@@ -9,6 +9,7 @@ class ActionResult:
     message: str = ""
     data: Any = None
     next_step_id: Optional[int] = None
+    duration: float = 0.0
 
 
 class BaseAction(ABC):

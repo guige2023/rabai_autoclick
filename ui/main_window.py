@@ -1,6 +1,8 @@
 import sys
 import os
 import platform
+import time
+import copy
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
@@ -14,23 +16,93 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QProgressBar,
     QMenu, QAction, QToolBar, QStatusBar, QCheckBox
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QObject
 from PyQt5.QtGui import QIcon, QColor, QFont, QCursor
 
 from core.engine import FlowEngine
 from core.base_action import ActionResult
 from utils.hotkey import HotkeyManager
 from utils.app_logger import app_logger
-from utils.memory import memory_manager
+from utils.memory import memory_manager, image_cache
 from utils.recording import RecordingManager, RecordingEditor, RecordedAction, PYNPUT_AVAILABLE
 from utils.history import WorkflowHistoryManager, HistoryDialog, QuickSaveDialog
 from utils.teaching_mode import teaching_mode_manager
+from utils.execution_stats import execution_stats
 from ui.hotkey_dialog import HotkeySettingsDialog
 from ui.region_selector import RegionSelector, PositionSelector
 from ui.message import message_manager, show_error, show_success, show_warning, show_toast
+from ui.stats_dialog import StatsDialog
 
 IS_MACOS = platform.system() == 'Darwin'
 IS_WINDOWS = platform.system() == 'Windows'
+
+
+class EngineSignals(QObject):
+    step_start = pyqtSignal(dict)
+    step_end = pyqtSignal(dict, object)
+    workflow_end = pyqtSignal(bool)
+    error = pyqtSignal(dict, str)
+
+
+PARAM_DESCRIPTIONS = {
+    'x': '屏幕X坐标（水平位置），点击"选取"按钮可在屏幕上点选',
+    'y': '屏幕Y坐标（垂直位置），点击"选取"按钮可在屏幕上点选',
+    'start_x': '拖拽起始点X坐标',
+    'start_y': '拖拽起始点Y坐标',
+    'end_x': '拖拽结束点X坐标',
+    'end_y': '拖拽结束点Y坐标',
+    'region': '识别区域，格式: x,y,宽度,高度。留空则全屏。 点击"框选"可拖拽选择',
+    'text': '要输入的文字内容，支持中文和英文',
+    'interval': '操作间隔时间，单位: 秒。如点击间隔、输入间隔',
+    'duration': '持续时间，单位: 秒。如鼠标移动动画时长',
+    'button': '鼠标按钮: left(左键)、right(右键)、middle(中键)',
+    'direction': '滚轮方向: up(向上滚动)、down(向下滚动)',
+    'key': '键盘按键，如: enter、escape、tab、f1-f12、a-z 等',
+    'keys': '组合键，用 + 连接，如: ctrl+a、ctrl+c、alt+f4',
+    'template': '模板图片路径，用于图像匹配点击',
+    'confidence': '匹配置信度，0-1之间。越高越严格，默认0.8',
+    'click_text': '【点击文字】OCR识别后点击包含此文字的区域',
+    'click_index': '当有多个匹配时，点击第几个。0=第一个，1=第二个',
+    'exact_match': '是否精确匹配。勾选=完全一致，不勾选=包含即可',
+    'contains': '【检测文字】只检测是否存在，不执行点击操作',
+    'move_duration': '鼠标移动动画时长，单位: 秒',
+    'preprocess_mode': '图像预处理模式。auto=快速(推荐)、all=全部模式(慢但准确)、contrast=对比度、binary=二值化',
+    'retry_count': 'OCR重试次数。auto模式仅1次，all模式可设置多次重试',
+    'times': '重复执行次数',
+    'count': '循环次数',
+    'delay': '延时时间，单位: 秒',
+    'clicks': '点击次数，默认1次。双击则填2',
+    'relative': '是否相对坐标。勾选后x,y为相对于当前位置的偏移',
+    'enter_after': '输入后是否按回车键。勾选则输入完成后自动按回车',
+    'find_all': '是否查找所有匹配。勾选返回所有匹配位置',
+    'script': 'Python脚本代码，可使用context变量',
+    'command': '系统命令，如打开程序、执行批处理',
+    'app_path': '应用程序完整路径，如: C:\\Program Files\\app.exe',
+    'url': '网页地址，会自动用浏览器打开',
+    'wait_time': '等待时间，单位: 秒',
+    'var_name': '变量名，用于存储或读取变量',
+    'value': '变量值',
+    'filename': '文件名或路径',
+    'content': '文件内容或文本内容',
+    'seconds': '等待秒数',
+    'milliseconds': '等待毫秒数',
+}
+
+PARAM_EXAMPLES = {
+    'click_text': '示例: "确定"、"提交"、"取消" → 点击包含这些文字的区域',
+    'contains': '示例: 检查页面是否有"成功"二字，不执行点击',
+    'exact_match': '示例: 文字是"配置"，勾选后只匹配"配置"，不勾选则"未配置"也会匹配',
+    'button': '示例: left=左键点击, right=右键点击, middle=中键点击',
+    'direction': '示例: down=向下滚动, up=向上滚动',
+    'key': '示例: enter=回车, escape=退出, f5=刷新, tab=制表符',
+    'keys': '示例: ctrl+a=全选, ctrl+c=复制, alt+f4=关闭窗口',
+    'preprocess_mode': '推荐: auto (快速，平衡速度和识别率)',
+    'template': '示例: D:\\images\\button.png → 匹配并点击这个图片',
+    'confidence': '示例: 0.9=高精度匹配, 0.7=宽松匹配',
+    'region': '示例: 100,200,300,400 → 从坐标(100,200)开始，宽300高400的区域',
+    'relative': '示例: 勾选后 x=10,y=20 表示从当前位置向右10像素、向下20像素',
+    'enter_after': '示例: 勾选后输入文字会自动按回车提交',
+}
 
 
 class ActionConfigWidget(QWidget):
@@ -57,7 +129,25 @@ class ActionConfigWidget(QWidget):
             for param in required_params:
                 widget = self._create_param_widget(param, None)
                 self.widgets[param] = widget
-                required_layout.addRow(f"{param}:", widget)
+                
+                row_widget = QWidget()
+                row_layout = QVBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(2)
+                row_layout.addWidget(widget)
+                
+                desc = PARAM_DESCRIPTIONS.get(param, '')
+                example = PARAM_EXAMPLES.get(param, '')
+                if desc or example:
+                    help_text = desc
+                    if example:
+                        help_text += f"\n{example}"
+                    help_label = QLabel(help_text)
+                    help_label.setStyleSheet("color: #666; font-size: 10px;")
+                    help_label.setWordWrap(True)
+                    row_layout.addWidget(help_label)
+                
+                required_layout.addRow(f"{param}:", row_widget)
             
             required_group.setLayout(required_layout)
             layout.addWidget(required_group)
@@ -70,7 +160,25 @@ class ActionConfigWidget(QWidget):
             for param, default_value in optional_params.items():
                 widget = self._create_param_widget(param, default_value)
                 self.widgets[param] = widget
-                optional_layout.addRow(f"{param}:", widget)
+                
+                row_widget = QWidget()
+                row_layout = QVBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(2)
+                row_layout.addWidget(widget)
+                
+                desc = PARAM_DESCRIPTIONS.get(param, '')
+                example = PARAM_EXAMPLES.get(param, '')
+                if desc or example:
+                    help_text = desc
+                    if example:
+                        help_text += f"\n{example}"
+                    help_label = QLabel(help_text)
+                    help_label.setStyleSheet("color: #666; font-size: 10px;")
+                    help_label.setWordWrap(True)
+                    row_layout.addWidget(help_label)
+                
+                optional_layout.addRow(f"{param}:", row_widget)
             
             optional_group.setLayout(optional_layout)
             layout.addWidget(optional_group)
@@ -147,6 +255,47 @@ class ActionConfigWidget(QWidget):
             widget.setChecked(default_value)
             widget.stateChanged.connect(self.config_changed.emit)
             return widget
+        elif param == 'button':
+            widget = QComboBox()
+            widget.addItem("左键", "left")
+            widget.addItem("右键", "right")
+            widget.addItem("中键", "middle")
+            idx = widget.findData(default_value) if default_value else 0
+            widget.setCurrentIndex(idx if idx >= 0 else 0)
+            widget.currentIndexChanged.connect(self.config_changed.emit)
+            return widget
+        elif param == 'direction':
+            widget = QComboBox()
+            widget.addItem("向下滚动", "down")
+            widget.addItem("向上滚动", "up")
+            idx = widget.findData(default_value) if default_value else 0
+            widget.setCurrentIndex(idx if idx >= 0 else 0)
+            widget.currentIndexChanged.connect(self.config_changed.emit)
+            return widget
+        elif param == 'preprocess_mode':
+            widget = QComboBox()
+            widget.addItem("自动多模式 (推荐)", "auto")
+            widget.addItem("全部预处理", "all")
+            widget.addItem("对比度增强", "contrast")
+            widget.addItem("二值化处理", "binary")
+            widget.addItem("降噪处理", "denoise")
+            widget.addItem("原始图像", "none")
+            idx = widget.findData(default_value) if default_value else 0
+            widget.setCurrentIndex(idx if idx >= 0 else 0)
+            widget.currentIndexChanged.connect(self.config_changed.emit)
+            return widget
+        elif param == 'key' and isinstance(default_value, str):
+            widget = QComboBox()
+            widget.setEditable(True)
+            common_keys = ['enter', 'escape', 'tab', 'space', 'backspace', 'delete', 
+                          'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
+                          'up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pagedown']
+            for key in common_keys:
+                widget.addItem(key, key)
+            if default_value:
+                widget.setCurrentText(str(default_value))
+            widget.currentTextChanged.connect(self.config_changed.emit)
+            return widget
         elif isinstance(default_value, int):
             widget = QSpinBox()
             widget.setRange(-99999, 99999)
@@ -162,13 +311,13 @@ class ActionConfigWidget(QWidget):
             return widget
         elif isinstance(default_value, list):
             widget = QLineEdit()
-            widget.setText(json.dumps(default_value))
+            widget.setText(str(default_value))
             widget.setPlaceholderText("JSON数组格式")
             widget.textChanged.connect(self.config_changed.emit)
             return widget
         elif isinstance(default_value, tuple):
             widget = QLineEdit()
-            widget.setText(json.dumps(list(default_value)))
+            widget.setText(str(default_value))
             widget.setPlaceholderText("JSON数组格式")
             widget.textChanged.connect(self.config_changed.emit)
             return widget
@@ -234,6 +383,8 @@ class ActionConfigWidget(QWidget):
                 config[param] = widget.value()
             elif isinstance(widget, QDoubleSpinBox):
                 config[param] = widget.value()
+            elif isinstance(widget, QComboBox):
+                config[param] = widget.currentData()
             elif isinstance(widget, QLineEdit):
                 text = widget.text().strip()
                 if text:
@@ -278,6 +429,12 @@ class ActionConfigWidget(QWidget):
                     widget.setValue(int(value))
                 elif isinstance(widget, QDoubleSpinBox):
                     widget.setValue(float(value))
+                elif isinstance(widget, QComboBox):
+                    idx = widget.findData(value)
+                    if idx >= 0:
+                        widget.setCurrentIndex(idx)
+                    elif widget.isEditable():
+                        widget.setCurrentText(str(value))
                 elif isinstance(widget, QLineEdit):
                     if isinstance(value, (list, tuple, dict)):
                         widget.setText(json.dumps(value))
@@ -615,6 +772,12 @@ class MainWindow(QMainWindow):
         
         self._always_on_top = False
         self._teaching_mode = False
+        self._target_region = None
+        self._window_mode = False
+        self._loop_count = 1
+        self._loop_interval = 1.0
+        self._current_loop = 0
+        self._is_looping = False
         
         message_manager.set_parent(self)
         
@@ -650,6 +813,11 @@ class MainWindow(QMainWindow):
         self.teaching_btn = QPushButton("🎓 教学")
         self.teaching_btn.setCheckable(True)
         self.hotkey_btn = QPushButton("⌨ 快捷键")
+        self.window_btn = QPushButton("🪟 窗口")
+        self.region_btn = QPushButton("📐 区域")
+        self.loop_btn = QPushButton("🔄 循环")
+        self.stats_btn = QPushButton("📊 统计")
+        self.memory_btn = QPushButton("💾 内存")
         
         self.stop_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
@@ -666,6 +834,11 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.on_top_btn)
         toolbar.addWidget(self.teaching_btn)
         toolbar.addWidget(self.hotkey_btn)
+        toolbar.addWidget(self.window_btn)
+        toolbar.addWidget(self.region_btn)
+        toolbar.addWidget(self.loop_btn)
+        toolbar.addWidget(self.stats_btn)
+        toolbar.addWidget(self.memory_btn)
         toolbar.addStretch()
         
         self.memory_label = QLabel()
@@ -784,6 +957,11 @@ class MainWindow(QMainWindow):
         self.on_top_btn.clicked.connect(self._toggle_always_on_top)
         self.teaching_btn.clicked.connect(self._toggle_teaching_mode)
         self.hotkey_btn.clicked.connect(self._on_hotkey_settings)
+        self.window_btn.clicked.connect(self._on_select_window)
+        self.region_btn.clicked.connect(self._on_select_region)
+        self.loop_btn.clicked.connect(self._on_loop_settings)
+        self.stats_btn.clicked.connect(self._on_show_stats)
+        self.memory_btn.clicked.connect(self._on_memory_optimize)
         
         self.action_list.currentRowChanged.connect(self._on_action_selected)
         
@@ -796,11 +974,17 @@ class MainWindow(QMainWindow):
         for widget in self.config_widgets.values():
             widget.config_changed.connect(self._on_config_changed)
         
+        self.engine_signals = EngineSignals()
+        self.engine_signals.step_start.connect(self._on_engine_step_start)
+        self.engine_signals.step_end.connect(self._on_engine_step_end)
+        self.engine_signals.workflow_end.connect(self._on_engine_workflow_end)
+        self.engine_signals.error.connect(self._on_engine_error)
+        
         self.engine.set_callbacks(
-            on_step_start=self._on_engine_step_start,
-            on_step_end=self._on_engine_step_end,
-            on_workflow_end=self._on_engine_workflow_end,
-            on_error=self._on_engine_error
+            on_step_start=lambda step: self.engine_signals.step_start.emit(step),
+            on_step_end=lambda step, result: self.engine_signals.step_end.emit(step, result),
+            on_workflow_end=lambda success: self.engine_signals.workflow_end.emit(success),
+            on_error=lambda step, msg: self.engine_signals.error.emit(step, msg)
         )
     
     def _on_new(self):
@@ -913,7 +1097,32 @@ class MainWindow(QMainWindow):
             show_warning("提示", "工作流中没有步骤")
             return
         
-        app_logger.info("开始运行工作流", "Workflow")
+        if self._target_region:
+            for step in self.current_workflow.get('steps', []):
+                if step.get('type') == 'ocr' and not step.get('region'):
+                    step['region'] = self._target_region
+            app_logger.info(f"使用识别区域: {self._target_region}", "Workflow")
+        
+        self._current_loop = 0
+        self._is_looping = True
+        
+        workflow_name = "未命名工作流"
+        execution_stats.start_session(workflow_name, self._loop_count)
+        
+        self._run_single_loop()
+    
+    def _run_single_loop(self):
+        if not self._is_looping:
+            return
+        
+        if self._current_loop >= self._loop_count:
+            return
+        
+        self._current_loop += 1
+        self._loop_start_time = time.time()
+        
+        app_logger.info(f"执行第 {self._current_loop}/{self._loop_count} 次循环", "Workflow")
+        
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.pause_btn.setEnabled(True)
@@ -921,11 +1130,23 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, len(self.current_workflow['steps']))
         self.progress_bar.setValue(0)
         
+        if self._current_loop == 1:
+            self.showMinimized()
+        
         self.engine.load_workflow_from_dict(self.current_workflow)
         self.engine.run_async()
     
     def _on_stop(self):
+        self._is_looping = False
+        self._current_loop = 0
         self.engine.stop()
+        self.run_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setText("⏸ 暂停")
+        self.progress_bar.setVisible(False)
+        self.showNormal()
+        self.activateWindow()
         app_logger.warning("停止工作流", "Workflow")
         show_toast("工作流已停止", 'warning')
     
@@ -1090,32 +1311,83 @@ class MainWindow(QMainWindow):
                 self.step_configs[step_id] = config
     
     def _on_engine_step_start(self, step):
-        app_logger.info(f"执行步骤 [{step.get('id')}]: {step.get('type')}", "Engine")
-        current = self.progress_bar.value()
-        self.progress_bar.setValue(current + 1)
+        try:
+            app_logger.info(f"执行步骤 [{step.get('id')}]: {step.get('type')}", "Engine")
+            current = self.progress_bar.value()
+            self.progress_bar.setValue(current + 1)
+        except Exception as e:
+            print(f"Step start error: {e}")
     
-    def _on_engine_step_end(self, step, result: ActionResult):
-        if result.success:
-            app_logger.success(f"步骤 [{step.get('id')}] 完成: {result.message}", "Engine")
-        else:
-            app_logger.error(f"步骤 [{step.get('id')}] 失败: {result.message}", "Engine")
+    def _on_engine_step_end(self, step, result):
+        try:
+            step_duration = getattr(result, 'duration', 0) or 0
+            execution_stats.record_step(
+                step.get('type', 'unknown'),
+                step_duration,
+                result.success,
+                result.message
+            )
+            
+            if result.success:
+                app_logger.success(f"步骤 [{step.get('id')}] 完成: {result.message} ({step_duration:.2f}秒)", "Engine")
+            else:
+                app_logger.error(f"步骤 [{step.get('id')}] 失败: {result.message}", "Engine")
+                execution_stats.record_error(step.get('type', 'unknown'), result.message)
+        except Exception as e:
+            print(f"Step end error: {e}")
     
-    def _on_engine_workflow_end(self, success: bool):
-        self.run_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.setText("⏸ 暂停")
-        self.progress_bar.setVisible(False)
-        
-        if success:
-            app_logger.success("工作流执行完成", "Workflow")
-            show_toast("工作流执行完成", 'success')
-        else:
-            app_logger.warning("工作流已停止", "Workflow")
+    def _on_engine_workflow_end(self, success):
+        try:
+            if not self._is_looping:
+                return
+            
+            loop_duration = 0
+            if hasattr(self, '_loop_start_time'):
+                loop_duration = time.time() - self._loop_start_time
+            
+            execution_stats.record_loop(self._current_loop, loop_duration, success, 
+                                        len(self.current_workflow.get('steps', [])))
+            
+            if not success:
+                self._is_looping = False
+            
+            if self._is_looping and self._current_loop < self._loop_count:
+                app_logger.info(f"循环 {self._current_loop} 完成，等待 {self._loop_interval} 秒后继续...", "Workflow")
+                QTimer.singleShot(int(self._loop_interval * 1000), self._run_single_loop)
+                return
+            
+            session_result = execution_stats.end_session(success)
+            total_duration = session_result.get('total_duration', 0) if session_result else 0
+            avg_duration = session_result.get('avg_loop_duration', 0) if session_result else 0
+            
+            self.run_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.pause_btn.setEnabled(False)
+            self.pause_btn.setText("⏸ 暂停")
+            self.progress_bar.setVisible(False)
+            
+            self.showNormal()
+            self.activateWindow()
+            
+            loop_info = f" (共{self._loop_count}次循环)" if self._loop_count > 1 else ""
+            time_info = f" | 总耗时: {total_duration:.1f}秒"
+            if avg_duration > 0 and self._loop_count > 1:
+                time_info += f" | 平均每循环: {avg_duration:.1f}秒"
+            
+            if success:
+                app_logger.success(f"工作流执行完成{loop_info}{time_info}", "Workflow")
+                show_toast(f"执行完成{loop_info} ({total_duration:.1f}秒)", 'success')
+            else:
+                app_logger.warning("工作流已停止", "Workflow")
+        except Exception as e:
+            print(f"Workflow end error: {e}")
     
     def _on_engine_error(self, step, message: str):
-        app_logger.error(f"步骤 [{step.get('id')}] 错误: {message}", "Engine")
-        show_error("执行错误", f"步骤 [{step.get('id')}]: {message}")
+        try:
+            app_logger.error(f"步骤 [{step.get('id')}] 错误: {message}", "Engine")
+            execution_stats.record_error(step.get('type', 'unknown'), message)
+        except Exception as e:
+            print(f"Engine error: {e}")
     
     def _on_hotkey_settings(self):
         dialog = HotkeySettingsDialog(self.current_hotkeys, self)
@@ -1135,10 +1407,212 @@ class MainWindow(QMainWindow):
             app_logger.info(f"快捷键已更新", "Hotkey")
             show_toast("快捷键设置已保存", 'success')
     
+    def _on_select_window(self):
+        """选择目标窗口"""
+        from utils.window_selector import WindowSelectorDialog
+        
+        if self._target_region and self.region_btn.text() != "📐 区域":
+            reply = QMessageBox.question(
+                self, '确认',
+                '已选择区域，选择窗口将清除当前区域设置。\n是否继续？',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        
+        menu = QMenu(self)
+        list_action = menu.addAction("🪟 从列表选择窗口")
+        clear_action = menu.addAction("❌ 清除窗口选择")
+        
+        action = menu.exec_(QCursor.pos())
+        
+        if action == list_action:
+            dialog = WindowSelectorDialog(self)
+            if dialog.exec_() == QDialog.Accepted:
+                window = dialog.get_selected_window()
+                if window:
+                    self._set_target_window(window)
+        elif action == clear_action:
+            self._clear_target_window()
+    
+    def _set_target_window(self, window):
+        """设置目标窗口"""
+        self._target_region = window.region
+        self._window_mode = True
+        self.window_btn.setText(f"🪟 {window.title[:10]}...")
+        self.window_btn.setStyleSheet("background-color: #2196F3; color: white;")
+        self.region_btn.setText("📐 区域")
+        self.region_btn.setStyleSheet("")
+        show_toast(f"已选择窗口: {window.title}", 'success')
+        app_logger.info(f"设置目标窗口: {window.title}", "UI")
+    
+    def _clear_target_window(self):
+        """清除目标窗口"""
+        self._target_region = None
+        self._window_mode = False
+        self.window_btn.setText("🪟 窗口")
+        self.window_btn.setStyleSheet("")
+        show_toast("已清除窗口选择", 'info')
+    
+    def _on_select_region(self):
+        """选择识别区域"""
+        if self._target_region and self._window_mode:
+            reply = QMessageBox.question(
+                self, '确认',
+                '已选择窗口，选择区域将清除当前窗口设置。\n是否继续？',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        
+        menu = QMenu(self)
+        select_action = menu.addAction("📐 框选识别区域")
+        clear_action = menu.addAction("❌ 清除区域")
+        
+        action = menu.exec_(QCursor.pos())
+        
+        if action == select_action:
+            self._do_select_region()
+        elif action == clear_action:
+            self._clear_region()
+    
+    def _do_select_region(self):
+        """执行区域选择"""
+        self.showMinimized()
+        QTimer.singleShot(300, self._create_region_selector)
+    
+    def _create_region_selector(self):
+        """创建区域选择器"""
+        try:
+            self._region_selector = RegionSelector(mode='region')
+            self._region_selector.region_selected.connect(self._on_region_selected)
+            self._region_selector.cancelled.connect(self._on_region_cancelled)
+        except Exception as e:
+            self.showNormal()
+            show_error("错误", f"创建区域选择器失败: {str(e)}")
+    
+    def _on_region_selected(self, x, y, w, h):
+        """区域选择完成"""
+        self._target_region = (x, y, w, h)
+        self._window_mode = False
+        self.region_btn.setText(f"📐 ({x},{y},{w}x{h})")
+        self.region_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+        self.window_btn.setText("🪟 窗口")
+        self.window_btn.setStyleSheet("")
+        self.showNormal()
+        self.activateWindow()
+        show_toast(f"已选择区域: ({x}, {y}, {w}x{h})", 'success')
+        app_logger.info(f"设置OCR区域: ({x}, {y}, {w}x{h})", "UI")
+    
+    def _on_region_cancelled(self):
+        """区域选择取消"""
+        self.showNormal()
+        self.activateWindow()
+    
+    def _clear_region(self):
+        """清除区域"""
+        self._target_region = None
+        self.region_btn.setText("📐 区域")
+        self.region_btn.setStyleSheet("")
+        show_toast("已清除识别区域", 'info')
+    
+    def _on_loop_settings(self):
+        """循环执行设置"""
+        from PyQt5.QtWidgets import QSpinBox, QDoubleSpinBox, QFormLayout
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("循环执行设置")
+        dialog.setMinimumWidth(300)
+        
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        
+        loop_spin = QSpinBox()
+        loop_spin.setRange(1, 9999)
+        loop_spin.setValue(self._loop_count)
+        form.addRow("循环次数:", loop_spin)
+        
+        interval_spin = QDoubleSpinBox()
+        interval_spin.setRange(0, 3600)
+        interval_spin.setValue(self._loop_interval)
+        interval_spin.setSingleStep(0.5)
+        form.addRow("循环间隔(秒):", interval_spin)
+        
+        layout.addLayout(form)
+        
+        info_label = QLabel("提示: 循环次数>1时，工作流将重复执行")
+        info_label.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(info_label)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            self._loop_count = loop_spin.value()
+            self._loop_interval = interval_spin.value()
+            
+            if self._loop_count > 1:
+                self.loop_btn.setText(f"🔄 x{self._loop_count}")
+                self.loop_btn.setStyleSheet("background-color: #FF9800; color: white;")
+            else:
+                self.loop_btn.setText("🔄 循环")
+                self.loop_btn.setStyleSheet("")
+            
+            show_toast(f"循环设置: {self._loop_count}次, 间隔{self._loop_interval}秒", 'success')
+            app_logger.info(f"循环设置: {self._loop_count}次, 间隔{self._loop_interval}秒", "UI")
+    
+    def _on_show_stats(self):
+        dialog = StatsDialog(self)
+        dialog.exec_()
+    
+    def _on_memory_optimize(self):
+        """内存优化"""
+        menu = QMenu(self)
+        optimize_action = menu.addAction("🧹 立即优化")
+        clear_cache_action = menu.addAction("🗑 清除缓存")
+        status_action = menu.addAction("📊 内存状态")
+        
+        action = menu.exec_(QCursor.pos())
+        
+        if action == optimize_action:
+            result = memory_manager.optimize()
+            freed = result.get('freed', 0)
+            after = result.get('after', 0)
+            show_toast(f"内存优化完成，释放 {freed}MB，当前 {after}MB", 'success')
+            app_logger.info(f"内存优化: 释放 {freed}MB, 当前 {after}MB", "Memory")
+            self._update_memory_display()
+        elif action == clear_cache_action:
+            memory_manager.clear_cache()
+            image_cache.clear()
+            show_toast("缓存已清除", 'success')
+            self._update_memory_display()
+        elif action == status_action:
+            usage = memory_manager.get_memory_usage()
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "内存状态", 
+                f"物理内存 (RSS): {usage['rss']} MB\n"
+                f"虚拟内存 (VMS): {usage['vms']} MB\n"
+                f"缓存数量: {usage['cache_size']}")
+    
     def closeEvent(self, event):
         self._memory_timer.stop()
         self.hotkey_manager.unregister_hotkeys()
+        
+        if hasattr(self, 'engine_signals'):
+            try:
+                self.engine_signals.deleteLater()
+            except:
+                pass
+        
+        if self.engine.is_running():
+            self.engine.stop()
+        
+        memory_manager.clear_cache()
+        image_cache.clear()
         memory_manager.optimize()
+        
         app_logger.info("程序退出", "Main")
         event.accept()
 

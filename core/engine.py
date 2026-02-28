@@ -121,7 +121,9 @@ class FlowEngine:
         return thread
     
     def _execute_step(self, step: Dict[str, Any]) -> ActionResult:
+        import time
         step_type = step.get('type')
+        start_time = time.time()
         
         if self._on_step_start:
             self._on_step_start(step)
@@ -151,6 +153,8 @@ class FlowEngine:
             
             result = action.execute(self.context, params)
             
+            result.duration = time.time() - start_time
+            
             if result.success and 'output_var' in step and result.data is not None:
                 self.context.set(step['output_var'], result.data)
             
@@ -166,7 +170,8 @@ class FlowEngine:
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"执行步骤失败: {str(e)}"
+                message=f"执行步骤失败: {str(e)}",
+                duration=time.time() - start_time
             )
     
     def stop(self) -> None:

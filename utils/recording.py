@@ -92,10 +92,18 @@ class RecordingManager(QObject):
         
         if self._mouse_listener:
             self._mouse_listener.stop()
+            try:
+                self._mouse_listener.join(timeout=1.0)
+            except:
+                pass
             self._mouse_listener = None
         
         if self._keyboard_listener:
             self._keyboard_listener.stop()
+            try:
+                self._keyboard_listener.join(timeout=1.0)
+            except:
+                pass
             self._keyboard_listener = None
         
         self.recording_stopped.emit(self._actions)

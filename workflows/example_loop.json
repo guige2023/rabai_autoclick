@@ -1,0 +1,63 @@
+{
+  "variables": {
+    "loop_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 0
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "main_loop",
+      "count": 3,
+      "loop_start": 2,
+      "pre_delay": 0.2
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "output_var": "click_x",
+      "pre_delay": 0.1
+    },
+    {
+      "id": 4,
+      "type": "click",
+      "x": 200,
+      "y": 100,
+      "button": "left",
+      "output_var": "click_y",
+      "pre_delay": 0.1
+    },
+    {
+      "id": 5,
+      "type": "set_variable",
+      "name": "counter",
+      "value": "{{counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.1
+    },
+    {
+      "id": 6,
+      "type": "condition",
+      "condition": "{{counter < 3}}",
+      "true_next": 2,
+      "false_next": 7,
+      "pre_delay": 0.1
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.1
+    }
+  ]
+}

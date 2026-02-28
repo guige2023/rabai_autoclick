@@ -6,10 +6,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
+DANGEROUS_KEYWORDS = [
+    'import os', 'import sys', 'import subprocess', 'import shutil',
+    'exec(', 'eval(', 'compile(', '__import__',
+    'open(', 'file(', 'input(',
+    'os.system', 'os.popen', 'os.spawn',
+    'subprocess.', 'shutil.',
+    'globals()', 'locals()', 'vars()',
+    'getattr(', 'setattr(', 'delattr(',
+    '__class__', '__bases__', '__subclasses__',
+    '__builtins__', '__import__',
+]
+
+
 class ScriptAction(BaseAction):
     action_type = "script"
     display_name = "执行脚本"
     description = "执行Python代码片段"
+    
+    def _check_safety(self, code: str) -> tuple:
+        for keyword in DANGEROUS_KEYWORDS:
+            if keyword in code:
+                return False, f"安全限制: 不允许使用 '{keyword}'"
+        return True, ""
     
     def execute(self, context, params: Dict[str, Any]) -> ActionResult:
         code = params.get('code', '')
@@ -19,6 +38,13 @@ class ScriptAction(BaseAction):
             return ActionResult(
                 success=False,
                 message="脚本代码为空"
+            )
+        
+        is_safe, safety_msg = self._check_safety(code)
+        if not is_safe:
+            return ActionResult(
+                success=False,
+                message=safety_msg
             )
         
         try:
@@ -59,7 +85,7 @@ class DelayAction(BaseAction):
                 actual_delay = seconds + random.uniform(-random_deviation, random_deviation)
                 actual_delay = max(0, actual_delay)
             else:
-                actual_delay = seconds
+                actual_delay = max(0, seconds)
             
             time.sleep(actual_delay)
             

@@ -1,0 +1,232 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from typing import Dict, Any, List
+from PyQt5.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
+    QTabWidget, QWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+    QGroupBox, QFormLayout, QTextEdit, QComboBox, QDateTimeEdit
+)
+from PyQt5.QtCore import Qt, QDateTime
+from PyQt5.QtGui import QFont, QColor
+
+from utils.execution_stats import execution_stats
+
+
+class StatsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("执行统计分析")
+        self.setMinimumSize(800, 600)
+        
+        self._init_ui()
+        self._load_data()
+    
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        
+        self._create_overview_tab()
+        self._create_steps_tab()
+        self._create_history_tab()
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        refresh_btn = QPushButton("🔄 刷新数据")
+        refresh_btn.clicked.connect(self._load_data)
+        btn_layout.addWidget(refresh_btn)
+        
+        clear_btn = QPushButton("🗑 清除历史")
+        clear_btn.clicked.connect(self._clear_history)
+        clear_btn.setStyleSheet("background-color: #f44336; color: white;")
+        btn_layout.addWidget(clear_btn)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def _create_overview_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        summary_group = QGroupBox("总体统计")
+        form = QFormLayout()
+        
+        self.total_sessions_label = QLabel("0")
+        self.total_sessions_label.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+        form.addRow("执行次数:", self.total_sessions_label)
+        
+        self.total_loops_label = QLabel("0")
+        self.total_loops_label.setFont(QFont("Microsoft YaHei", 12))
+        form.addRow("总循环次数:", self.total_loops_label)
+        
+        self.total_duration_label = QLabel("0秒")
+        self.total_duration_label.setFont(QFont("Microsoft YaHei", 12))
+        form.addRow("总运行时间:", self.total_duration_label)
+        
+        self.avg_duration_label = QLabel("0秒")
+        self.avg_duration_label.setFont(QFont("Microsoft YaHei", 12))
+        form.addRow("平均执行时间:", self.avg_duration_label)
+        
+        self.success_rate_label = QLabel("0%")
+        self.success_rate_label.setFont(QFont("Microsoft YaHei", 12))
+        form.addRow("成功率:", self.success_rate_label)
+        
+        summary_group.setLayout(form)
+        layout.addWidget(summary_group)
+        
+        step_group = QGroupBox("步骤类型统计")
+        step_layout = QVBoxLayout()
+        
+        self.step_table = QTableWidget()
+        self.step_table.setColumnCount(5)
+        self.step_table.setHorizontalHeaderLabels(["步骤类型", "执行次数", "平均耗时", "总耗时", "成功率"])
+        self.step_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        step_layout.addWidget(self.step_table)
+        
+        step_group.setLayout(step_layout)
+        layout.addWidget(step_group)
+        
+        self.tabs.addTab(tab, "📊 总览")
+    
+    def _create_steps_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        self.step_perf_table = QTableWidget()
+        self.step_perf_table.setColumnCount(7)
+        self.step_perf_table.setHorizontalHeaderLabels([
+            "步骤类型", "执行次数", "平均耗时", "最小耗时", "最大耗时", "成功率", "错误数"
+        ])
+        self.step_perf_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.step_perf_table)
+        
+        error_group = QGroupBox("常见错误")
+        error_layout = QVBoxLayout()
+        
+        self.error_text = QTextEdit()
+        self.error_text.setReadOnly(True)
+        self.error_text.setMaximumHeight(150)
+        error_layout.addWidget(self.error_text)
+        
+        error_group.setLayout(error_layout)
+        layout.addWidget(error_group)
+        
+        self.tabs.addTab(tab, "⚡ 步骤性能")
+    
+    def _create_history_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(6)
+        self.history_table.setHorizontalHeaderLabels([
+            "时间", "工作流", "循环次数", "总耗时", "平均循环耗时", "状态"
+        ])
+        self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.history_table)
+        
+        self.tabs.addTab(tab, "📜 执行历史")
+    
+    def _load_data(self):
+        summary = execution_stats.get_summary()
+        
+        self.total_sessions_label.setText(str(summary['total_sessions']))
+        self.total_loops_label.setText(str(summary['total_loops']))
+        
+        total_dur = summary['total_duration']
+        if total_dur > 3600:
+            self.total_duration_label.setText(f"{total_dur/3600:.1f}小时")
+        elif total_dur > 60:
+            self.total_duration_label.setText(f"{total_dur/60:.1f}分钟")
+        else:
+            self.total_duration_label.setText(f"{total_dur:.1f}秒")
+        
+        avg_dur = summary['avg_duration']
+        if avg_dur > 60:
+            self.avg_duration_label.setText(f"{avg_dur/60:.1f}分钟")
+        else:
+            self.avg_duration_label.setText(f"{avg_dur:.1f}秒")
+        
+        rate = summary['success_rate']
+        self.success_rate_label.setText(f"{rate:.1f}%")
+        if rate >= 90:
+            self.success_rate_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        elif rate >= 70:
+            self.success_rate_label.setStyleSheet("color: #FF9800; font-weight: bold;")
+        else:
+            self.success_rate_label.setStyleSheet("color: #f44336; font-weight: bold;")
+        
+        self.step_table.setRowCount(0)
+        for stype, stats in summary['step_stats'].items():
+            row = self.step_table.rowCount()
+            self.step_table.insertRow(row)
+            self.step_table.setItem(row, 0, QTableWidgetItem(stype))
+            self.step_table.setItem(row, 1, QTableWidgetItem(str(stats['count'])))
+            self.step_table.setItem(row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒"))
+            self.step_table.setItem(row, 3, QTableWidgetItem(f"{stats['total_duration']:.1f}秒"))
+            self.step_table.setItem(row, 4, QTableWidgetItem(f"{stats['success_rate']:.1f}%"))
+        
+        step_perf = execution_stats.get_step_performance()
+        self.step_perf_table.setRowCount(0)
+        
+        all_errors = []
+        for stype, stats in step_perf.items():
+            row = self.step_perf_table.rowCount()
+            self.step_perf_table.insertRow(row)
+            self.step_perf_table.setItem(row, 0, QTableWidgetItem(stype))
+            self.step_perf_table.setItem(row, 1, QTableWidgetItem(str(stats['count'])))
+            self.step_perf_table.setItem(row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒"))
+            self.step_perf_table.setItem(row, 3, QTableWidgetItem(f"{stats['min_duration']:.2f}秒"))
+            self.step_perf_table.setItem(row, 4, QTableWidgetItem(f"{stats['max_duration']:.2f}秒"))
+            self.step_perf_table.setItem(row, 5, QTableWidgetItem(f"{stats['success_rate']:.1f}%"))
+            self.step_perf_table.setItem(row, 6, QTableWidgetItem(str(stats['error_count'])))
+            
+            if stats['common_errors']:
+                all_errors.extend([f"[{stype}] {e}" for e in stats['common_errors']])
+        
+        self.error_text.setText('\n'.join(all_errors[-20:]) if all_errors else "暂无错误记录")
+        
+        recent = execution_stats.get_recent_sessions(30)
+        self.history_table.setRowCount(0)
+        
+        for session in recent:
+            row = self.history_table.rowCount()
+            self.history_table.insertRow(row)
+            
+            self.history_table.setItem(row, 0, QTableWidgetItem(session.get('date', '-')))
+            self.history_table.setItem(row, 1, QTableWidgetItem(session.get('workflow_name', '-')[:20]))
+            self.history_table.setItem(row, 2, QTableWidgetItem(str(session.get('loop_count', 1))))
+            
+            total_dur = session.get('total_duration', 0)
+            self.history_table.setItem(row, 3, QTableWidgetItem(f"{total_dur:.1f}秒"))
+            
+            avg_dur = session.get('avg_loop_duration', 0)
+            self.history_table.setItem(row, 4, QTableWidgetItem(f"{avg_dur:.1f}秒"))
+            
+            status = "✓ 成功" if session.get('success', False) else "✗ 失败"
+            status_item = QTableWidgetItem(status)
+            if session.get('success', False):
+                status_item.setForeground(QColor('#4CAF50'))
+            else:
+                status_item.setForeground(QColor('#f44336'))
+            self.history_table.setItem(row, 5, status_item)
+    
+    def _clear_history(self):
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, '确认清除',
+            '确定要清除所有执行历史记录吗？\n此操作不可恢复！',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            execution_stats.clear_history()
+            self._load_data()
