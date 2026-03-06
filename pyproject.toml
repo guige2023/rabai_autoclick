@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rabai-autoclick"
+version = "22.0.0"
+description = "RabAI AutoClick - 桌面端+CLI智能自动化工具 (整合版)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "RabAI Team", email = "team@rabai.app"}
+]
+keywords = ["automation", "workflow", "cli", "desktop", "auto-click", "ocr", "image-match"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "click>=8.1.0",
+    "pyautogui>=0.9.53",
+    "opencv-python>=4.5.0",
+    "PyQt5>=5.15.0",
+    "numpy>=1.19.0",
+    "rapidocr-onnxruntime>=1.3.0",
+    "pynput>=1.7.0",
+    "psutil>=5.8.0",
+    "Pillow>=8.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+ocr = [
+    "paddleocr>=2.6.0",
+    "paddlepaddle>=2.3.0",
+]
+easyocr = [
+    "easyocr>=1.6.0",
+]
+
+[project.scripts]
+rabai = "cli.main:cli"
+rabai-pipe = "cli.main:pipe_cli"
+rabai-gui = "main:main"
+
+[project.gui-scripts]
+rabai-desktop = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "cli*", "gui*", "core*", "actions*", "utils*", "ui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

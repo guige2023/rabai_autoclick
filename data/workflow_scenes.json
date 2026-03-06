@@ -1,0 +1,312 @@
+{
+  "scenes": [
+    {
+      "scene_id": "morning_routine",
+      "name": "晨间Routine",
+      "description": "早上起床后的一系列自动化任务",
+      "icon": "🌅",
+      "status": "inactive",
+      "workflows": [
+        {
+          "workflow_id": "wf_001",
+          "workflow_name": "开灯",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 1
+        },
+        {
+          "workflow_id": "wf_002",
+          "workflow_name": "播放音乐",
+          "enabled": true,
+          "delay": 5,
+          "order": 2
+        },
+        {
+          "workflow_id": "wf_003",
+          "workflow_name": "煮咖啡",
+          "enabled": true,
+          "delay": 10,
+          "order": 3
+        },
+        {
+          "workflow_id": "wf_004",
+          "workflow_name": "播报天气",
+          "enabled": true,
+          "delay": 30,
+          "order": 4
+        },
+        {
+          "workflow_id": "wf_005",
+          "workflow_name": "打开新闻",
+          "enabled": true,
+          "delay": 60,
+          "order": 5
+        }
+      ],
+      "schedule": {
+        "enabled": true,
+        "time": "07:00",
+        "days": [
+          "monday",
+          "tuesday",
+          "wednesday",
+          "thursday",
+          "friday"
+        ],
+        "timezone": "Asia/Shanghai"
+      },
+      "created_at": 1772753048.2976584,
+      "updated_at": 1772753048.2976587,
+      "usage_count": 0,
+      "tags": [
+        "生活",
+        "早晨",
+        "自动化"
+      ],
+      "settings": {}
+    },
+    {
+      "scene_id": "work_mode",
+      "name": "工作模式",
+      "description": "开启专注工作模式",
+      "icon": "💼",
+      "status": "inactive",
+      "workflows": [
+        {
+          "workflow_id": "wf_010",
+          "workflow_name": "打开工作应用",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 1
+        },
+        {
+          "workflow_id": "wf_011",
+          "workflow_name": "开启勿扰",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 2
+        },
+        {
+          "workflow_id": "wf_012",
+          "workflow_name": "整理桌面",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 3
+        }
+      ],
+      "schedule": {
+        "enabled": false,
+        "time": "",
+        "days": [],
+        "timezone": "Asia/Shanghai"
+      },
+      "created_at": 1772753048.2976668,
+      "updated_at": 1772753048.297667,
+      "usage_count": 0,
+      "tags": [
+        "工作",
+        "专注"
+      ],
+      "settings": {}
+    },
+    {
+      "scene_id": "shutdown_routine",
+      "name": "下班Shutdown",
+      "description": "下班前自动清理工作环境",
+      "icon": "🏠",
+      "status": "inactive",
+      "workflows": [
+        {
+          "workflow_id": "wf_020",
+          "workflow_name": "保存所有文件",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 1
+        },
+        {
+          "workflow_id": "wf_021",
+          "workflow_name": "关闭不必要的应用",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 2
+        },
+        {
+          "workflow_id": "wf_022",
+          "workflow_name": "清理桌面",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 3
+        },
+        {
+          "workflow_id": "wf_023",
+          "workflow_name": "锁屏",
+          "enabled": true,
+          "delay": 5,
+          "order": 4
+        }
+      ],
+      "schedule": {
+        "enabled": true,
+        "time": "18:30",
+        "days": [
+          "monday",
+          "tuesday",
+          "wednesday",
+          "thursday",
+          "friday"
+        ],
+        "timezone": "Asia/Shanghai"
+      },
+      "created_at": 1772753048.297674,
+      "updated_at": 1772753048.2976742,
+      "usage_count": 0,
+      "tags": [
+        "工作",
+        "下班",
+        "清理"
+      ],
+      "settings": {}
+    },
+    {
+      "scene_id": "travel_ready",
+      "name": "出差Ready",
+      "description": "出差前的一系列准备任务",
+      "icon": "✈️",
+      "status": "inactive",
+      "workflows": [
+        {
+          "workflow_id": "wf_030",
+          "workflow_name": "查看天气",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 1
+        },
+        {
+          "workflow_id": "wf_031",
+          "workflow_name": "打包清单",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 2
+        },
+        {
+          "workflow_id": "wf_032",
+          "workflow_name": "叫车",
+          "enabled": true,
+          "delay": 60,
+          "order": 3
+        },
+        {
+          "workflow_id": "wf_033",
+          "workflow_name": "发送行程",
+          "enabled": true,
+          "delay": 120,
+          "order": 4
+        }
+      ],
+      "schedule": {
+        "enabled": false,
+        "time": "",
+        "days": [],
+        "timezone": "Asia/Shanghai"
+      },
+      "created_at": 1772753048.2976804,
+      "updated_at": 1772753048.2976806,
+      "usage_count": 0,
+      "tags": [
+        "出差",
+        "旅行",
+        "准备"
+      ],
+      "settings": {}
+    },
+    {
+      "scene_id": "meeting_mode",
+      "name": "会议模式",
+      "description": "开会时自动调整环境",
+      "icon": "📅",
+      "status": "inactive",
+      "workflows": [
+        {
+          "workflow_id": "wf_040",
+          "workflow_name": "开启静音",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 1
+        },
+        {
+          "workflow_id": "wf_041",
+          "workflow_name": "关闭通知",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 2
+        },
+        {
+          "workflow_id": "wf_042",
+          "workflow_name": "打开会议软件",
+          "enabled": true,
+          "delay": 5,
+          "order": 3
+        }
+      ],
+      "schedule": {
+        "enabled": false,
+        "time": "",
+        "days": [],
+        "timezone": "Asia/Shanghai"
+      },
+      "created_at": 1772753048.2976892,
+      "updated_at": 1772753048.2976894,
+      "usage_count": 0,
+      "tags": [
+        "会议",
+        "专注"
+      ],
+      "settings": {}
+    },
+    {
+      "scene_id": "rest_time",
+      "name": "休息时间",
+      "description": "放松休息时的自动化",
+      "icon": "🛋️",
+      "status": "inactive",
+      "workflows": [
+        {
+          "workflow_id": "wf_050",
+          "workflow_name": "调暗灯光",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 1
+        },
+        {
+          "workflow_id": "wf_051",
+          "workflow_name": "播放轻音乐",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 2
+        },
+        {
+          "workflow_id": "wf_052",
+          "workflow_name": "关闭工作应用",
+          "enabled": true,
+          "delay": 0.0,
+          "order": 3
+        }
+      ],
+      "schedule": {
+        "enabled": false,
+        "time": "",
+        "days": [],
+        "timezone": "Asia/Shanghai"
+      },
+      "created_at": 1772753048.297694,
+      "updated_at": 1772753048.2976942,
+      "usage_count": 0,
+      "tags": [
+        "休息",
+        "放松"
+      ],
+      "settings": {}
+    }
+  ],
+  "active_scene_id": null
+}

@@ -1,0 +1,217 @@
+2026-03-06 22:41:04 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 22:41:04 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 22:44:07 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 22:44:07 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 22:46:36 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 22:46:36 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 22:48:26 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 22:48:26 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 22:51:51 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 22:51:51 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 22:52:20 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 22:52:20 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 22:54:16 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 22:54:16 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 22:55:07 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 22:55:19 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 22:55:21 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 22:55:21 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-06 22:55:22 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1757, 646) (0.79秒)
+2026-03-06 22:55:22 | INFO     | RabAI_AutoClick | 执行步骤 [2]: screenshot
+2026-03-06 22:55:23 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 截图成功 (0.96秒)
+2026-03-06 22:55:23 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 1.8秒
+2026-03-06 22:56:18 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 22:56:18 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-06 22:56:18 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1757, 646) (0.71秒)
+2026-03-06 22:56:18 | INFO     | RabAI_AutoClick | 执行步骤 [2]: screenshot
+2026-03-06 22:56:19 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 截图成功 (0.89秒)
+2026-03-06 22:56:19 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 1.6秒
+2026-03-06 22:58:15 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 22:58:16 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 22:58:16 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-06 22:58:16 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1757, 646) (0.73秒)
+2026-03-06 22:58:16 | INFO     | RabAI_AutoClick | 执行步骤 [2]: screenshot
+2026-03-06 22:58:17 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 截图成功 (0.88秒)
+2026-03-06 22:58:17 | INFO     | RabAI_AutoClick | 执行步骤 [3]: click
+2026-03-06 22:58:18 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 点击成功: (1757, 646) (0.70秒)
+2026-03-06 22:58:18 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.3秒
+2026-03-06 23:01:08 | INFO     | RabAI_AutoClick | 添加步骤: OCR文字识别
+2026-03-06 23:01:17 | INFO     | RabAI_AutoClick | 设置OCR区域: (1494, 271, 435x531)
+2026-03-06 23:01:27 | INFO     | RabAI_AutoClick | 使用识别区域: (1494, 271, 435, 531)
+2026-03-06 23:01:27 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:01:27 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-06 23:01:28 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1757, 646) (0.73秒)
+2026-03-06 23:01:28 | INFO     | RabAI_AutoClick | 执行步骤 [2]: screenshot
+2026-03-06 23:01:29 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 截图成功 (1.11秒)
+2026-03-06 23:01:29 | INFO     | RabAI_AutoClick | 执行步骤 [3]: click
+2026-03-06 23:01:29 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 点击成功: (1757, 646) (0.71秒)
+2026-03-06 23:01:29 | INFO     | RabAI_AutoClick | 执行步骤 [4]: ocr
+2026-03-06 23:01:32 | INFO     | RabAI_AutoClick | ✓ 步骤 [4] 完成: 点击成功: '影片' [第1个匹配项(共1个)] (2.51秒)
+2026-03-06 23:01:32 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 5.1秒
+2026-03-06 23:03:17 | INFO     | RabAI_AutoClick | 快速保存工作流: 111
+2026-03-06 23:03:57 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:03:57 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:04:18 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:11:10 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:11:10 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:11:29 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 23:11:44 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:14:17 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:14:17 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:14:33 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:16:37 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:17:00 | INFO     | RabAI_AutoClick | 设置OCR区域: (1503, 160, 414x709)
+2026-03-06 23:17:07 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 23:17:10 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:17:12 | INFO     | RabAI_AutoClick | 使用识别区域: (1503, 160, 414, 709)
+2026-03-06 23:17:12 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:17:12 | INFO     | RabAI_AutoClick | 执行步骤 [1]: find_image
+2026-03-06 23:17:12 | ERROR    | RabAI_AutoClick | 步骤 [1] 失败: 未指定模板图片路径
+2026-03-06 23:17:12 | ERROR    | RabAI_AutoClick | 步骤 [1] 错误: 未指定模板图片路径
+2026-03-06 23:17:12 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 0.0秒
+2026-03-06 23:20:13 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:20:13 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:22:26 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:26:59 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:27:13 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 23:27:19 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:27:21 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:27:21 | INFO     | RabAI_AutoClick | 执行步骤 [1]: find_image
+2026-03-06 23:27:21 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 未找到匹配图像 (0.85秒)
+2026-03-06 23:27:21 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-06 23:27:22 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (1738, 401) (0.71秒)
+2026-03-06 23:27:22 | INFO     | RabAI_AutoClick | 执行步骤 [3]: screenshot
+2026-03-06 23:27:23 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 截图成功 (0.87秒)
+2026-03-06 23:27:23 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.5秒
+2026-03-06 23:28:25 | INFO     | RabAI_AutoClick | 设置OCR区域: (1505, 218, 414x583)
+2026-03-06 23:28:34 | INFO     | RabAI_AutoClick | 使用识别区域: (1505, 218, 414, 583)
+2026-03-06 23:28:34 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:28:34 | INFO     | RabAI_AutoClick | 执行步骤 [1]: find_image
+2026-03-06 23:28:35 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 未找到匹配图像 (0.86秒)
+2026-03-06 23:28:35 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-06 23:28:35 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (1738, 401) (0.69秒)
+2026-03-06 23:28:35 | INFO     | RabAI_AutoClick | 执行步骤 [3]: screenshot
+2026-03-06 23:28:36 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 截图成功 (0.83秒)
+2026-03-06 23:28:36 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.4秒
+2026-03-06 23:31:01 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:31:01 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:31:17 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:31:47 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:31:55 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 23:32:06 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:32:07 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:32:07 | INFO     | RabAI_AutoClick | 执行步骤 [1]: find_image
+2026-03-06 23:32:08 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 未找到匹配图像 (0.76秒)
+2026-03-06 23:32:08 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-06 23:32:09 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (1746, 538) (0.70秒)
+2026-03-06 23:32:09 | INFO     | RabAI_AutoClick | 执行步骤 [3]: screenshot
+2026-03-06 23:32:09 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 截图成功 (0.84秒)
+2026-03-06 23:32:09 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.3秒
+2026-03-06 23:36:03 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:36:03 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:36:04 | INFO     | RabAI_AutoClick | 新建工作流
+2026-03-06 23:36:53 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:37:05 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 23:37:15 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:37:18 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:37:19 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:37:19 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-06 23:37:20 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1735, 530) (0.73秒)
+2026-03-06 23:37:20 | INFO     | RabAI_AutoClick | 执行步骤 [2]: find_image
+2026-03-06 23:37:21 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 未找到匹配图像 (0.67秒)
+2026-03-06 23:37:21 | INFO     | RabAI_AutoClick | 执行步骤 [3]: screenshot
+2026-03-06 23:37:22 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_233721.png (0.90秒)
+2026-03-06 23:37:22 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.3秒
+2026-03-06 23:39:42 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:39:42 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:40:11 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:40:11 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:40:16 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:40:21 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:40:32 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 23:40:40 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:40:43 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:40:46 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:40:46 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-06 23:40:46 | ERROR    | RabAI_AutoClick | 步骤 [1] 失败: ⚠️ macOS辅助功能权限未授权！
+
+请前往：
+系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能
+添加终端或Python并重启程序
+2026-03-06 23:40:46 | ERROR    | RabAI_AutoClick | 步骤 [1] 错误: ⚠️ macOS辅助功能权限未授权！
+
+请前往：
+系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能
+添加终端或Python并重启程序
+2026-03-06 23:40:46 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 0.3秒
+2026-03-06 23:42:30 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:42:30 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:42:54 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:43:07 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 23:43:16 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:43:25 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:43:26 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:43:26 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-06 23:43:27 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1613, 540) | 实际位置: Point(x=1613, y=540) (0.97秒)
+2026-03-06 23:43:27 | INFO     | RabAI_AutoClick | 执行步骤 [2]: find_image
+2026-03-06 23:43:28 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 未找到匹配图像 (1.02秒)
+2026-03-06 23:43:28 | INFO     | RabAI_AutoClick | 执行步骤 [3]: screenshot
+2026-03-06 23:43:28 | ERROR    | RabAI_AutoClick | 步骤 [3] 失败: 截图失败: unsupported operand type(s) for -: 'str' and 'str'
+2026-03-06 23:43:28 | ERROR    | RabAI_AutoClick | 步骤 [3] 错误: 截图失败: unsupported operand type(s) for -: 'str' and 'str'
+2026-03-06 23:43:28 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.0秒
+2026-03-06 23:46:06 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:46:06 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:46:18 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:46:39 | INFO     | RabAI_AutoClick | 添加步骤: 鼠标点击
+2026-03-06 23:46:54 | INFO     | RabAI_AutoClick | 设置OCR区域: (1316, 45, 600x863)
+2026-03-06 23:47:04 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:47:19 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:47:20 | INFO     | RabAI_AutoClick | 使用识别区域: (1316, 45, 600, 863)
+2026-03-06 23:47:20 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:47:20 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-06 23:47:21 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1476, 201) | 实际位置: Point(x=1476, y=201) (0.95秒)
+2026-03-06 23:47:21 | INFO     | RabAI_AutoClick | 执行步骤 [2]: find_image
+2026-03-06 23:47:22 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 未找到匹配图像 (1.02秒)
+2026-03-06 23:47:22 | INFO     | RabAI_AutoClick | 执行步骤 [3]: screenshot
+2026-03-06 23:47:23 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_234722.png (0.85秒)
+2026-03-06 23:47:23 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.8秒
+2026-03-06 23:47:49 | INFO     | RabAI_AutoClick | 删除步骤 [1]
+2026-03-06 23:47:50 | INFO     | RabAI_AutoClick | 使用识别区域: (1316, 45, 600, 863)
+2026-03-06 23:47:50 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:47:50 | INFO     | RabAI_AutoClick | 执行步骤 [2]: find_image
+2026-03-06 23:47:51 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 未找到匹配图像 (0.66秒)
+2026-03-06 23:47:51 | INFO     | RabAI_AutoClick | 执行步骤 [3]: screenshot
+2026-03-06 23:47:52 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_234751.png (0.83秒)
+2026-03-06 23:47:52 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 1.5秒
+2026-03-06 23:48:42 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:48:54 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:48:55 | INFO     | RabAI_AutoClick | 使用识别区域: (1316, 45, 600, 863)
+2026-03-06 23:48:55 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-06 23:48:55 | INFO     | RabAI_AutoClick | 执行步骤 [2]: find_image
+2026-03-06 23:48:56 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 未找到匹配图像 (0.73秒)
+2026-03-06 23:48:56 | INFO     | RabAI_AutoClick | 执行步骤 [3]: screenshot
+2026-03-06 23:48:57 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_234856.png (0.97秒)
+2026-03-06 23:48:57 | INFO     | RabAI_AutoClick | 执行步骤 [4]: find_image
+2026-03-06 23:48:57 | INFO     | RabAI_AutoClick | ✓ 步骤 [4] 完成: 找到图像: (3705, 1046) (0.62秒)
+2026-03-06 23:48:57 | INFO     | RabAI_AutoClick | 执行步骤 [5]: screenshot
+2026-03-06 23:48:58 | INFO     | RabAI_AutoClick | ✓ 步骤 [5] 完成: 截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_234858.png (0.99秒)
+2026-03-06 23:48:58 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 3.3秒
+2026-03-06 23:51:58 | INFO     | RabAI_AutoClick | 程序退出
+2026-03-06 23:54:29 | WARNING  | RabAI_AutoClick | keyboard模块未安装，全局热键不可用
+2026-03-06 23:54:29 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-06 23:54:30 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-06 23:59:38 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:59:43 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-06 23:59:50 | INFO     | RabAI_AutoClick | 添加步骤: 查找图像
+2026-03-06 23:59:52 | INFO     | RabAI_AutoClick | 添加步骤: 截图
+2026-03-07 00:00:06 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-07 00:00:06 | INFO     | RabAI_AutoClick | 执行步骤 [1]: find_image
+2026-03-07 00:00:08 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 未找到匹配图像 (1.45秒)
+2026-03-07 00:00:08 | INFO     | RabAI_AutoClick | 执行步骤 [2]: screenshot
+2026-03-07 00:00:09 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260307_000008.png (0.95秒)
+2026-03-07 00:00:09 | INFO     | RabAI_AutoClick | 执行步骤 [3]: find_image
+2026-03-07 00:00:09 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 找到图像: (3705, 1046) (0.59秒)
+2026-03-07 00:00:09 | INFO     | RabAI_AutoClick | 执行步骤 [4]: screenshot
+2026-03-07 00:00:10 | INFO     | RabAI_AutoClick | ✓ 步骤 [4] 完成: 截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260307_000010.png (0.98秒)
+2026-03-07 00:00:11 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 4.0秒
+2026-03-07 00:00:37 | INFO     | RabAI_AutoClick | 程序退出

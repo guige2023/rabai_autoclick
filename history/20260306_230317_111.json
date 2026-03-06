@@ -1,0 +1,54 @@
+{
+  "name": "111",
+  "created_at": "2026-03-06T23:03:17.587050",
+  "tags": [],
+  "workflow": {
+    "variables": {},
+    "steps": [
+      {
+        "x": 1757,
+        "y": 646,
+        "button": "left",
+        "clicks": 1,
+        "interval": 0.1,
+        "move_duration": 0.2,
+        "relative": false,
+        "pre_delay": 0.0,
+        "post_delay": 0.0,
+        "id": 1,
+        "type": "click"
+      },
+      {
+        "pre_delay": 0.0,
+        "post_delay": 0.0,
+        "id": 2,
+        "type": "screenshot"
+      },
+      {
+        "x": 1757,
+        "y": 646,
+        "button": "right",
+        "clicks": 1,
+        "interval": 0.1,
+        "move_duration": 0.2,
+        "relative": false,
+        "pre_delay": 0.0,
+        "post_delay": 0.0,
+        "id": 3,
+        "type": "click"
+      },
+      {
+        "click_text": "影片",
+        "click_index": 0,
+        "exact_match": true,
+        "move_duration": 0.2,
+        "preprocess_mode": "auto",
+        "retry_count": 3,
+        "pre_delay": 0.0,
+        "post_delay": 0.0,
+        "id": 4,
+        "type": "ocr"
+      }
+    ]
+  }
+}

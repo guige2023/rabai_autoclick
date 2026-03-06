@@ -1,0 +1,2637 @@
+[
+  {
+    "start_time": 1772808921.578301,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.7666797637939453,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772808923.345087
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.7903001308441162,
+        "success": true,
+        "message": "点击成功: (1757, 646)",
+        "timestamp": 1772808922.380432
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.9639251232147217,
+        "success": true,
+        "message": "截图成功",
+        "timestamp": 1772808923.344527
+      }
+    ],
+    "errors": [],
+    "end_time": 1772808923.345093,
+    "total_duration": 1.7667920589447021,
+    "success": true,
+    "avg_loop_duration": 1.7666797637939453,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 1,
+        "avg_duration": 0.7903001308441162,
+        "total_duration": 0.7903001308441162,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.9639251232147217,
+        "total_duration": 0.9639251232147217,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 22:55:23"
+  },
+  {
+    "start_time": 1772808978.0178392,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.6170282363891602,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772808979.6357
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.7092990875244141,
+        "success": true,
+        "message": "点击成功: (1757, 646)",
+        "timestamp": 1772808978.7452722
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.8891918659210205,
+        "success": true,
+        "message": "截图成功",
+        "timestamp": 1772808979.634741
+      }
+    ],
+    "errors": [],
+    "end_time": 1772808979.6357062,
+    "total_duration": 1.6178669929504395,
+    "success": true,
+    "avg_loop_duration": 1.6170282363891602,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 1,
+        "avg_duration": 0.7092990875244141,
+        "total_duration": 0.7092990875244141,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.8891918659210205,
+        "total_duration": 0.8891918659210205,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 22:56:19"
+  },
+  {
+    "start_time": 1772809096.1785989,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.3185698986053467,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772809098.497243
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.7250518798828125,
+        "success": true,
+        "message": "点击成功: (1757, 646)",
+        "timestamp": 1772809096.9131908
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.8809499740600586,
+        "success": true,
+        "message": "截图成功",
+        "timestamp": 1772809097.794206
+      },
+      {
+        "type": "click",
+        "duration": 0.7022242546081543,
+        "success": true,
+        "message": "点击成功: (1757, 646)",
+        "timestamp": 1772809098.496671
+      }
+    ],
+    "errors": [],
+    "end_time": 1772809098.497246,
+    "total_duration": 2.3186471462249756,
+    "success": true,
+    "avg_loop_duration": 2.3185698986053467,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 2,
+        "avg_duration": 0.7136380672454834,
+        "total_duration": 1.4272761344909668,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.8809499740600586,
+        "total_duration": 0.8809499740600586,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 22:58:18"
+  },
+  {
+    "start_time": 1772809287.258688,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 5.077211856842041,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772809292.336001
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.7312266826629639,
+        "success": true,
+        "message": "点击成功: (1757, 646)",
+        "timestamp": 1772809288.00796
+      },
+      {
+        "type": "screenshot",
+        "duration": 1.1123919486999512,
+        "success": true,
+        "message": "截图成功",
+        "timestamp": 1772809289.1186821
+      },
+      {
+        "type": "click",
+        "duration": 0.7050127983093262,
+        "success": true,
+        "message": "点击成功: (1757, 646)",
+        "timestamp": 1772809289.8251982
+      },
+      {
+        "type": "ocr",
+        "duration": 2.5101001262664795,
+        "success": true,
+        "message": "点击成功: '影片' [第1个匹配项(共1个)]",
+        "timestamp": 1772809292.334133
+      }
+    ],
+    "errors": [],
+    "end_time": 1772809292.336011,
+    "total_duration": 5.077322959899902,
+    "success": true,
+    "avg_loop_duration": 5.077211856842041,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 2,
+        "avg_duration": 0.718119740486145,
+        "total_duration": 1.43623948097229,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 1.1123919486999512,
+        "total_duration": 1.1123919486999512,
+        "success_rate": 100.0
+      },
+      "ocr": {
+        "count": 1,
+        "avg_duration": 2.5101001262664795,
+        "total_duration": 2.5101001262664795,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 23:01:32"
+  },
+  {
+    "start_time": 1772810232.915772,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.017464876174926758,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772810232.9333272
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.0006608963012695312,
+        "success": false,
+        "message": "未指定模板图片路径",
+        "timestamp": 1772810232.932805
+      }
+    ],
+    "errors": [
+      {
+        "type": "find_image",
+        "message": "未指定模板图片路径",
+        "timestamp": 1772810232.93315
+      },
+      {
+        "type": "find_image",
+        "message": "未指定模板图片路径",
+        "timestamp": 1772810232.933307
+      }
+    ],
+    "end_time": 1772810232.9333398,
+    "total_duration": 0.017567873001098633,
+    "success": true,
+    "avg_loop_duration": 0.017464876174926758,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 1,
+        "avg_duration": 0.0006608963012695312,
+        "total_duration": 0.0006608963012695312,
+        "success_rate": 0.0
+      }
+    },
+    "date": "2026-03-06 23:17:12"
+  },
+  {
+    "start_time": 1772810841.042572,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.4529900550842285,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772810843.496115
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.8532180786132812,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772810841.9105449
+      },
+      {
+        "type": "click",
+        "duration": 0.7138361930847168,
+        "success": true,
+        "message": "点击成功: (1738, 401)",
+        "timestamp": 1772810842.624793
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.8703889846801758,
+        "success": true,
+        "message": "截图成功",
+        "timestamp": 1772810843.495331
+      }
+    ],
+    "errors": [],
+    "end_time": 1772810843.49612,
+    "total_duration": 2.453547954559326,
+    "success": true,
+    "avg_loop_duration": 2.4529900550842285,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 1,
+        "avg_duration": 0.8532180786132812,
+        "total_duration": 0.8532180786132812,
+        "success_rate": 100.0
+      },
+      "click": {
+        "count": 1,
+        "avg_duration": 0.7138361930847168,
+        "total_duration": 0.7138361930847168,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.8703889846801758,
+        "total_duration": 0.8703889846801758,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 23:27:23"
+  },
+  {
+    "start_time": 1772810914.155296,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.39719820022583,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772810916.5525749
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.8566980361938477,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772810915.034076
+      },
+      {
+        "type": "click",
+        "duration": 0.6923072338104248,
+        "success": true,
+        "message": "点击成功: (1738, 401)",
+        "timestamp": 1772810915.726777
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.8253049850463867,
+        "success": true,
+        "message": "截图成功",
+        "timestamp": 1772810916.551868
+      }
+    ],
+    "errors": [],
+    "end_time": 1772810916.552581,
+    "total_duration": 2.397284984588623,
+    "success": true,
+    "avg_loop_duration": 2.39719820022583,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 1,
+        "avg_duration": 0.8566980361938477,
+        "total_duration": 0.8566980361938477,
+        "success_rate": 100.0
+      },
+      "click": {
+        "count": 1,
+        "avg_duration": 0.6923072338104248,
+        "total_duration": 0.6923072338104248,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.8253049850463867,
+        "total_duration": 0.8253049850463867,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 23:28:36"
+  },
+  {
+    "start_time": 1772811127.65488,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.3148281574249268,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772811129.969794
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.7626268863677979,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772811128.425051
+      },
+      {
+        "type": "click",
+        "duration": 0.7046239376068115,
+        "success": true,
+        "message": "点击成功: (1746, 538)",
+        "timestamp": 1772811129.13009
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.8392479419708252,
+        "success": true,
+        "message": "截图成功",
+        "timestamp": 1772811129.969215
+      }
+    ],
+    "errors": [],
+    "end_time": 1772811129.9697988,
+    "total_duration": 2.3149187564849854,
+    "success": true,
+    "avg_loop_duration": 2.3148281574249268,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 1,
+        "avg_duration": 0.7626268863677979,
+        "total_duration": 0.7626268863677979,
+        "success_rate": 100.0
+      },
+      "click": {
+        "count": 1,
+        "avg_duration": 0.7046239376068115,
+        "total_duration": 0.7046239376068115,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.8392479419708252,
+        "total_duration": 0.8392479419708252,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 23:32:09"
+  },
+  {
+    "start_time": 1772811439.8469172,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.3172738552093506,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772811442.164311
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.7332448959350586,
+        "success": true,
+        "message": "点击成功: (1735, 530)",
+        "timestamp": 1772811440.589397
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6717987060546875,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772811441.261153
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.9023380279541016,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_233721.png",
+        "timestamp": 1772811442.16372
+      }
+    ],
+    "errors": [],
+    "end_time": 1772811442.164313,
+    "total_duration": 2.3173959255218506,
+    "success": true,
+    "avg_loop_duration": 2.3172738552093506,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 1,
+        "avg_duration": 0.7332448959350586,
+        "total_duration": 0.7332448959350586,
+        "success_rate": 100.0
+      },
+      "find_image": {
+        "count": 1,
+        "avg_duration": 0.6717987060546875,
+        "total_duration": 0.6717987060546875,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.9023380279541016,
+        "total_duration": 0.9023380279541016,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 23:37:22"
+  },
+  {
+    "start_time": 1772811646.308702,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.2642807960510254,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772811646.573057
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.25623083114624023,
+        "success": false,
+        "message": "⚠️ macOS辅助功能权限未授权！\n\n请前往：\n系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能\n添加终端或Python并重启程序",
+        "timestamp": 1772811646.5723588
+      }
+    ],
+    "errors": [
+      {
+        "type": "click",
+        "message": "⚠️ macOS辅助功能权限未授权！\n\n请前往：\n系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能\n添加终端或Python并重启程序",
+        "timestamp": 1772811646.57292
+      },
+      {
+        "type": "click",
+        "message": "⚠️ macOS辅助功能权限未授权！\n\n请前往：\n系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能\n添加终端或Python并重启程序",
+        "timestamp": 1772811646.573048
+      }
+    ],
+    "end_time": 1772811646.5730639,
+    "total_duration": 0.2643618583679199,
+    "success": true,
+    "avg_loop_duration": 0.2642807960510254,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 1,
+        "avg_duration": 0.25623083114624023,
+        "total_duration": 0.25623083114624023,
+        "success_rate": 0.0
+      }
+    },
+    "date": "2026-03-06 23:40:46"
+  },
+  {
+    "start_time": 1772811806.22524,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.006887912750244,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772811808.233526
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.9711790084838867,
+        "success": true,
+        "message": "点击成功: (1613, 540) | 实际位置: Point(x=1613, y=540)",
+        "timestamp": 1772811807.2120562
+      },
+      {
+        "type": "find_image",
+        "duration": 1.0191428661346436,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772811808.231423
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.0008857250213623047,
+        "success": false,
+        "message": "截图失败: unsupported operand type(s) for -: 'str' and 'str'",
+        "timestamp": 1772811808.2332711
+      }
+    ],
+    "errors": [
+      {
+        "type": "screenshot",
+        "message": "截图失败: unsupported operand type(s) for -: 'str' and 'str'",
+        "timestamp": 1772811808.2334368
+      },
+      {
+        "type": "screenshot",
+        "message": "截图失败: unsupported operand type(s) for -: 'str' and 'str'",
+        "timestamp": 1772811808.233515
+      }
+    ],
+    "end_time": 1772811808.233529,
+    "total_duration": 2.008289098739624,
+    "success": true,
+    "avg_loop_duration": 2.006887912750244,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 1,
+        "avg_duration": 0.9711790084838867,
+        "total_duration": 0.9711790084838867,
+        "success_rate": 100.0
+      },
+      "find_image": {
+        "count": 1,
+        "avg_duration": 1.0191428661346436,
+        "total_duration": 1.0191428661346436,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.0008857250213623047,
+        "total_duration": 0.0008857250213623047,
+        "success_rate": 0.0
+      }
+    },
+    "date": "2026-03-06 23:43:28"
+  },
+  {
+    "start_time": 1772812040.55716,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.843878984451294,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772812043.4023921
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.9504289627075195,
+        "success": true,
+        "message": "点击成功: (1476, 201) | 实际位置: Point(x=1476, y=201)",
+        "timestamp": 1772812041.522316
+      },
+      {
+        "type": "find_image",
+        "duration": 1.0220811367034912,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772812042.556749
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.849247932434082,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_234722.png",
+        "timestamp": 1772812043.401979
+      }
+    ],
+    "errors": [],
+    "end_time": 1772812043.403384,
+    "total_duration": 2.846224069595337,
+    "success": true,
+    "avg_loop_duration": 2.843878984451294,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 1,
+        "avg_duration": 0.9504289627075195,
+        "total_duration": 0.9504289627075195,
+        "success_rate": 100.0
+      },
+      "find_image": {
+        "count": 1,
+        "avg_duration": 1.0220811367034912,
+        "total_duration": 1.0220811367034912,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.849247932434082,
+        "total_duration": 0.849247932434082,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 23:47:23"
+  },
+  {
+    "start_time": 1772812070.6347048,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.4988889694213867,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772812072.1336582
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.6628992557525635,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772812071.3057349
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.8271961212158203,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_234751.png",
+        "timestamp": 1772812072.133044
+      }
+    ],
+    "errors": [],
+    "end_time": 1772812072.133665,
+    "total_duration": 1.498960256576538,
+    "success": true,
+    "avg_loop_duration": 1.4988889694213867,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 1,
+        "avg_duration": 0.6628992557525635,
+        "total_duration": 0.6628992557525635,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.8271961212158203,
+        "total_duration": 0.8271961212158203,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 23:47:52"
+  },
+  {
+    "start_time": 1772812135.482383,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 3.3309128284454346,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772812138.813345
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.7285120487213135,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772812136.2200131
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.9741168022155762,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_234856.png",
+        "timestamp": 1772812137.1984909
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6223528385162354,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772812137.819884
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.9912912845611572,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260306_234858.png",
+        "timestamp": 1772812138.811566
+      }
+    ],
+    "errors": [],
+    "end_time": 1772812138.813348,
+    "total_duration": 3.330965042114258,
+    "success": true,
+    "avg_loop_duration": 3.3309128284454346,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 2,
+        "avg_duration": 0.6754324436187744,
+        "total_duration": 1.3508648872375488,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 2,
+        "avg_duration": 0.9827040433883667,
+        "total_duration": 1.9654080867767334,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-06 23:48:58"
+  },
+  {
+    "start_time": 1772812806.945821,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 4.001414060592651,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772812810.9493608
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 1.4495680332183838,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772812808.4221299
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.9508967399597168,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260307_000008.png",
+        "timestamp": 1772812809.373065
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5948929786682129,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772812809.9680698
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.9791810512542725,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260307_000010.png",
+        "timestamp": 1772812810.947575
+      }
+    ],
+    "errors": [],
+    "end_time": 1772812810.949376,
+    "total_duration": 4.003555059432983,
+    "success": true,
+    "avg_loop_duration": 4.001414060592651,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 2,
+        "avg_duration": 1.0222305059432983,
+        "total_duration": 2.0444610118865967,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 2,
+        "avg_duration": 0.9650388956069946,
+        "total_duration": 1.9300777912139893,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:00:10"
+  },
+  {
+    "start_time": 1772812885.8659542,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 3.6586761474609375,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772812889.524835
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 1.070106029510498,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772812886.960342
+      },
+      {
+        "type": "screenshot",
+        "duration": 1.0928387641906738,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260307_000127.png",
+        "timestamp": 1772812888.0535512
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6554028987884521,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772812888.709256
+      },
+      {
+        "type": "find_image",
+        "duration": 0.8142478466033936,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772812889.5236712
+      }
+    ],
+    "errors": [],
+    "end_time": 1772812889.524844,
+    "total_duration": 3.6588897705078125,
+    "success": true,
+    "avg_loop_duration": 3.6586761474609375,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.8465855916341146,
+        "total_duration": 2.5397567749023438,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 1.0928387641906738,
+        "total_duration": 1.0928387641906738,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:01:29"
+  },
+  {
+    "start_time": 1772813489.340461,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 4.023216009140015,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772813493.366079
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 1.1218328475952148,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772813490.4958348
+      },
+      {
+        "type": "find_image",
+        "duration": 0.8780970573425293,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772813491.3740811
+      },
+      {
+        "type": "click",
+        "duration": 0.9417469501495361,
+        "success": true,
+        "message": "点击成功: (1612, 664) | 实际位置: Point(x=1612, y=664)",
+        "timestamp": 1772813492.316109
+      },
+      {
+        "type": "click",
+        "duration": 1.0467069149017334,
+        "success": true,
+        "message": "点击成功: (1612, 664) | 实际位置: Point(x=1612, y=664)",
+        "timestamp": 1772813493.363251
+      }
+    ],
+    "errors": [],
+    "end_time": 1772813493.366111,
+    "total_duration": 4.0256500244140625,
+    "success": true,
+    "avg_loop_duration": 4.023216009140015,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 2,
+        "avg_duration": 0.9999649524688721,
+        "total_duration": 1.9999299049377441,
+        "success_rate": 100.0
+      },
+      "click": {
+        "count": 2,
+        "avg_duration": 0.9942269325256348,
+        "total_duration": 1.9884538650512695,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:11:33"
+  },
+  {
+    "start_time": 1772813544.643162,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 5.408613204956055,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772813550.052944
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 1.640024185180664,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772813546.3160179
+      },
+      {
+        "type": "find_image",
+        "duration": 1.850128173828125,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772813548.166325
+      },
+      {
+        "type": "click",
+        "duration": 0.9350299835205078,
+        "success": true,
+        "message": "点击成功: (1594, 533) | 实际位置: Point(x=1594, y=533)",
+        "timestamp": 1772813549.1014342
+      },
+      {
+        "type": "click",
+        "duration": 0.9459331035614014,
+        "success": true,
+        "message": "点击成功: (1612, 664) | 实际位置: Point(x=1612, y=664)",
+        "timestamp": 1772813550.0483022
+      }
+    ],
+    "errors": [],
+    "end_time": 1772813550.0529542,
+    "total_duration": 5.409792184829712,
+    "success": true,
+    "avg_loop_duration": 5.408613204956055,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 2,
+        "avg_duration": 1.7450761795043945,
+        "total_duration": 3.490152359008789,
+        "success_rate": 100.0
+      },
+      "click": {
+        "count": 2,
+        "avg_duration": 0.9404815435409546,
+        "total_duration": 1.8809630870819092,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:12:30"
+  },
+  {
+    "start_time": 1772814005.3960042,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 3.2328431606292725,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772814008.6289768
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.9465899467468262,
+        "success": true,
+        "message": "点击成功: (1733, 544) | 实际位置: Point(x=1733, y=544)",
+        "timestamp": 1772814006.356041
+      },
+      {
+        "type": "click",
+        "duration": 0.9379599094390869,
+        "success": true,
+        "message": "点击成功: (1733, 544) | 实际位置: Point(x=1733, y=544)",
+        "timestamp": 1772814007.294961
+      },
+      {
+        "type": "find_image",
+        "duration": 0.7422080039978027,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772814008.037132
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5911810398101807,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772814008.628363
+      }
+    ],
+    "errors": [],
+    "end_time": 1772814008.628982,
+    "total_duration": 3.232977867126465,
+    "success": true,
+    "avg_loop_duration": 3.2328431606292725,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 2,
+        "avg_duration": 0.9422749280929565,
+        "total_duration": 1.884549856185913,
+        "success_rate": 100.0
+      },
+      "find_image": {
+        "count": 2,
+        "avg_duration": 0.6666945219039917,
+        "total_duration": 1.3333890438079834,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:20:08"
+  },
+  {
+    "start_time": 1772814788.531775,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 5.8365912437438965,
+        "success": true,
+        "step_count": 6,
+        "timestamp": 1772814794.370046
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.9776310920715332,
+        "success": true,
+        "message": "点击成功: (1015, 762) | 实际位置: Point(x=1032, y=766)",
+        "timestamp": 1772814789.540002
+      },
+      {
+        "type": "click",
+        "duration": 0.9365801811218262,
+        "success": true,
+        "message": "点击成功: (None, None) | 实际位置: Point(x=1032, y=766)",
+        "timestamp": 1772814790.475625
+      },
+      {
+        "type": "find_image",
+        "duration": 1.5918138027191162,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772814792.067647
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6018781661987305,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772814792.6697102
+      },
+      {
+        "type": "find_image",
+        "duration": 0.7555780410766602,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772814793.425499
+      },
+      {
+        "type": "click",
+        "duration": 0.9431970119476318,
+        "success": true,
+        "message": "点击成功: (1117, 402) | 实际位置: Point(x=1117, y=402)",
+        "timestamp": 1772814794.368779
+      }
+    ],
+    "errors": [],
+    "end_time": 1772814794.37006,
+    "total_duration": 5.838284969329834,
+    "success": true,
+    "avg_loop_duration": 5.8365912437438965,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 3,
+        "avg_duration": 0.9524694283803304,
+        "total_duration": 2.857408285140991,
+        "success_rate": 100.0
+      },
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.9830900033315023,
+        "total_duration": 2.949270009994507,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:33:14"
+  },
+  {
+    "start_time": 1772814819.064951,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.7613368034362793,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772814820.826399
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.5840060710906982,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772814819.8493938
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6006519794464111,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772814820.2590668
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5666851997375488,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772814820.825831
+      }
+    ],
+    "errors": [],
+    "end_time": 1772814820.8264,
+    "total_duration": 1.7614490985870361,
+    "success": true,
+    "avg_loop_duration": 1.7613368034362793,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.5837810834248861,
+        "total_duration": 1.7513432502746582,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:33:40"
+  },
+  {
+    "start_time": 1772815042.1094348,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 6.341240882873535,
+        "success": true,
+        "step_count": 7,
+        "timestamp": 1772815048.451107
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 1.001788854598999,
+        "success": true,
+        "message": "点击成功: (630, 131) | 实际位置: Point(x=707, y=138)",
+        "timestamp": 1772815043.128296
+      },
+      {
+        "type": "click",
+        "duration": 1.1452622413635254,
+        "success": true,
+        "message": "点击成功: (784, 300) | 实际位置: Point(x=784, y=300)",
+        "timestamp": 1772815044.295278
+      },
+      {
+        "type": "click",
+        "duration": 0.9780850410461426,
+        "success": true,
+        "message": "点击成功: (1350, 215) | 实际位置: Point(x=1346, y=208)",
+        "timestamp": 1772815045.27427
+      },
+      {
+        "type": "find_image",
+        "duration": 0.9398140907287598,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815046.216148
+      },
+      {
+        "type": "find_image",
+        "duration": 0.8500039577484131,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772815047.0645912
+      },
+      {
+        "type": "screenshot",
+        "duration": 0.7947828769683838,
+        "success": true,
+        "message": "截图已保存: /Users/guige876/gram/rabai-autoclick-v22/screenshots/screenshot_20260307_003727.png",
+        "timestamp": 1772815047.859311
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5910420417785645,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815048.4504519
+      }
+    ],
+    "errors": [],
+    "end_time": 1772815048.451114,
+    "total_duration": 6.341679096221924,
+    "success": true,
+    "avg_loop_duration": 6.341240882873535,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 3,
+        "avg_duration": 1.0417120456695557,
+        "total_duration": 3.125136137008667,
+        "success_rate": 100.0
+      },
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.7936200300852457,
+        "total_duration": 2.3808600902557373,
+        "success_rate": 100.0
+      },
+      "screenshot": {
+        "count": 1,
+        "avg_duration": 0.7947828769683838,
+        "total_duration": 0.7947828769683838,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:37:28"
+  },
+  {
+    "start_time": 1772815414.437994,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.1514689922332764,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772815416.589599
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 1.1837308406829834,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815415.631894
+      },
+      {
+        "type": "find_image",
+        "duration": 0.9559848308563232,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772815416.5883782
+      }
+    ],
+    "errors": [],
+    "end_time": 1772815416.5896142,
+    "total_duration": 2.1516201496124268,
+    "success": true,
+    "avg_loop_duration": 2.1514689922332764,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 2,
+        "avg_duration": 1.0698578357696533,
+        "total_duration": 2.1397156715393066,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:43:36"
+  },
+  {
+    "start_time": 1772815576.1206772,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.1261470317840576,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772815578.246916
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.9101510047912598,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772815577.042377
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6435360908508301,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815577.6860301
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5600037574768066,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815578.246136
+      }
+    ],
+    "errors": [],
+    "end_time": 1772815578.246922,
+    "total_duration": 2.1262447834014893,
+    "success": true,
+    "avg_loop_duration": 2.1261470317840576,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.7045636177062988,
+        "total_duration": 2.1136908531188965,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:46:18"
+  },
+  {
+    "start_time": 1772815615.3832,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.967170000076294,
+        "success": true,
+        "step_count": 5,
+        "timestamp": 1772815618.350467
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.795180082321167,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772815616.187372
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5294442176818848,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815616.716962
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5832967758178711,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815617.3003762
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5391008853912354,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772815617.839651
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5103139877319336,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815618.349979
+      }
+    ],
+    "errors": [],
+    "end_time": 1772815618.3504739,
+    "total_duration": 2.9672739505767822,
+    "success": true,
+    "avg_loop_duration": 2.967170000076294,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 5,
+        "avg_duration": 0.5914671897888184,
+        "total_duration": 2.957335948944092,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:46:58"
+  },
+  {
+    "start_time": 1772815661.143556,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 3.144902229309082,
+        "success": true,
+        "step_count": 5,
+        "timestamp": 1772815664.28913
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.8105947971343994,
+        "success": true,
+        "message": "找到图像: (3455, 1037)",
+        "timestamp": 1772815661.97327
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5561120510101318,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815662.529511
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5954046249389648,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815663.125077
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6448390483856201,
+        "success": true,
+        "message": "找到图像: (3455, 1037)",
+        "timestamp": 1772815663.769996
+      },
+      {
+        "type": "find_image",
+        "duration": 0.51839280128479,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772815664.288459
+      }
+    ],
+    "errors": [],
+    "end_time": 1772815664.28914,
+    "total_duration": 3.1455838680267334,
+    "success": true,
+    "avg_loop_duration": 3.144902229309082,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 5,
+        "avg_duration": 0.6250686645507812,
+        "total_duration": 3.1253433227539062,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:47:44"
+  },
+  {
+    "start_time": 1772816011.140691,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.5668821334838867,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772816012.708234
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.7875051498413086,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816011.9465852
+      },
+      {
+        "type": "find_image",
+        "duration": 0.2594730854034424,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816012.206292
+      },
+      {
+        "type": "find_image",
+        "duration": 0.2525498867034912,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816012.4588969
+      },
+      {
+        "type": "find_image",
+        "duration": 0.24868392944335938,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816012.707632
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816012.708244,
+    "total_duration": 1.5675530433654785,
+    "success": true,
+    "avg_loop_duration": 1.5668821334838867,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 4,
+        "avg_duration": 0.3870530128479004,
+        "total_duration": 1.5482120513916016,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:53:32"
+  },
+  {
+    "start_time": 1772816020.776704,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.0937581062316895,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772816021.870544
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.39511823654174805,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816021.18803
+      },
+      {
+        "type": "find_image",
+        "duration": 0.23315882682800293,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816021.4212701
+      },
+      {
+        "type": "find_image",
+        "duration": 0.23430895805358887,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816021.655648
+      },
+      {
+        "type": "find_image",
+        "duration": 0.21423697471618652,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816021.869928
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816021.87055,
+    "total_duration": 1.0938458442687988,
+    "success": true,
+    "avg_loop_duration": 1.0937581062316895,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 4,
+        "avg_duration": 0.2692057490348816,
+        "total_duration": 1.0768229961395264,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:53:41"
+  },
+  {
+    "start_time": 1772816033.829524,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.0446021556854248,
+        "success": true,
+        "step_count": 4,
+        "timestamp": 1772816034.874203
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.38248205184936523,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816034.2258172
+      },
+      {
+        "type": "find_image",
+        "duration": 0.22603631019592285,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816034.4519649
+      },
+      {
+        "type": "find_image",
+        "duration": 0.23781776428222656,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816034.689933
+      },
+      {
+        "type": "find_image",
+        "duration": 0.18375802040100098,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816034.873711
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816034.874209,
+    "total_duration": 1.044684886932373,
+    "success": true,
+    "avg_loop_duration": 1.0446021556854248,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 4,
+        "avg_duration": 0.2575235366821289,
+        "total_duration": 1.0300941467285156,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:53:54"
+  },
+  {
+    "start_time": 1772816347.034604,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.9008378982543945,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772816347.935596
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.44783496856689453,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816347.499147
+      },
+      {
+        "type": "find_image",
+        "duration": 0.23888611793518066,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816347.738147
+      },
+      {
+        "type": "find_image",
+        "duration": 0.19692778587341309,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816347.935061
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816347.9356039,
+    "total_duration": 0.9009997844696045,
+    "success": true,
+    "avg_loop_duration": 0.9008378982543945,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.2945496241251628,
+        "total_duration": 0.8836488723754883,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:59:07"
+  },
+  {
+    "start_time": 1772816390.817628,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.8589060306549072,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772816391.676606
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.4347350597381592,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816391.268499
+      },
+      {
+        "type": "find_image",
+        "duration": 0.21330595016479492,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816391.481878
+      },
+      {
+        "type": "find_image",
+        "duration": 0.19411015510559082,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816391.676121
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816391.676608,
+    "total_duration": 0.8589801788330078,
+    "success": true,
+    "avg_loop_duration": 0.8589060306549072,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.2807170550028483,
+        "total_duration": 0.8421511650085449,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 00:59:51"
+  },
+  {
+    "start_time": 1772816402.597676,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.9777278900146484,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772816404.575479
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.7698690891265869,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772816403.380172
+      },
+      {
+        "type": "find_image",
+        "duration": 0.597283124923706,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816403.977642
+      },
+      {
+        "type": "find_image",
+        "duration": 0.5972669124603271,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816404.574925
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816404.575487,
+    "total_duration": 1.9778108596801758,
+    "success": true,
+    "avg_loop_duration": 1.9777278900146484,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.65480637550354,
+        "total_duration": 1.9644191265106201,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:00:04"
+  },
+  {
+    "start_time": 1772816646.872559,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.4716789722442627,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772816649.3444061
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 1.1031978130340576,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816647.992079
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6911590099334717,
+        "success": true,
+        "message": "找到图像: (3705, 1046)",
+        "timestamp": 1772816648.683542
+      },
+      {
+        "type": "find_image",
+        "duration": 0.6594769954681396,
+        "success": true,
+        "message": "找到图像: (3455, 1037)",
+        "timestamp": 1772816649.343002
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816649.344416,
+    "total_duration": 2.4718568325042725,
+    "success": true,
+    "avg_loop_duration": 2.4716789722442627,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.817944606145223,
+        "total_duration": 2.453833818435669,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:04:09"
+  },
+  {
+    "start_time": 1772816669.483315,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.8047292232513428,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772816670.2881489
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.3925328254699707,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816669.8854342
+      },
+      {
+        "type": "find_image",
+        "duration": 0.20885109901428223,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816670.094321
+      },
+      {
+        "type": "find_image",
+        "duration": 0.19309329986572266,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816670.287458
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816670.2881541,
+    "total_duration": 0.8048391342163086,
+    "success": true,
+    "avg_loop_duration": 0.8047292232513428,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.2648257414499919,
+        "total_duration": 0.7944772243499756,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:04:30"
+  },
+  {
+    "start_time": 1772816918.9957361,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.028594970703125,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772816920.024447
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.5662457942962646,
+        "success": true,
+        "message": "找到图像: (1436, 812)",
+        "timestamp": 1772816919.577651
+      },
+      {
+        "type": "find_image",
+        "duration": 0.22812390327453613,
+        "success": true,
+        "message": "找到图像: (1419, 810)",
+        "timestamp": 1772816919.805878
+      },
+      {
+        "type": "find_image",
+        "duration": 0.2179889678955078,
+        "success": true,
+        "message": "未找到匹配图像",
+        "timestamp": 1772816920.023967
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816920.024449,
+    "total_duration": 1.0287129878997803,
+    "success": true,
+    "avg_loop_duration": 1.028594970703125,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.33745288848876953,
+        "total_duration": 1.0123586654663086,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:08:40"
+  },
+  {
+    "start_time": 1772816948.40609,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.8296878337860107,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772816949.2358458
+      }
+    ],
+    "steps": [
+      {
+        "type": "find_image",
+        "duration": 0.34629225730895996,
+        "success": true,
+        "message": "找到图像: (1403, 755)",
+        "timestamp": 1772816949.2322292
+      },
+      {
+        "type": "find_image",
+        "duration": 0.194746732711792,
+        "success": true,
+        "message": "找到图像: (1402, 777)",
+        "timestamp": 1772816949.235316
+      },
+      {
+        "type": "find_image",
+        "duration": 0.22497105598449707,
+        "success": true,
+        "message": "找到图像: (1418, 792)",
+        "timestamp": 1772816949.235733
+      }
+    ],
+    "errors": [],
+    "end_time": 1772816949.235857,
+    "total_duration": 0.8297669887542725,
+    "success": true,
+    "avg_loop_duration": 0.8296878337860107,
+    "success_rate": 100.0,
+    "step_stats": {
+      "find_image": {
+        "count": 3,
+        "avg_duration": 0.2553366820017497,
+        "total_duration": 0.766010046005249,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:09:09"
+  },
+  {
+    "start_time": 1772817004.51002,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.4392871856689453,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772817004.949377
+      }
+    ],
+    "steps": [
+      {
+        "type": "click_image",
+        "duration": 0.42388296127319336,
+        "success": false,
+        "message": "图像匹配失败: unsupported operand type(s) for +=: 'int' and 'str'",
+        "timestamp": 1772817004.948313
+      }
+    ],
+    "errors": [
+      {
+        "type": "click_image",
+        "message": "图像匹配失败: unsupported operand type(s) for +=: 'int' and 'str'",
+        "timestamp": 1772817004.9491122
+      },
+      {
+        "type": "click_image",
+        "message": "图像匹配失败: unsupported operand type(s) for +=: 'int' and 'str'",
+        "timestamp": 1772817004.949325
+      }
+    ],
+    "end_time": 1772817004.949399,
+    "total_duration": 0.4393789768218994,
+    "success": true,
+    "avg_loop_duration": 0.4392871856689453,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click_image": {
+        "count": 1,
+        "avg_duration": 0.42388296127319336,
+        "total_duration": 0.42388296127319336,
+        "success_rate": 0.0
+      }
+    },
+    "date": "2026-03-07 01:10:04"
+  },
+  {
+    "start_time": 1772817136.063489,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.022975921630859375,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817136.086567
+      }
+    ],
+    "steps": [],
+    "errors": [
+      {
+        "type": "click_image",
+        "message": "执行步骤失败: invalid literal for int() with base 10: '(0'",
+        "timestamp": 1772817136.086554
+      }
+    ],
+    "end_time": 1772817136.0865831,
+    "total_duration": 0.02309417724609375,
+    "success": true,
+    "avg_loop_duration": 0.022975921630859375,
+    "success_rate": 100.0,
+    "date": "2026-03-07 01:12:16"
+  },
+  {
+    "start_time": 1772817204.6320791,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.7692840099334717,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817206.4014962
+      }
+    ],
+    "steps": [
+      {
+        "type": "click_image",
+        "duration": 1.7535700798034668,
+        "success": true,
+        "message": "图像点击成功: (3706, 1252)",
+        "timestamp": 1772817206.39955
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817206.401514,
+    "total_duration": 1.769434928894043,
+    "success": true,
+    "avg_loop_duration": 1.7692840099334717,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click_image": {
+        "count": 1,
+        "avg_duration": 1.7535700798034668,
+        "total_duration": 1.7535700798034668,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:13:26"
+  },
+  {
+    "start_time": 1772817217.3122802,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.434725046157837,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817218.747116
+      }
+    ],
+    "steps": [
+      {
+        "type": "click_image",
+        "duration": 1.424834966659546,
+        "success": true,
+        "message": "图像点击成功: (3706, 1252)",
+        "timestamp": 1772817218.745277
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817218.7471209,
+    "total_duration": 1.4348406791687012,
+    "success": true,
+    "avg_loop_duration": 1.434725046157837,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click_image": {
+        "count": 1,
+        "avg_duration": 1.424834966659546,
+        "total_duration": 1.424834966659546,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:13:38"
+  },
+  {
+    "start_time": 1772817232.374516,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.3426108360290527,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817233.7172759
+      }
+    ],
+    "steps": [
+      {
+        "type": "click_image",
+        "duration": 1.3143060207366943,
+        "success": true,
+        "message": "图像点击成功: (3706, 1252)",
+        "timestamp": 1772817233.7116811
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817233.717281,
+    "total_duration": 1.3427650928497314,
+    "success": true,
+    "avg_loop_duration": 1.3426108360290527,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click_image": {
+        "count": 1,
+        "avg_duration": 1.3143060207366943,
+        "total_duration": 1.3143060207366943,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:13:53"
+  },
+  {
+    "start_time": 1772817252.134669,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.6975162029266357,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817253.8323772
+      }
+    ],
+    "steps": [
+      {
+        "type": "click_image",
+        "duration": 1.6544442176818848,
+        "success": true,
+        "message": "图像点击成功: (3455, 1037)",
+        "timestamp": 1772817253.8288078
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817253.832384,
+    "total_duration": 1.6977150440216064,
+    "success": true,
+    "avg_loop_duration": 1.6975162029266357,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click_image": {
+        "count": 1,
+        "avg_duration": 1.6544442176818848,
+        "total_duration": 1.6544442176818848,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:14:13"
+  },
+  {
+    "start_time": 1772817268.4085069,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.909909963607788,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817270.3186638
+      }
+    ],
+    "steps": [
+      {
+        "type": "click_image",
+        "duration": 1.8910472393035889,
+        "success": true,
+        "message": "图像点击成功: (3455, 1037)",
+        "timestamp": 1772817270.31233
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817270.318672,
+    "total_duration": 1.9101650714874268,
+    "success": true,
+    "avg_loop_duration": 1.909909963607788,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click_image": {
+        "count": 1,
+        "avg_duration": 1.8910472393035889,
+        "total_duration": 1.8910472393035889,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:14:30"
+  },
+  {
+    "start_time": 1772817343.466696,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 3.43979811668396,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817346.9065568
+      }
+    ],
+    "steps": [
+      {
+        "type": "ocr",
+        "duration": 3.3963890075683594,
+        "success": true,
+        "message": "点击成功: '扩展盘' [第1个匹配项(共1个)]",
+        "timestamp": 1772817346.9053361
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817346.906559,
+    "total_duration": 3.4398629665374756,
+    "success": true,
+    "avg_loop_duration": 3.43979811668396,
+    "success_rate": 100.0,
+    "step_stats": {
+      "ocr": {
+        "count": 1,
+        "avg_duration": 3.3963890075683594,
+        "total_duration": 3.3963890075683594,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:15:46"
+  },
+  {
+    "start_time": 1772817600.63703,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.0331990718841553,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817601.670308
+      }
+    ],
+    "steps": [
+      {
+        "type": "drag",
+        "duration": 1.0123767852783203,
+        "success": true,
+        "message": "拖拽成功: (667, 255) -> (1420, 730)",
+        "timestamp": 1772817601.6693912
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817601.670316,
+    "total_duration": 1.0332860946655273,
+    "success": true,
+    "avg_loop_duration": 1.0331990718841553,
+    "success_rate": 100.0,
+    "step_stats": {
+      "drag": {
+        "count": 1,
+        "avg_duration": 1.0123767852783203,
+        "total_duration": 1.0123767852783203,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:20:01"
+  },
+  {
+    "start_time": 1772817635.816015,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 1.4373083114624023,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772817637.253443
+      }
+    ],
+    "steps": [
+      {
+        "type": "drag",
+        "duration": 0.991508960723877,
+        "success": true,
+        "message": "拖拽成功: (667, 255) -> (1420, 730)",
+        "timestamp": 1772817636.828361
+      },
+      {
+        "type": "mouse_move",
+        "duration": 0.42489194869995117,
+        "success": true,
+        "message": "移动成功: (1331, 524)",
+        "timestamp": 1772817637.252929
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817637.253448,
+    "total_duration": 1.4374330043792725,
+    "success": true,
+    "avg_loop_duration": 1.4373083114624023,
+    "success_rate": 100.0,
+    "step_stats": {
+      "drag": {
+        "count": 1,
+        "avg_duration": 0.991508960723877,
+        "total_duration": 0.991508960723877,
+        "success_rate": 100.0
+      },
+      "mouse_move": {
+        "count": 1,
+        "avg_duration": 0.42489194869995117,
+        "total_duration": 0.42489194869995117,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:20:37"
+  },
+  {
+    "start_time": 1772817642.016416,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.8157761096954346,
+        "success": true,
+        "step_count": 1,
+        "timestamp": 1772817642.8322828
+      }
+    ],
+    "steps": [
+      {
+        "type": "mouse_move",
+        "duration": 0.41840529441833496,
+        "success": true,
+        "message": "移动成功: (1331, 524)",
+        "timestamp": 1772817642.831871
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817642.83229,
+    "total_duration": 0.8158738613128662,
+    "success": true,
+    "avg_loop_duration": 0.8157761096954346,
+    "success_rate": 100.0,
+    "step_stats": {
+      "mouse_move": {
+        "count": 1,
+        "avg_duration": 0.41840529441833496,
+        "total_duration": 0.41840529441833496,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:20:42"
+  },
+  {
+    "start_time": 1772817661.8795688,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 0.8738870620727539,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772817662.753518
+      }
+    ],
+    "steps": [
+      {
+        "type": "mouse_move",
+        "duration": 0.4333620071411133,
+        "success": true,
+        "message": "移动成功: (1331, 524)",
+        "timestamp": 1772817662.322031
+      },
+      {
+        "type": "mouse_move",
+        "duration": 0.4312450885772705,
+        "success": true,
+        "message": "移动成功: (537, 868)",
+        "timestamp": 1772817662.7532349
+      }
+    ],
+    "errors": [],
+    "end_time": 1772817662.753525,
+    "total_duration": 0.8739562034606934,
+    "success": true,
+    "avg_loop_duration": 0.8738870620727539,
+    "success_rate": 100.0,
+    "step_stats": {
+      "mouse_move": {
+        "count": 2,
+        "avg_duration": 0.4323035478591919,
+        "total_duration": 0.8646070957183838,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 01:21:02"
+  }
+]
