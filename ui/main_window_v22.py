@@ -1638,13 +1638,10 @@ class MainWindow(QMainWindow):
             action_info = self.engine.get_action_info().get(action_type, {})
             display_name = action_info.get('display_name', action_type)
             
-            item = QTreeWidgetItem(self.step_tree)
-            item.setText(0, f"[{step['id']}] {display_name}")
-            item.setData(0, Qt.UserRole, step['id'])
-            
+            self.step_list.add_step(step['id'], action_type, display_name)
             self.step_configs[step['id']] = step.get('params', {})
         
-        self.step_tree.expandAll()
+        self.step_list.set_current_index(self.step_list.get_step_count() - 1)
         show_toast(f"已添加 {len(steps)} 个步骤到工作流", 'success')
     
     def _load_actions(self):

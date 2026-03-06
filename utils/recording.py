@@ -74,6 +74,8 @@ class RecordingManager(QObject):
         self._polling_timer = None
         self._last_mouse_pos = None
         self._last_mouse_buttons = set()
+        self._pressed_keys = set()
+        self._modifier_keys = {'shift', 'ctrl', 'alt', 'cmd', 'command', 'option', 'control'}
         
         if PYNPUT_AVAILABLE:
             try:
@@ -116,13 +118,16 @@ class RecordingManager(QObject):
     
     def _start_pynput_recording(self) -> bool:
         try:
+            self._pressed_keys = set()
+            
             self._mouse_listener = self._mouse_module.Listener(
                 on_click=self._on_mouse_click,
                 on_scroll=self._on_mouse_scroll
             )
             
             self._keyboard_listener = self._keyboard_module.Listener(
-                on_press=self._on_key_press
+                on_press=self._on_key_press,
+                on_release=self._on_key_release
             )
             
             self._mouse_listener.start()
@@ -237,14 +242,49 @@ class RecordingManager(QObject):
             return
         
         try:
+            key_name = None
             if hasattr(key, 'char') and key.char:
-                self._add_action('type_text', {
-                    'text': key.char
-                })
+                key_name = key.char
             elif hasattr(key, 'name'):
-                self._add_action('key_press', {
-                    'key': key.name
-                })
+                key_name = key.name.lower()
+            
+            if key_name:
+                self._pressed_keys.add(key_name)
+                
+                if len(self._pressed_keys) > 1:
+                    combo = '+'.join(sorted(self._pressed_keys))
+                    if any(mod in self._pressed_keys for mod in self._modifier_keys):
+                        return
+                elif key_name in self._modifier_keys:
+                    return
+                elif len(self._pressed_keys) == 1:
+                    if len(key_name) == 1:
+                        self._add_action('type_text', {
+                            'text': key_name
+                        })
+                    else:
+                        self._add_action('key_press', {
+                            'key': key_name
+                        })
+        except Exception:
+            pass
+    
+    def _on_key_release(self, key):
+        if not self._is_recording:
+            return
+        
+        try:
+            key_name = None
+            if hasattr(key, 'char') and key.char:
+                key_name = key.char
+            elif hasattr(key, 'name'):
+                key_name = key.name.lower()
+            
+            if key_name and key_name in self._pressed_keys:
+                self._pressed_keys.discard(key_name)
+                
+                if len(self._pressed_keys) == 0 and hasattr(key, 'name'):
+                    pass
         except Exception:
             pass
     
@@ -261,11 +301,21 @@ class RecordingManager(QObject):
         steps = []
         step_id = 1
         
+        action_type_map = {
+            'click': 'click',
+            'scroll': 'scroll',
+            'type_text': 'type_text',
+            'key_press': 'key_press',
+            'hotkey': 'hotkey'
+        }
+        
         for action in self._actions:
+            action_type = action_type_map.get(action.action_type, action.action_type)
+            
             step = {
                 'id': step_id,
-                'type': action.action_type,
-                **action.params
+                'type': action_type,
+                'params': dict(action.params)
             }
             steps.append(step)
             step_id += 1
