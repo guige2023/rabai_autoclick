@@ -15,38 +15,22 @@ try:
     PYNPUT_AVAILABLE = True
 except ImportError:
     PYNPUT_AVAILABLE = False
-except Exception:
-    PYNPUT_AVAILABLE = False
 
-PYNPUT_PERMISSION_OK = None
+import pyautogui
+PYAUTOGUI_AVAILABLE = True
 
-def check_pynput_permission():
-    global PYNPUT_PERMISSION_OK
-    if PYNPUT_PERMISSION_OK is not None:
-        return PYNPUT_PERMISSION_OK
-    
+
+def check_pynput_permission() -> bool:
     if not PYNPUT_AVAILABLE:
-        PYNPUT_PERMISSION_OK = False
         return False
-    
     try:
-        import platform
-        if platform.system() == 'Darwin':
-            import subprocess
-            result = subprocess.run(
-                ['osascript', '-e', 'tell application "System Events" to get name of every process'],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                PYNPUT_PERMISSION_OK = True
-            else:
-                PYNPUT_PERMISSION_OK = False
-        else:
-            PYNPUT_PERMISSION_OK = True
-    except Exception:
-        PYNPUT_PERMISSION_OK = True
-    
-    return PYNPUT_PERMISSION_OK
+        from pynput import mouse
+        listener = mouse.Listener(lambda x: None)
+        listener.start()
+        listener.stop()
+        return True
+    except:
+        return False
 
 
 class RecordedAction:
@@ -85,50 +69,59 @@ class RecordingManager(QObject):
         self._keyboard_listener = None
         self._last_action_time = 0
         self._min_interval = 0.1
-        self._permission_checked = False
+        self._initialized = False
+        self._use_pyautogui = False
+        self._polling_timer = None
+        self._last_mouse_pos = None
+        self._last_mouse_buttons = set()
+        
+        if PYNPUT_AVAILABLE:
+            try:
+                from pynput import mouse as mouse_module, keyboard as keyboard_module
+                self._mouse_module = mouse_module
+                self._keyboard_module = keyboard_module
+                self._initialized = True
+                print("[Recording] pynput initialized successfully")
+            except Exception as e:
+                print(f"[Recording] Failed to initialize pynput: {e}")
+                self._initialized = False
+        
+        if not self._initialized and PYAUTOGUI_AVAILABLE:
+            self._use_pyautogui = True
+            self._initialized = True
+            print("[Recording] Using pyautogui fallback")
     
     def is_recording(self) -> bool:
         return self._is_recording
     
-    def check_permission(self) -> bool:
-        if self._permission_checked:
-            return PYNPUT_PERMISSION_OK if PYNPUT_PERMISSION_OK else False
-        
-        if not PYNPUT_AVAILABLE:
-            return False
-        
-        try:
-            test_listener = keyboard.Listener(lambda x: None)
-            test_listener.start()
-            test_listener.stop()
-            return True
-        except Exception:
-            return False
-    
     def start_recording(self) -> bool:
-        if not PYNPUT_AVAILABLE:
+        if not self._initialized:
+            print("[Recording] Not initialized")
             return False
         
         if self._is_recording:
             return False
         
-        if not self._permission_checked:
-            if not self.check_permission():
-                return False
-            self._permission_checked = True
-        
         self._actions = []
         self._start_time = time.time()
         self._is_recording = True
         self._last_action_time = 0
+        self._last_mouse_pos = pyautogui.position()
+        self._last_mouse_buttons = set()
         
+        if self._use_pyautogui:
+            return self._start_pyautogui_recording()
+        else:
+            return self._start_pynput_recording()
+    
+    def _start_pynput_recording(self) -> bool:
         try:
-            self._mouse_listener = mouse.Listener(
+            self._mouse_listener = self._mouse_module.Listener(
                 on_click=self._on_mouse_click,
                 on_scroll=self._on_mouse_scroll
             )
             
-            self._keyboard_listener = keyboard.Listener(
+            self._keyboard_listener = self._keyboard_module.Listener(
                 on_press=self._on_key_press
             )
             
@@ -138,9 +131,34 @@ class RecordingManager(QObject):
             self.recording_started.emit()
             return True
         except Exception as e:
+            print(f"[Recording] Failed to start pynput recording: {e}")
             self._is_recording = False
-            print(f"启动录制失败: {e}")
+            self._use_pyautogui = True
+            return self._start_pyautogui_recording()
+    
+    def _start_pyautogui_recording(self) -> bool:
+        try:
+            self._polling_timer = QTimer(self)
+            self._polling_timer.timeout.connect(self._poll_input)
+            self._polling_timer.start(50)
+            
+            self.recording_started.emit()
+            return True
+        except Exception as e:
+            print(f"[Recording] Failed to start pyautogui recording: {e}")
+            self._is_recording = False
             return False
+    
+    def _poll_input(self):
+        if not self._is_recording:
+            return
+        
+        try:
+            current_pos = pyautogui.position()
+            if current_pos != self._last_mouse_pos:
+                self._last_mouse_pos = current_pos
+        except:
+            pass
     
     def stop_recording(self) -> List[RecordedAction]:
         if not self._is_recording:
@@ -148,21 +166,26 @@ class RecordingManager(QObject):
         
         self._is_recording = False
         
-        if self._mouse_listener:
-            self._mouse_listener.stop()
-            try:
-                self._mouse_listener.join(timeout=1.0)
-            except:
-                pass
-            self._mouse_listener = None
-        
-        if self._keyboard_listener:
-            self._keyboard_listener.stop()
-            try:
-                self._keyboard_listener.join(timeout=1.0)
-            except:
-                pass
-            self._keyboard_listener = None
+        if self._use_pyautogui:
+            if self._polling_timer:
+                self._polling_timer.stop()
+                self._polling_timer = None
+        else:
+            if self._mouse_listener:
+                self._mouse_listener.stop()
+                try:
+                    self._mouse_listener.join(timeout=1.0)
+                except:
+                    pass
+                self._mouse_listener = None
+            
+            if self._keyboard_listener:
+                self._keyboard_listener.stop()
+                try:
+                    self._keyboard_listener.join(timeout=1.0)
+                except:
+                    pass
+                self._keyboard_listener = None
         
         self.recording_stopped.emit(self._actions)
         return self._actions.copy()

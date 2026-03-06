@@ -1,0 +1,62 @@
+{
+  "variables": {},
+  "steps": [
+    {
+      "click_text": "配置",
+      "click_index": 0,
+      "exact_match": true,
+      "move_duration": 0.2,
+      "preprocess_mode": "none",
+      "retry_count": 3,
+      "pre_delay": 0.0,
+      "post_delay": 1.0,
+      "id": 2,
+      "type": "ocr"
+    },
+    {
+      "random_deviation": 0,
+      "pre_delay": 0.0,
+      "post_delay": 1.0,
+      "id": 3,
+      "type": "delay"
+    },
+    {
+      "click_text": "全部",
+      "click_index": 0,
+      "exact_match": true,
+      "move_duration": 0.2,
+      "preprocess_mode": "auto",
+      "retry_count": 3,
+      "pre_delay": 0.0,
+      "post_delay": 0.0,
+      "id": 5,
+      "type": "ocr"
+    },
+    {
+      "random_deviation": 0,
+      "pre_delay": 0.0,
+      "post_delay": 1.0,
+      "id": 6,
+      "type": "delay"
+    },
+    {
+      "click_text": "保存",
+      "click_index": 0,
+      "exact_match": true,
+      "move_duration": 0.2,
+      "preprocess_mode": "none",
+      "retry_count": 3,
+      "pre_delay": 0.0,
+      "post_delay": 1.0,
+      "id": 7,
+      "type": "ocr"
+    },
+    {
+      "random_deviation": 0,
+      "pre_delay": 0.0,
+      "post_delay": 1.0,
+      "id": 8,
+      "type": "delay"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "variables": {
+    "username": "test",
+    "count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "ocr",
+      "region": [0, 0, 800, 200],
+      "output_var": "ocr_text",
+      "pre_delay": 0.3
+    },
+    {
+      "id": 2,
+      "type": "type_text",
+      "text": "{{ocr_text}}",
+      "interval": 0.05,
+      "enter_after": true,
+      "pre_delay": 0.2
+    },
+    {
+      "id": 3,
+      "type": "click_image",
+      "template": "confirm_button.png",
+      "confidence": 0.8,
+      "pre_delay": 0.3
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 0.5
+    }
+  ]
+}

@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QDialog, QDialogButtonBox, QProgressBar,
     QMenu, QAction, QToolBar, QStatusBar, QCheckBox, QFrame,
-    QScrollArea, QGridLayout
+    QScrollArea, QGridLayout, QTreeWidget, QTreeWidgetItem
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QObject
 from PyQt5.QtGui import QIcon, QColor, QFont, QCursor
@@ -215,7 +215,45 @@ class ActionConfigWidget(QWidget):
             optional_layout = QFormLayout()
             optional_layout.setSpacing(5)
             
+            coord_param_groups = [
+                (['x', 'y'], "坐标"),
+                (['start_x', 'start_y'], "起始坐标"),
+                (['end_x', 'end_y'], "结束坐标")
+            ]
+            
+            processed_params = set()
+            
+            for param_group, label in coord_param_groups:
+                if all(p in optional_params for p in param_group):
+                    coord_widget = self._create_coord_widget_optional(param_group, optional_params)
+                    optional_layout.addRow(f"{label}:", coord_widget)
+                    processed_params.update(param_group)
+                elif any(p in optional_params for p in param_group):
+                    for p in param_group:
+                        if p in optional_params and p not in processed_params:
+                            widget = self._create_param_widget(p, optional_params[p])
+                            self.widgets[p] = widget
+                            
+                            row_widget = QWidget()
+                            row_layout = QVBoxLayout(row_widget)
+                            row_layout.setContentsMargins(0, 0, 0, 0)
+                            row_layout.setSpacing(2)
+                            row_layout.addWidget(widget)
+                            
+                            desc = PARAM_DESCRIPTIONS.get(p, '')
+                            if desc:
+                                help_label = QLabel(desc)
+                                help_label.setStyleSheet("color: #666; font-size: 10px;")
+                                help_label.setWordWrap(True)
+                                row_layout.addWidget(help_label)
+                            
+                            optional_layout.addRow(f"{p}:", row_widget)
+                            processed_params.add(p)
+            
             for param, default_value in optional_params.items():
+                if param in processed_params:
+                    continue
+                    
                 widget = self._create_param_widget(param, default_value)
                 self.widgets[param] = widget
                 
@@ -288,6 +326,35 @@ class ActionConfigWidget(QWidget):
                 
                 if i < len(params) - 1:
                     h_layout.addSpacing(10)
+        
+        pick_btn = QPushButton("选取位置")
+        pick_btn.clicked.connect(lambda: self._pick_coords(params))
+        h_layout.addWidget(pick_btn)
+        
+        h_layout.addStretch()
+        return container
+    
+    def _create_coord_widget_optional(self, params: list, optional_params: dict) -> QWidget:
+        container = QWidget()
+        h_layout = QHBoxLayout(container)
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        
+        for i, param in enumerate(params):
+            label = QLabel(f"{param.split('_')[-1].upper()}:")
+            spin = QSpinBox()
+            spin.setRange(0, 9999)
+            default_val = optional_params.get(param, 0)
+            spin.setValue(int(default_val) if default_val else 0)
+            spin.valueChanged.connect(self.config_changed.emit)
+            spin.setMaximumWidth(80)
+            
+            self.widgets[f"{param}_spin"] = spin
+            
+            h_layout.addWidget(label)
+            h_layout.addWidget(spin)
+            
+            if i < len(params) - 1:
+                h_layout.addSpacing(10)
         
         pick_btn = QPushButton("选取位置")
         pick_btn.clicked.connect(lambda: self._pick_coords(params))
@@ -930,11 +997,29 @@ class LogWidget(QWidget):
 
 
 class RecordingWidget(QWidget):
+    """录屏功能面板
+    
+    注意: pynput 在 macOS 上可能存在线程安全问题，    如遇到崩溃，请使用手动添加步骤的方式
+    """
+    
+    action_added = pyqtSignal(str)
+    list_cleared = pyqtSignal()
+    workflow_added = pyqtSignal(list)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self._recording_manager = RecordingManager()
         self._init_ui()
         self._connect_signals()
+        
+        self.action_added.connect(self._do_add_item)
+        self.list_cleared.connect(self._do_clear_list)
+    
+    def _do_add_item(self, text: str):
+        self.action_list.addItem(text)
+    
+    def _do_clear_list(self):
+        self.action_list.clear()
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -951,11 +1036,14 @@ class RecordingWidget(QWidget):
         self.stop_btn.setEnabled(False)
         self.clear_btn = QPushButton("清空")
         self.optimize_btn = QPushButton("优化")
+        self.add_to_workflow_btn = QPushButton("添加到工作流")
+        self.add_to_workflow_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         
         btn_layout.addWidget(self.record_btn)
         btn_layout.addWidget(self.stop_btn)
         btn_layout.addWidget(self.clear_btn)
         btn_layout.addWidget(self.optimize_btn)
+        btn_layout.addWidget(self.add_to_workflow_btn)
         layout.addLayout(btn_layout)
         
         self.action_list = QListWidget()
@@ -964,34 +1052,45 @@ class RecordingWidget(QWidget):
         self.status_label = QLabel("状态: 就绪")
         layout.addWidget(self.status_label)
         
+        help_label = QLabel("提示: 优化功能会合并连续的相同类型操作，并优化延时。\n点击'添加到工作流'可将录制的操作添加到左侧工作流列表。")
+        help_label.setStyleSheet("color: #666; font-size: 10px;")
+        layout.addWidget(help_label)
+        
         if not PYNPUT_AVAILABLE:
             self.record_btn.setEnabled(False)
             self.status_label.setText("状态: pynput未安装，录屏功能不可用")
             self.status_label.setStyleSheet("color: red;")
-        elif not check_pynput_permission():
-            self.record_btn.setEnabled(False)
-            self.status_label.setText("状态: macOS需要辅助功能权限，请在系统偏好设置中授权")
-            self.status_label.setStyleSheet("color: orange;")
-            self.status_label.setToolTip("系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能 → 添加终端/Python")
     
     def _connect_signals(self):
         self.record_btn.clicked.connect(self._on_record)
         self.stop_btn.clicked.connect(self._on_stop)
         self.clear_btn.clicked.connect(self._on_clear)
         self.optimize_btn.clicked.connect(self._on_optimize)
+        self.add_to_workflow_btn.clicked.connect(self._on_add_to_workflow)
         
         self._recording_manager.action_recorded.connect(self._on_action_recorded)
         self._recording_manager.recording_started.connect(self._on_recording_started)
         self._recording_manager.recording_stopped.connect(self._on_recording_stopped)
     
     def _on_record(self):
-        if self._recording_manager.start_recording():
-            self.record_btn.setEnabled(False)
-            self.stop_btn.setEnabled(True)
-            self.status_label.setText("状态: 录制中...")
-            show_toast("开始录制操作", 'info')
-        else:
-            show_error("录制失败", "无法启动录制")
+        try:
+            if not PYNPUT_AVAILABLE:
+                show_error("录制失败", "pynput模块未安装，请运行: pip install pynput")
+                return
+            
+            if not check_pynput_permission():
+                show_error("录制失败", "请先授权辅助功能权限：\n系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能\n添加终端或Python到列表")
+                return
+            
+            if self._recording_manager.start_recording():
+                self.record_btn.setEnabled(False)
+                self.stop_btn.setEnabled(True)
+                self.status_label.setText("状态: 录制中...")
+                show_toast("开始录制操作", 'info')
+            else:
+                show_error("录制失败", "无法启动录制")
+        except Exception as e:
+            show_error("录制异常", f"启动录制时发生错误: {str(e)}")
     
     def _on_stop(self):
         actions = self._recording_manager.stop_recording()
@@ -1020,11 +1119,27 @@ class RecordingWidget(QWidget):
         
         show_toast(f"优化完成：合并 {merged} 个，优化 {optimized} 个延时", 'success')
     
+    def _on_add_to_workflow(self):
+        actions = self._recording_manager.get_actions()
+        if not actions:
+            show_warning("提示", "没有可添加的操作，请先录制")
+            return
+        
+        workflow = self._recording_manager.to_workflow()
+        steps = workflow.get('steps', [])
+        
+        if not steps:
+            show_warning("提示", "无法生成工作流步骤")
+            return
+        
+        self.workflow_added.emit(steps)
+        show_toast(f"已添加 {len(steps)} 个步骤到工作流", 'success')
+    
     def _on_action_recorded(self, action_type: str, params: dict):
-        self.action_list.addItem(f"{action_type}: {params}")
+        self.action_added.emit(f"{action_type}: {params}")
     
     def _on_recording_started(self):
-        self.action_list.clear()
+        self.list_cleared.emit()
     
     def _on_recording_stopped(self, actions):
         pass
@@ -1434,6 +1549,7 @@ class MainWindow(QMainWindow):
         right_panel.addTab(self.variables_widget, "变量")
         
         self.recording_widget = RecordingWidget()
+        self.recording_widget.workflow_added.connect(self._on_workflow_added_from_recording)
         right_panel.addTab(self.recording_widget, "录屏")
         
         self.predictive_widget = PredictiveWidget()
@@ -1511,6 +1627,25 @@ class MainWindow(QMainWindow):
             self.memory_label.setText(f"内存: {mem['rss']} MB")
         except:
             self.memory_label.setText("")
+    
+    def _on_workflow_added_from_recording(self, steps: list):
+        for step in steps:
+            step['id'] = self.next_step_id
+            self.next_step_id += 1
+            self.current_workflow['steps'].append(step)
+            
+            action_type = step.get('type', 'unknown')
+            action_info = self.engine.get_action_info().get(action_type, {})
+            display_name = action_info.get('display_name', action_type)
+            
+            item = QTreeWidgetItem(self.step_tree)
+            item.setText(0, f"[{step['id']}] {display_name}")
+            item.setData(0, Qt.UserRole, step['id'])
+            
+            self.step_configs[step['id']] = step.get('params', {})
+        
+        self.step_tree.expandAll()
+        show_toast(f"已添加 {len(steps)} 个步骤到工作流", 'success')
     
     def _load_actions(self):
         action_info = self.engine.get_action_info()

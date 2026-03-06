@@ -243,9 +243,6 @@ class OCRAction(BaseAction):
         move_duration = params.get('move_duration', 0.2)
         preprocess_mode = params.get('preprocess_mode', 'auto')
         retry_count = params.get('retry_count', 3)
-        double_click = params.get('double_click', False)
-        button = params.get('button', 'left')
-        clicks = params.get('clicks', 1)
         
         try:
             screenshot = pyautogui.screenshot(region=region)
@@ -307,19 +304,12 @@ class OCRAction(BaseAction):
                 target = matched_results[click_index]
                 pyautogui.moveTo(target['x'], target['y'], duration=move_duration)
                 time.sleep(0.05)
-                
-                actual_clicks = clicks
-                if double_click:
-                    actual_clicks = 2
-                
-                pyautogui.click(target['x'], target['y'], clicks=actual_clicks, button=button)
+                pyautogui.click(target['x'], target['y'])
                 
                 match_info = f"第{click_index + 1}个匹配项(共{len(matched_results)}个)"
-                click_info = f"{'双击' if double_click or clicks == 2 else '单击'}"
-                button_info = f"{'右键' if button == 'right' else '左键' if button == 'left' else button}"
                 return ActionResult(
                     success=True,
-                    message=f"点击成功: '{target['text']}' [{match_info}] ({click_info}-{button_info})",
+                    message=f"点击成功: '{target['text']}' [{match_info}]",
                     data={
                         'text': full_text,
                         'results': ocr_results,
@@ -370,8 +360,5 @@ class OCRAction(BaseAction):
             'contains': None,
             'move_duration': 0.2,
             'preprocess_mode': 'auto',
-            'retry_count': 3,
-            'double_click': False,
-            'button': 'left',
-            'clicks': 1
+            'retry_count': 3
         }

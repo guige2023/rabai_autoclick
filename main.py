@@ -6,6 +6,10 @@ RabAI AutoClick v22 - 整合版主入口
 import sys
 import os
 
+os.environ['FLAGS_use_mkldnn'] = '0'
+os.environ['FLAGS_enable_onednn_backend'] = '0'
+os.environ['FLAGS_allocator_strategy'] = 'naive_best_fit'
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt5.QtWidgets import QApplication

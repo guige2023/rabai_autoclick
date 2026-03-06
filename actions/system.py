@@ -17,31 +17,27 @@ class ScreenshotAction(BaseAction):
         save_path = params.get('save_path', None)
         
         try:
-            if region and isinstance(region, str):
-                parts = region.split(',')
-                if len(parts) == 4:
-                    region = tuple(int(p) for p in parts)
-                else:
-                    region = None
-            
             screenshot = pyautogui.screenshot(region=region)
             
-            if not save_path:
-                default_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'screenshots')
-                os.makedirs(default_dir, exist_ok=True)
-                timestamp = time.strftime('%Y%m%d_%H%M%S')
-                save_path = os.path.join(default_dir, f'screenshot_{timestamp}.png')
-            
-            save_dir = os.path.dirname(save_path)
-            if save_dir:
-                os.makedirs(save_dir, exist_ok=True)
-            
-            screenshot.save(save_path)
-            return ActionResult(
-                success=True,
-                message=f"截图已保存: {save_path}",
-                data={'path': save_path}
-            )
+            if save_path:
+                screenshot.save(save_path)
+                return ActionResult(
+                    success=True,
+                    message=f"截图已保存: {save_path}",
+                    data={'path': save_path}
+                )
+            else:
+                import io
+                import base64
+                buffer = io.BytesIO()
+                screenshot.save(buffer, format='PNG')
+                img_base64 = base64.b64encode(buffer.getvalue()).decode()
+                
+                return ActionResult(
+                    success=True,
+                    message="截图成功",
+                    data={'image': img_base64, 'size': screenshot.size}
+                )
         except Exception as e:
             return ActionResult(
                 success=False,

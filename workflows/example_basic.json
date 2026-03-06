@@ -1,0 +1,44 @@
+{
+  "variables": {},
+  "steps": [
+    {
+      "id": 1,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 500,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.2
+    },
+    {
+      "id": 3,
+      "type": "type_text",
+      "text": "Hello RabAI AutoClick!",
+      "interval": 0.05,
+      "pre_delay": 0.3
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 0.3
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "enter",
+      "pre_delay": 0.2
+    },
+    {
+      "id": 6,
+      "type": "screenshot",
+      "save_path": "example_screenshot.png",
+      "pre_delay": 0.5
+    }
+  ]
+}

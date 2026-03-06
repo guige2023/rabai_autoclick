@@ -151,8 +151,6 @@ class FlowEngine:
             
             params = self.context.resolve_value(params)
             
-            print(f"[DEBUG] 执行动作: {step_type}, 参数: {params}")
-            
             result = action.execute(self.context, params)
             
             result.duration = time.time() - start_time
@@ -170,8 +168,6 @@ class FlowEngine:
             return result
         
         except Exception as e:
-            import traceback
-            traceback.print_exc()
             return ActionResult(
                 success=False,
                 message=f"执行步骤失败: {str(e)}",

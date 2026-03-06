@@ -1,0 +1,39 @@
+{
+  "variables": {
+    "data": {
+      "items": ["apple", "banana", "cherry"],
+      "prices": [10, 5, 20]
+    }
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "script",
+      "code": "total = sum(context['data']['prices'])\nreturn_value = total",
+      "output_var": "total_price",
+      "pre_delay": 0.2
+    },
+    {
+      "id": 2,
+      "type": "script",
+      "code": "items = context['data']['items']\nreturn_value = ', '.join(items)",
+      "output_var": "item_list",
+      "pre_delay": 0.2
+    },
+    {
+      "id": 3,
+      "type": "script",
+      "code": "prices = context['data']['prices']\nreturn_value = {'min': min(prices), 'max': max(prices), 'avg': sum(prices) / len(prices)}",
+      "output_var": "price_stats",
+      "pre_delay": 0.2
+    },
+    {
+      "id": 4,
+      "type": "type_text",
+      "text": "商品列表: {{item_list}}\n总价: {{total_price}} 元\n平均价格: {{price_stats.avg}} 元",
+      "interval": 0.05,
+      "enter_after": true,
+      "pre_delay": 0.3
+    }
+  ]
+}

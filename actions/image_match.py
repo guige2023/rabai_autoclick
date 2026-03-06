@@ -10,37 +10,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-def parse_region(region):
-    if region is None:
-        return None
-    if isinstance(region, tuple):
-        return region
-    if isinstance(region, list):
-        return tuple(region)
-    if isinstance(region, str):
-        parts = [x.strip() for x in region.split(',')]
-        if len(parts) == 4:
-            return tuple(int(p) for p in parts)
-    return None
-
-
-def parse_offset(offset):
-    if offset is None:
-        return (0, 0)
-    if isinstance(offset, tuple):
-        return offset
-    if isinstance(offset, list):
-        return tuple(offset)
-    if isinstance(offset, str):
-        s = offset.strip()
-        if s.startswith('(') and s.endswith(')'):
-            s = s[1:-1]
-        parts = [x.strip() for x in s.split(',')]
-        if len(parts) >= 2:
-            return (int(parts[0]), int(parts[1]))
-    return (0, 0)
-
-
 class ImageMatchAction(BaseAction):
     action_type = "click_image"
     display_name = "图像识别点击"
@@ -49,8 +18,8 @@ class ImageMatchAction(BaseAction):
     def execute(self, context, params: Dict[str, Any]) -> ActionResult:
         template_path = params.get('template', '')
         confidence = params.get('confidence', 0.8)
-        region = parse_region(params.get('region', None))
-        click_offset = parse_offset(params.get('click_offset', (0, 0)))
+        region = params.get('region', None)
+        click_offset = params.get('click_offset', (0, 0))
         click_center = params.get('click_center', True)
         double_click = params.get('double_click', False)
         move_duration = params.get('move_duration', 0.2)
@@ -73,7 +42,7 @@ class ImageMatchAction(BaseAction):
             if position is None:
                 return ActionResult(
                     success=False,
-                    message=f"未找到匹配图像 (置信度: {confidence})"
+                    message=f"未找到匹配图像: {template_path}"
                 )
             
             center_x, center_y = position
@@ -113,13 +82,8 @@ class ImageMatchAction(BaseAction):
         template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
         gray_screenshot = cv2.cvtColor(screenshot_cv, cv2.COLOR_BGR2GRAY)
         
-        print(f"[DEBUG] 模板大小: {template.shape}, 截图大小: {gray_screenshot.shape}")
-        print(f"[DEBUG] 搜索区域: {region}")
-        
         result = cv2.matchTemplate(gray_screenshot, template, cv2.TM_CCOEFF_NORMED)
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-        
-        print(f"[DEBUG] 匹配置信度: {max_val:.3f}, 位置: {max_loc}")
         
         if max_val >= confidence:
             h, w = template.shape
@@ -130,7 +94,6 @@ class ImageMatchAction(BaseAction):
                 center_x += region[0]
                 center_y += region[1]
             
-            print(f"[DEBUG] 最终坐标: ({center_x}, {center_y})")
             return (center_x, center_y)
         
         return None
@@ -157,7 +120,7 @@ class FindImageAction(BaseAction):
     def execute(self, context, params: Dict[str, Any]) -> ActionResult:
         template_path = params.get('template', '')
         confidence = params.get('confidence', 0.8)
-        region = parse_region(params.get('region', None))
+        region = params.get('region', None)
         find_all = params.get('find_all', False)
         
         if not template_path:
@@ -209,13 +172,8 @@ class FindImageAction(BaseAction):
         template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
         gray_screenshot = cv2.cvtColor(screenshot_cv, cv2.COLOR_BGR2GRAY)
         
-        print(f"[DEBUG] 模板大小: {template.shape}, 截图大小: {gray_screenshot.shape}")
-        print(f"[DEBUG] 搜索区域: {region}")
-        
         result = cv2.matchTemplate(gray_screenshot, template, cv2.TM_CCOEFF_NORMED)
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-        
-        print(f"[DEBUG] 匹配置信度: {max_val:.3f}, 位置: {max_loc}")
         
         if max_val >= confidence:
             h, w = template.shape
@@ -226,7 +184,6 @@ class FindImageAction(BaseAction):
                 center_x += region[0]
                 center_y += region[1]
             
-            print(f"[DEBUG] 最终坐标: ({center_x}, {center_y})")
             return (center_x, center_y)
         return None
     
