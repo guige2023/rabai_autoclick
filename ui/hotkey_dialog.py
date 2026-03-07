@@ -128,7 +128,7 @@ class HotkeySettingsDialog(QDialog):
         info_label.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(info_label)
         
-        hotkey_group = QGroupBox("快捷键配置")
+        workflow_group = QGroupBox("工作流控制")
         form_layout = QFormLayout()
         
         self.start_edit = HotkeyEdit()
@@ -146,8 +146,24 @@ class HotkeySettingsDialog(QDialog):
         self.pause_edit.key_captured.connect(lambda k: self._on_key_captured('pause', k))
         form_layout.addRow("暂停/继续:", self.pause_edit)
         
-        hotkey_group.setLayout(form_layout)
-        layout.addWidget(hotkey_group)
+        workflow_group.setLayout(form_layout)
+        layout.addWidget(workflow_group)
+        
+        record_group = QGroupBox("录屏控制")
+        record_layout = QFormLayout()
+        
+        self.record_start_edit = HotkeyEdit()
+        self.record_start_edit.set_hotkey(self.hotkeys.get('record_start', 'f9'))
+        self.record_start_edit.key_captured.connect(lambda k: self._on_key_captured('record_start', k))
+        record_layout.addRow("开始录制:", self.record_start_edit)
+        
+        self.record_stop_edit = HotkeyEdit()
+        self.record_stop_edit.set_hotkey(self.hotkeys.get('record_stop', 'f10'))
+        self.record_stop_edit.key_captured.connect(lambda k: self._on_key_captured('record_stop', k))
+        record_layout.addRow("停止录制:", self.record_stop_edit)
+        
+        record_group.setLayout(record_layout)
+        layout.addWidget(record_group)
         
         reset_btn = QPushButton("恢复默认设置")
         reset_btn.clicked.connect(self._reset_to_default)
@@ -167,12 +183,22 @@ class HotkeySettingsDialog(QDialog):
         self.start_edit.set_hotkey('f6')
         self.stop_edit.set_hotkey('f7')
         self.pause_edit.set_hotkey('f8')
-        self.hotkeys = {'start': 'f6', 'stop': 'f7', 'pause': 'f8'}
+        self.record_start_edit.set_hotkey('f9')
+        self.record_stop_edit.set_hotkey('f10')
+        self.hotkeys = {
+            'start': 'f6', 
+            'stop': 'f7', 
+            'pause': 'f8',
+            'record_start': 'f9',
+            'record_stop': 'f10'
+        }
     
     def _on_accept(self):
         self.hotkeys['start'] = self.start_edit.get_hotkey() or 'f6'
         self.hotkeys['stop'] = self.stop_edit.get_hotkey() or 'f7'
         self.hotkeys['pause'] = self.pause_edit.get_hotkey() or 'f8'
+        self.hotkeys['record_start'] = self.record_start_edit.get_hotkey() or 'f9'
+        self.hotkeys['record_stop'] = self.record_stop_edit.get_hotkey() or 'f10'
         self.accept()
     
     def get_hotkeys(self) -> dict:

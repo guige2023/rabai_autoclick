@@ -5,6 +5,11 @@ RabAI AutoClick v22 - 整合版主入口
 
 import sys
 import os
+import platform
+import multiprocessing as mp
+
+if platform.system() == 'Darwin':
+    mp.set_start_method('spawn', force=True)
 
 os.environ['FLAGS_use_mkldnn'] = '0'
 os.environ['FLAGS_enable_onednn_backend'] = '0'

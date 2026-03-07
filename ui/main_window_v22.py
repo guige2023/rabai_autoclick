@@ -25,12 +25,17 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QObject
 from PyQt5.QtGui import QIcon, QColor, QFont, QCursor
 
+IS_MACOS = platform.system() == 'Darwin'
+IS_WINDOWS = platform.system() == 'Windows'
+
 from core.engine import FlowEngine
 from core.base_action import ActionResult
 from utils.hotkey import HotkeyManager
 from utils.app_logger import app_logger
 from utils.memory import memory_manager, image_cache
 from utils.recording import RecordingManager, RecordingEditor, RecordedAction, PYNPUT_AVAILABLE, check_pynput_permission
+if IS_MACOS and PYNPUT_AVAILABLE:
+    from utils.recording_mac import MacRecordingManager, MacPermissionChecker, create_recording_manager, check_recording_permission, request_recording_permission
 from utils.history import WorkflowHistoryManager, HistoryDialog, QuickSaveDialog
 from utils.teaching_mode import teaching_mode_manager
 from utils.execution_stats import execution_stats
@@ -45,9 +50,6 @@ from src.workflow_diagnostics import WorkflowDiagnosticsV2, create_diagnostics, 
 from src.workflow_share import WorkflowShareSystem, create_share_system, ShareType
 from src.pipeline_mode import PipelineRunner, create_pipeline_runner, PipeMode
 from src.screen_recorder import ScreenRecorderConverter, create_screen_recorder
-
-IS_MACOS = platform.system() == 'Darwin'
-IS_WINDOWS = platform.system() == 'Windows'
 
 
 def show_question(title: str, message: str) -> bool:
@@ -800,6 +802,7 @@ class ActionConfigWidget(QWidget):
 class StepListWidget(QWidget):
     step_selected = pyqtSignal(int)
     step_moved = pyqtSignal(int, int)
+    steps_cleared = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -820,6 +823,8 @@ class StepListWidget(QWidget):
         
         self.add_btn = QPushButton("添加步骤")
         self.remove_btn = QPushButton("删除")
+        self.clear_btn = QPushButton("清空")
+        self.clear_btn.setStyleSheet("background-color: #ff9800; color: white;")
         self.up_btn = QPushButton("↑")
         self.down_btn = QPushButton("↓")
         
@@ -828,6 +833,7 @@ class StepListWidget(QWidget):
         
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.remove_btn)
+        btn_layout.addWidget(self.clear_btn)
         btn_layout.addWidget(self.up_btn)
         btn_layout.addWidget(self.down_btn)
         
@@ -997,9 +1003,12 @@ class LogWidget(QWidget):
 
 
 class RecordingWidget(QWidget):
-    """录屏功能面板
+    """录屏功能面板 - 已优化 Mac 系统稳定性
     
-    注意: pynput 在 macOS 上可能存在线程安全问题，    如遇到崩溃，请使用手动添加步骤的方式
+    Mac 专用优化：
+    - 使用独立进程隔离 pynput，避免与 Qt 线程冲突
+    - 自动恢复监听器
+    - 更可靠的权限检查
     """
     
     action_added = pyqtSignal(str)
@@ -1008,12 +1017,22 @@ class RecordingWidget(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._recording_manager = RecordingManager()
+        self._use_mac_manager = IS_MACOS and PYNPUT_AVAILABLE
+        
+        if self._use_mac_manager:
+            self._recording_manager = MacRecordingManager()
+        else:
+            self._recording_manager = RecordingManager()
+        
+        self._main_window = None
         self._init_ui()
         self._connect_signals()
         
         self.action_added.connect(self._do_add_item)
         self.list_cleared.connect(self._do_clear_list)
+    
+    def set_main_window(self, window):
+        self._main_window = window
     
     def _do_add_item(self, text: str):
         self.action_list.addItem(text)
@@ -1024,8 +1043,12 @@ class RecordingWidget(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
         
-        info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤")
-        info_label.setStyleSheet("color: gray; font-size: 11px;")
+        if self._use_mac_manager:
+            info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤\n✅ 已启用 Mac 进程隔离模式")
+            info_label.setStyleSheet("color: #1976D2; font-size: 11px;")
+        else:
+            info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤")
+            info_label.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(info_label)
         
         btn_layout = QHBoxLayout()
@@ -1035,7 +1058,8 @@ class RecordingWidget(QWidget):
         self.stop_btn = QPushButton("⏹ 停止录制")
         self.stop_btn.setEnabled(False)
         self.clear_btn = QPushButton("清空")
-        self.optimize_btn = QPushButton("优化")
+        self.optimize_btn = QPushButton("🔧 优化")
+        self.optimize_btn.setToolTip("优化录制的操作：\n1. 合并连续的文本输入\n2. 移除过短的延时\n3. 整理按键组合顺序")
         self.add_to_workflow_btn = QPushButton("添加到工作流")
         self.add_to_workflow_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         
@@ -1052,7 +1076,14 @@ class RecordingWidget(QWidget):
         self.status_label = QLabel("状态: 就绪")
         layout.addWidget(self.status_label)
         
-        help_label = QLabel("提示: 优化功能会合并连续的相同类型操作，并优化延时。\n点击'添加到工作流'可将录制的操作添加到左侧工作流列表。")
+        help_text = (
+            "📌 优化功能说明：\n"
+            "• 合并连续的文本输入为一个完整字符串\n"
+            "• 移除过短(<0.1秒)的延时\n"
+            "• 整理快捷键顺序(如 cmd+c)\n\n"
+            "💡 提示：录制时主窗口会自动最小化，方便操作"
+        )
+        help_label = QLabel(help_text)
         help_label.setStyleSheet("color: #666; font-size: 10px;")
         layout.addWidget(help_label)
         
@@ -1071,6 +1102,9 @@ class RecordingWidget(QWidget):
         self._recording_manager.action_recorded.connect(self._on_action_recorded)
         self._recording_manager.recording_started.connect(self._on_recording_started)
         self._recording_manager.recording_stopped.connect(self._on_recording_stopped)
+        
+        if self._use_mac_manager:
+            self._recording_manager.recording_error.connect(self._on_recording_error)
     
     def _on_record(self):
         try:
@@ -1078,15 +1112,24 @@ class RecordingWidget(QWidget):
                 show_error("录制失败", "pynput模块未安装，请运行: pip install pynput")
                 return
             
-            if not check_pynput_permission():
-                show_error("录制失败", "请先授权辅助功能权限：\n系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能\n添加终端或Python到列表")
-                return
+            if self._use_mac_manager:
+                if not self._recording_manager.check_permission():
+                    request_recording_permission(self)
+                    return
+            else:
+                if not check_pynput_permission():
+                    show_error("录制失败", "请先授权辅助功能权限：\n系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能\n添加终端或Python到列表")
+                    return
             
             if self._recording_manager.start_recording():
                 self.record_btn.setEnabled(False)
                 self.stop_btn.setEnabled(True)
                 self.status_label.setText("状态: 录制中...")
-                show_toast("开始录制操作", 'info')
+                
+                if self._main_window:
+                    self._main_window.showMinimized()
+                
+                show_toast("开始录制操作 - 主窗口已最小化", 'info')
             else:
                 show_error("录制失败", "无法启动录制")
         except Exception as e:
@@ -1097,6 +1140,11 @@ class RecordingWidget(QWidget):
         self.record_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_label.setText(f"状态: 已录制 {len(actions)} 个操作")
+        
+        if self._main_window:
+            self._main_window.showNormal()
+            self._main_window.activateWindow()
+        
         show_toast(f"录制完成，共 {len(actions)} 个操作", 'success')
     
     def _on_clear(self):
@@ -1107,17 +1155,68 @@ class RecordingWidget(QWidget):
     def _on_optimize(self):
         actions = self._recording_manager.get_actions()
         if not actions:
-            show_warning("提示", "没有可优化的操作")
+            show_warning("提示", "没有可优化的操作，请先录制")
             return
         
-        editor = RecordingEditor(actions)
-        merged = editor.merge_consecutive_types()
-        optimized = editor.optimize_delays()
+        if self._use_mac_manager:
+            merged = self._merge_consecutive_actions(actions)
+            optimized = self._optimize_delays(actions)
+            self._fix_hotkey_order(actions)
+            self._refresh_action_list()
+            show_toast(f"优化完成：合并 {merged} 个文本，优化 {optimized} 个延时", 'success')
+        else:
+            editor = RecordingEditor(actions)
+            merged = editor.merge_consecutive_types()
+            optimized = editor.optimize_delays()
+            self._recording_manager._actions = editor.get_actions()
+            self._refresh_action_list()
+            show_toast(f"优化完成：合并 {merged} 个，优化 {optimized} 个延时", 'success')
+    
+    def _fix_hotkey_order(self, actions: List) -> int:
+        fixed = 0
+        modifier_order = ['ctrl', 'cmd', 'alt', 'option', 'shift']
         
-        self._recording_manager._actions = editor.get_actions()
-        self._refresh_action_list()
+        for action in actions:
+            if action.get('action_type') == 'hotkey':
+                keys_str = action.get('params', {}).get('keys', '')
+                if isinstance(keys_str, str) and '+' in keys_str:
+                    keys_list = keys_str.split('+')
+                    modifiers = [k for k in keys_list if k in modifier_order]
+                    non_modifiers = [k for k in keys_list if k not in modifier_order]
+                    
+                    if modifiers and non_modifiers:
+                        sorted_modifiers = sorted(modifiers, key=lambda x: modifier_order.index(x) if x in modifier_order else 999)
+                        new_order = sorted_modifiers + non_modifiers
+                        new_keys = '+'.join(new_order)
+                        if new_keys != keys_str:
+                            action['params']['keys'] = new_keys
+                            fixed += 1
         
-        show_toast(f"优化完成：合并 {merged} 个，优化 {optimized} 个延时", 'success')
+        return fixed
+    
+    def _merge_consecutive_actions(self, actions: List) -> int:
+        if not actions:
+            return 0
+        merged = 0
+        i = 0
+        while i < len(actions) - 1:
+            current = actions[i]
+            next_action = actions[i + 1]
+            if current.get('action_type') == 'type_text' and next_action.get('action_type') == 'type_text':
+                current['params']['text'] += next_action['params'].get('text', '')
+                del actions[i + 1]
+                merged += 1
+            else:
+                i += 1
+        return merged
+    
+    def _optimize_delays(self, actions: List, min_delay: float = 0.1) -> int:
+        optimized = 0
+        for action in actions:
+            if 'pre_delay' in action.get('params', {}) and action['params']['pre_delay'] < min_delay:
+                del action['params']['pre_delay']
+                optimized += 1
+        return optimized
     
     def _on_add_to_workflow(self):
         actions = self._recording_manager.get_actions()
@@ -1137,17 +1236,30 @@ class RecordingWidget(QWidget):
     
     def _on_action_recorded(self, action_type: str, params: dict):
         self.action_added.emit(f"{action_type}: {params}")
+        app_logger.info(f"录屏动作: {action_type} - {params}", "Recording")
     
     def _on_recording_started(self):
         self.list_cleared.emit()
+        app_logger.info("开始录制操作", "Recording")
     
     def _on_recording_stopped(self, actions):
-        pass
+        app_logger.info(f"录制完成，共 {len(actions)} 个动作", "Recording")
+    
+    def _on_recording_error(self, error_msg: str):
+        self.record_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.status_label.setText(f"状态: 错误 - {error_msg}")
+        self.status_label.setStyleSheet("color: red;")
+        show_error("录制错误", error_msg)
     
     def _refresh_action_list(self):
         self.action_list.clear()
-        for action in self._recording_manager.get_actions():
-            self.action_list.addItem(f"{action.action_type}: {action.params}")
+        actions = self._recording_manager.get_actions()
+        for action in actions:
+            if isinstance(action, dict):
+                self.action_list.addItem(f"{action.get('action_type', 'unknown')}: {action.get('params', {})}")
+            else:
+                self.action_list.addItem(f"{action.action_type}: {action.params}")
     
     def get_workflow(self) -> Dict[str, Any]:
         return self._recording_manager.to_workflow()
@@ -1156,11 +1268,21 @@ class RecordingWidget(QWidget):
 class PredictiveWidget(QWidget):
     """预测性自动化面板"""
     
+    action_triggered = pyqtSignal(str, dict)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.engine = create_predictive_engine("./data")
+        self._workflows = {}
         self._init_ui()
+    
+    def set_workflows(self, workflows: Dict):
+        self._workflows = workflows
         self._refresh_predictions()
+    
+    def record_action(self, action_type: str, target: str, result: str = "success"):
+        self.engine.record_action(action_type, target, result=result)
+        self._update_stats()
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -1169,14 +1291,15 @@ class PredictiveWidget(QWidget):
         info_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #1976D2;")
         layout.addWidget(info_label)
         
-        self.prediction_label = QLabel("正在分析...")
+        self.prediction_label = QLabel("暂无足够数据进行预测，请先执行一些工作流")
         self.prediction_label.setWordWrap(True)
         self.prediction_label.setStyleSheet("padding: 10px; background-color: #E3F2FD; border-radius: 5px;")
         layout.addWidget(self.prediction_label)
         
         self.alternatives_list = QListWidget()
         self.alternatives_list.setMaximumHeight(100)
-        layout.addWidget(QLabel("备选建议:"))
+        self.alternatives_list.itemDoubleClicked.connect(self._on_alternative_clicked)
+        layout.addWidget(QLabel("备选建议 (双击执行):"))
         layout.addWidget(self.alternatives_list)
         
         btn_layout = QHBoxLayout()
@@ -1190,11 +1313,16 @@ class PredictiveWidget(QWidget):
         
         layout.addLayout(btn_layout)
         
-        self.stats_label = QLabel()
+        self.stats_label = QLabel("历史动作: 0 | 成功率: 0%")
         self.stats_label.setStyleSheet("color: #666; font-size: 11px;")
         layout.addWidget(self.stats_label)
         
         layout.addStretch()
+        self._update_stats()
+    
+    def _update_stats(self):
+        analysis = self.engine.analyze_user_behavior()
+        self.stats_label.setText(f"历史动作: {analysis.get('total_actions', 0)} | 成功率: {analysis.get('success_rate', 0):.0%}")
     
     def _refresh_predictions(self):
         prediction = self.engine.predict_next_action()
@@ -1211,9 +1339,13 @@ class PredictiveWidget(QWidget):
                 self.alternatives_list.addItem(f"• {alt}")
         else:
             self.prediction_label.setText("暂无足够数据进行预测，请先执行一些工作流")
+            self.alternatives_list.clear()
         
-        analysis = self.engine.analyze_user_behavior()
-        self.stats_label.setText(f"历史动作: {analysis.get('total_actions', 0)} | 成功率: {analysis.get('success_rate', 0):.0%}")
+        self._update_stats()
+    
+    def _on_alternative_clicked(self, item):
+        text = item.text().replace("• ", "")
+        self.action_triggered.emit("suggested", {"action": text})
     
     def _show_analysis(self):
         analysis = self.engine.analyze_user_behavior()
@@ -1226,6 +1358,10 @@ class PredictiveWidget(QWidget):
         
         text = QTextEdit()
         text.setReadOnly(True)
+        
+        action_dist = analysis.get('action_type_distribution', {})
+        top_targets = list(analysis.get('top_targets', {}).items())[:5]
+        
         text.setHtml(f"""
         <h3>📊 用户行为分析报告</h3>
         <p><b>总动作数:</b> {analysis.get('total_actions', 0)}</p>
@@ -1234,11 +1370,11 @@ class PredictiveWidget(QWidget):
         <p><b>成功率:</b> {analysis.get('success_rate', 0):.0%}</p>
         <h4>动作类型分布:</h4>
         <ul>
-        {''.join(f"<li>{k}: {v}</li>" for k, v in analysis.get('action_type_distribution', {}).items())}
+        {''.join(f"<li>{k}: {v}</li>" for k, v in action_dist.items()) if action_dist else "<li>暂无数据</li>"}
         </ul>
         <h4>最常用目标:</h4>
         <ul>
-        {''.join(f"<li>{k}: {v}次</li>" for k, v in list(analysis.get('top_targets', {}).items())[:5])}
+        {''.join(f"<li>{k}: {v}次</li>" for k, v in top_targets) if top_targets else "<li>暂无数据</li>"}
         </ul>
         """)
         layout.addWidget(text)
@@ -1256,7 +1392,17 @@ class DiagnosticsWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.diagnostics = create_diagnostics("./data")
+        self._workflows = {}
         self._init_ui()
+    
+    def set_workflows(self, workflows: Dict):
+        self._workflows = workflows
+        self._refresh_workflows()
+    
+    def record_execution(self, workflow_id: str, workflow_name: str, 
+                        step_results: list, duration: float, success: bool, error: str = None):
+        self.diagnostics.record_execution(workflow_id, workflow_name, step_results, duration, success, error)
+        self._refresh_workflows()
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -1284,21 +1430,29 @@ class DiagnosticsWidget(QWidget):
         summary_btn.clicked.connect(self._show_summary)
         btn_layout.addWidget(summary_btn)
         
-        layout.addLayout(btn_layout)
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.clicked.connect(self._refresh_workflows)
+        btn_layout.addWidget(refresh_btn)
         
-        self._refresh_workflows()
+        layout.addLayout(btn_layout)
     
     def _refresh_workflows(self):
         self.workflow_list.clear()
-        summary = self.diagnostics.get_health_summary()
+        
+        if not self.diagnostics.execution_history:
+            self.workflow_list.addItem("暂无执行历史，请先运行工作流")
+            return
         
         for wf_id in self.diagnostics.execution_history.keys():
-            report = self.diagnostics.diagnose(wf_id)
-            emoji = "🟢" if report.overall_health == HealthLevel.EXCELLENT else \
-                    "🟡" if report.overall_health == HealthLevel.GOOD else \
-                    "🟠" if report.overall_health == HealthLevel.FAIR else \
-                    "🔴" if report.overall_health == HealthLevel.POOR else "⛔"
-            self.workflow_list.addItem(f"{emoji} {report.workflow_name} (分数: {report.health_score:.0f})")
+            try:
+                report = self.diagnostics.diagnose(wf_id)
+                emoji = "🟢" if report.overall_health == HealthLevel.EXCELLENT else \
+                        "🟡" if report.overall_health == HealthLevel.GOOD else \
+                        "🟠" if report.overall_health == HealthLevel.FAIR else \
+                        "🔴" if report.overall_health == HealthLevel.POOR else "⛔"
+                self.workflow_list.addItem(f"{emoji} {report.workflow_name} (分数: {report.health_score:.0f})")
+            except Exception as e:
+                self.workflow_list.addItem(f"⛔ {wf_id} (诊断失败)")
     
     def _diagnose(self):
         current = self.workflow_list.currentRow()
@@ -1308,13 +1462,17 @@ class DiagnosticsWidget(QWidget):
         
         wf_ids = list(self.diagnostics.execution_history.keys())
         if current < len(wf_ids):
-            report = self.diagnostics.diagnose(wf_ids[current])
-            self.result_text.setText(self.diagnostics.generate_report_text(report))
+            try:
+                report = self.diagnostics.diagnose(wf_ids[current])
+                self.result_text.setText(self.diagnostics.generate_report_text(report))
+            except Exception as e:
+                self.result_text.setText(f"诊断失败: {str(e)}")
     
     def _show_summary(self):
-        summary = self.diagnostics.get_health_summary()
-        
-        text = f"""
+        try:
+            summary = self.diagnostics.get_health_summary()
+            
+            text = f"""
 📊 工作流健康概览
 {'='*40}
 
@@ -1325,24 +1483,35 @@ class DiagnosticsWidget(QWidget):
 
 健康分布:
 """
-        for level, count in summary.get('health_distribution', {}).items():
-            text += f"  • {level}: {count}个\n"
-        
-        if summary.get('needs_attention'):
-            text += f"\n⚠️ 需要关注的工作流:\n"
-            for wf in summary['needs_attention']:
-                text += f"  • {wf}\n"
-        
-        self.result_text.setText(text)
+            for level, count in summary.get('health_distribution', {}).items():
+                text += f"  • {level}: {count}个\n"
+            
+            if summary.get('needs_attention'):
+                text += f"\n⚠️ 需要关注的工作流:\n"
+                for wf in summary['needs_attention']:
+                    text += f"  • {wf}\n"
+            
+            self.result_text.setText(text)
+        except Exception as e:
+            self.result_text.setText(f"获取健康概览失败: {str(e)}")
 
 
 class ShareWidget(QWidget):
     """工作流分享面板"""
     
+    workflow_imported = pyqtSignal(dict)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.share_system = create_share_system("./data")
+        self._workflows = {}
+        self._current_workflow = None
         self._init_ui()
+    
+    def set_workflows(self, workflows: Dict, current_workflow: Dict = None):
+        self._workflows = workflows
+        self._current_workflow = current_workflow
+        self._refresh_workflow_list()
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -1354,9 +1523,9 @@ class ShareWidget(QWidget):
         export_group = QGroupBox("导出工作流")
         export_layout = QVBoxLayout()
         
-        self.export_id_edit = QLineEdit()
-        self.export_id_edit.setPlaceholderText("工作流ID")
-        export_layout.addWidget(self.export_id_edit)
+        self.workflow_combo = QComboBox()
+        export_layout.addWidget(QLabel("选择工作流:"))
+        export_layout.addWidget(self.workflow_combo)
         
         export_btn = QPushButton("📤 导出为JSON")
         export_btn.clicked.connect(self._export_workflow)
@@ -1382,39 +1551,72 @@ class ShareWidget(QWidget):
         layout.addStretch()
         self._refresh_links()
     
+    def _refresh_workflow_list(self):
+        self.workflow_combo.clear()
+        if self._current_workflow and self._current_workflow.get('steps'):
+            self.workflow_combo.addItem("当前工作流")
+        self.workflow_combo.addItem("从文件选择...")
+    
     def _export_workflow(self):
-        wf_id = self.export_id_edit.text().strip()
-        if not wf_id:
-            show_warning("提示", "请输入工作流ID")
-            return
-        
-        json_str = self.share_system.export_to_json(wf_id)
-        if json_str:
-            filepath, _ = QFileDialog.getSaveFileName(self, "保存工作流", f"{wf_id}.json", "JSON文件 (*.json)")
-            if filepath:
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(json_str)
-                show_toast("工作流导出成功", 'success')
+        if self.workflow_combo.currentText() == "当前工作流" and self._current_workflow:
+            workflow_data = self._current_workflow
+            workflow_name = "exported_workflow"
         else:
-            show_error("导出失败", "工作流不存在或导出失败")
+            filepath, _ = QFileDialog.getOpenFileName(self, "选择工作流文件", "", "JSON文件 (*.json)")
+            if filepath:
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        workflow_data = json.load(f)
+                    workflow_name = os.path.basename(filepath).replace('.json', '')
+                except Exception as e:
+                    show_error("导出失败", f"读取文件失败: {str(e)}")
+                    return
+            else:
+                return
+        
+        save_path, _ = QFileDialog.getSaveFileName(self, "保存工作流", f"{workflow_name}.json", "JSON文件 (*.json)")
+        if save_path:
+            try:
+                export_data = {
+                    "version": "22.0.0",
+                    "name": workflow_name,
+                    "workflow": workflow_data,
+                    "exported_at": time.time()
+                }
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    json.dump(export_data, f, ensure_ascii=False, indent=2)
+                show_toast("工作流导出成功", 'success')
+            except Exception as e:
+                show_error("导出失败", f"保存文件失败: {str(e)}")
     
     def _import_from_file(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "导入工作流", "", "JSON文件 (*.json)")
         if filepath:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                json_str = f.read()
-            
-            report = self.share_system.import_workflow(json_str, "json")
-            if report.result.value == "success":
-                show_toast(f"导入成功: {report.workflow_name}", 'success')
-            else:
-                show_error("导入失败", report.message)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if isinstance(data, dict) and 'workflow' in data:
+                    workflow = data['workflow']
+                else:
+                    workflow = data
+                
+                if isinstance(workflow, dict) and 'steps' in workflow:
+                    self.workflow_imported.emit(workflow)
+                    show_toast("工作流导入成功", 'success')
+                else:
+                    show_error("导入失败", "无效的工作流格式")
+            except Exception as e:
+                show_error("导入失败", f"读取文件失败: {str(e)}")
     
     def _refresh_links(self):
         self.links_list.clear()
-        links = self.share_system.list_shared_workflows()
-        for link in links:
-            self.links_list.addItem(f"🔗 {link.link_id} - {link.workflow_name} (查看: {link.view_count})")
+        try:
+            links = self.share_system.list_shared_workflows()
+            for link in links:
+                self.links_list.addItem(f"🔗 {link.link_id} - {link.workflow_name} (查看: {link.view_count})")
+        except Exception:
+            self.links_list.addItem("暂无分享链接")
 
 
 class MainWindow(QMainWindow):
@@ -1549,16 +1751,19 @@ class MainWindow(QMainWindow):
         right_panel.addTab(self.variables_widget, "变量")
         
         self.recording_widget = RecordingWidget()
+        self.recording_widget.set_main_window(self)
         self.recording_widget.workflow_added.connect(self._on_workflow_added_from_recording)
         right_panel.addTab(self.recording_widget, "录屏")
         
         self.predictive_widget = PredictiveWidget()
+        self.predictive_widget.action_triggered.connect(self._on_predictive_action)
         right_panel.addTab(self.predictive_widget, "🧠 预测")
         
         self.diagnostics_widget = DiagnosticsWidget()
         right_panel.addTab(self.diagnostics_widget, "🏥 诊断")
         
         self.share_widget = ShareWidget()
+        self.share_widget.workflow_imported.connect(self._on_workflow_imported)
         right_panel.addTab(self.share_widget, "🔗 分享")
         
         self.log_widget = LogWidget()
@@ -1629,20 +1834,97 @@ class MainWindow(QMainWindow):
             self.memory_label.setText("")
     
     def _on_workflow_added_from_recording(self, steps: list):
-        for step in steps:
+        TYPE_MAP = {
+            'hotkey': 'key_press',
+            'type_text': 'type_text',
+            'key_press': 'key_press',
+            'click': 'click',
+            'double_click': 'double_click',
+            'scroll': 'scroll',
+        }
+        
+        app_logger.info(f"添加录屏步骤到工作流，共 {len(steps)} 个步骤", "Recording")
+        
+        for i, step in enumerate(steps):
+            app_logger.debug(f"步骤 {i}: {step}", "Recording")
+            
             step['id'] = self.next_step_id
             self.next_step_id += 1
+            
+            original_type = step.get('type')
+            if not original_type:
+                original_type = step.get('action_type', 'unknown')
+            
+            app_logger.debug(f"原始类型: {original_type}", "Recording")
+            
+            mapped_type = TYPE_MAP.get(original_type)
+            if not mapped_type:
+                mapped_type = original_type if original_type else 'unknown'
+            
+            app_logger.debug(f"映射类型: {mapped_type}", "Recording")
+            
+            step['type'] = mapped_type
+            
+            params = step.get('params', {})
+            
+            if original_type == 'hotkey' and 'keys' in params:
+                keys_str = params['keys']
+                if isinstance(keys_str, str):
+                    params['keys'] = keys_str.split('+')
+            
+            if original_type in ('hotkey', 'key_press') and 'key' in params:
+                if 'keys' not in params:
+                    params['keys'] = [params['key']]
+                del params['key']
+            
+            step['params'] = params
+            
             self.current_workflow['steps'].append(step)
+            
+            action_info = self.engine.get_action_info().get(mapped_type, {})
+            display_name = action_info.get('display_name', mapped_type)
+            
+            self.step_list.add_step(step['id'], mapped_type, display_name)
+            self.step_configs[step['id']] = params
+        
+        self.step_list.set_current_index(self.step_list.get_step_count() - 1)
+        show_toast(f"已添加 {len(steps)} 个步骤到工作流", 'success')
+        
+        self._update_all_panels()
+    
+    def _on_predictive_action(self, action_type: str, params: dict):
+        app_logger.info(f"预测动作触发: {action_type} - {params}", "Predictive")
+    
+    def _on_workflow_imported(self, workflow: dict):
+        self.current_workflow = workflow
+        self.step_list.clear()
+        self.step_configs = {}
+        self.next_step_id = 1
+        
+        for step in workflow.get('steps', []):
+            step['id'] = self.next_step_id
+            self.next_step_id += 1
+            self.step_configs[step['id']] = step.get('params', {})
             
             action_type = step.get('type', 'unknown')
             action_info = self.engine.get_action_info().get(action_type, {})
             display_name = action_info.get('display_name', action_type)
-            
             self.step_list.add_step(step['id'], action_type, display_name)
-            self.step_configs[step['id']] = step.get('params', {})
         
-        self.step_list.set_current_index(self.step_list.get_step_count() - 1)
-        show_toast(f"已添加 {len(steps)} 个步骤到工作流", 'success')
+        if workflow.get('steps'):
+            self.step_list.set_current_index(0)
+        
+        self._update_all_panels()
+        show_toast("工作流导入成功", 'success')
+    
+    def _update_all_panels(self):
+        """更新所有面板的工作流数据"""
+        self.share_widget.set_workflows({}, self.current_workflow)
+        self.predictive_widget.set_workflows({'current': self.current_workflow})
+        self.diagnostics_widget.set_workflows({'current': self.current_workflow})
+    
+    def _update_share_widget(self):
+        self._update_all_panels()
     
     def _load_actions(self):
         action_info = self.engine.get_action_info()
@@ -1664,24 +1946,55 @@ class MainWindow(QMainWindow):
             self.hotkey_manager.register_hotkeys(
                 start_key=self.current_hotkeys.get('start', 'f6'),
                 stop_key=self.current_hotkeys.get('stop', 'f7'),
-                pause_key=self.current_hotkeys.get('pause', 'f8')
+                pause_key=self.current_hotkeys.get('pause', 'f8'),
+                record_start_key=self.current_hotkeys.get('record_start', 'f9'),
+                record_stop_key=self.current_hotkeys.get('record_stop', 'f10')
             )
             self.hotkey_manager.start_triggered.connect(self._on_run)
             self.hotkey_manager.stop_triggered.connect(self._on_stop)
             self.hotkey_manager.pause_triggered.connect(self._on_pause)
-            app_logger.info(f"快捷键已启用: 运行={self.current_hotkeys.get('start', 'f6').upper()}, "
-                           f"停止={self.current_hotkeys.get('stop', 'f7').upper()}", "Hotkey")
+            self.hotkey_manager.record_start_triggered.connect(self._on_record_start_hotkey)
+            self.hotkey_manager.record_stop_triggered.connect(self._on_record_stop_hotkey)
+            
+            def format_key(key_str):
+                parts = key_str.replace(' ', '+').split('+')
+                return '+'.join(p.strip().upper() for p in parts)
+            
+            start_key = format_key(self.current_hotkeys.get('start', 'f6'))
+            stop_key = format_key(self.current_hotkeys.get('stop', 'f7'))
+            record_start_key = format_key(self.current_hotkeys.get('record_start', 'f9'))
+            record_stop_key = format_key(self.current_hotkeys.get('record_stop', 'f10'))
+            
+            app_logger.info(f"全局快捷键已启用: 运行={start_key}, "
+                           f"停止={stop_key}, 录制={record_start_key}/{record_stop_key}", "Hotkey")
         else:
-            app_logger.warning("keyboard模块未安装，全局热键不可用", "Hotkey")
+            app_logger.warning("快捷键模块不可用", "Hotkey")
+    
+    def _on_record_start_hotkey(self):
+        if not self.recording_widget._recording_manager.is_recording():
+            self.recording_widget._on_record()
+    
+    def _on_record_stop_hotkey(self):
+        if self.recording_widget._recording_manager.is_recording():
+            self.recording_widget._on_stop()
     
     def _update_button_texts(self):
-        start_key = self.current_hotkeys.get('start', 'f6').upper()
-        stop_key = self.current_hotkeys.get('stop', 'f7').upper()
-        pause_key = self.current_hotkeys.get('pause', 'f8').upper()
+        def format_key_display(key_str):
+            parts = key_str.replace(' ', '+').split('+')
+            return '+'.join(p.strip().upper() for p in parts)
+        
+        start_key = format_key_display(self.current_hotkeys.get('start', 'f6'))
+        stop_key = format_key_display(self.current_hotkeys.get('stop', 'f7'))
+        pause_key = format_key_display(self.current_hotkeys.get('pause', 'f8'))
+        record_start_key = format_key_display(self.current_hotkeys.get('record_start', 'f9'))
+        record_stop_key = format_key_display(self.current_hotkeys.get('record_stop', 'f10'))
         
         self.run_btn.setText(f"▶ 运行 ({start_key})")
         self.stop_btn.setText(f"⏹ 停止 ({stop_key})")
         self.pause_btn.setText(f"⏸ 暂停 ({pause_key})")
+        
+        self.recording_widget.record_btn.setText(f"🔴 开始录制 ({record_start_key})")
+        self.recording_widget.stop_btn.setText(f"⏹ 停止录制 ({record_stop_key})")
     
     def _connect_signals(self):
         self.new_btn.clicked.connect(self._on_new)
@@ -1704,6 +2017,7 @@ class MainWindow(QMainWindow):
         
         self.step_list.add_btn.clicked.connect(self._on_add_step)
         self.step_list.remove_btn.clicked.connect(self._on_remove_step)
+        self.step_list.clear_btn.clicked.connect(self._on_clear_steps)
         self.step_list.up_btn.clicked.connect(self._on_move_up)
         self.step_list.down_btn.clicked.connect(self._on_move_down)
         self.step_list.step_selected.connect(self._on_step_selected)
@@ -1815,10 +2129,12 @@ class MainWindow(QMainWindow):
             item = self.step_list.list_widget.item(i)
             data = item.data(Qt.UserRole)
             step_id = data['id']
+            step_type = data.get('type', 'unknown')
             
             if step_id in self.step_configs:
                 step = self.step_configs[step_id].copy()
                 step['id'] = step_id
+                step['type'] = step_type
                 steps.append(step)
         
         self.current_workflow['steps'] = steps
@@ -2009,6 +2325,25 @@ class MainWindow(QMainWindow):
             
             self.step_list.remove_step(index)
             app_logger.info(f"删除步骤 [{step_id}]", "Editor")
+    
+    def _on_clear_steps(self):
+        if self.step_list.get_step_count() == 0:
+            return
+        
+        reply = QMessageBox.question(
+            self, "确认清空",
+            "确定要清空所有步骤吗？此操作不可撤销。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.step_list.clear()
+            self.step_configs = {}
+            self.current_workflow['steps'] = []
+            self.next_step_id = 1
+            app_logger.info("已清空所有步骤", "Editor")
+            show_toast("已清空所有步骤", 'info')
     
     def _on_move_up(self):
         index = self.step_list.get_current_index()

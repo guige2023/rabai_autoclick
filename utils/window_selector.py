@@ -1,5 +1,7 @@
 import sys
 import os
+import platform
+import subprocess
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from typing import Optional, List, Dict, Any
@@ -9,6 +11,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QCursor
+
+IS_MACOS = platform.system() == 'Darwin'
 
 try:
     import pygetwindow as gw
@@ -22,6 +26,13 @@ try:
     WIN32_AVAILABLE = True
 except ImportError:
     WIN32_AVAILABLE = False
+
+if IS_MACOS:
+    try:
+        from AppKit import NSWorkspace
+        APPKIT_AVAILABLE = True
+    except ImportError:
+        APPKIT_AVAILABLE = False
 
 
 class WindowInfo:
@@ -43,38 +54,77 @@ class WindowInfo:
         return (self.left + self.width // 2, self.top + self.height // 2)
 
 
+def _get_macos_windows() -> List[WindowInfo]:
+    windows = []
+    
+    if APPKIT_AVAILABLE:
+        try:
+            workspace = NSWorkspace.sharedWorkspace()
+            apps = workspace.runningApplications()
+            for app in apps:
+                if app.activationPolicy() == 0:
+                    title = app.localizedName()
+                    if title:
+                        windows.append(WindowInfo(title=title))
+            return windows
+        except Exception as e:
+            print(f"[WindowSelector] AppKit error: {e}")
+    
+    try:
+        result = subprocess.run(
+            ['osascript', '-e', 'tell application "System Events" to get name of every process whose background only is false'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            app_names = [name.strip() for name in result.stdout.strip().split(', ') if name]
+            windows = [WindowInfo(title=name) for name in app_names]
+    except Exception as e:
+        print(f"[WindowSelector] AppleScript error: {e}")
+    
+    return windows
+
+
 def get_all_windows() -> List[WindowInfo]:
     windows = []
     
-    if WIN32_AVAILABLE:
-        def enum_windows_proc(hwnd, lParam):
-            if win32gui.IsWindowVisible(hwnd):
-                title = win32gui.GetWindowText(hwnd)
-                if title:
-                    rect = win32gui.GetWindowRect(hwnd)
-                    left, top, right, bottom = rect
-                    windows.append(WindowInfo(
-                        title=title,
-                        hwnd=hwnd,
-                        left=left,
-                        top=top,
-                        width=right - left,
-                        height=bottom - top
-                    ))
-            return True
+    try:
+        if IS_MACOS:
+            windows = _get_macos_windows()
         
-        win32gui.EnumWindows(enum_windows_proc, None)
-    
-    elif GW_AVAILABLE:
-        for win in gw.getAllWindows():
-            if win.title:
-                windows.append(WindowInfo(
-                    title=win.title,
-                    left=win.left,
-                    top=win.top,
-                    width=win.width,
-                    height=win.height
-                ))
+        elif WIN32_AVAILABLE:
+            def enum_windows_proc(hwnd, lParam):
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    if title:
+                        rect = win32gui.GetWindowRect(hwnd)
+                        left, top, right, bottom = rect
+                        windows.append(WindowInfo(
+                            title=title,
+                            hwnd=hwnd,
+                            left=left,
+                            top=top,
+                            width=right - left,
+                            height=bottom - top
+                        ))
+                return True
+            
+            win32gui.EnumWindows(enum_windows_proc, None)
+        
+        elif GW_AVAILABLE:
+            for win in gw.getAllWindows():
+                if win.title:
+                    windows.append(WindowInfo(
+                        title=win.title,
+                        left=win.left,
+                        top=win.top,
+                        width=win.width,
+                        height=win.height
+                    ))
+    except Exception as e:
+        print(f"[WindowSelector] Error getting windows: {e}")
     
     windows.sort(key=lambda w: w.title.lower())
     return windows
@@ -89,35 +139,60 @@ def get_window_by_title(title: str) -> Optional[WindowInfo]:
 
 
 def get_active_window() -> Optional[WindowInfo]:
-    if WIN32_AVAILABLE:
-        hwnd = win32gui.GetForegroundWindow()
-        if hwnd:
-            title = win32gui.GetWindowText(hwnd)
-            rect = win32gui.GetWindowRect(hwnd)
-            left, top, right, bottom = rect
-            return WindowInfo(
-                title=title,
-                hwnd=hwnd,
-                left=left,
-                top=top,
-                width=right - left,
-                height=bottom - top
+    try:
+        if IS_MACOS:
+            script = '''
+            tell application "System Events"
+                set frontApp to name of first application process whose frontmost is true
+            end tell
+            '''
+            result = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True,
+                text=True,
+                timeout=5
             )
-    elif GW_AVAILABLE:
-        win = gw.getActiveWindow()
-        if win:
-            return WindowInfo(
-                title=win.title,
-                left=win.left,
-                top=win.top,
-                width=win.width,
-                height=win.height
-            )
+            if result.returncode == 0 and result.stdout.strip():
+                return WindowInfo(title=result.stdout.strip())
+        
+        elif WIN32_AVAILABLE:
+            hwnd = win32gui.GetForegroundWindow()
+            if hwnd:
+                title = win32gui.GetWindowText(hwnd)
+                rect = win32gui.GetWindowRect(hwnd)
+                left, top, right, bottom = rect
+                return WindowInfo(
+                    title=title,
+                    hwnd=hwnd,
+                    left=left,
+                    top=top,
+                    width=right - left,
+                    height=bottom - top
+                )
+        elif GW_AVAILABLE:
+            win = gw.getActiveWindow()
+            if win:
+                return WindowInfo(
+                    title=win.title,
+                    left=win.left,
+                    top=win.top,
+                    width=win.width,
+                    height=win.height
+                )
+    except Exception as e:
+        print(f"[WindowSelector] Error getting active window: {e}")
     return None
 
 
 def focus_window(window: WindowInfo) -> bool:
-    if WIN32_AVAILABLE and window.hwnd:
+    if IS_MACOS and window.title:
+        try:
+            app_name = window.title.split(' - ')[0] if ' - ' in window.title else window.title
+            subprocess.run(['osascript', '-e', f'tell application "{app_name}" to activate'], timeout=5)
+            return True
+        except:
+            pass
+    elif WIN32_AVAILABLE and window.hwnd:
         try:
             win32gui.ShowWindow(window.hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(window.hwnd)
@@ -197,6 +272,12 @@ class WindowSelectorDialog(QDialog):
         self.window_list.clear()
         self._windows = get_all_windows()
         
+        if not self._windows:
+            item = QListWidgetItem("⚠️ 未找到窗口，请确保有应用程序在运行")
+            item.setData(Qt.UserRole, None)
+            self.window_list.addItem(item)
+            return
+        
         for win in self._windows:
             item = QListWidgetItem(f"🪟 {win.title}")
             item.setData(Qt.UserRole, win)
@@ -217,9 +298,14 @@ class WindowSelectorDialog(QDialog):
             item = self.window_list.item(index)
             win = item.data(Qt.UserRole)
             
-            self.title_label.setText(win.title[:50] + "..." if len(win.title) > 50 else win.title)
-            self.position_label.setText(f"({win.left}, {win.top})")
-            self.size_label.setText(f"{win.width} × {win.height}")
+            if win:
+                self.title_label.setText(win.title[:50] + "..." if len(win.title) > 50 else win.title)
+                self.position_label.setText(f"({win.left}, {win.top})")
+                self.size_label.setText(f"{win.width} × {win.height}")
+            else:
+                self.title_label.setText("-")
+                self.position_label.setText("-")
+                self.size_label.setText("-")
     
     def _on_select(self):
         current = self.window_list.currentItem()

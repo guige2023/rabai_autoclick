@@ -7,6 +7,90 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
+class ClickAction(BaseAction):
+    action_type = "click"
+    display_name = "鼠标单击"
+    description = "模拟鼠标单击操作"
+    
+    def execute(self, context, params: Dict[str, Any]) -> ActionResult:
+        x = params.get('x', None)
+        y = params.get('y', None)
+        button = params.get('button', 'left')
+        clicks = params.get('clicks', 1)
+        move_duration = params.get('move_duration', 0.2)
+        
+        try:
+            if x is not None and y is not None:
+                pyautogui.moveTo(x, y, duration=move_duration)
+                time.sleep(0.05)
+            
+            pyautogui.click(x=x, y=y, clicks=clicks, button=button)
+            
+            return ActionResult(
+                success=True,
+                message=f"点击成功: ({x}, {y}) {button}",
+                data={'x': x, 'y': y, 'button': button, 'clicks': clicks}
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"点击失败: {str(e)}"
+            )
+    
+    def get_required_params(self) -> list:
+        return []
+    
+    def get_optional_params(self) -> dict:
+        return {
+            'x': None,
+            'y': None,
+            'button': 'left',
+            'clicks': 1,
+            'move_duration': 0.2
+        }
+
+
+class DoubleClickAction(BaseAction):
+    action_type = "double_click"
+    display_name = "鼠标双击"
+    description = "模拟鼠标双击操作"
+    
+    def execute(self, context, params: Dict[str, Any]) -> ActionResult:
+        x = params.get('x', None)
+        y = params.get('y', None)
+        button = params.get('button', 'left')
+        move_duration = params.get('move_duration', 0.2)
+        
+        try:
+            if x is not None and y is not None:
+                pyautogui.moveTo(x, y, duration=move_duration)
+                time.sleep(0.05)
+            
+            pyautogui.doubleClick(x=x, y=y, button=button)
+            
+            return ActionResult(
+                success=True,
+                message=f"双击成功: ({x}, {y}) {button}",
+                data={'x': x, 'y': y, 'button': button}
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"双击失败: {str(e)}"
+            )
+    
+    def get_required_params(self) -> list:
+        return []
+    
+    def get_optional_params(self) -> dict:
+        return {
+            'x': None,
+            'y': None,
+            'button': 'left',
+            'move_duration': 0.2
+        }
+
+
 class ScrollAction(BaseAction):
     action_type = "scroll"
     display_name = "鼠标滚轮"

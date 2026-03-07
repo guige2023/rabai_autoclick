@@ -489,3 +489,296 @@
 2026-03-07 02:27:05,859 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
 2026-03-07 02:27:33,973 - WARNING - RabAI_AutoClick - keyboard模块未安装，全局热键不可用
 2026-03-07 02:27:33,974 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 13:11:19,909 - WARNING - RabAI_AutoClick - keyboard模块未安装，全局热键不可用
+2026-03-07 13:11:19,917 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 13:11:21,948 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 13:11:23,035 - INFO - RabAI_AutoClick - 新建工作流
+2026-03-07 13:14:51,957 - WARNING - RabAI_AutoClick - keyboard模块未安装，全局热键不可用
+2026-03-07 13:14:51,959 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 13:14:54,060 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 13:25:51,564 - WARNING - RabAI_AutoClick - keyboard模块未安装，全局热键不可用
+2026-03-07 13:25:51,565 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 13:25:52,972 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 13:26:44,317 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 13:26:46,412 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 224, 'y': 462, 'button': 'left', 'clicks': 1}
+2026-03-07 13:33:31,870 - WARNING - RabAI_AutoClick - keyboard模块未安装，全局热键不可用
+2026-03-07 13:33:31,878 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 13:33:48,725 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 13:33:50,781 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 737, 'y': 444, 'button': 'left', 'clicks': 1}
+2026-03-07 13:34:58,461 - WARNING - RabAI_AutoClick - keyboard模块未安装，全局热键不可用
+2026-03-07 13:34:58,463 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 13:35:00,512 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 13:35:04,053 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 13:35:05,502 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 782, 'y': 450, 'button': 'left', 'clicks': 1}
+2026-03-07 13:35:08,157 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 982, 'y': 1015, 'button': 'left', 'clicks': 1, 'pre_delay': 2.654}
+2026-03-07 13:35:08,962 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 926, 'y': 569, 'button': 'left', 'clicks': 1, 'pre_delay': 0.805}
+2026-03-07 13:35:09,875 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1004, 'y': 540, 'button': 'left', 'clicks': 1, 'pre_delay': 0.913}
+2026-03-07 13:35:11,178 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1158, 'y': 1010, 'button': 'left', 'clicks': 1, 'pre_delay': 1.303}
+2026-03-07 13:35:12,376 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1723, 'y': 646, 'button': 'left', 'clicks': 1, 'pre_delay': 1.198}
+2026-03-07 13:35:12,492 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1723, 'y': 646, 'button': 'left', 'clicks': 1, 'pre_delay': 0.116}
+2026-03-07 13:35:15,186 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1722, 'y': 646, 'button': 'left', 'clicks': 1, 'pre_delay': 2.694}
+2026-03-07 13:35:15,317 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1722, 'y': 646, 'button': 'left', 'clicks': 1, 'pre_delay': 0.131}
+2026-03-07 13:35:17,017 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 2390, 'y': 988, 'button': 'left', 'clicks': 1, 'pre_delay': 1.701}
+2026-03-07 13:35:18,555 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+c', 'pre_delay': 1.538}
+2026-03-07 13:35:19,611 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+v', 'pre_delay': 1.056}
+2026-03-07 13:35:20,955 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+x', 'pre_delay': 1.344}
+2026-03-07 13:35:26,057 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1843, 'y': 1043, 'button': 'left', 'clicks': 1, 'pre_delay': 5.102}
+2026-03-07 13:35:27,422 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1007, 'y': 238, 'button': 'left', 'clicks': 1, 'pre_delay': 1.365}
+2026-03-07 13:35:27,528 - INFO - RabAI_AutoClick - 录制完成，共 15 个动作
+2026-03-07 13:36:34,127 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 13:36:35,287 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 964, 'y': 377, 'button': 'left', 'clicks': 1}
+2026-03-07 13:36:36,695 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1700, 'y': 819, 'button': 'left', 'clicks': 1, 'pre_delay': 1.408}
+2026-03-07 13:36:37,477 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1364, 'y': 627, 'button': 'left', 'clicks': 1, 'pre_delay': 0.782}
+2026-03-07 13:36:39,317 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+c', 'pre_delay': 1.84}
+2026-03-07 13:36:39,757 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+v', 'pre_delay': 0.44}
+2026-03-07 13:36:40,896 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+n', 'pre_delay': 1.138}
+2026-03-07 13:36:42,853 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 526, 'y': 347, 'button': 'left', 'clicks': 1, 'pre_delay': 1.957}
+2026-03-07 13:36:44,990 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 127, 'y': 824, 'button': 'left', 'clicks': 1, 'pre_delay': 2.136}
+2026-03-07 13:36:46,095 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 965, 'y': 234, 'button': 'left', 'clicks': 1, 'pre_delay': 1.105}
+2026-03-07 13:36:46,310 - INFO - RabAI_AutoClick - 录制完成，共 9 个动作
+2026-03-07 13:38:55,661 - INFO - RabAI_AutoClick - 执行第 1/1 次循环
+2026-03-07 13:38:55,670 - INFO - RabAI_AutoClick - 执行步骤 [1]: None
+2026-03-07 13:38:55,673 - ERROR - RabAI_AutoClick - 步骤 [1] 错误: 未找到动作类型: None
+2026-03-07 13:38:55,676 - INFO - RabAI_AutoClick - ✓ 工作流执行完成 | 总耗时: 0.0秒
+2026-03-07 13:46:54,609 - INFO - RabAI_AutoClick - 程序退出
+2026-03-07 13:49:42,568 - WARNING - RabAI_AutoClick - keyboard模块未安装，全局热键不可用
+2026-03-07 13:49:42,569 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 13:49:44,613 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 19:29:30,442 - INFO - RabAI_AutoClick - 从历史记录加载工作流
+2026-03-07 19:34:13,610 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 19:34:15,232 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 881, 'y': 401, 'button': 'left', 'clicks': 1}
+2026-03-07 19:34:17,230 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1709, 'y': 766, 'button': 'left', 'clicks': 1, 'pre_delay': 1.998}
+2026-03-07 19:34:18,479 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1393, 'y': 477, 'button': 'left', 'clicks': 1, 'pre_delay': 1.249}
+2026-03-07 19:34:19,879 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1317, 'y': 721, 'button': 'left', 'clicks': 1, 'pre_delay': 1.4}
+2026-03-07 19:34:20,939 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+c', 'pre_delay': 1.06}
+2026-03-07 19:34:21,768 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1263, 'y': 650, 'button': 'left', 'clicks': 1, 'pre_delay': 0.829}
+2026-03-07 19:34:22,571 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+v', 'pre_delay': 0.803}
+2026-03-07 19:34:28,189 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 995, 'y': 243, 'button': 'left', 'clicks': 1, 'pre_delay': 5.618}
+2026-03-07 19:34:28,405 - INFO - RabAI_AutoClick - 录制完成，共 8 个动作
+2026-03-07 19:34:56,826 - INFO - RabAI_AutoClick - 快捷键已更新
+2026-03-07 19:49:25,252 - INFO - RabAI_AutoClick - Qt快捷键已启用(仅窗口内有效): 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 19:49:25,253 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 19:49:26,256 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 19:54:09,746 - INFO - RabAI_AutoClick - 程序退出
+2026-03-07 19:54:19,945 - INFO - RabAI_AutoClick - 程序退出
+2026-03-07 20:51:19,476 - INFO - RabAI_AutoClick - Qt快捷键已启用(仅窗口内有效): 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 20:51:19,480 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 20:57:43,314 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 20:57:46,279 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 796, 'y': 230, 'button': 'left', 'clicks': 1}
+2026-03-07 20:57:47,236 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 796, 'y': 230, 'button': 'left', 'clicks': 1, 'pre_delay': 0.957}
+2026-03-07 20:57:48,015 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 960, 'y': 232, 'button': 'left', 'clicks': 1, 'pre_delay': 0.779}
+2026-03-07 20:57:48,227 - INFO - RabAI_AutoClick - 录制完成，共 3 个动作
+2026-03-07 20:58:23,844 - INFO - RabAI_AutoClick - 程序退出
+2026-03-07 21:02:19,493 - INFO - RabAI_AutoClick - Qt快捷键已启用(仅窗口内有效): 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:02:19,494 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 21:02:38,226 - INFO - RabAI_AutoClick - 设置OCR区域: (1551, 238, 352x453)
+2026-03-07 21:02:54,373 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 21:02:57,214 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 922, 'y': 407, 'button': 'left', 'clicks': 1}
+2026-03-07 21:03:00,645 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 190, 'y': 490, 'button': 'left', 'clicks': 1, 'pre_delay': 3.431}
+2026-03-07 21:03:01,686 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 88, 'y': 408, 'button': 'left', 'clicks': 1, 'pre_delay': 1.042}
+2026-03-07 21:03:03,094 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1551, 'y': 505, 'button': 'left', 'clicks': 1, 'pre_delay': 1.407}
+2026-03-07 21:03:04,433 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1760, 'y': 642, 'button': 'left', 'clicks': 1, 'pre_delay': 1.339}
+2026-03-07 21:03:05,213 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1747, 'y': 635, 'button': 'left', 'clicks': 1, 'pre_delay': 0.781}
+2026-03-07 21:03:05,323 - INFO - RabAI_AutoClick - 录屏动作: double_click - {'x': 1747, 'y': 635, 'button': 'left', 'clicks': 2, 'pre_delay': 0.11}
+2026-03-07 21:03:07,892 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 2317, 'y': 1018, 'button': 'left', 'clicks': 1, 'pre_delay': 2.569}
+2026-03-07 21:03:09,408 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1168, 'y': 630, 'button': 'left', 'clicks': 1, 'pre_delay': 1.516}
+2026-03-07 21:03:12,335 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+f10', 'pre_delay': 2.927}
+2026-03-07 21:03:15,166 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'ctrl+f9', 'pre_delay': 2.831}
+2026-03-07 21:03:17,014 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 159, 'y': 829, 'button': 'left', 'clicks': 1, 'pre_delay': 1.848}
+2026-03-07 21:03:21,488 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1231, 'y': 414, 'button': 'left', 'clicks': 1, 'pre_delay': 4.473}
+2026-03-07 21:03:22,443 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1153, 'y': 444, 'button': 'left', 'clicks': 1, 'pre_delay': 0.956}
+2026-03-07 21:03:24,222 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'ctrl+f10', 'pre_delay': 1.779}
+2026-03-07 21:03:25,343 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+f10', 'pre_delay': 1.121}
+2026-03-07 21:03:25,450 - INFO - RabAI_AutoClick - 录制完成，共 16 个动作
+2026-03-07 21:03:58,076 - INFO - RabAI_AutoClick - 使用识别区域: (1551, 238, 352, 453)
+2026-03-07 21:03:58,076 - INFO - RabAI_AutoClick - 执行第 1/1 次循环
+2026-03-07 21:03:58,086 - INFO - RabAI_AutoClick - 执行步骤 [1]: None
+2026-03-07 21:03:58,089 - ERROR - RabAI_AutoClick - 步骤 [1] 错误: 未找到动作类型: None
+2026-03-07 21:03:58,091 - INFO - RabAI_AutoClick - ✓ 工作流执行完成 | 总耗时: 0.0秒
+2026-03-07 21:10:12,968 - INFO - RabAI_AutoClick - Qt快捷键已启用(仅窗口内有效): 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:10:12,969 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 21:10:13,815 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 21:10:33,802 - INFO - RabAI_AutoClick - 程序退出
+2026-03-07 21:10:39,599 - INFO - RabAI_AutoClick - 设置OCR区域: (897, 91, 475x448)
+2026-03-07 21:10:46,017 - INFO - RabAI_AutoClick - 设置OCR区域: (1617, 170, 297x479)
+2026-03-07 21:10:55,317 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 21:10:56,640 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 914, 'y': 312, 'button': 'left', 'clicks': 1}
+2026-03-07 21:10:58,771 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 173, 'y': 414, 'button': 'left', 'clicks': 1, 'pre_delay': 2.13}
+2026-03-07 21:10:59,799 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 953, 'y': 358, 'button': 'left', 'clicks': 1, 'pre_delay': 1.03}
+2026-03-07 21:11:00,950 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1220, 'y': 667, 'button': 'left', 'clicks': 1, 'pre_delay': 1.15}
+2026-03-07 21:11:01,072 - INFO - RabAI_AutoClick - 录屏动作: double_click - {'x': 1220, 'y': 667, 'button': 'left', 'clicks': 2, 'pre_delay': 0.122}
+2026-03-07 21:11:02,658 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 215, 'y': 588, 'button': 'left', 'clicks': 1, 'pre_delay': 1.587}
+2026-03-07 21:11:04,736 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+c', 'pre_delay': 2.078}
+2026-03-07 21:11:05,825 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+v', 'pre_delay': 1.089}
+2026-03-07 21:11:16,363 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 138, 'y': 543, 'button': 'left', 'clicks': 1, 'pre_delay': 10.538}
+2026-03-07 21:11:22,320 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 197, 'y': 870, 'button': 'left', 'clicks': 1, 'pre_delay': 5.957}
+2026-03-07 21:11:23,531 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 131, 'y': 558, 'button': 'left', 'clicks': 1, 'pre_delay': 1.211}
+2026-03-07 21:11:26,573 - INFO - RabAI_AutoClick - 录制完成，共 11 个动作
+2026-03-07 21:11:38,929 - INFO - RabAI_AutoClick - 使用识别区域: (1617, 170, 297, 479)
+2026-03-07 21:11:38,930 - INFO - RabAI_AutoClick - 执行第 1/1 次循环
+2026-03-07 21:11:38,938 - INFO - RabAI_AutoClick - 执行步骤 [1]: None
+2026-03-07 21:11:38,941 - ERROR - RabAI_AutoClick - 步骤 [1] 错误: 未找到动作类型: None
+2026-03-07 21:11:38,943 - INFO - RabAI_AutoClick - ✓ 工作流执行完成 | 总耗时: 0.0秒
+2026-03-07 21:15:02,701 - INFO - RabAI_AutoClick - 程序退出
+2026-03-07 21:15:50,110 - INFO - RabAI_AutoClick - Qt快捷键已启用(仅窗口内有效): 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:15:50,114 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 21:15:51,713 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 21:18:13,922 - INFO - RabAI_AutoClick - 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:18:13,923 - INFO - RabAI_AutoClick - RabAI AutoClick v22 增强版启动
+2026-03-07 21:18:15,481 - INFO - RabAI_AutoClick - ✓ 辅助功能权限已授权
+2026-03-07 21:20:19,532 - INFO - RabAI_AutoClick - 程序退出
+2026-03-07 21:21:04,124 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 21:21:06,169 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 139, 'y': 555, 'button': 'left', 'clicks': 1}
+2026-03-07 21:21:09,079 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1607, 'y': 1021, 'button': 'left', 'clicks': 1, 'pre_delay': 2.91}
+2026-03-07 21:21:17,546 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+f11', 'pre_delay': 8.467}
+2026-03-07 21:21:22,102 - INFO - RabAI_AutoClick - 录制完成，共 3 个动作
+2026-03-07 21:21:28,830 - INFO - RabAI_AutoClick - 开始录制操作
+2026-03-07 21:21:32,821 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 999, 'y': 564, 'button': 'left', 'clicks': 1}
+2026-03-07 21:21:34,408 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1302, 'y': 1013, 'button': 'left', 'clicks': 1, 'pre_delay': 1.587}
+2026-03-07 21:21:35,497 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1711, 'y': 650, 'button': 'left', 'clicks': 1, 'pre_delay': 1.089}
+2026-03-07 21:21:35,638 - INFO - RabAI_AutoClick - 录屏动作: double_click - {'x': 1711, 'y': 650, 'button': 'left', 'clicks': 2, 'pre_delay': 0.141}
+2026-03-07 21:21:37,428 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 823, 'y': 400, 'button': 'left', 'clicks': 1, 'pre_delay': 1.791}
+2026-03-07 21:21:39,474 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1264, 'y': 541, 'button': 'left', 'clicks': 1, 'pre_delay': 2.046}
+2026-03-07 21:21:40,607 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 647, 'y': 821, 'button': 'left', 'clicks': 1, 'pre_delay': 1.133}
+2026-03-07 21:21:43,717 - INFO - RabAI_AutoClick - 录屏动作: click - {'x': 1227, 'y': 1013, 'button': 'left', 'clicks': 1, 'pre_delay': 3.11}
+2026-03-07 21:21:44,828 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1323, 'y': 581, 'clicks': 1, 'direction': 'up', 'pre_delay': 1.11}
+2026-03-07 21:21:44,885 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1323, 'y': 581, 'clicks': 6, 'direction': 'up', 'pre_delay': 0.057}
+2026-03-07 21:21:45,195 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1323, 'y': 581, 'clicks': 1, 'direction': 'up', 'pre_delay': 0.31}
+2026-03-07 21:21:45,252 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1323, 'y': 581, 'clicks': 6, 'direction': 'up', 'pre_delay': 0.057}
+2026-03-07 21:21:45,447 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1323, 'y': 581, 'clicks': 1, 'direction': 'up', 'pre_delay': 0.196}
+2026-03-07 21:21:45,808 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1323, 'y': 581, 'clicks': 1, 'direction': 'down', 'pre_delay': 0.361}
+2026-03-07 21:21:45,876 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1323, 'y': 581, 'clicks': 6, 'direction': 'down', 'pre_delay': 0.067}
+2026-03-07 21:21:46,073 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1324, 'y': 572, 'clicks': 1, 'direction': 'down', 'pre_delay': 0.198}
+2026-03-07 21:21:46,307 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1324, 'y': 572, 'clicks': 1, 'direction': 'down', 'pre_delay': 0.233}
+2026-03-07 21:21:46,575 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1322, 'y': 527, 'clicks': 1, 'direction': 'up', 'pre_delay': 0.269}
+2026-03-07 21:21:46,637 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1322, 'y': 527, 'clicks': 6, 'direction': 'up', 'pre_delay': 0.062}
+2026-03-07 21:21:46,805 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1322, 'y': 527, 'clicks': 1, 'direction': 'up', 'pre_delay': 0.168}
+2026-03-07 21:21:47,024 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1322, 'y': 527, 'clicks': 1, 'direction': 'up', 'pre_delay': 0.219}
+2026-03-07 21:21:47,082 - INFO - RabAI_AutoClick - 录屏动作: scroll - {'x': 1322, 'y': 527, 'clicks': 6, 'direction': 'up', 'pre_delay': 0.058}
+2026-03-07 21:21:49,371 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+c', 'pre_delay': 2.289}
+2026-03-07 21:21:50,298 - INFO - RabAI_AutoClick - 录屏动作: hotkey - {'keys': 'cmd+v', 'pre_delay': 0.927}
+2026-03-07 21:21:52,832 - INFO - RabAI_AutoClick - 录制完成，共 24 个动作
+2026-03-07 21:22:01,270 - INFO - RabAI_AutoClick - 添加录屏步骤到工作流，共 24 个步骤
+2026-03-07 21:22:01,271 - DEBUG - RabAI_AutoClick - 步骤 0: {'id': 1, 'params': {'button': 'left', 'clicks': 1, 'x': 999, 'y': 564}, 'type': 'click'}
+2026-03-07 21:22:01,274 - DEBUG - RabAI_AutoClick - 原始类型: click
+2026-03-07 21:22:01,274 - DEBUG - RabAI_AutoClick - 映射类型: click
+2026-03-07 21:22:01,277 - DEBUG - RabAI_AutoClick - 步骤 1: {'id': 2, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 1.587, 'x': 1302, 'y': 1013}, 'type': 'click'}
+2026-03-07 21:22:01,278 - DEBUG - RabAI_AutoClick - 原始类型: click
+2026-03-07 21:22:01,279 - DEBUG - RabAI_AutoClick - 映射类型: click
+2026-03-07 21:22:01,279 - DEBUG - RabAI_AutoClick - 步骤 2: {'id': 3, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 1.089, 'x': 1711, 'y': 650}, 'type': 'click'}
+2026-03-07 21:22:01,279 - DEBUG - RabAI_AutoClick - 原始类型: click
+2026-03-07 21:22:01,279 - DEBUG - RabAI_AutoClick - 映射类型: click
+2026-03-07 21:22:01,280 - DEBUG - RabAI_AutoClick - 步骤 3: {'id': 4, 'params': {'button': 'left', 'clicks': 2, 'pre_delay': 0.141, 'x': 1711, 'y': 650}, 'type': 'double_click'}
+2026-03-07 21:22:01,280 - DEBUG - RabAI_AutoClick - 原始类型: double_click
+2026-03-07 21:22:01,280 - DEBUG - RabAI_AutoClick - 映射类型: double_click
+2026-03-07 21:22:01,280 - DEBUG - RabAI_AutoClick - 步骤 4: {'id': 5, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 1.791, 'x': 823, 'y': 400}, 'type': 'click'}
+2026-03-07 21:22:01,280 - DEBUG - RabAI_AutoClick - 原始类型: click
+2026-03-07 21:22:01,281 - DEBUG - RabAI_AutoClick - 映射类型: click
+2026-03-07 21:22:01,281 - DEBUG - RabAI_AutoClick - 步骤 5: {'id': 6, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 2.046, 'x': 1264, 'y': 541}, 'type': 'click'}
+2026-03-07 21:22:01,281 - DEBUG - RabAI_AutoClick - 原始类型: click
+2026-03-07 21:22:01,281 - DEBUG - RabAI_AutoClick - 映射类型: click
+2026-03-07 21:22:01,281 - DEBUG - RabAI_AutoClick - 步骤 6: {'id': 7, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 1.133, 'x': 647, 'y': 821}, 'type': 'click'}
+2026-03-07 21:22:01,281 - DEBUG - RabAI_AutoClick - 原始类型: click
+2026-03-07 21:22:01,281 - DEBUG - RabAI_AutoClick - 映射类型: click
+2026-03-07 21:22:01,282 - DEBUG - RabAI_AutoClick - 步骤 7: {'id': 8, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 3.11, 'x': 1227, 'y': 1013}, 'type': 'click'}
+2026-03-07 21:22:01,282 - DEBUG - RabAI_AutoClick - 原始类型: click
+2026-03-07 21:22:01,282 - DEBUG - RabAI_AutoClick - 映射类型: click
+2026-03-07 21:22:01,282 - DEBUG - RabAI_AutoClick - 步骤 8: {'id': 9, 'params': {'clicks': 1, 'direction': 'up', 'pre_delay': 1.11, 'x': 1323, 'y': 581}, 'type': 'scroll'}
+2026-03-07 21:22:01,282 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,282 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,282 - DEBUG - RabAI_AutoClick - 步骤 9: {'id': 10, 'params': {'clicks': 6, 'direction': 'up', 'pre_delay': 0.057, 'x': 1323, 'y': 581}, 'type': 'scroll'}
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 步骤 10: {'id': 11, 'params': {'clicks': 1, 'direction': 'up', 'pre_delay': 0.31, 'x': 1323, 'y': 581}, 'type': 'scroll'}
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 步骤 11: {'id': 12, 'params': {'clicks': 6, 'direction': 'up', 'pre_delay': 0.057, 'x': 1323, 'y': 581}, 'type': 'scroll'}
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 步骤 12: {'id': 13, 'params': {'clicks': 1, 'direction': 'up', 'pre_delay': 0.196, 'x': 1323, 'y': 581}, 'type': 'scroll'}
+2026-03-07 21:22:01,283 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 步骤 13: {'id': 14, 'params': {'clicks': 1, 'direction': 'down', 'pre_delay': 0.361, 'x': 1323, 'y': 581}, 'type': 'scroll'}
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 步骤 14: {'id': 15, 'params': {'clicks': 6, 'direction': 'down', 'pre_delay': 0.067, 'x': 1323, 'y': 581}, 'type': 'scroll'}
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 步骤 15: {'id': 16, 'params': {'clicks': 1, 'direction': 'down', 'pre_delay': 0.198, 'x': 1324, 'y': 572}, 'type': 'scroll'}
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,284 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,285 - DEBUG - RabAI_AutoClick - 步骤 16: {'id': 17, 'params': {'clicks': 1, 'direction': 'down', 'pre_delay': 0.233, 'x': 1324, 'y': 572}, 'type': 'scroll'}
+2026-03-07 21:22:01,285 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,285 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,285 - DEBUG - RabAI_AutoClick - 步骤 17: {'id': 18, 'params': {'clicks': 1, 'direction': 'up', 'pre_delay': 0.269, 'x': 1322, 'y': 527}, 'type': 'scroll'}
+2026-03-07 21:22:01,286 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,286 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,286 - DEBUG - RabAI_AutoClick - 步骤 18: {'id': 19, 'params': {'clicks': 6, 'direction': 'up', 'pre_delay': 0.062, 'x': 1322, 'y': 527}, 'type': 'scroll'}
+2026-03-07 21:22:01,286 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,286 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,286 - DEBUG - RabAI_AutoClick - 步骤 19: {'id': 20, 'params': {'clicks': 1, 'direction': 'up', 'pre_delay': 0.168, 'x': 1322, 'y': 527}, 'type': 'scroll'}
+2026-03-07 21:22:01,286 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 步骤 20: {'id': 21, 'params': {'clicks': 1, 'direction': 'up', 'pre_delay': 0.219, 'x': 1322, 'y': 527}, 'type': 'scroll'}
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 步骤 21: {'id': 22, 'params': {'clicks': 6, 'direction': 'up', 'pre_delay': 0.058, 'x': 1322, 'y': 527}, 'type': 'scroll'}
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 原始类型: scroll
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 映射类型: scroll
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 步骤 22: {'id': 23, 'params': {'keys': 'cmd+c', 'pre_delay': 2.289}, 'type': 'hotkey'}
+2026-03-07 21:22:01,287 - DEBUG - RabAI_AutoClick - 原始类型: hotkey
+2026-03-07 21:22:01,288 - DEBUG - RabAI_AutoClick - 映射类型: key_press
+2026-03-07 21:22:01,288 - DEBUG - RabAI_AutoClick - 步骤 23: {'id': 24, 'params': {'keys': 'cmd+v', 'pre_delay': 0.927}, 'type': 'hotkey'}
+2026-03-07 21:22:01,288 - DEBUG - RabAI_AutoClick - 原始类型: hotkey
+2026-03-07 21:22:01,288 - DEBUG - RabAI_AutoClick - 映射类型: key_press
+2026-03-07 21:22:20,972 - INFO - RabAI_AutoClick - 执行第 1/1 次循环
+2026-03-07 21:22:20,985 - INFO - RabAI_AutoClick - 执行步骤 [1]: click
+2026-03-07 21:22:21,597 - INFO - RabAI_AutoClick - ✓ 步骤 [1] 完成: 点击成功: (999, 564) left (0.61秒)
+2026-03-07 21:22:21,597 - INFO - RabAI_AutoClick - 执行步骤 [2]: click
+2026-03-07 21:22:23,785 - INFO - RabAI_AutoClick - ✓ 步骤 [2] 完成: 点击成功: (1302, 1013) left (2.20秒)
+2026-03-07 21:22:23,786 - INFO - RabAI_AutoClick - 执行步骤 [3]: click
+2026-03-07 21:22:25,473 - INFO - RabAI_AutoClick - ✓ 步骤 [3] 完成: 点击成功: (1711, 650) left (1.69秒)
+2026-03-07 21:22:25,474 - INFO - RabAI_AutoClick - 执行步骤 [4]: double_click
+2026-03-07 21:22:26,219 - INFO - RabAI_AutoClick - ✓ 步骤 [4] 完成: 双击成功: (1711, 650) left (0.75秒)
+2026-03-07 21:22:26,220 - INFO - RabAI_AutoClick - 执行步骤 [5]: click
+2026-03-07 21:22:28,618 - INFO - RabAI_AutoClick - ✓ 步骤 [5] 完成: 点击成功: (823, 400) left (2.40秒)
+2026-03-07 21:22:28,618 - INFO - RabAI_AutoClick - 执行步骤 [6]: click
+2026-03-07 21:22:31,274 - INFO - RabAI_AutoClick - ✓ 步骤 [6] 完成: 点击成功: (1264, 541) left (2.66秒)
+2026-03-07 21:22:31,275 - INFO - RabAI_AutoClick - 执行步骤 [7]: click
+2026-03-07 21:22:33,009 - INFO - RabAI_AutoClick - ✓ 步骤 [7] 完成: 点击成功: (647, 821) left (1.73秒)
+2026-03-07 21:22:33,009 - INFO - RabAI_AutoClick - 执行步骤 [8]: click
+2026-03-07 21:22:36,719 - INFO - RabAI_AutoClick - ✓ 步骤 [8] 完成: 点击成功: (1227, 1013) left (3.71秒)
+2026-03-07 21:22:36,720 - INFO - RabAI_AutoClick - 执行步骤 [9]: scroll
+2026-03-07 21:22:38,428 - INFO - RabAI_AutoClick - ✓ 步骤 [9] 完成: 滚动成功: 1 格 (up) (1.71秒)
+2026-03-07 21:22:38,429 - INFO - RabAI_AutoClick - 执行步骤 [10]: scroll
+2026-03-07 21:22:39,082 - INFO - RabAI_AutoClick - ✓ 步骤 [10] 完成: 滚动成功: 6 格 (up) (0.65秒)
+2026-03-07 21:22:39,082 - INFO - RabAI_AutoClick - 执行步骤 [11]: scroll
+2026-03-07 21:22:39,999 - INFO - RabAI_AutoClick - ✓ 步骤 [11] 完成: 滚动成功: 1 格 (up) (0.92秒)
+2026-03-07 21:22:39,999 - INFO - RabAI_AutoClick - 执行步骤 [12]: scroll
+2026-03-07 21:22:40,648 - INFO - RabAI_AutoClick - ✓ 步骤 [12] 完成: 滚动成功: 6 格 (up) (0.65秒)
+2026-03-07 21:22:40,649 - INFO - RabAI_AutoClick - 执行步骤 [13]: scroll
+2026-03-07 21:22:41,438 - INFO - RabAI_AutoClick - ✓ 步骤 [13] 完成: 滚动成功: 1 格 (up) (0.79秒)
+2026-03-07 21:22:41,439 - INFO - RabAI_AutoClick - 执行步骤 [14]: scroll
+2026-03-07 21:22:42,400 - INFO - RabAI_AutoClick - ✓ 步骤 [14] 完成: 滚动成功: -1 格 (down) (0.96秒)
+2026-03-07 21:22:42,401 - INFO - RabAI_AutoClick - 执行步骤 [15]: scroll
+2026-03-07 21:22:43,070 - INFO - RabAI_AutoClick - ✓ 步骤 [15] 完成: 滚动成功: -6 格 (down) (0.67秒)
+2026-03-07 21:22:43,070 - INFO - RabAI_AutoClick - 执行步骤 [16]: scroll
+2026-03-07 21:22:43,880 - INFO - RabAI_AutoClick - ✓ 步骤 [16] 完成: 滚动成功: -1 格 (down) (0.81秒)
+2026-03-07 21:22:43,881 - INFO - RabAI_AutoClick - 执行步骤 [17]: scroll
+2026-03-07 21:22:44,707 - INFO - RabAI_AutoClick - ✓ 步骤 [17] 完成: 滚动成功: -1 格 (down) (0.83秒)
+2026-03-07 21:22:44,708 - INFO - RabAI_AutoClick - 执行步骤 [18]: scroll
+2026-03-07 21:22:45,580 - INFO - RabAI_AutoClick - ✓ 步骤 [18] 完成: 滚动成功: 1 格 (up) (0.87秒)
+2026-03-07 21:22:45,580 - INFO - RabAI_AutoClick - 执行步骤 [19]: scroll
+2026-03-07 21:22:46,240 - INFO - RabAI_AutoClick - ✓ 步骤 [19] 完成: 滚动成功: 6 格 (up) (0.66秒)
+2026-03-07 21:22:46,241 - INFO - RabAI_AutoClick - 执行步骤 [20]: scroll
+2026-03-07 21:22:47,006 - INFO - RabAI_AutoClick - ✓ 步骤 [20] 完成: 滚动成功: 1 格 (up) (0.77秒)
+2026-03-07 21:22:47,007 - INFO - RabAI_AutoClick - 执行步骤 [21]: scroll
+2026-03-07 21:22:47,837 - INFO - RabAI_AutoClick - ✓ 步骤 [21] 完成: 滚动成功: 1 格 (up) (0.83秒)
+2026-03-07 21:22:47,837 - INFO - RabAI_AutoClick - 执行步骤 [22]: scroll
+2026-03-07 21:22:48,496 - INFO - RabAI_AutoClick - ✓ 步骤 [22] 完成: 滚动成功: 6 格 (up) (0.66秒)
+2026-03-07 21:22:48,496 - INFO - RabAI_AutoClick - 执行步骤 [23]: key_press
+2026-03-07 21:22:51,330 - INFO - RabAI_AutoClick - ✓ 步骤 [23] 完成: 按键成功: ['cmd', 'c'] (2.83秒)
+2026-03-07 21:22:51,331 - INFO - RabAI_AutoClick - 执行步骤 [24]: key_press
+2026-03-07 21:22:52,803 - INFO - RabAI_AutoClick - ✓ 步骤 [24] 完成: 按键成功: ['cmd', 'v'] (1.47秒)
+2026-03-07 21:22:52,810 - INFO - RabAI_AutoClick - ✓ 工作流执行完成 | 总耗时: 31.8秒
+2026-03-07 21:24:20,363 - INFO - RabAI_AutoClick - 设置OCR区域: (1610, 252, 309x452)

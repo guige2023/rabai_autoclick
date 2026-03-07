@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt5.QtWidgets import QWidget, QApplication, QRubberBand, QMessageBox
 from PyQt5.QtCore import Qt, QRect, QPoint, pyqtSignal
-from PyQt5.QtGui import QScreen, QPixmap, QPainter, QColor, QPen, QFont, QCursor
+from PyQt5.QtGui import QScreen, QPixmap, QPainter, QColor, QPen, QFont, QCursor, QBrush
 from typing import Optional, Tuple
 
 
@@ -42,11 +42,12 @@ class RegionSelector(QWidget):
         
         painter.drawPixmap(0, 0, self._screenshot)
         
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
-        
         if not self._selection_rect.isNull():
-            painter.setCompositionMode(QPainter.CompositionMode_Source)
-            painter.drawPixmap(self._selection_rect, self._screenshot, self._selection_rect)
+            overlay = QColor(0, 0, 0, 120)
+            painter.fillRect(0, 0, self.width(), self._selection_rect.top(), overlay)
+            painter.fillRect(0, self._selection_rect.bottom(), self.width(), self.height() - self._selection_rect.bottom(), overlay)
+            painter.fillRect(0, self._selection_rect.top(), self._selection_rect.left(), self._selection_rect.height(), overlay)
+            painter.fillRect(self._selection_rect.right(), self._selection_rect.top(), self.width() - self._selection_rect.right(), self._selection_rect.height(), overlay)
             
             pen = QPen(QColor(0, 120, 215), 2)
             painter.setPen(pen)
@@ -163,7 +164,6 @@ class PositionSelector(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self._screenshot)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
         
         painter.setPen(QColor(255, 255, 255))
         painter.setFont(QFont('Microsoft YaHei', 10))
