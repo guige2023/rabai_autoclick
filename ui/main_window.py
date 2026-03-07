@@ -26,7 +26,7 @@ from utils.app_logger import app_logger
 from utils.memory import memory_manager, image_cache
 from utils.recording import RecordingManager, RecordingEditor, RecordedAction, PYNPUT_AVAILABLE
 from utils.history import WorkflowHistoryManager, HistoryDialog, QuickSaveDialog
-from utils.teaching_mode import teaching_mode_manager
+from utils.key_display import key_display_window
 from utils.execution_stats import execution_stats
 from ui.hotkey_dialog import HotkeySettingsDialog
 from ui.region_selector import RegionSelector, PositionSelector
@@ -1178,7 +1178,7 @@ class MainWindow(QMainWindow):
         app_logger.info(f"窗口置顶: {self._always_on_top}", "UI")
     
     def _toggle_teaching_mode(self):
-        self._teaching_mode = teaching_mode_manager.toggle()
+        self._teaching_mode = key_display_window.toggle()
         
         if self._teaching_mode:
             self.teaching_btn.setChecked(True)

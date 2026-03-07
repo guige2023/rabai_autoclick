@@ -782,3 +782,147 @@
 2026-03-07 21:22:52 | INFO     | RabAI_AutoClick | ✓ 步骤 [24] 完成: 按键成功: ['cmd', 'v'] (1.47秒)
 2026-03-07 21:22:52 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 31.8秒
 2026-03-07 21:24:20 | INFO     | RabAI_AutoClick | 设置OCR区域: (1610, 252, 309x452)
+2026-03-07 21:37:05 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:37:05 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 21:37:06 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 21:46:27 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:46:27 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 21:46:29 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 21:52:50 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:52:50 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 21:52:52 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 21:54:47 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:54:47 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 21:54:49 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 21:56:45 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 21:56:45 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 21:56:56 | INFO     | RabAI_AutoClick | 开始录制操作
+2026-03-07 21:56:57 | INFO     | RabAI_AutoClick | 录屏动作: click - {'x': 758, 'y': 442, 'button': 'left', 'clicks': 1}
+2026-03-07 21:56:59 | INFO     | RabAI_AutoClick | 录屏动作: click - {'x': 1211, 'y': 1020, 'button': 'left', 'clicks': 1, 'pre_delay': 1.408}
+2026-03-07 21:57:00 | INFO     | RabAI_AutoClick | 录制完成，共 2 个动作
+2026-03-07 21:57:16 | INFO     | RabAI_AutoClick | 添加录屏步骤到工作流，共 2 个步骤
+2026-03-07 21:57:16 | DEBUG    | RabAI_AutoClick | 步骤 0: {'id': 1, 'params': {'button': 'left', 'clicks': 1, 'x': 758, 'y': 442}, 'type': 'click'}
+2026-03-07 21:57:16 | DEBUG    | RabAI_AutoClick | 原始类型: click
+2026-03-07 21:57:16 | DEBUG    | RabAI_AutoClick | 映射类型: click
+2026-03-07 21:57:16 | DEBUG    | RabAI_AutoClick | 步骤 1: {'id': 2, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 1.408, 'x': 1211, 'y': 1020}, 'type': 'click'}
+2026-03-07 21:57:16 | DEBUG    | RabAI_AutoClick | 原始类型: click
+2026-03-07 21:57:16 | DEBUG    | RabAI_AutoClick | 映射类型: click
+2026-03-07 21:57:19 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-07 21:57:19 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-07 21:57:19 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (758, 442) left (0.61秒)
+2026-03-07 21:57:19 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-07 21:57:21 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (1211, 1020) left (2.00秒)
+2026-03-07 21:57:21 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.6秒
+2026-03-07 22:01:49 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 22:01:49 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:01:49 | INFO     | RabAI_AutoClick | 教学模式: True
+2026-03-07 22:03:39 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 22:03:39 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:03:41 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 22:03:50 | INFO     | RabAI_AutoClick | 开始录制操作
+2026-03-07 22:03:52 | INFO     | RabAI_AutoClick | 录屏动作: click - {'x': 1031, 'y': 265, 'button': 'left', 'clicks': 1}
+2026-03-07 22:03:53 | INFO     | RabAI_AutoClick | 录屏动作: click - {'x': 1268, 'y': 416, 'button': 'left', 'clicks': 1, 'pre_delay': 1.457}
+2026-03-07 22:03:55 | INFO     | RabAI_AutoClick | 录制完成，共 2 个动作
+2026-03-07 22:03:58 | INFO     | RabAI_AutoClick | 添加录屏步骤到工作流，共 2 个步骤
+2026-03-07 22:03:58 | DEBUG    | RabAI_AutoClick | 步骤 0: {'id': 1, 'params': {'button': 'left', 'clicks': 1, 'x': 1031, 'y': 265}, 'type': 'click'}
+2026-03-07 22:03:58 | DEBUG    | RabAI_AutoClick | 原始类型: click
+2026-03-07 22:03:58 | DEBUG    | RabAI_AutoClick | 映射类型: click
+2026-03-07 22:03:58 | DEBUG    | RabAI_AutoClick | 步骤 1: {'id': 2, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 1.457, 'x': 1268, 'y': 416}, 'type': 'click'}
+2026-03-07 22:03:58 | DEBUG    | RabAI_AutoClick | 原始类型: click
+2026-03-07 22:03:58 | DEBUG    | RabAI_AutoClick | 映射类型: click
+2026-03-07 22:04:01 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-07 22:04:01 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-07 22:04:01 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1031, 265) left (0.59秒)
+2026-03-07 22:04:01 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-07 22:04:03 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (1268, 416) left (2.05秒)
+2026-03-07 22:04:03 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.7秒
+2026-03-07 22:04:10 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-07 22:04:10 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-07 22:04:11 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1031, 265) left (0.61秒)
+2026-03-07 22:04:11 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-07 22:04:13 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (1268, 416) left (2.06秒)
+2026-03-07 22:04:13 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 2.7秒
+2026-03-07 22:06:39 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 22:06:39 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:06:41 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 22:08:39 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10
+2026-03-07 22:08:39 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:08:41 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 22:08:43 | INFO     | RabAI_AutoClick | 教学模式: True
+2026-03-07 22:16:03 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10, 显示=F11
+2026-03-07 22:16:03 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:16:14 | INFO     | RabAI_AutoClick | 按键显示: True
+2026-03-07 22:16:27 | INFO     | RabAI_AutoClick | 按键显示: False
+2026-03-07 22:16:28 | INFO     | RabAI_AutoClick | 按键显示: True
+2026-03-07 22:16:54 | INFO     | RabAI_AutoClick | 按键显示: False
+2026-03-07 22:16:58 | INFO     | RabAI_AutoClick | 按键显示: True
+2026-03-07 22:16:58 | INFO     | RabAI_AutoClick | 按键显示: False
+2026-03-07 22:17:04 | INFO     | RabAI_AutoClick | 快捷键已更新
+2026-03-07 22:20:44 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10, 显示=F11
+2026-03-07 22:20:44 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:20:45 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 22:22:47 | INFO     | RabAI_AutoClick | 按键显示: True
+2026-03-07 22:23:01 | INFO     | RabAI_AutoClick | 按键显示: False
+2026-03-07 22:27:26 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10, 显示=CTRL+F11
+2026-03-07 22:27:26 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:27:28 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 22:27:30 | INFO     | RabAI_AutoClick | 按键显示: True
+2026-03-07 22:27:40 | INFO     | RabAI_AutoClick | 快捷键已更新
+2026-03-07 22:30:27 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10, 显示=CTRL+F11
+2026-03-07 22:30:27 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:30:35 | INFO     | RabAI_AutoClick | 按键显示: True
+2026-03-07 22:30:51 | INFO     | RabAI_AutoClick | 按键显示: False
+2026-03-07 22:39:26 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10, 显示=CTRL+F11
+2026-03-07 22:39:26 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:42:22 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10, 显示=CTRL+F11
+2026-03-07 22:42:22 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:49:31 | INFO     | RabAI_AutoClick | 全局快捷键已启用: 运行=CTRL+F6, 停止=CTRL+F7, 录制=CTRL+F9/CTRL+F10, 显示=CTRL+F11
+2026-03-07 22:49:31 | INFO     | RabAI_AutoClick | RabAI AutoClick v22 增强版启动
+2026-03-07 22:49:32 | INFO     | RabAI_AutoClick | ✓ 辅助功能权限已授权
+2026-03-07 22:56:52 | INFO     | RabAI_AutoClick | 按键显示: True
+2026-03-07 22:57:33 | INFO     | RabAI_AutoClick | 快捷键已更新
+2026-03-07 22:57:40 | INFO     | RabAI_AutoClick | 设置OCR区域: (1539, 261, 393x457)
+2026-03-07 22:57:48 | INFO     | RabAI_AutoClick | 开始录制操作
+2026-03-07 22:57:50 | INFO     | RabAI_AutoClick | 录屏动作: click - {'x': 1057, 'y': 486, 'button': 'left', 'clicks': 1}
+2026-03-07 22:57:52 | INFO     | RabAI_AutoClick | 录屏动作: click - {'x': 840, 'y': 170, 'button': 'left', 'clicks': 1, 'pre_delay': 2.534}
+2026-03-07 22:57:54 | INFO     | RabAI_AutoClick | 录屏动作: click - {'x': 211, 'y': 902, 'button': 'left', 'clicks': 1, 'pre_delay': 1.64}
+2026-03-07 22:57:56 | INFO     | RabAI_AutoClick | 录制完成，共 3 个动作
+2026-03-07 22:57:59 | INFO     | RabAI_AutoClick | 添加录屏步骤到工作流，共 3 个步骤
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 步骤 0: {'id': 1, 'params': {'button': 'left', 'clicks': 1, 'x': 1057, 'y': 486}, 'type': 'click'}
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 原始类型: click
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 映射类型: click
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 步骤 1: {'id': 2, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 2.534, 'x': 840, 'y': 170}, 'type': 'click'}
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 原始类型: click
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 映射类型: click
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 步骤 2: {'id': 3, 'params': {'button': 'left', 'clicks': 1, 'pre_delay': 1.64, 'x': 211, 'y': 902}, 'type': 'click'}
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 原始类型: click
+2026-03-07 22:57:59 | DEBUG    | RabAI_AutoClick | 映射类型: click
+2026-03-07 22:58:07 | INFO     | RabAI_AutoClick | 使用识别区域: (1539, 261, 393, 457)
+2026-03-07 22:58:07 | INFO     | RabAI_AutoClick | 执行第 1/1 次循环
+2026-03-07 22:58:07 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-07 22:58:08 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1057, 486) left (0.76秒)
+2026-03-07 22:58:08 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-07 22:58:11 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (840, 170) left (3.14秒)
+2026-03-07 22:58:11 | INFO     | RabAI_AutoClick | 执行步骤 [3]: click
+2026-03-07 22:58:13 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 点击成功: (211, 902) left (2.25秒)
+2026-03-07 22:58:14 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 | 总耗时: 6.2秒
+2026-03-07 22:58:22 | INFO     | RabAI_AutoClick | 循环设置: 2次, 间隔1.0秒
+2026-03-07 22:58:27 | INFO     | RabAI_AutoClick | 使用识别区域: (1539, 261, 393, 457)
+2026-03-07 22:58:27 | INFO     | RabAI_AutoClick | 执行第 1/2 次循环
+2026-03-07 22:58:27 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-07 22:58:28 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1057, 486) left (0.59秒)
+2026-03-07 22:58:28 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-07 22:58:31 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (840, 170) left (3.14秒)
+2026-03-07 22:58:31 | INFO     | RabAI_AutoClick | 执行步骤 [3]: click
+2026-03-07 22:58:33 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 点击成功: (211, 902) left (2.24秒)
+2026-03-07 22:58:33 | INFO     | RabAI_AutoClick | 循环 1 完成，等待 1.0 秒后继续...
+2026-03-07 22:58:34 | INFO     | RabAI_AutoClick | 执行第 2/2 次循环
+2026-03-07 22:58:34 | INFO     | RabAI_AutoClick | 执行步骤 [1]: click
+2026-03-07 22:58:35 | INFO     | RabAI_AutoClick | ✓ 步骤 [1] 完成: 点击成功: (1057, 486) left (0.60秒)
+2026-03-07 22:58:35 | INFO     | RabAI_AutoClick | 执行步骤 [2]: click
+2026-03-07 22:58:38 | INFO     | RabAI_AutoClick | ✓ 步骤 [2] 完成: 点击成功: (840, 170) left (3.13秒)
+2026-03-07 22:58:38 | INFO     | RabAI_AutoClick | 执行步骤 [3]: click
+2026-03-07 22:58:40 | INFO     | RabAI_AutoClick | ✓ 步骤 [3] 完成: 点击成功: (211, 902) left (2.24秒)
+2026-03-07 22:58:40 | INFO     | RabAI_AutoClick | ✓ 工作流执行完成 (共2次循环) | 总耗时: 13.0秒 | 平均每循环: 6.0秒
+2026-03-07 23:00:48 | INFO     | RabAI_AutoClick | 按键显示: False
+2026-03-07 23:00:49 | INFO     | RabAI_AutoClick | 按键显示: True

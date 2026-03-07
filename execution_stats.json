@@ -1412,5 +1412,272 @@
       }
     },
     "date": "2026-03-07 21:22:52"
+  },
+  {
+    "start_time": 1772891839.3064399,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.631201982498169,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772891841.937846
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.6066501140594482,
+        "success": true,
+        "message": "点击成功: (758, 442) left",
+        "timestamp": 1772891839.9656599
+      },
+      {
+        "type": "click",
+        "duration": 2.00045108795166,
+        "success": true,
+        "message": "点击成功: (1211, 1020) left",
+        "timestamp": 1772891841.9368389
+      }
+    ],
+    "errors": [],
+    "end_time": 1772891841.937849,
+    "total_duration": 2.631409168243408,
+    "success": true,
+    "avg_loop_duration": 2.631201982498169,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 2,
+        "avg_duration": 1.3035506010055542,
+        "total_duration": 2.6071012020111084,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 21:57:21"
+  },
+  {
+    "start_time": 1772892241.162721,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.6600890159606934,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772892243.822958
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.590731143951416,
+        "success": true,
+        "message": "点击成功: (1031, 265) left",
+        "timestamp": 1772892241.851213
+      },
+      {
+        "type": "click",
+        "duration": 2.0505449771881104,
+        "success": true,
+        "message": "点击成功: (1268, 416) left",
+        "timestamp": 1772892243.82076
+      }
+    ],
+    "errors": [],
+    "end_time": 1772892243.822974,
+    "total_duration": 2.6602530479431152,
+    "success": true,
+    "avg_loop_duration": 2.6600890159606934,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 2,
+        "avg_duration": 1.3206380605697632,
+        "total_duration": 2.6412761211395264,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 22:04:03"
+  },
+  {
+    "start_time": 1772892250.746109,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 2.6999380588531494,
+        "success": true,
+        "step_count": 2,
+        "timestamp": 1772892253.4461608
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.6092798709869385,
+        "success": true,
+        "message": "点击成功: (1031, 265) left",
+        "timestamp": 1772892251.406635
+      },
+      {
+        "type": "click",
+        "duration": 2.056924819946289,
+        "success": true,
+        "message": "点击成功: (1268, 416) left",
+        "timestamp": 1772892253.4438138
+      }
+    ],
+    "errors": [],
+    "end_time": 1772892253.4461818,
+    "total_duration": 2.700072765350342,
+    "success": true,
+    "avg_loop_duration": 2.6999380588531494,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 2,
+        "avg_duration": 1.3331023454666138,
+        "total_duration": 2.6662046909332275,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 22:04:13"
+  },
+  {
+    "start_time": 1772895487.823761,
+    "workflow_name": "未命名工作流",
+    "loop_count": 1,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 6.171998977661133,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772895493.99678
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.7641689777374268,
+        "success": true,
+        "message": "点击成功: (1057, 486) left",
+        "timestamp": 1772895488.644841
+      },
+      {
+        "type": "click",
+        "duration": 3.143406867980957,
+        "success": true,
+        "message": "点击成功: (840, 170) left",
+        "timestamp": 1772895491.750626
+      },
+      {
+        "type": "click",
+        "duration": 2.245347023010254,
+        "success": true,
+        "message": "点击成功: (211, 902) left",
+        "timestamp": 1772895493.996011
+      }
+    ],
+    "errors": [],
+    "end_time": 1772895493.9967968,
+    "total_duration": 6.1730358600616455,
+    "success": true,
+    "avg_loop_duration": 6.171998977661133,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 3,
+        "avg_duration": 2.0509742895762124,
+        "total_duration": 6.152922868728638,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 22:58:13"
+  },
+  {
+    "start_time": 1772895507.605977,
+    "workflow_name": "未命名工作流",
+    "loop_count": 2,
+    "loops": [
+      {
+        "index": 1,
+        "duration": 5.988424062728882,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772895513.594671
+      },
+      {
+        "index": 2,
+        "duration": 5.98921799659729,
+        "success": true,
+        "step_count": 3,
+        "timestamp": 1772895520.584984
+      }
+    ],
+    "steps": [
+      {
+        "type": "click",
+        "duration": 0.5887107849121094,
+        "success": true,
+        "message": "点击成功: (1057, 486) left",
+        "timestamp": 1772895508.210242
+      },
+      {
+        "type": "click",
+        "duration": 3.1379928588867188,
+        "success": true,
+        "message": "点击成功: (840, 170) left",
+        "timestamp": 1772895511.3484879
+      },
+      {
+        "type": "click",
+        "duration": 2.24336314201355,
+        "success": true,
+        "message": "点击成功: (211, 902) left",
+        "timestamp": 1772895513.5918689
+      },
+      {
+        "type": "click",
+        "duration": 0.5995218753814697,
+        "success": true,
+        "message": "点击成功: (1057, 486) left",
+        "timestamp": 1772895515.208956
+      },
+      {
+        "type": "click",
+        "duration": 3.132449150085449,
+        "success": true,
+        "message": "点击成功: (840, 170) left",
+        "timestamp": 1772895518.3490372
+      },
+      {
+        "type": "click",
+        "duration": 2.2417590618133545,
+        "success": true,
+        "message": "点击成功: (211, 902) left",
+        "timestamp": 1772895520.583704
+      }
+    ],
+    "errors": [],
+    "end_time": 1772895520.585016,
+    "total_duration": 12.979038953781128,
+    "success": true,
+    "avg_loop_duration": 5.988821029663086,
+    "success_rate": 100.0,
+    "step_stats": {
+      "click": {
+        "count": 6,
+        "avg_duration": 1.9906328121821086,
+        "total_duration": 11.943796873092651,
+        "success_rate": 100.0
+      }
+    },
+    "date": "2026-03-07 22:58:40"
   }
 ]

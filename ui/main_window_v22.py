@@ -37,7 +37,7 @@ from utils.recording import RecordingManager, RecordingEditor, RecordedAction, P
 if IS_MACOS and PYNPUT_AVAILABLE:
     from utils.recording_mac import MacRecordingManager, MacPermissionChecker, create_recording_manager, check_recording_permission, request_recording_permission
 from utils.history import WorkflowHistoryManager, HistoryDialog, QuickSaveDialog
-from utils.teaching_mode import teaching_mode_manager
+from utils.key_display import key_display_window
 from utils.execution_stats import execution_stats
 from ui.hotkey_dialog import HotkeySettingsDialog
 from ui.region_selector import RegionSelector, PositionSelector
@@ -1683,7 +1683,7 @@ class MainWindow(QMainWindow):
         
         self.on_top_btn = QPushButton("📌 置顶")
         self.on_top_btn.setCheckable(True)
-        self.teaching_btn = QPushButton("🎓 教学")
+        self.teaching_btn = QPushButton("🖥 显示")
         self.teaching_btn.setCheckable(True)
         self.hotkey_btn = QPushButton("⌨ 快捷键")
         self.window_btn = QPushButton("🪟 窗口")
@@ -1948,13 +1948,15 @@ class MainWindow(QMainWindow):
                 stop_key=self.current_hotkeys.get('stop', 'f7'),
                 pause_key=self.current_hotkeys.get('pause', 'f8'),
                 record_start_key=self.current_hotkeys.get('record_start', 'f9'),
-                record_stop_key=self.current_hotkeys.get('record_stop', 'f10')
+                record_stop_key=self.current_hotkeys.get('record_stop', 'f10'),
+                display_key=self.current_hotkeys.get('display', 'f11')
             )
             self.hotkey_manager.start_triggered.connect(self._on_run)
             self.hotkey_manager.stop_triggered.connect(self._on_stop)
             self.hotkey_manager.pause_triggered.connect(self._on_pause)
             self.hotkey_manager.record_start_triggered.connect(self._on_record_start_hotkey)
             self.hotkey_manager.record_stop_triggered.connect(self._on_record_stop_hotkey)
+            self.hotkey_manager.display_triggered.connect(self._toggle_teaching_mode)
             
             def format_key(key_str):
                 parts = key_str.replace(' ', '+').split('+')
@@ -1964,9 +1966,10 @@ class MainWindow(QMainWindow):
             stop_key = format_key(self.current_hotkeys.get('stop', 'f7'))
             record_start_key = format_key(self.current_hotkeys.get('record_start', 'f9'))
             record_stop_key = format_key(self.current_hotkeys.get('record_stop', 'f10'))
+            display_key = format_key(self.current_hotkeys.get('display', 'f11'))
             
             app_logger.info(f"全局快捷键已启用: 运行={start_key}, "
-                           f"停止={stop_key}, 录制={record_start_key}/{record_stop_key}", "Hotkey")
+                           f"停止={stop_key}, 录制={record_start_key}/{record_stop_key}, 显示={display_key}", "Hotkey")
         else:
             app_logger.warning("快捷键模块不可用", "Hotkey")
     
@@ -1977,6 +1980,9 @@ class MainWindow(QMainWindow):
     def _on_record_stop_hotkey(self):
         if self.recording_widget._recording_manager.is_recording():
             self.recording_widget._on_stop()
+            self.showNormal()
+            self.activateWindow()
+            self.raise_()
     
     def _update_button_texts(self):
         def format_key_display(key_str):
@@ -2236,18 +2242,18 @@ class MainWindow(QMainWindow):
         app_logger.info(f"窗口置顶: {self._always_on_top}", "UI")
     
     def _toggle_teaching_mode(self):
-        self._teaching_mode = teaching_mode_manager.toggle()
+        self._teaching_mode = key_display_window.toggle()
         
         if self._teaching_mode:
             self.teaching_btn.setChecked(True)
             self.teaching_btn.setStyleSheet("background-color: #9C27B0; color: white;")
-            show_toast("教学模式已开启 - 按键和鼠标点击将显示在屏幕上", 'success')
+            show_toast("按键显示已开启 - 屏幕显示鼠标位置，按 ESC 关闭", 'success')
         else:
             self.teaching_btn.setChecked(False)
             self.teaching_btn.setStyleSheet("")
-            show_toast("教学模式已关闭", 'info')
+            show_toast("按键显示已关闭", 'info')
         
-        app_logger.info(f"教学模式: {self._teaching_mode}", "UI")
+        app_logger.info(f"按键显示: {self._teaching_mode}", "UI")
     
     def _on_history(self):
         dialog = HistoryDialog(self.history_manager, self)
@@ -2465,6 +2471,7 @@ class MainWindow(QMainWindow):
             
             self.showNormal()
             self.activateWindow()
+            self.raise_()
             
             self.predictive_widget._refresh_predictions()
             
@@ -2491,22 +2498,30 @@ class MainWindow(QMainWindow):
             print(f"Engine error: {e}")
     
     def _on_hotkey_settings(self):
-        dialog = HotkeySettingsDialog(self.current_hotkeys, self)
-        if dialog.exec_() == QDialog.Accepted:
-            new_hotkeys = dialog.get_hotkeys()
-            self.current_hotkeys = new_hotkeys
-            
-            self.hotkey_manager.save_config(new_hotkeys)
-            self.hotkey_manager.unregister_hotkeys()
-            self.hotkey_manager.register_hotkeys(
-                start_key=new_hotkeys.get('start', 'f6'),
-                stop_key=new_hotkeys.get('stop', 'f7'),
-                pause_key=new_hotkeys.get('pause', 'f8')
-            )
-            
-            self._update_button_texts()
-            app_logger.info(f"快捷键已更新", "Hotkey")
-            show_toast("快捷键设置已保存", 'success')
+        try:
+            dialog = HotkeySettingsDialog(self.current_hotkeys, self)
+            if dialog.exec_() == QDialog.Accepted:
+                new_hotkeys = dialog.get_hotkeys()
+                self.current_hotkeys = new_hotkeys
+                
+                self.hotkey_manager.save_config(new_hotkeys)
+                
+                self.hotkey_manager.register_hotkeys(
+                    start_key=new_hotkeys.get('start', 'f6'),
+                    stop_key=new_hotkeys.get('stop', 'f7'),
+                    pause_key=new_hotkeys.get('pause', 'f8'),
+                    record_start_key=new_hotkeys.get('record_start', 'f9'),
+                    record_stop_key=new_hotkeys.get('record_stop', 'f10'),
+                    display_key=new_hotkeys.get('display', 'f11')
+                )
+                
+                self._update_button_texts()
+                app_logger.info(f"快捷键已更新", "Hotkey")
+                show_toast("快捷键设置已保存", 'success')
+        except Exception as e:
+            print(f"[ERROR] _on_hotkey_settings: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _on_select_window(self):
         from utils.window_selector import WindowSelectorDialog
@@ -2687,6 +2702,19 @@ class MainWindow(QMainWindow):
                 f"物理内存 (RSS): {usage['rss']} MB\n"
                 f"虚拟内存 (VMS): {usage['vms']} MB\n"
                 f"缓存数量: {usage['cache_size']}")
+    
+    def keyPressEvent(self, event):
+        from PyQt5.QtCore import Qt
+        
+        if event.key() == Qt.Key.Key_Escape:
+            if key_display_window.is_enabled():
+                key_display_window.disable()
+                self.teaching_btn.setChecked(False)
+                self.teaching_btn.setStyleSheet("")
+                show_toast("按键显示已关闭", 'info')
+                return
+        
+        super().keyPressEvent(event)
     
     def closeEvent(self, event):
         self._memory_timer.stop()

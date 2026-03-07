@@ -4,7 +4,7 @@ from .app_logger import AppLogger, app_logger
 from .memory import MemoryManager, ImageCache, memory_manager, image_cache
 from .recording import RecordingManager, RecordingEditor, RecordedAction, PYNPUT_AVAILABLE
 from .history import WorkflowHistoryManager, HistoryDialog, QuickSaveDialog
-from .teaching_mode import TeachingModeManager, teaching_mode_manager
+from .key_display import KeyDisplayWindow, key_display_window
 
 __all__ = [
     'HotkeyManager',
@@ -23,6 +23,6 @@ __all__ = [
     'WorkflowHistoryManager',
     'HistoryDialog',
     'QuickSaveDialog',
-    'TeachingModeManager',
-    'teaching_mode_manager',
+    'KeyDisplayWindow',
+    'key_display_window',
 ]

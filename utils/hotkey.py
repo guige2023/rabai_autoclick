@@ -21,13 +21,15 @@ class HotkeyManager(QObject):
     custom_triggered = pyqtSignal(str)
     record_start_triggered = pyqtSignal()
     record_stop_triggered = pyqtSignal()
+    display_triggered = pyqtSignal()
     
     DEFAULT_HOTKEYS = {
         'start': 'f6',
         'stop': 'f7',
         'pause': 'f8',
         'record_start': 'f9',
-        'record_stop': 'f10'
+        'record_stop': 'f10',
+        'display': 'f11'
     }
     
     def __init__(self, parent=None):
@@ -39,6 +41,7 @@ class HotkeyManager(QObject):
         self._config_path = None
         self._pynput_listener = None
         self._pressed_keys = set()
+        self._listener_started = False
         self._check_keyboard()
     
     def _check_keyboard(self):
@@ -124,6 +127,8 @@ class HotkeyManager(QObject):
                         self.record_start_triggered.emit()
                     elif action == 'record_stop':
                         self.record_stop_triggered.emit()
+                    elif action == 'display':
+                        self.display_triggered.emit()
                     break
     
     def _on_pynput_release(self, key):
@@ -137,11 +142,10 @@ class HotkeyManager(QObject):
                          pause_key: str = 'f8',
                          record_start_key: str = 'f9',
                          record_stop_key: str = 'f10',
+                         display_key: str = 'f11',
                          custom_hotkeys: Dict[str, str] = None) -> bool:
         if not self._keyboard_available:
             return False
-        
-        self.unregister_hotkeys()
         
         self._registered_hotkeys = {
             'start': start_key,
@@ -149,15 +153,23 @@ class HotkeyManager(QObject):
             'pause': pause_key,
             'record_start': record_start_key,
             'record_stop': record_stop_key,
+            'display': display_key,
         }
         
         if IS_MACOS and PYNPUT_AVAILABLE:
+            if self._listener_started and self._pynput_listener:
+                print("[DEBUG] Listener already running, just updating hotkeys")
+                self._hotkeys_enabled = True
+                return True
+            
             try:
+                print("[DEBUG] Starting new pynput listener")
                 self._pynput_listener = pynput_keyboard.Listener(
                     on_press=self._on_pynput_press,
                     on_release=self._on_pynput_release
                 )
                 self._pynput_listener.start()
+                self._listener_started = True
                 self._hotkeys_enabled = True
                 return True
             except Exception as e:
@@ -167,11 +179,13 @@ class HotkeyManager(QObject):
         try:
             import keyboard
             
+            keyboard.unhook_all()
             keyboard.add_hotkey(start_key, self._on_start)
             keyboard.add_hotkey(stop_key, self._on_stop)
             keyboard.add_hotkey(pause_key, self._on_pause)
             keyboard.add_hotkey(record_start_key, self._on_record_start)
             keyboard.add_hotkey(record_stop_key, self._on_record_stop)
+            keyboard.add_hotkey(display_key, self._on_display)
             
             if custom_hotkeys:
                 for name, key in custom_hotkeys.items():
@@ -195,12 +209,11 @@ class HotkeyManager(QObject):
         return True
     
     def unregister_hotkeys(self) -> None:
-        if self._pynput_listener:
-            try:
-                self._pynput_listener.stop()
-            except:
-                pass
-            self._pynput_listener = None
+        print("[DEBUG] unregister_hotkeys called")
+        
+        self._registered_hotkeys.clear()
+        self._pressed_keys.clear()
+        self._hotkeys_enabled = False
         
         if not IS_MACOS:
             try:
@@ -209,9 +222,7 @@ class HotkeyManager(QObject):
             except:
                 pass
         
-        self._registered_hotkeys.clear()
-        self._pressed_keys.clear()
-        self._hotkeys_enabled = False
+        print("[DEBUG] unregister_hotkeys done")
     
     def update_hotkey(self, action: str, new_key: str) -> bool:
         if not self._keyboard_available:
@@ -234,6 +245,9 @@ class HotkeyManager(QObject):
     
     def _on_record_stop(self):
         self.record_stop_triggered.emit()
+    
+    def _on_display(self):
+        self.display_triggered.emit()
     
     def _on_custom(self, name: str):
         callback = self._custom_hotkeys.get(name)

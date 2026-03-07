@@ -1,14 +1,12 @@
 import sys
-import os
 import threading
 import time
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QApplication, QSizePolicy
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplication
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect
-from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QBrush, QLinearGradient, QPainterPath
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject
+from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QBrush
 
 try:
     from pynput import mouse, keyboard
@@ -25,9 +23,12 @@ class KeyDisplayWidget(QWidget):
         self._init_ui()
     
     def _init_ui(self):
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setWindowFlags(
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(10, 5, 10, 5)
@@ -36,9 +37,9 @@ class KeyDisplayWidget(QWidget):
         self._key_labels: List[QLabel] = []
         for _ in range(self._max_keys):
             label = QLabel()
-            label.setAlignment(Qt.AlignCenter)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setMinimumSize(50, 50)
-            label.setFont(QFont('Microsoft YaHei', 14, QFont.Bold))
+            label.setFont(QFont('Arial', 14, QFont.Weight.Bold))
             label.setStyleSheet("""
                 QLabel {
                     background-color: rgba(0, 0, 0, 180);
@@ -109,116 +110,58 @@ class KeyDisplayWidget(QWidget):
         self.hide()
 
 
-class MouseIndicatorWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._click_animation = False
-        self._click_button = None
-        self._init_ui()
-    
-    def _init_ui(self):
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        
-        self.setFixedSize(60, 60)
-        self.hide()
-    
-    def show_click(self, button: str, x: int, y: int):
-        self._click_button = button
-        self._click_animation = True
-        self.move(x - 30, y - 30)
-        self.show()
-        
-        QTimer.singleShot(300, self._hide_click)
-    
-    def _hide_click(self):
-        self._click_animation = False
-        self.hide()
-    
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        if self._click_animation:
-            if self._click_button == 'left':
-                color = QColor(76, 175, 80, 200)
-            elif self._click_button == 'right':
-                color = QColor(244, 67, 54, 200)
-            else:
-                color = QColor(33, 150, 243, 200)
-            
-            painter.setPen(QPen(color, 3))
-            painter.setBrush(QBrush(color))
-            
-            painter.drawEllipse(5, 5, 50, 50)
-            
-            painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(10, 10, 40, 40)
-
-
-class RecordingOverlay(QWidget):
+class MousePositionWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
     
     def _init_ui(self):
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setWindowFlags(
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         
-        layout = QVBoxLayout(self)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(10, 5, 10, 5)
         
-        self.recording_label = QLabel("● 录制中")
-        self.recording_label.setStyleSheet("""
+        self._position_label = QLabel("鼠标: (0, 0)")
+        self._position_label.setFont(QFont('Arial', 12))
+        self._position_label.setStyleSheet("""
             QLabel {
-                background-color: rgba(244, 67, 54, 200);
+                background-color: rgba(0, 120, 215, 200);
                 color: white;
-                padding: 8px 16px;
-                border-radius: 15px;
-                font-size: 14px;
-                font-weight: bold;
+                border-radius: 8px;
+                padding: 8px 12px;
             }
         """)
-        layout.addWidget(self.recording_label)
+        self._layout.addWidget(self._position_label)
         
-        self.timer_label = QLabel("00:00")
-        self.timer_label.setStyleSheet("""
+        self._tip_label = QLabel("按 ESC 关闭显示")
+        self._tip_label.setFont(QFont('Arial', 10))
+        self._tip_label.setStyleSheet("""
             QLabel {
-                background-color: rgba(0, 0, 0, 150);
+                background-color: rgba(100, 100, 100, 180);
                 color: white;
+                border-radius: 5px;
                 padding: 5px 10px;
-                border-radius: 10px;
-                font-size: 12px;
             }
         """)
-        layout.addWidget(self.timer_label)
+        self._layout.addWidget(self._tip_label)
         
-        self._start_time = 0
-        self._timer = QTimer()
-        self._timer.timeout.connect(self._update_timer)
+        self.adjustSize()
     
-    def start_recording(self):
-        self._start_time = time.time()
-        self._timer.start(1000)
-        self.show()
-    
-    def stop_recording(self):
-        self._timer.stop()
-        self.hide()
-    
-    def _update_timer(self):
-        elapsed = int(time.time() - self._start_time)
-        minutes = elapsed // 60
-        seconds = elapsed % 60
-        self.timer_label.setText(f"{minutes:02d}:{seconds:02d}")
+    def update_position(self, x: int, y: int):
+        self._position_label.setText(f"鼠标: ({x}, {y})")
+        self.adjustSize()
 
 
-class TeachingModeManager:
+class KeyDisplayManager(QObject):
     _instance = None
     _lock = threading.Lock()
+    
+    toggled = pyqtSignal(bool)
     
     def __new__(cls):
         if cls._instance is None:
@@ -231,15 +174,13 @@ class TeachingModeManager:
     def __init__(self):
         if self._initialized:
             return
+        super().__init__()
         self._initialized = True
         
         self._enabled = False
         self._key_display: Optional[KeyDisplayWidget] = None
-        self._mouse_indicator: Optional[MouseIndicatorWidget] = None
-        self._recording_overlay: Optional[RecordingOverlay] = None
-        
-        self._mouse_listener = None
-        self._keyboard_listener = None
+        self._mouse_position_widget: Optional[MousePositionWidget] = None
+        self._position_timer: Optional[QTimer] = None
         
         self._pressed_keys: Dict[str, bool] = {}
     
@@ -247,70 +188,48 @@ class TeachingModeManager:
         return self._enabled
     
     def enable(self) -> bool:
-        if not PYNPUT_AVAILABLE:
-            return False
-        
         if self._enabled:
             return True
         
-        app = QApplication.instance()
-        if app is None:
+        try:
+            app = QApplication.instance()
+            if app is None:
+                return False
+            
+            self._key_display = KeyDisplayWidget()
+            self._mouse_position_widget = MousePositionWidget()
+            
+            screen = app.primaryScreen()
+            if screen:
+                geometry = screen.geometry()
+                self._key_display.move(geometry.width() - 400, 50)
+                self._mouse_position_widget.move(20, geometry.height() - 100)
+            
+            self._mouse_position_widget.show()
+            
+            self._position_timer = QTimer()
+            self._position_timer.timeout.connect(self._update_mouse_position)
+            self._position_timer.start(50)
+            
+            self._enabled = True
+            self.toggled.emit(True)
+            
+            return True
+            
+        except Exception as e:
+            print(f"[KeyDisplay] Error enabling: {e}")
+            import traceback
+            traceback.print_exc()
+            self._cleanup()
             return False
-        
-        self._key_display = KeyDisplayWidget()
-        self._mouse_indicator = MouseIndicatorWidget()
-        self._recording_overlay = RecordingOverlay()
-        
-        screen = app.primaryScreen()
-        if screen:
-            geometry = screen.geometry()
-            self._key_display.move(geometry.width() - 400, 50)
-            self._recording_overlay.move(20, 20)
-        
-        self._mouse_listener = mouse.Listener(
-            on_click=self._on_mouse_click
-        )
-        
-        self._keyboard_listener = keyboard.Listener(
-            on_press=self._on_key_press,
-            on_release=self._on_key_release
-        )
-        
-        self._mouse_listener.start()
-        self._keyboard_listener.start()
-        
-        self._enabled = True
-        return True
     
     def disable(self):
         if not self._enabled:
             return
         
-        if self._mouse_listener:
-            self._mouse_listener.stop()
-            self._mouse_listener = None
-        
-        if self._keyboard_listener:
-            self._keyboard_listener.stop()
-            self._keyboard_listener = None
-        
-        if self._key_display:
-            self._key_display.hide()
-            self._key_display.deleteLater()
-            self._key_display = None
-        
-        if self._mouse_indicator:
-            self._mouse_indicator.hide()
-            self._mouse_indicator.deleteLater()
-            self._mouse_indicator = None
-        
-        if self._recording_overlay:
-            self._recording_overlay.hide()
-            self._recording_overlay.deleteLater()
-            self._recording_overlay = None
-        
-        self._pressed_keys.clear()
+        self._cleanup()
         self._enabled = False
+        self.toggled.emit(False)
     
     def toggle(self) -> bool:
         if self._enabled:
@@ -319,60 +238,53 @@ class TeachingModeManager:
         else:
             return self.enable()
     
-    def _on_mouse_click(self, x, y, button, pressed):
-        if not self._enabled or not pressed:
-            return
+    def _cleanup(self):
+        if self._position_timer:
+            self._position_timer.stop()
+            self._position_timer.deleteLater()
+            self._position_timer = None
         
-        button_name = 'left' if button == mouse.Button.left else 'right' if button == mouse.Button.right else 'middle'
+        if self._key_display:
+            self._key_display.hide()
+            self._key_display.deleteLater()
+            self._key_display = None
         
-        if self._mouse_indicator:
-            QTimer.singleShot(0, lambda: self._mouse_indicator.show_click(button_name, x, y))
+        if self._mouse_position_widget:
+            self._mouse_position_widget.hide()
+            self._mouse_position_widget.deleteLater()
+            self._mouse_position_widget = None
+        
+        self._pressed_keys.clear()
     
-    def _on_key_press(self, key):
+    def _update_mouse_position(self):
         if not self._enabled:
             return
         
         try:
-            if hasattr(key, 'char') and key.char:
-                key_name = key.char
-            elif hasattr(key, 'name'):
-                key_name = key.name
-            else:
-                return
-            
-            if key_name not in self._pressed_keys:
-                self._pressed_keys[key_name] = True
-                if self._key_display:
-                    QTimer.singleShot(0, lambda k=key_name: self._key_display.add_key(k))
+            cursor = QApplication.instance().queryKeyboardModifiers()
+            pos = QApplication.instance().desktop().cursor().pos()
+            if self._mouse_position_widget:
+                self._mouse_position_widget.update_position(pos.x(), pos.y())
         except Exception:
             pass
     
-    def _on_key_release(self, key):
+    def on_key_press(self, key_name: str):
         if not self._enabled:
             return
         
-        try:
-            if hasattr(key, 'char') and key.char:
-                key_name = key.char
-            elif hasattr(key, 'name'):
-                key_name = key.name
-            else:
-                return
-            
-            if key_name in self._pressed_keys:
-                del self._pressed_keys[key_name]
-                if self._key_display:
-                    QTimer.singleShot(0, lambda k=key_name: self._key_display.remove_key(k))
-        except Exception:
-            pass
+        if key_name not in self._pressed_keys:
+            self._pressed_keys[key_name] = True
+            if self._key_display:
+                self._key_display.add_key(key_name)
     
-    def show_recording_overlay(self):
-        if self._recording_overlay:
-            self._recording_overlay.start_recording()
-    
-    def hide_recording_overlay(self):
-        if self._recording_overlay:
-            self._recording_overlay.stop_recording()
+    def on_key_release(self, key_name: str):
+        if not self._enabled:
+            return
+        
+        if key_name in self._pressed_keys:
+            del self._pressed_keys[key_name]
+            if self._key_display:
+                self._key_display.remove_key(key_name)
 
 
-teaching_mode_manager = TeachingModeManager()
+key_display_manager = KeyDisplayManager()

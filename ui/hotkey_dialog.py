@@ -165,6 +165,17 @@ class HotkeySettingsDialog(QDialog):
         record_group.setLayout(record_layout)
         layout.addWidget(record_group)
         
+        display_group = QGroupBox("显示控制")
+        display_layout = QFormLayout()
+        
+        self.display_edit = HotkeyEdit()
+        self.display_edit.set_hotkey(self.hotkeys.get('display', 'f11'))
+        self.display_edit.key_captured.connect(lambda k: self._on_key_captured('display', k))
+        display_layout.addRow("按键显示:", self.display_edit)
+        
+        display_group.setLayout(display_layout)
+        layout.addWidget(display_group)
+        
         reset_btn = QPushButton("恢复默认设置")
         reset_btn.clicked.connect(self._reset_to_default)
         layout.addWidget(reset_btn)
@@ -185,12 +196,14 @@ class HotkeySettingsDialog(QDialog):
         self.pause_edit.set_hotkey('f8')
         self.record_start_edit.set_hotkey('f9')
         self.record_stop_edit.set_hotkey('f10')
+        self.display_edit.set_hotkey('f11')
         self.hotkeys = {
             'start': 'f6', 
             'stop': 'f7', 
             'pause': 'f8',
             'record_start': 'f9',
-            'record_stop': 'f10'
+            'record_stop': 'f10',
+            'display': 'f11'
         }
     
     def _on_accept(self):
@@ -199,6 +212,7 @@ class HotkeySettingsDialog(QDialog):
         self.hotkeys['pause'] = self.pause_edit.get_hotkey() or 'f8'
         self.hotkeys['record_start'] = self.record_start_edit.get_hotkey() or 'f9'
         self.hotkeys['record_stop'] = self.record_stop_edit.get_hotkey() or 'f10'
+        self.hotkeys['display'] = self.display_edit.get_hotkey() or 'f11'
         self.accept()
     
     def get_hotkeys(self) -> dict:
