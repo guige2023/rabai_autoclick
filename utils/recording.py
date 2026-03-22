@@ -29,7 +29,7 @@ def check_pynput_permission() -> bool:
         listener.start()
         listener.stop()
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -162,7 +162,7 @@ class RecordingManager(QObject):
             current_pos = pyautogui.position()
             if current_pos != self._last_mouse_pos:
                 self._last_mouse_pos = current_pos
-        except:
+        except Exception:
             pass
     
     def stop_recording(self) -> List[RecordedAction]:

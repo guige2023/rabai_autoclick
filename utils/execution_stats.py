@@ -16,7 +16,7 @@ class ExecutionStats:
             try:
                 with open(self.stats_file, 'r', encoding='utf-8') as f:
                     self.history = json.load(f)
-            except:
+            except Exception:
                 self.history = []
         else:
             self.history = []
@@ -25,7 +25,7 @@ class ExecutionStats:
         try:
             with open(self.stats_file, 'w', encoding='utf-8') as f:
                 json.dump(self.history[-1000:], f, ensure_ascii=False, indent=2)
-        except:
+        except Exception:
             pass
     
     def start_session(self, workflow_name: str = "未命名", loop_count: int = 1):

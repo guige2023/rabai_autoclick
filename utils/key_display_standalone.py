@@ -30,7 +30,7 @@ class KeyDisplayApp:
                 self.root.call('::tk::unsupported::MacWindowStyle', 
                                'style', self.root._w, 
                                'floating', 'closeBox collapseBox resizable')
-            except:
+            except Exception:
                 pass
         
         self.keys = deque(maxlen=5)
@@ -84,7 +84,7 @@ class KeyDisplayApp:
             x = self.root.winfo_pointerx()
             y = self.root.winfo_pointery()
             self.mouse_label.config(text=f"Mouse: ({x}, {y})")
-        except:
+        except Exception:
             pass
         
         self.root.after(50, self._start_mouse_update)
@@ -105,13 +105,13 @@ class KeyDisplayApp:
         if self.mouse_listener:
             try:
                 self.mouse_listener.stop()
-            except:
+            except Exception:
                 pass
         
         if self.keyboard_listener:
             try:
                 self.keyboard_listener.stop()
-            except:
+            except Exception:
                 pass
     
     def _on_mouse_click(self, x, y, button, pressed):

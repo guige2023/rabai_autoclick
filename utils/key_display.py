@@ -57,7 +57,7 @@ class KeyDisplayWindow:
         if self._process is not None:
             try:
                 self._process.terminate()
-            except:
+            except Exception:
                 pass
             self._process = None
         

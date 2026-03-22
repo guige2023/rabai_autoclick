@@ -105,7 +105,7 @@ class HotkeyManager(QObject):
                     'page_up': 'pageup', 'page_down': 'pagedown',
                 }
                 return name_map.get(name, name)
-        except:
+        except Exception:
             pass
         return ''
     
@@ -222,7 +222,7 @@ class HotkeyManager(QObject):
             try:
                 import keyboard
                 keyboard.unhook_all()
-            except:
+            except Exception:
                 pass
         
         print("[DEBUG] unregister_hotkeys done")

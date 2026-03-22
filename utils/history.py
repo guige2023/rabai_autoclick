@@ -32,7 +32,7 @@ class WorkflowHistoryManager:
             try:
                 with open(self.index_file, 'r', encoding='utf-8') as f:
                     self.index = json.load(f)
-            except:
+            except Exception:
                 self.index = {'workflows': []}
         else:
             self.index = {'workflows': []}
@@ -81,7 +81,7 @@ class WorkflowHistoryManager:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 return data.get('workflow', data)
-            except:
+            except Exception:
                 return None
         return None
     
@@ -113,7 +113,7 @@ class WorkflowHistoryManager:
                         break
                 self._save_index()
                 return True
-            except:
+            except Exception:
                 return False
         return False
     
