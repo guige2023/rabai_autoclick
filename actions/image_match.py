@@ -1,13 +1,16 @@
-import cv2
-import numpy as np
-import pyautogui
 import time
 from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
 import sys
 import os
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
+from utils.mouse_utils import macos_click
+
+import cv2
+import numpy as np
+import pyautogui
 
 
 class ImageMatchAction(BaseAction):
@@ -20,9 +23,12 @@ class ImageMatchAction(BaseAction):
         confidence = params.get('confidence', 0.8)
         region = params.get('region', None)
         click_offset = params.get('click_offset', (0, 0))
+        offset_x = params.get('offset_x', 0)
+        offset_y = params.get('offset_y', 0)
         click_center = params.get('click_center', True)
         double_click = params.get('double_click', False)
         move_duration = params.get('move_duration', 0.2)
+        button = params.get('button', 'left')
         
         if not template_path:
             return ActionResult(
@@ -47,21 +53,27 @@ class ImageMatchAction(BaseAction):
             
             center_x, center_y = position
             
-            if click_offset:
-                center_x += click_offset[0]
-                center_y += click_offset[1]
+            if isinstance(click_offset, (tuple, list)) and len(click_offset) >= 2:
+                center_x += int(click_offset[0])
+                center_y += int(click_offset[1])
+            
+            center_x += int(offset_x)
+            center_y += int(offset_y)
             
             pyautogui.moveTo(center_x, center_y, duration=move_duration)
-            time.sleep(0.05)
+            time.sleep(0.2)
             
-            if double_click:
-                pyautogui.doubleClick(center_x, center_y)
-            else:
-                pyautogui.click(center_x, center_y)
+            click_count = 2 if double_click else 1
+            macos_click(center_x, center_y, click_count, button)
+            
+            time.sleep(0.1)
+            
+            click_type = "双击" if double_click else "单击"
+            button_name = "右键" if button == 'right' else "左键" if button == 'left' else "中键"
             
             return ActionResult(
                 success=True,
-                message=f"图像点击成功: ({center_x}, {center_y})",
+                message=f"图像{click_type}{button_name}成功: ({center_x}, {center_y})",
                 data={'x': center_x, 'y': center_y, 'template': template_path}
             )
         except Exception as e:
@@ -106,9 +118,12 @@ class ImageMatchAction(BaseAction):
             'confidence': 0.8,
             'region': None,
             'click_offset': (0, 0),
+            'offset_x': 0,
+            'offset_y': 0,
             'click_center': True,
             'double_click': False,
-            'move_duration': 0.2
+            'move_duration': 0.2,
+            'button': 'left'
         }
 
 

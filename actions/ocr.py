@@ -1,38 +1,46 @@
-import pyautogui
 import time
 from typing import Dict, Any, Optional, Tuple, List
 import sys
 import os
+import warnings
+
+import pyautogui
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
+from utils.mouse_utils import macos_click
 
-OCR_AVAILABLE = False
-OCR_BACKEND = None
 
-try:
-    from rapidocr_onnxruntime import RapidOCR
-    OCR_AVAILABLE = True
-    OCR_BACKEND = 'rapidocr'
-except ImportError:
-    pass
+_ocr_instance = None
+_ocr_backend = None
 
-if not OCR_AVAILABLE:
+
+def _get_ocr():
+    global _ocr_instance, _ocr_backend
+    if _ocr_instance is not None:
+        return _ocr_instance, _ocr_backend
+    
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from rapidocr_onnxruntime import RapidOCR
+            _ocr_instance = RapidOCR()
+            _ocr_backend = 'rapidocr'
+            return _ocr_instance, _ocr_backend
+    except (ImportError, AttributeError, Exception):
+        pass
+    
     try:
         import easyocr
-        OCR_AVAILABLE = True
-        OCR_BACKEND = 'easyocr'
-    except ImportError:
+        _ocr_instance = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
+        _ocr_backend = 'easyocr'
+        return _ocr_instance, _ocr_backend
+    except (ImportError, Exception):
         pass
-
-if not OCR_AVAILABLE:
-    try:
-        os.environ['FLAGS_use_mkldnn'] = '0'
-        os.environ['FLAGS_enable_onednn_backend'] = '0'
-        from paddleocr import PaddleOCR
-        OCR_AVAILABLE = True
-        OCR_BACKEND = 'paddleocr'
-    except ImportError:
-        pass
+    
+    return None, None
 
 
 def preprocess_image_enhanced(img_array, mode='auto'):
@@ -96,6 +104,10 @@ def preprocess_image_enhanced(img_array, mode='auto'):
         return [('original', img_array)]
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
+
+
 class OCRAction(BaseAction):
     action_type = "ocr"
     display_name = "OCR文字识别"
@@ -106,35 +118,9 @@ class OCRAction(BaseAction):
     
     @classmethod
     def get_ocr(cls):
-        if cls._ocr_instance is None and OCR_AVAILABLE:
-            if OCR_BACKEND == 'rapidocr':
-                cls._ocr_instance = RapidOCR(
-                    det_limit_side_len=1280,
-                    det_db_thresh=0.2,
-                    det_db_box_thresh=0.4,
-                    det_db_unclip_ratio=1.8,
-                    det_db_score_mode='fast',
-                    use_det=True,
-                    use_cls=True,
-                    use_rec=True,
-                    print_verbose=False
-                )
-                cls._ocr_backend = 'rapidocr'
-            elif OCR_BACKEND == 'easyocr':
-                cls._ocr_instance = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
-                cls._ocr_backend = 'easyocr'
-            elif OCR_BACKEND == 'paddleocr':
-                cls._ocr_instance = PaddleOCR(
-                    use_angle_cls=True, 
-                    lang='ch', 
-                    show_log=False, 
-                    use_gpu=False,
-                    det_db_thresh=0.2,
-                    det_db_box_thresh=0.4,
-                    det_db_unclip_ratio=1.8
-                )
-                cls._ocr_backend = 'paddleocr'
-        return cls._ocr_instance
+        ocr, backend = _get_ocr()
+        cls._ocr_backend = backend
+        return ocr
     
     def _sort_by_position(self, results: List[dict]) -> List[dict]:
         """按位置排序：从上到下，从左到右"""
@@ -229,11 +215,15 @@ class OCRAction(BaseAction):
         return results
     
     def execute(self, context, params: Dict[str, Any]) -> ActionResult:
-        if not OCR_AVAILABLE:
+        ocr, ocr_backend = _get_ocr()
+        
+        if ocr is None:
             return ActionResult(
                 success=False,
                 message="OCR未安装，请运行: pip install rapidocr-onnxruntime"
             )
+        
+        self._ocr_backend = ocr_backend
         
         region = params.get('region', None)
         click_text = params.get('click_text', None)
@@ -243,14 +233,15 @@ class OCRAction(BaseAction):
         move_duration = params.get('move_duration', 0.2)
         preprocess_mode = params.get('preprocess_mode', 'auto')
         retry_count = params.get('retry_count', 3)
+        click_count = params.get('click_count', 1)
+        button = params.get('button', 'left')
+        offset_x = params.get('offset_x', 0)
+        offset_y = params.get('offset_y', 0)
         
         try:
             screenshot = pyautogui.screenshot(region=region)
             
-            import numpy as np
             img_array = np.array(screenshot)
-            
-            ocr = self.get_ocr()
             
             processed_images = preprocess_image_enhanced(img_array, preprocess_mode)
             
@@ -302,14 +293,21 @@ class OCRAction(BaseAction):
                     click_index = len(matched_results) - 1
                 
                 target = matched_results[click_index]
-                pyautogui.moveTo(target['x'], target['y'], duration=move_duration)
-                time.sleep(0.05)
-                pyautogui.click(target['x'], target['y'])
+                click_x = int(target['x']) + int(offset_x)
+                click_y = int(target['y']) + int(offset_y)
                 
+                pyautogui.moveTo(click_x, click_y, duration=move_duration)
+                time.sleep(0.2)
+                
+                macos_click(click_x, click_y, click_count, button)
+                macos_click(click_x, click_y, click_count, button)
+                
+                click_type = "双击" if click_count == 2 else "单击"
+                button_name = "右键" if button == 'right' else "左键" if button == 'left' else "中键"
                 match_info = f"第{click_index + 1}个匹配项(共{len(matched_results)}个)"
                 return ActionResult(
                     success=True,
-                    message=f"点击成功: '{target['text']}' [{match_info}]",
+                    message=f"{click_type}{button_name}成功: '{target['text']}' [{match_info}] 偏移({offset_x},{offset_y})",
                     data={
                         'text': full_text,
                         'results': ocr_results,
@@ -360,5 +358,9 @@ class OCRAction(BaseAction):
             'contains': None,
             'move_duration': 0.2,
             'preprocess_mode': 'auto',
-            'retry_count': 3
+            'retry_count': 3,
+            'click_count': 1,
+            'button': 'left',
+            'offset_x': 0,
+            'offset_y': 0
         }
