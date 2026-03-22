@@ -80,7 +80,7 @@ def test_context_safe_exec():
     try:
         ctx.safe_exec("__import__('os').system('echo test')")
         assert False, "危险代码不应执行"
-    except:
+    except Exception:
         pass
 
 @test("Core - BaseAction 基类")
