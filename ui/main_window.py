@@ -567,8 +567,9 @@ class VariablesWidget(QWidget):
                 if name:
                     try:
                         value = json.loads(value)
-                    except:
-                        pass
+                    except Exception as e:
+                        import logging
+                        logging.getLogger('RabAI').warning(f'解析变量JSON失败: {e}')
                     variables[name] = value
         return variables
     
@@ -904,7 +905,9 @@ class MainWindow(QMainWindow):
         try:
             mem = memory_manager.get_memory_usage()
             self.memory_label.setText(f"内存: {mem['rss']} MB")
-        except:
+        except Exception as e:
+            import logging
+            logging.getLogger('RabAI').warning(f'内存显示更新失败: {e}')
             self.memory_label.setText("")
     
     def _load_actions(self):
@@ -1603,8 +1606,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'engine_signals'):
             try:
                 self.engine_signals.deleteLater()
-            except:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger('RabAI').debug(f'清理engine_signals失败: {e}')
         
         if self.engine.is_running():
             self.engine.stop()

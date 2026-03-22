@@ -180,16 +180,18 @@ class RecordingManager(QObject):
                 self._mouse_listener.stop()
                 try:
                     self._mouse_listener.join(timeout=1.0)
-                except:
-                    pass
+                except Exception as e:
+                    import logging
+                    logging.getLogger("RabAI").debug(f"停止鼠标监听器失败: {e}")
                 self._mouse_listener = None
             
             if self._keyboard_listener:
                 self._keyboard_listener.stop()
                 try:
                     self._keyboard_listener.join(timeout=1.0)
-                except:
-                    pass
+                except Exception as e:
+                    import logging
+                    logging.getLogger("RabAI").debug(f"停止键盘监听器失败: {e}")
                 self._keyboard_listener = None
         
         self.recording_stopped.emit(self._actions)

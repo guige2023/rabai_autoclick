@@ -279,8 +279,9 @@ print("变量已设置")''',
                     value = int(value)
                 elif value.replace('.', '').isdigit():
                     value = float(value)
-            except:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger('RabAI').warning(f'解析测试变量失败: {e}')
             
             self._test_vars[name] = value
             self._update_test_vars_display()

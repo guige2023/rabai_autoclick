@@ -66,8 +66,9 @@ class HotkeyManager(QObject):
                 with open(self._config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
                     return config.get('hotkeys', self.DEFAULT_HOTKEYS.copy())
-            except:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger("RabAI").warning(f"加载热键配置失败: {e}")
         return self.DEFAULT_HOTKEYS.copy()
     
     def save_config(self, hotkeys: Dict[str, str]) -> bool:
@@ -82,7 +83,9 @@ class HotkeyManager(QObject):
             with open(self._config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
             return True
-        except:
+        except Exception as e:
+                import logging
+                logging.getLogger("RabAI").warning(f"保存热键配置失败: {e}")
             return False
     
     def _normalize_key(self, key_str: str) -> str:

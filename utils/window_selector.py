@@ -190,15 +190,17 @@ def focus_window(window: WindowInfo) -> bool:
             app_name = window.title.split(' - ')[0] if ' - ' in window.title else window.title
             subprocess.run(['osascript', '-e', f'tell application "{app_name}" to activate'], timeout=5)
             return True
-        except:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger('RabAI').debug(f'激活macOS窗口失败: {e}')
     elif WIN32_AVAILABLE and window.hwnd:
         try:
             win32gui.ShowWindow(window.hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(window.hwnd)
             return True
-        except:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger('RabAI').debug(f'激活Win32窗口失败: {e}')
     return False
 
 

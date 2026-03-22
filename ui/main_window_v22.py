@@ -1066,7 +1066,8 @@ class VariablesWidget(QWidget):
                             value = json.loads(value_str) if value_str else ([] if var_type == "list" else {})
                         else:
                             value = value_str
-                    except:
+                    except Exception as e:
+                        app_logger.warning(f"解析变量值失败: {e}")
                         value = value_str
                     
                     variables[name] = {
@@ -1986,8 +1987,8 @@ class MainWindow(QMainWindow):
             if new_pos.x == test_x + 1 and new_pos.y == test_y + 1:
                 app_logger.success("辅助功能权限已授权", "Permission")
                 return
-        except:
-            pass
+        except Exception as e:
+            app_logger.debug(f"辅助功能检查失败: {e}")
         
         reply = QMessageBox.question(
             self, 
@@ -2012,7 +2013,8 @@ class MainWindow(QMainWindow):
         try:
             mem = memory_manager.get_memory_usage()
             self.memory_label.setText(f"内存: {mem['rss']} MB")
-        except:
+        except Exception as e:
+            app_logger.debug(f"内存显示更新失败: {e}")
             self.memory_label.setText("")
     
     def _on_workflow_added_from_recording(self, steps: list):
@@ -2950,8 +2952,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'engine_signals'):
             try:
                 self.engine_signals.deleteLater()
-            except:
-                pass
+            except Exception as e:
+                app_logger.debug(f"清理engine_signals失败: {e}")
         
         if self.engine.is_running():
             self.engine.stop()
