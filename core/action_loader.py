@@ -1,9 +1,12 @@
 import os
 import importlib.util
 import inspect
+import logging
 from typing import Dict, Type, Optional
 from pathlib import Path
 from .base_action import BaseAction
+
+logger = logging.getLogger(__name__)
 
 
 class ActionLoader:
@@ -46,7 +49,7 @@ class ActionLoader:
                         first_action = obj
             return first_action
         except Exception as e:
-            print(f"加载动作文件失败 {file_path}: {e}")
+            logger.error(f"加载动作文件失败 {file_path}: {e}")
         
         return None
     

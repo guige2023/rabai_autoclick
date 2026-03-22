@@ -1,11 +1,14 @@
 import json
 import time
 import threading
+import logging
 from typing import Dict, Any, Optional, Callable
 from pathlib import Path
 from .context import ContextManager
 from .action_loader import ActionLoader
 from .base_action import ActionResult
+
+logger = logging.getLogger(__name__)
 
 
 class FlowEngine:
@@ -36,7 +39,7 @@ class FlowEngine:
             
             return True
         except Exception as e:
-            print(f"加载工作流失败: {e}")
+            logger.error(f"加载工作流失败: {e}")
             return False
     
     def load_workflow_from_dict(self, workflow: Dict[str, Any]) -> bool:
@@ -46,7 +49,7 @@ class FlowEngine:
                 self.context.set_all(self._workflow['variables'])
             return True
         except Exception as e:
-            print(f"加载工作流失败: {e}")
+            logger.error(f"加载工作流失败: {e}")
             return False
     
     def save_workflow(self, workflow_path: str) -> bool:
@@ -56,7 +59,7 @@ class FlowEngine:
                 json.dump(self._workflow, f, ensure_ascii=False, indent=2)
             return True
         except Exception as e:
-            print(f"保存工作流失败: {e}")
+            logger.error(f"保存工作流失败: {e}")
             return False
     
     def run(self) -> bool:
