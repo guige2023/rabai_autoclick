@@ -2341,8 +2341,6 @@ class MainWindow(QMainWindow):
             show_warning("提示", "工作流中没有步骤")
             return
         
-        print(f"[DEBUG] _target_region = {self._target_region}")
-        
         if self._target_region:
             for step in self.current_workflow.get('steps', []):
                 step_type = step.get('type')
@@ -2736,7 +2734,6 @@ class MainWindow(QMainWindow):
                 app_logger.info(f"快捷键已更新", "Hotkey")
                 show_toast("快捷键设置已保存", 'success')
         except Exception as e:
-            print(f"[ERROR] _on_hotkey_settings: {e}")
             import traceback
             traceback.print_exc()
     
