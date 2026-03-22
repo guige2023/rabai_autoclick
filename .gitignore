@@ -25,38 +25,32 @@ venv/
 ENV/
 env/
 .venv/
-
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
-
 # Logs
 logs/
 *.log
-
 # History
 history/
-
 # Config
 config.json
-
 # Screenshots
 *.png
 !workflows/*.png
-
 # Test
 .pytest_cache/
 .coverage
 htmlcov/
-
 # OS
 .DS_Store
 Thumbs.db
-
 # Build
 *.spec
-build/
-dist/
+# macOS
+# Auto-generated configs
+111.json
+logs/*.log

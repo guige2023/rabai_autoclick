@@ -93,7 +93,9 @@ PARAM_DESCRIPTIONS = {
     'count': '循环次数',
     'delay': '延时时间，单位: 秒',
     'clicks': '点击次数，默认1次。双击则填2',
+    'click_count': '点击次数: 1=单击, 2=双击',
     'double_click': '是否双击。勾选则执行双击操作',
+    'button': '鼠标按键: left=左键, right=右键, middle=中键',
     'relative': '是否相对坐标。勾选后x,y为相对于当前位置的偏移',
     'enter_after': '输入后是否按回车键。勾选则输入完成后自动按回车',
     'find_all': '是否查找所有匹配。勾选返回所有匹配位置',
@@ -117,6 +119,8 @@ PARAM_DESCRIPTIONS = {
     'loop_start': '循环开始时跳转的步骤ID',
     'loop_end': '循环结束时跳转的步骤ID',
     'click_offset': '点击偏移量，格式: x,y。相对于匹配中心点的偏移',
+    'offset_x': 'X轴偏移量，正数向右，负数向左',
+    'offset_y': 'Y轴偏移量，正数向下，负数向上',
     'click_center': '是否点击中心点。勾选则点击匹配区域的中心',
     'output_var': '输出变量名，将结果保存到指定变量',
     'pre_delay': '前置延时，执行动作前的等待时间（秒）',
@@ -297,14 +301,37 @@ class ActionConfigWidget(QWidget):
         self.post_delay.setSingleStep(0.1)
         common_layout.addRow("后置延时(秒):", self.post_delay)
         
-        self.output_var = QLineEdit()
+        output_layout = QHBoxLayout()
+        self.output_var = QComboBox()
+        self.output_var.setEditable(True)
         self.output_var.setPlaceholderText("可选，保存结果的变量名")
-        common_layout.addRow("输出变量:", self.output_var)
+        self.output_var.lineEdit().textChanged.connect(lambda: self.config_changed.emit())
+        output_layout.addWidget(self.output_var)
+        
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setFixedWidth(30)
+        refresh_btn.setToolTip("刷新变量列表")
+        refresh_btn.clicked.connect(self._refresh_output_variables)
+        output_layout.addWidget(refresh_btn)
+        
+        common_layout.addRow("输出变量:", output_layout)
         
         common_group.setLayout(common_layout)
         layout.addWidget(common_group)
         
         layout.addStretch()
+    
+    def _refresh_output_variables(self):
+        if hasattr(self.parent(), 'variables_widget'):
+            var_names = self.parent().variables_widget.get_variable_names()
+            current_text = self.output_var.currentText()
+            self.output_var.clear()
+            self.output_var.addItem("")
+            for name in var_names:
+                self.output_var.addItem(name)
+            idx = self.output_var.findText(current_text)
+            if idx >= 0:
+                self.output_var.setCurrentIndex(idx)
     
     def _create_coord_widget(self, params: list, required_params: list) -> QWidget:
         container = QWidget()
@@ -332,6 +359,11 @@ class ActionConfigWidget(QWidget):
         pick_btn = QPushButton("选取位置")
         pick_btn.clicked.connect(lambda: self._pick_coords(params))
         h_layout.addWidget(pick_btn)
+        
+        import_btn = QPushButton("变量")
+        import_btn.setToolTip("从变量导入坐标")
+        import_btn.clicked.connect(lambda: self._import_coord_variable(params))
+        h_layout.addWidget(import_btn)
         
         h_layout.addStretch()
         return container
@@ -362,8 +394,48 @@ class ActionConfigWidget(QWidget):
         pick_btn.clicked.connect(lambda: self._pick_coords(params))
         h_layout.addWidget(pick_btn)
         
+        import_btn = QPushButton("变量")
+        import_btn.setToolTip("从变量导入坐标")
+        import_btn.clicked.connect(lambda: self._import_coord_variable(params))
+        h_layout.addWidget(import_btn)
+        
         h_layout.addStretch()
         return container
+    
+    def _import_coord_variable(self, params: list):
+        from PyQt5.QtWidgets import QInputDialog
+        
+        if hasattr(self.parent(), 'variables_widget'):
+            var_names = self.parent().variables_widget.get_variable_names()
+            coord_vars = [v for v in var_names]
+            
+            if not coord_vars:
+                show_toast("没有可用的变量", 'warning')
+                return
+            
+            var_name, ok = QInputDialog.getItem(self, "导入变量", "选择变量:", coord_vars, 0, False)
+            if ok and var_name:
+                variables = self.parent().variables_widget.get_variables()
+                var_data = variables.get(var_name, {})
+                var_type = var_data.get('type', 'string')
+                
+                if var_type == 'coordinate':
+                    value = var_data.get('default_value', (0, 0))
+                    if isinstance(value, (tuple, list)) and len(value) >= 2:
+                        if len(params) >= 1 and f"{params[0]}_spin" in self.widgets:
+                            self.widgets[f"{params[0]}_spin"].setValue(int(value[0]))
+                        if len(params) >= 2 and f"{params[1]}_spin" in self.widgets:
+                            self.widgets[f"{params[1]}_spin"].setValue(int(value[1]))
+                        show_toast(f"已导入变量: {var_name}", 'success')
+                elif var_type == 'region':
+                    value = var_data.get('default_value', (0, 0, 100, 100))
+                    if isinstance(value, (tuple, list)) and len(value) >= 4:
+                        for i, param in enumerate(params[:4]):
+                            if f"{param}_spin" in self.widgets:
+                                self.widgets[f"{param}_spin"].setValue(int(value[i]))
+                        show_toast(f"已导入变量: {var_name}", 'success')
+                else:
+                    show_toast(f"变量类型不匹配，需要 coordinate 或 region 类型", 'warning')
     
     def _pick_coords(self, params: list):
         self.window().hide()
@@ -563,6 +635,14 @@ class ActionConfigWidget(QWidget):
             widget.setCurrentIndex(idx if idx >= 0 else 0)
             widget.currentIndexChanged.connect(self.config_changed.emit)
             return widget
+        elif param == 'click_count':
+            widget = QComboBox()
+            widget.addItem("单击", 1)
+            widget.addItem("双击", 2)
+            idx = widget.findData(default_value) if default_value else 0
+            widget.setCurrentIndex(idx if idx >= 0 else 0)
+            widget.currentIndexChanged.connect(self.config_changed.emit)
+            return widget
         elif param == 'direction':
             widget = QComboBox()
             widget.addItem("向下滚动", "down")
@@ -729,7 +809,7 @@ class ActionConfigWidget(QWidget):
         config['pre_delay'] = self.pre_delay.value()
         config['post_delay'] = self.post_delay.value()
         
-        output_var = self.output_var.text().strip()
+        output_var = self.output_var.currentText().strip()
         if output_var:
             config['output_var'] = output_var
         
@@ -795,7 +875,11 @@ class ActionConfigWidget(QWidget):
             self.post_delay.blockSignals(False)
         if 'output_var' in config:
             self.output_var.blockSignals(True)
-            self.output_var.setText(config['output_var'])
+            idx = self.output_var.findText(config['output_var'])
+            if idx >= 0:
+                self.output_var.setCurrentIndex(idx)
+            else:
+                self.output_var.setEditText(config['output_var'])
             self.output_var.blockSignals(False)
 
 
@@ -875,8 +959,11 @@ class StepListWidget(QWidget):
 
 
 class VariablesWidget(QWidget):
+    variables_changed = pyqtSignal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._variables: Dict[str, Dict] = {}
         self._init_ui()
     
     def _init_ui(self):
@@ -884,55 +971,146 @@ class VariablesWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(2)
-        self.table.setHorizontalHeaderLabels(["变量名", "值"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["变量名", "类型", "默认值", "描述"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         layout.addWidget(self.table)
         
         btn_layout = QHBoxLayout()
         self.add_btn = QPushButton("添加变量")
         self.remove_btn = QPushButton("删除变量")
+        self.import_btn = QPushButton("导入变量")
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.remove_btn)
+        btn_layout.addWidget(self.import_btn)
         layout.addLayout(btn_layout)
         
         self.add_btn.clicked.connect(self._add_variable)
         self.remove_btn.clicked.connect(self._remove_variable)
+        self.import_btn.clicked.connect(self._import_variable)
     
     def _add_variable(self):
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(""))
-        self.table.setItem(row, 1, QTableWidgetItem(""))
+        
+        name_edit = QTableWidgetItem("")
+        self.table.setItem(row, 0, name_edit)
+        
+        type_combo = QComboBox()
+        type_combo.addItems(["string", "integer", "float", "boolean", "coordinate", "region", "list", "dict"])
+        self.table.setCellWidget(row, 1, type_combo)
+        
+        value_edit = QTableWidgetItem("")
+        self.table.setItem(row, 2, value_edit)
+        
+        desc_edit = QTableWidgetItem("")
+        self.table.setItem(row, 3, desc_edit)
     
     def _remove_variable(self):
         current_row = self.table.currentRow()
         if current_row >= 0:
             self.table.removeRow(current_row)
+            self.variables_changed.emit()
+    
+    def _import_variable(self):
+        from PyQt5.QtWidgets import QInputDialog
+        var_names = self.get_variable_names()
+        if not var_names:
+            show_toast("没有可用的变量", 'warning')
+            return
+        
+        var_name, ok = QInputDialog.getItem(self, "导入变量", "选择变量:", var_names, 0, False)
+        if ok and var_name:
+            show_toast(f"已选择变量: ${{{var_name}}}", 'info')
+    
+    def get_variable_names(self) -> List[str]:
+        names = []
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            if name_item and name_item.text().strip():
+                names.append(name_item.text().strip())
+        return names
     
     def get_variables(self) -> Dict[str, Any]:
         variables = {}
         for row in range(self.table.rowCount()):
             name_item = self.table.item(row, 0)
-            value_item = self.table.item(row, 1)
-            if name_item and value_item:
+            type_widget = self.table.cellWidget(row, 1)
+            value_item = self.table.item(row, 2)
+            desc_item = self.table.item(row, 3)
+            
+            if name_item:
                 name = name_item.text().strip()
-                value = value_item.text()
                 if name:
+                    var_type = type_widget.currentText() if type_widget else "string"
+                    value_str = value_item.text() if value_item else ""
+                    description = desc_item.text() if desc_item else ""
+                    
                     try:
-                        value = json.loads(value)
+                        if var_type == "integer":
+                            value = int(value_str) if value_str else 0
+                        elif var_type == "float":
+                            value = float(value_str) if value_str else 0.0
+                        elif var_type == "boolean":
+                            value = value_str.lower() in ('true', '1', 'yes')
+                        elif var_type == "coordinate":
+                            parts = value_str.replace('(', '').replace(')', '').split(',')
+                            value = tuple(int(p.strip()) for p in parts[:2]) if len(parts) >= 2 else (0, 0)
+                        elif var_type == "region":
+                            parts = value_str.replace('(', '').replace(')', '').split(',')
+                            value = tuple(int(p.strip()) for p in parts[:4]) if len(parts) >= 4 else (0, 0, 100, 100)
+                        elif var_type in ("list", "dict"):
+                            value = json.loads(value_str) if value_str else ([] if var_type == "list" else {})
+                        else:
+                            value = value_str
                     except:
-                        pass
-                    variables[name] = value
+                        value = value_str
+                    
+                    variables[name] = {
+                        'type': var_type,
+                        'default_value': value,
+                        'description': description
+                    }
+        
         return variables
     
     def set_variables(self, variables: Dict[str, Any]) -> None:
         self.table.setRowCount(0)
-        for name, value in variables.items():
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            self.table.setItem(row, 0, QTableWidgetItem(name))
-            self.table.setItem(row, 1, QTableWidgetItem(json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)))
+        for name, var_data in variables.items():
+            if isinstance(var_data, dict):
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, QTableWidgetItem(name))
+                
+                type_combo = QComboBox()
+                type_combo.addItems(["string", "integer", "float", "boolean", "coordinate", "region", "list", "dict"])
+                idx = type_combo.findText(var_data.get('type', 'string'))
+                type_combo.setCurrentIndex(idx if idx >= 0 else 0)
+                self.table.setCellWidget(row, 1, type_combo)
+                
+                default_val = var_data.get('default_value', '')
+                if isinstance(default_val, (tuple, list)):
+                    default_val = str(default_val)
+                elif isinstance(default_val, (dict, list)):
+                    default_val = json.dumps(default_val, ensure_ascii=False)
+                else:
+                    default_val = str(default_val)
+                self.table.setItem(row, 2, QTableWidgetItem(default_val))
+                self.table.setItem(row, 3, QTableWidgetItem(var_data.get('description', '')))
+            else:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, QTableWidgetItem(name))
+                
+                type_combo = QComboBox()
+                type_combo.addItems(["string", "integer", "float", "boolean", "coordinate", "region", "list", "dict"])
+                self.table.setCellWidget(row, 1, type_combo)
+                
+                self.table.setItem(row, 2, QTableWidgetItem(str(var_data)))
+                self.table.setItem(row, 3, QTableWidgetItem(""))
 
 
 class LogWidget(QWidget):
@@ -1645,6 +1823,8 @@ class MainWindow(QMainWindow):
         self._loop_interval = 1.0
         self._current_loop = 0
         self._is_looping = False
+        self._mini_mode = False
+        self._mini_toolbar = None
         
         self.predictive_engine = create_predictive_engine("./data")
         self.healing_system = create_self_healing_system("./data")
@@ -1691,6 +1871,7 @@ class MainWindow(QMainWindow):
         self.loop_btn = QPushButton("🔄 循环")
         self.stats_btn = QPushButton("📊 统计")
         self.memory_btn = QPushButton("💾 内存")
+        self.mini_btn = QPushButton("📱 迷你")
         
         self.stop_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
@@ -1712,6 +1893,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.loop_btn)
         toolbar.addWidget(self.stats_btn)
         toolbar.addWidget(self.memory_btn)
+        toolbar.addWidget(self.mini_btn)
         toolbar.addStretch()
         
         self.memory_label = QLabel()
@@ -2018,6 +2200,7 @@ class MainWindow(QMainWindow):
         self.loop_btn.clicked.connect(self._on_loop_settings)
         self.stats_btn.clicked.connect(self._on_show_stats)
         self.memory_btn.clicked.connect(self._on_memory_optimize)
+        self.mini_btn.clicked.connect(self._toggle_mini_mode)
         
         self.action_list.currentRowChanged.connect(self._on_action_selected)
         
@@ -2223,6 +2406,38 @@ class MainWindow(QMainWindow):
             self.engine.pause()
             self.pause_btn.setText("▶ 继续")
             app_logger.info("已暂停", "Workflow")
+    
+    def _toggle_mini_mode(self):
+        from .mini_toolbar import MiniToolbar
+        
+        if self._mini_mode:
+            self._mini_mode = False
+            if self._mini_toolbar:
+                self._mini_toolbar.close()
+                self._mini_toolbar = None
+            self.showNormal()
+            self.activateWindow()
+            self.mini_btn.setText("📱 迷你")
+            self.mini_btn.setStyleSheet("")
+        else:
+            self._mini_mode = True
+            self._mini_toolbar = MiniToolbar()
+            self._mini_toolbar.run_clicked.connect(self._on_run)
+            self._mini_toolbar.stop_clicked.connect(self._on_stop)
+            self._mini_toolbar.region_clicked.connect(self._on_select_region)
+            self._mini_toolbar.window_clicked.connect(self._on_select_window)
+            self._mini_toolbar.settings_clicked.connect(self._on_hotkey_settings)
+            self._mini_toolbar.switch_to_full.connect(self._toggle_mini_mode)
+            
+            if self._target_region:
+                self._mini_toolbar.set_region(*self._target_region)
+            
+            self._mini_toolbar.move(100, 100)
+            self._mini_toolbar.show()
+            
+            self.hide()
+            self.mini_btn.setText("📱 完整")
+            self.mini_btn.setStyleSheet("background-color: #9C27B0; color: white;")
     
     def _toggle_always_on_top(self):
         self._always_on_top = not self._always_on_top
@@ -2589,8 +2804,9 @@ class MainWindow(QMainWindow):
             self._clear_region()
     
     def _do_select_region(self):
+        self._region_selector = None
         self.showMinimized()
-        QTimer.singleShot(300, self._create_region_selector)
+        QTimer.singleShot(500, self._create_region_selector)
     
     def _create_region_selector(self):
         try:
@@ -2610,14 +2826,25 @@ class MainWindow(QMainWindow):
         self.region_btn.setStyleSheet("background-color: #4CAF50; color: white;")
         self.window_btn.setText("🪟 窗口")
         self.window_btn.setStyleSheet("")
+        
+        if self._region_selector:
+            self._region_selector.close()
+            self._region_selector = None
+        
         self.showNormal()
         self.activateWindow()
+        self.raise_()
         show_toast(f"已选择区域: ({x}, {y}, {w}x{h})", 'success')
         app_logger.info(f"设置OCR区域: ({x}, {y}, {w}x{h})", "UI")
     
     def _on_region_cancelled(self):
+        if self._region_selector:
+            self._region_selector.close()
+            self._region_selector = None
+        
         self.showNormal()
         self.activateWindow()
+        self.raise_()
     
     def _clear_region(self):
         self._target_region = None
