@@ -80,6 +80,9 @@ class DelayAction(BaseAction):
         random_deviation = params.get('random_deviation', 0)
         
         try:
+            seconds = float(seconds)
+            random_deviation = float(random_deviation)
+            
             if random_deviation > 0:
                 import random
                 actual_delay = seconds + random.uniform(-random_deviation, random_deviation)

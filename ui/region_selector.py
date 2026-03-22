@@ -21,6 +21,7 @@ class RegionSelector(QWidget):
         self._screenshot: Optional[QPixmap] = None
         self._selection_rect = QRect()
         self._has_selected = False
+        self._is_closing = False
         
         self._init_ui()
     
@@ -28,14 +29,15 @@ class RegionSelector(QWidget):
         screen = QApplication.primaryScreen()
         self._screenshot = screen.grabWindow(0)
         
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setWindowState(Qt.WindowFullScreen)
-        self.setCursor(Qt.CrossCursor)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowState(Qt.WindowState.WindowFullScreen)
+        self.setCursor(Qt.CursorShape.CrossCursor)
         
-        self._rubber_band = QRubberBand(QRubberBand.Rectangle, self)
+        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
         
         self.show()
         self.activateWindow()
+        self.raise_()
     
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -121,18 +123,32 @@ class RegionSelector(QWidget):
     
     def _confirm_selection(self):
         if not self._selection_rect.isNull():
+            self._has_selected = True
             self.region_selected.emit(
                 self._selection_rect.x(),
                 self._selection_rect.y(),
                 self._selection_rect.width(),
                 self._selection_rect.height()
             )
-            self._has_selected = True
-            self.close()
+            self._safe_close()
     
     def _cancel(self):
+        self._has_selected = True
         self.cancelled.emit()
-        self.close()
+        self._safe_close()
+    
+    def _safe_close(self):
+        if self._is_closing:
+            return
+        self._is_closing = True
+        
+        if self._rubber_band:
+            self._rubber_band.hide()
+            self._rubber_band.deleteLater()
+            self._rubber_band = None
+        
+        self.hide()
+        self.deleteLater()
     
     def closeEvent(self, event):
         if not self._has_selected:
