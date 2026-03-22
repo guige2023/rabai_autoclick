@@ -84,8 +84,8 @@ class HotkeyManager(QObject):
                 json.dump(config, f, ensure_ascii=False, indent=2)
             return True
         except Exception as e:
-                import logging
-                logging.getLogger("RabAI").warning(f"保存热键配置失败: {e}")
+            import logging
+            logging.getLogger("RabAI").warning(f"保存热键配置失败: {e}")
             return False
     
     def _normalize_key(self, key_str: str) -> str:
