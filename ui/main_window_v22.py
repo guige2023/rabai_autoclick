@@ -8,6 +8,7 @@ import os
 import platform
 import time
 import copy
+import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
@@ -27,6 +28,8 @@ from PyQt5.QtGui import QIcon, QColor, QFont, QCursor
 
 IS_MACOS = platform.system() == 'Darwin'
 IS_WINDOWS = platform.system() == 'Windows'
+
+logger = logging.getLogger(__name__)
 
 from core.engine import FlowEngine
 from core.base_action import ActionResult
@@ -2626,7 +2629,7 @@ class MainWindow(QMainWindow):
             current = self.progress_bar.value()
             self.progress_bar.setValue(current + 1)
         except Exception as e:
-            print(f"Step start error: {e}")
+            logger.error(f"Step start error: {e}")
     
     def _on_engine_step_end(self, step, result):
         try:
@@ -2652,7 +2655,7 @@ class MainWindow(QMainWindow):
                 app_logger.error(f"步骤 [{step.get('id')}] 失败: {result.message}", "Engine")
                 execution_stats.record_error(step.get('type', 'unknown'), result.message)
         except Exception as e:
-            print(f"Step end error: {e}")
+            logger.error(f"Step end error: {e}")
     
     def _on_engine_workflow_end(self, success):
         try:
@@ -2703,14 +2706,14 @@ class MainWindow(QMainWindow):
                 app_logger.warning("工作流已停止", "Workflow")
                 QMessageBox.warning(self, "执行停止", "工作流已停止执行")
         except Exception as e:
-            print(f"Workflow end error: {e}")
+            logger.error(f"Workflow end error: {e}")
     
     def _on_engine_error(self, step, message: str):
         try:
             app_logger.error(f"步骤 [{step.get('id')}] 错误: {message}", "Engine")
             execution_stats.record_error(step.get('type', 'unknown'), message)
         except Exception as e:
-            print(f"Engine error: {e}")
+            logger.error(f"Engine error: {e}")
     
     def _on_hotkey_settings(self):
         try:
