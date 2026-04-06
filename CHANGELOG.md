@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-04-07
+
+### Added
+- Comprehensive type hints throughout codebase
+- Complete documentation for all modules (README.md per directory)
+- GitHub issue templates (bug report, feature request)
+- GitHub pull request template
+- Pre-commit hooks configuration
+- Dependabot for automated dependency updates
+- CodeQL security scanning configuration
+- EditorConfig for consistent editor settings
+- .editorconfig, FUNDING.yml, SUPPORT.md
+- Example workflow files with comments and metadata
+
+### Improved
+- All Python files now have comprehensive type annotations
+- Docstrings added to all public methods
+- PEP 8 compliance with line-length 100
+- ruff linting configuration
+- CI/CD workflows with GitHub Actions
+
+### Documentation
+- Added README.md to all source directories
+- ARCHITECTURE.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, INSTALL.md
+- TODO.md for tracking future improvements
+- Comprehensive CHANGELOG
+
 ## [2.3.0] - 2026-03-06
 
 ### Added
