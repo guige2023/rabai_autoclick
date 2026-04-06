@@ -1,33 +1,52 @@
-import sys
+"""Workflow history management for RabAI AutoClick.
+
+Provides WorkflowHistoryManager for persisting and querying workflow history,
+and HistoryDialog/QuickSaveDialog PyQt UI components for user interaction.
+"""
+
 import os
 import platform
-from typing import List, Dict, Any, Optional
-from datetime import datetime
 import json
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QDialog, QFileDialog,
     QMessageBox, QSplitter, QLineEdit, QTextEdit, QComboBox,
     QGroupBox, QFormLayout, QDialogButtonBox
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QPoint
-from PyQt5.QtGui import QFont, QColor, QKeySequence
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QFont, QColor
 
 
-IS_MACOS = platform.system() == 'Darwin'
-IS_WINDOWS = platform.system() == 'Windows'
+# Platform detection
+IS_MACOS: bool = platform.system() == 'Darwin'
+IS_WINDOWS: bool = platform.system() == 'Windows'
 
 
 class WorkflowHistoryManager:
-    def __init__(self, history_dir: str = None):
+    """Manage workflow history with JSON persistence."""
+    
+    def __init__(self, history_dir: Optional[str] = None) -> None:
+        """Initialize the history manager.
+        
+        Args:
+            history_dir: Optional custom directory for history files.
+        """
         if history_dir is None:
-            history_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'history')
-        self.history_dir = history_dir
+            history_dir = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), 
+                'history'
+            )
+        self.history_dir: str = history_dir
         os.makedirs(history_dir, exist_ok=True)
-        self.index_file = os.path.join(history_dir, 'index.json')
+        self.index_file: str = os.path.join(history_dir, 'index.json')
+        self.index: Dict[str, Any] = {'workflows': []}
         self._load_index()
     
-    def _load_index(self):
+    def _load_index(self) -> None:
+        """Load the history index from file."""
         if os.path.exists(self.index_file):
             try:
                 with open(self.index_file, 'r', encoding='utf-8') as f:
@@ -37,11 +56,27 @@ class WorkflowHistoryManager:
         else:
             self.index = {'workflows': []}
     
-    def _save_index(self):
+    def _save_index(self) -> None:
+        """Save the history index to file."""
         with open(self.index_file, 'w', encoding='utf-8') as f:
             json.dump(self.index, f, ensure_ascii=False, indent=2)
     
-    def save_workflow(self, name: str, workflow: Dict[str, Any], tags: List[str] = None) -> str:
+    def save_workflow(
+        self, 
+        name: str, 
+        workflow: Dict[str, Any], 
+        tags: Optional[List[str]] = None
+    ) -> str:
+        """Save a workflow to history.
+        
+        Args:
+            name: Workflow name.
+            workflow: Workflow dictionary.
+            tags: Optional list of tag strings.
+            
+        Returns:
+            Path to the saved workflow file.
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{timestamp}_{name}.json"
         filepath = os.path.join(self.history_dir, filename)
@@ -56,7 +91,7 @@ class WorkflowHistoryManager:
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         
-        entry = {
+        entry: Dict[str, Any] = {
             'filename': filename,
             'name': name,
             'created_at': datetime.now().isoformat(),
@@ -64,7 +99,9 @@ class WorkflowHistoryManager:
             'step_count': len(workflow.get('steps', []))
         }
         
-        for i, item in enumerate(self.index['workflows']):
+        # Update existing entry with same name, else insert
+        workflows = self.index['workflows']
+        for i, item in enumerate(workflows):
             if item.get('name') == name:
                 self.index['workflows'][i] = entry
                 self._save_index()
@@ -75,6 +112,14 @@ class WorkflowHistoryManager:
         return filepath
     
     def load_workflow(self, filename: str) -> Optional[Dict[str, Any]]:
+        """Load a workflow from history.
+        
+        Args:
+            filename: Name of the workflow file.
+            
+        Returns:
+            Workflow dictionary, or None if not found.
+        """
         filepath = os.path.join(self.history_dir, filename)
         if os.path.exists(filepath):
             try:
@@ -86,6 +131,14 @@ class WorkflowHistoryManager:
         return None
     
     def delete_workflow(self, filename: str) -> bool:
+        """Delete a workflow from history.
+        
+        Args:
+            filename: Name of the workflow file to delete.
+            
+        Returns:
+            True if deleted, False otherwise.
+        """
         filepath = os.path.join(self.history_dir, filename)
         if os.path.exists(filepath):
             os.remove(filepath)
@@ -98,6 +151,15 @@ class WorkflowHistoryManager:
         return False
     
     def rename_workflow(self, filename: str, new_name: str) -> bool:
+        """Rename a workflow in history.
+        
+        Args:
+            filename: Name of the workflow file to rename.
+            new_name: New name for the workflow.
+            
+        Returns:
+            True if renamed, False otherwise.
+        """
         filepath = os.path.join(self.history_dir, filename)
         if os.path.exists(filepath):
             try:
@@ -118,9 +180,22 @@ class WorkflowHistoryManager:
         return False
     
     def get_all_workflows(self) -> List[Dict[str, Any]]:
+        """Get all workflows from history.
+        
+        Returns:
+            List of workflow index entries.
+        """
         return self.index.get('workflows', [])
     
     def search_workflows(self, keyword: str) -> List[Dict[str, Any]]:
+        """Search workflows by name or tags.
+        
+        Args:
+            keyword: Search keyword.
+            
+        Returns:
+            List of matching workflow entries.
+        """
         keyword = keyword.lower()
         return [
             w for w in self.index.get('workflows', [])
@@ -130,9 +205,21 @@ class WorkflowHistoryManager:
 
 
 class HistoryDialog(QDialog):
+    """Dialog for browsing and managing workflow history."""
+    
     workflow_selected = pyqtSignal(dict)
     
-    def __init__(self, history_manager: WorkflowHistoryManager, parent=None):
+    def __init__(
+        self, 
+        history_manager: WorkflowHistoryManager, 
+        parent: Optional[QWidget] = None
+    ) -> None:
+        """Initialize the history dialog.
+        
+        Args:
+            history_manager: WorkflowHistoryManager instance.
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
         self.history_manager = history_manager
         self.setWindowTitle("操作记录管理")
@@ -140,9 +227,11 @@ class HistoryDialog(QDialog):
         self._init_ui()
         self._load_workflows()
     
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Initialize the dialog UI components."""
         layout = QVBoxLayout(self)
         
+        # Search bar
         search_layout = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("搜索工作流...")
@@ -150,8 +239,10 @@ class HistoryDialog(QDialog):
         search_layout.addWidget(self.search_edit)
         layout.addLayout(search_layout)
         
+        # Main splitter
         splitter = QSplitter(Qt.Horizontal)
         
+        # Left panel: workflow list
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -161,6 +252,7 @@ class HistoryDialog(QDialog):
         self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
         left_layout.addWidget(self.list_widget)
         
+        # Action buttons
         btn_layout = QHBoxLayout()
         self.load_btn = QPushButton("加载")
         self.delete_btn = QPushButton("删除")
@@ -176,10 +268,12 @@ class HistoryDialog(QDialog):
         
         splitter.addWidget(left_widget)
         
+        # Right panel: details
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
         
+        # Info group
         info_group = QGroupBox("详细信息")
         info_layout = QFormLayout()
         
@@ -196,6 +290,7 @@ class HistoryDialog(QDialog):
         info_group.setLayout(info_layout)
         right_layout.addWidget(info_group)
         
+        # Preview group
         preview_group = QGroupBox("步骤预览")
         preview_layout = QVBoxLayout()
         self.preview_text = QTextEdit()
@@ -209,11 +304,17 @@ class HistoryDialog(QDialog):
         
         layout.addWidget(splitter)
         
+        # Close button
         button_box = QDialogButtonBox(QDialogButtonBox.Close)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
     
-    def _load_workflows(self, keyword: str = None):
+    def _load_workflows(self, keyword: Optional[str] = None) -> None:
+        """Load workflows into the list widget.
+        
+        Args:
+            keyword: Optional search keyword to filter workflows.
+        """
         self.list_widget.clear()
         
         if keyword:
@@ -222,14 +323,26 @@ class HistoryDialog(QDialog):
             workflows = self.history_manager.get_all_workflows()
         
         for w in workflows:
-            item = QListWidgetItem(f"{w.get('name', '未命名')} ({w.get('step_count', 0)} 步)")
+            item = QListWidgetItem(
+                f"{w.get('name', '未命名')} ({w.get('step_count', 0)} 步)"
+            )
             item.setData(Qt.UserRole, w)
             self.list_widget.addItem(item)
     
-    def _on_search(self, text: str):
+    def _on_search(self, text: str) -> None:
+        """Handle search text changed.
+        
+        Args:
+            text: Current search text.
+        """
         self._load_workflows(text if text else None)
     
-    def _on_item_clicked(self, item: QListWidgetItem):
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        """Handle item click - show details.
+        
+        Args:
+            item: Clicked list item.
+        """
         data = item.data(Qt.UserRole)
         if data:
             self.name_label.setText(data.get('name', ''))
@@ -239,12 +352,20 @@ class HistoryDialog(QDialog):
             
             workflow = self.history_manager.load_workflow(data.get('filename'))
             if workflow:
-                self.preview_text.setPlainText(json.dumps(workflow, ensure_ascii=False, indent=2))
+                self.preview_text.setPlainText(
+                    json.dumps(workflow, ensure_ascii=False, indent=2)
+                )
     
-    def _on_item_double_clicked(self, item: QListWidgetItem):
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        """Handle item double-click - load workflow.
+        
+        Args:
+            item: Double-clicked list item.
+        """
         self._on_load()
     
-    def _on_load(self):
+    def _on_load(self) -> None:
+        """Load selected workflow and emit signal."""
         item = self.list_widget.currentItem()
         if item:
             data = item.data(Qt.UserRole)
@@ -253,7 +374,8 @@ class HistoryDialog(QDialog):
                 self.workflow_selected.emit(workflow)
                 self.accept()
     
-    def _on_delete(self):
+    def _on_delete(self) -> None:
+        """Delete selected workflow after confirmation."""
         item = self.list_widget.currentItem()
         if item:
             data = item.data(Qt.UserRole)
@@ -266,7 +388,8 @@ class HistoryDialog(QDialog):
                 self.history_manager.delete_workflow(data.get('filename'))
                 self._load_workflows()
     
-    def _on_rename(self):
+    def _on_rename(self) -> None:
+        """Rename selected workflow with input dialog."""
         item = self.list_widget.currentItem()
         if item:
             data = item.data(Qt.UserRole)
@@ -276,20 +399,31 @@ class HistoryDialog(QDialog):
                 QLineEdit.Normal, data.get('name', '')
             )
             if ok and new_name:
-                self.history_manager.rename_workflow(data.get('filename'), new_name)
+                self.history_manager.rename_workflow(
+                    data.get('filename'), new_name
+                )
                 self._load_workflows()
 
 
 class QuickSaveDialog(QDialog):
-    def __init__(self, parent=None):
+    """Dialog for quickly saving a workflow with name and tags."""
+    
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        """Initialize the quick save dialog.
+        
+        Args:
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
         self.setWindowTitle("快速保存")
         self.setMinimumWidth(400)
         self._init_ui()
     
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Initialize the dialog UI components."""
         layout = QVBoxLayout(self)
         
+        # Form fields
         form_layout = QFormLayout()
         
         self.name_edit = QLineEdit()
@@ -302,6 +436,7 @@ class QuickSaveDialog(QDialog):
         
         layout.addLayout(form_layout)
         
+        # Buttons
         button_box = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel
         )
@@ -309,7 +444,12 @@ class QuickSaveDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
     
-    def get_data(self) -> tuple:
+    def get_data(self) -> Tuple[str, List[str]]:
+        """Get the entered name and tags.
+        
+        Returns:
+            Tuple of (workflow_name, tags_list).
+        """
         name = self.name_edit.text().strip() or f"工作流_{datetime.now().strftime('%H%M%S')}"
         tags = [t.strip() for t in self.tags_edit.text().split(',') if t.strip()]
         return name, tags
