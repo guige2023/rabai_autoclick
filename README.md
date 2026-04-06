@@ -425,6 +425,34 @@ pytest tests/test_core.py -v
 
 欢迎提交 Issue 和 Pull Request！
 
+### 开发环境设置
+
+```bash
+# 克隆仓库
+git clone https://github.com/guige2023/rabai_autoclick.git
+cd rabai_autoclick
+
+# 安装开发依赖
+pip install -r requirements.txt
+pip install pytest ruff black
+
+# 运行测试
+pytest tests/ -v
+
+# 代码格式化
+black .
+
+# 代码检查
+ruff check .
+```
+
+### 提交规范
+
+- 使用清晰的 commit message
+- 提交前运行测试
+- 遵循 PEP 8 规范
+- 添加 type hints 和 docstring
+
 ---
 
 **Made with ❤️ by RabAI Team**
