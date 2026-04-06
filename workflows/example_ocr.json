@@ -1,35 +1,38 @@
 {
-  "variables": {
-    "username": "test",
-    "count": 0
-  },
+  "variables": {},
   "steps": [
     {
       "id": 1,
-      "type": "ocr",
-      "region": [0, 0, 800, 200],
-      "output_var": "ocr_text",
-      "pre_delay": 0.3
+      "type": "screenshot",
+      "save_path": "ocr_capture.png",
+      "pre_delay": 0.5
     },
     {
       "id": 2,
-      "type": "type_text",
-      "text": "{{ocr_text}}",
-      "interval": 0.05,
-      "enter_after": true,
+      "type": "ocr",
+      "image_path": "ocr_capture.png",
+      "output_var": "recognized_text",
       "pre_delay": 0.2
     },
     {
       "id": 3,
-      "type": "click_image",
-      "template": "confirm_button.png",
-      "confidence": 0.8,
-      "pre_delay": 0.3
+      "type": "condition",
+      "condition": "{{recognized_text.length > 0}}",
+      "true_next": 4,
+      "false_next": 5,
+      "pre_delay": 0.1
     },
     {
       "id": 4,
       "type": "delay",
-      "seconds": 0.5
+      "seconds": 0.5,
+      "pre_delay": 0.1
+    },
+    {
+      "id": 5,
+      "type": "delay",
+      "seconds": 0.3,
+      "pre_delay": 0.1
     }
   ]
 }
