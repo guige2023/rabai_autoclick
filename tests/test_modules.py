@@ -1,3 +1,9 @@
+"""Test modules for RabAI AutoClick.
+
+Provides comprehensive unit tests for core modules, actions, and utilities.
+Can be run standalone (python tests/test_modules.py) or with pytest.
+"""
+
 import sys
 import os
 import json
@@ -12,19 +18,26 @@ test_results = {
     'warnings': []
 }
 
-def test(name):
+
+def test(name: str = ""):
+    """Decorator to mark and run a test function.
+    
+    Args:
+        name: Test name (uses function name if empty).
+    """
     def decorator(func):
+        test_name = name or func.__name__
         def wrapper():
             try:
                 func()
-                test_results['passed'].append(name)
-                print(f"[PASS] {name}")
+                test_results['passed'].append(test_name)
+                print(f"[PASS] {test_name}")
             except AssertionError as e:
-                test_results['failed'].append({'name': name, 'error': str(e)})
-                print(f"[FAIL] {name}: {e}")
+                test_results['failed'].append({'name': test_name, 'error': str(e)})
+                print(f"[FAIL] {test_name}: {e}")
             except Exception as e:
-                test_results['failed'].append({'name': name, 'error': str(e)})
-                print(f"[ERROR] {name}: {e}")
+                test_results['failed'].append({'name': test_name, 'error': str(e)})
+                print(f"[ERROR] {test_name}: {e}")
                 traceback.print_exc()
         return wrapper
     return decorator
@@ -125,6 +138,54 @@ def test_base_action():
     assert action.action_type == "test"
     assert action.get_required_params() == ['param1']
     assert action.get_optional_params() == {'param2': 'default'}
+
+
+@test("BaseAction - 验证方法")
+def test_base_action_validation():
+    from core.base_action import BaseAction, ActionResult
+    
+    class TestAction(BaseAction):
+        action_type = "test"
+        display_name = "Test"
+        
+        def execute(self, context, params):
+            return ActionResult(success=True)
+        
+        def get_required_params(self):
+            return ['required1', 'required2']
+    
+    action = TestAction()
+    
+    # Test validate_type
+    valid, msg = action.validate_type(123, int, 'param')
+    assert valid == True
+    
+    valid, msg = action.validate_type("str", int, 'param')
+    assert valid == False
+    assert 'param' in msg and 'int' in msg
+    
+    # Test validate_range
+    valid, msg = action.validate_range(5, 0, 10, 'param')
+    assert valid == True
+    
+    valid, msg = action.validate_range(15, 0, 10, 'param')
+    assert valid == False
+    assert 'param' in msg and '0' in msg and '10' in msg
+    
+    # Test validate_in
+    valid, msg = action.validate_in('left', ['left', 'right'], 'button')
+    assert valid == True
+    
+    valid, msg = action.validate_in('middle', ['left', 'right'], 'button')
+    assert valid == False
+    
+    # Test validate_params default implementation (checks required params)
+    valid, msg = action.validate_params({'required1': 'a', 'required2': 'b'})
+    assert valid == True
+    
+    valid, msg = action.validate_params({'required1': 'a'})
+    assert valid == False
+    assert 'required2' in msg
 
 @test("ActionLoader - 加载动作")
 def test_action_loader():
@@ -338,16 +399,17 @@ def test_image_match_action():
 
 @test("OCRAction - 可用性检查")
 def test_ocr_action():
-    from actions.ocr import OCRAction, OCR_AVAILABLE
+    from actions.ocr import OCRAction, _get_ocr
     from core.context import ContextManager
     
     action = OCRAction()
     ctx = ContextManager()
     
-    if not OCR_AVAILABLE:
+    ocr_engine, backend = _get_ocr()
+    if ocr_engine is None:
         result = action.execute(ctx, {})
         assert result.success == False
-        assert "PaddleOCR未安装" in result.message
+        assert "未安装" in result.message
 
 def run_all_tests():
     print("=" * 60)
