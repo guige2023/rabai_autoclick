@@ -25,32 +25,55 @@ venv/
 ENV/
 env/
 .venv/
-# IDE
+
+# IDE / Editors
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+.DS_Store
+Thumbs.db
+.project
+.pydevproject
+.settings/
+
 # Logs
 logs/
 *.log
+!logs/.gitkeep
+
 # History
 history/
-# Config
+*.history
+
+# Config (user-specific, don't commit)
 config.json
-# Screenshots
+*.local.json
+111.json
+
+# Screenshots (keep workflow templates)
+screenshots/
 *.png
 !workflows/*.png
+
 # Test
 .pytest_cache/
 .coverage
 htmlcov/
+.tox/
+
 # OS
 .DS_Store
 Thumbs.db
+
 # Build
 *.spec
-# macOS
-# Auto-generated configs
-111.json
-logs/*.log
+*.app
+*.dmg
+build/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
