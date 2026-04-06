@@ -1,39 +1,41 @@
 {
+  "name": "Script Execution Example Workflow",
+  "description": "Demonstrates custom Python script execution in workflows",
   "variables": {
-    "data": {
-      "items": ["apple", "banana", "cherry"],
-      "prices": [10, 5, 20]
-    }
+    "input_value": 10
   },
   "steps": [
     {
       "id": 1,
-      "type": "script",
-      "code": "total = sum(context['data']['prices'])\nreturn_value = total",
-      "output_var": "total_price",
-      "pre_delay": 0.2
+      "type": "set_variable",
+      "name": "input_value",
+      "value": 10,
+      "value_type": "int",
+      "pre_delay": 0,
+      "comment": "Set initial input value"
     },
     {
       "id": 2,
       "type": "script",
-      "code": "items = context['data']['items']\nreturn_value = ', '.join(items)",
-      "output_var": "item_list",
-      "pre_delay": 0.2
+      "code": "# Calculate factorial\ndef factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n - 1)\n\nresult = factorial(input_value)\nprint(f'Factorial of {input_value} is {result}')",
+      "output_var": "factorial_result",
+      "pre_delay": 0.1,
+      "comment": "Calculate factorial using script"
     },
     {
       "id": 3,
       "type": "script",
-      "code": "prices = context['data']['prices']\nreturn_value = {'min': min(prices), 'max': max(prices), 'avg': sum(prices) / len(prices)}",
-      "output_var": "price_stats",
-      "pre_delay": 0.2
+      "code": "# Simple string manipulation\ntext = 'Hello World'\nupper_text = text.upper()\nreversed_text = text[::-1]\nprint(f'Original: {text}')\nprint(f'Upper: {upper_text}')\nprint(f'Reversed: {reversed_text}')",
+      "output_var": "string_result",
+      "pre_delay": 0.1,
+      "comment": "String manipulation example"
     },
     {
       "id": 4,
-      "type": "type_text",
-      "text": "商品列表: {{item_list}}\n总价: {{total_price}} 元\n平均价格: {{price_stats.avg}} 元",
-      "interval": 0.05,
-      "enter_after": true,
-      "pre_delay": 0.3
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.1,
+      "comment": "End of script workflow"
     }
   ]
 }
