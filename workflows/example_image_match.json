@@ -1,0 +1,61 @@
+{
+  "name": "Image Match Example Workflow",
+  "description": "Demonstrates template-based image matching and clicking",
+  "variables": {},
+  "steps": [
+    {
+      "id": 1,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0,
+      "comment": "Wait for screen to settle"
+    },
+    {
+      "id": 2,
+      "type": "click_image",
+      "image_path": "templates/button_submit.png",
+      "confidence": 0.8,
+      "pre_delay": 0.2,
+      "comment": "Click on submit button template"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.1,
+      "comment": "Wait for action to complete"
+    },
+    {
+      "id": 4,
+      "type": "find_image",
+      "image_path": "templates/confirm_dialog.png",
+      "output_var": "dialog_found",
+      "pre_delay": 0.2,
+      "comment": "Check if confirmation dialog appears"
+    },
+    {
+      "id": 5,
+      "type": "condition",
+      "condition": "{{dialog_found == true}}",
+      "true_next": 6,
+      "false_next": 7,
+      "pre_delay": 0.1,
+      "comment": "Handle dialog if found"
+    },
+    {
+      "id": 6,
+      "type": "click_image",
+      "image_path": "templates/button_ok.png",
+      "confidence": 0.8,
+      "pre_delay": 0.1,
+      "comment": "Click OK to confirm"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "result_screenshot.png",
+      "pre_delay": 0.3,
+      "comment": "Capture final result"
+    }
+  ]
+}
