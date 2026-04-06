@@ -1,68 +1,114 @@
-import sys
+"""Window selector utilities for RabAI AutoClick.
+
+Provides cross-platform window enumeration and selection dialogs
+for targeting automation actions to specific windows.
+"""
+
 import os
 import platform
 import subprocess
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sys
+from typing import List, Optional, Tuple
 
-from typing import Optional, List, Dict, Any
-from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QLabel, QLineEdit, QGroupBox, QFormLayout, QDialogButtonBox
-)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QCursor
+from PyQt5.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
+    QPushButton, QLabel, QLineEdit, QGroupBox, QFormLayout, 
+    QDialogButtonBox
+)
 
-IS_MACOS = platform.system() == 'Darwin'
 
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# Platform detection
+IS_MACOS: bool = platform.system() == 'Darwin'
+
+# Library availability flags
 try:
     import pygetwindow as gw
-    GW_AVAILABLE = True
+    GW_AVAILABLE: bool = True
 except ImportError:
     GW_AVAILABLE = False
 
 try:
     import win32gui
     import win32con
-    WIN32_AVAILABLE = True
+    WIN32_AVAILABLE: bool = True
 except ImportError:
     WIN32_AVAILABLE = False
 
-if IS_MACOS:
-    try:
-        from AppKit import NSWorkspace
-        APPKIT_AVAILABLE = True
-    except ImportError:
-        APPKIT_AVAILABLE = False
+try:
+    from AppKit import NSWorkspace
+    APPKIT_AVAILABLE: bool = True
+except ImportError:
+    APPKIT_AVAILABLE = False
 
 
 class WindowInfo:
-    def __init__(self, title: str, hwnd: int = None, left: int = 0, top: int = 0, 
-                 width: int = 0, height: int = 0):
-        self.title = title
-        self.hwnd = hwnd
-        self.left = left
-        self.top = top
-        self.width = width
-        self.height = height
+    """Represents information about a window."""
+    
+    def __init__(
+        self,
+        title: str,
+        hwnd: Optional[int] = None,
+        left: int = 0,
+        top: int = 0,
+        width: int = 0,
+        height: int = 0
+    ) -> None:
+        """Initialize WindowInfo.
+        
+        Args:
+            title: Window title.
+            hwnd: Window handle (platform-specific).
+            left: Left edge X coordinate.
+            top: Top edge Y coordinate.
+            width: Window width.
+            height: Window height.
+        """
+        self.title: str = title
+        self.hwnd: Optional[int] = hwnd
+        self.left: int = left
+        self.top: int = top
+        self.width: int = width
+        self.height: int = height
     
     @property
-    def region(self) -> tuple:
+    def region(self) -> Tuple[int, int, int, int]:
+        """Get the window region as (left, top, width, height).
+        
+        Returns:
+            Tuple of (left, top, width, height).
+        """
         return (self.left, self.top, self.width, self.height)
     
     @property
-    def center(self) -> tuple:
+    def center(self) -> Tuple[int, int]:
+        """Get the window center coordinates.
+        
+        Returns:
+            Tuple of (center_x, center_y).
+        """
         return (self.left + self.width // 2, self.top + self.height // 2)
 
 
 def _get_macos_windows() -> List[WindowInfo]:
-    windows = []
+    """Get all visible windows on macOS.
+    
+    Returns:
+        List of WindowInfo objects for visible windows.
+    """
+    windows: List[WindowInfo] = []
     
     if APPKIT_AVAILABLE:
         try:
             workspace = NSWorkspace.sharedWorkspace()
             apps = workspace.runningApplications()
             for app in apps:
-                if app.activationPolicy() == 0:
+                if app.activationPolicy() == 0:  # Regular app
                     title = app.localizedName()
                     if title:
                         windows.append(WindowInfo(title=title))
@@ -72,14 +118,19 @@ def _get_macos_windows() -> List[WindowInfo]:
     
     try:
         result = subprocess.run(
-            ['osascript', '-e', 'tell application "System Events" to get name of every process whose background only is false'],
+            ['osascript', '-e', 
+             'tell application "System Events" to get name of every process '
+             'whose background only is false'],
             capture_output=True,
             text=True,
             timeout=10
         )
         
         if result.returncode == 0 and result.stdout.strip():
-            app_names = [name.strip() for name in result.stdout.strip().split(', ') if name]
+            app_names = [
+                name.strip() for name in result.stdout.strip().split(', ') 
+                if name
+            ]
             windows = [WindowInfo(title=name) for name in app_names]
     except Exception as e:
         print(f"[WindowSelector] AppleScript error: {e}")
@@ -88,14 +139,19 @@ def _get_macos_windows() -> List[WindowInfo]:
 
 
 def get_all_windows() -> List[WindowInfo]:
-    windows = []
+    """Get all visible windows on the current platform.
+    
+    Returns:
+        List of WindowInfo objects, sorted by title.
+    """
+    windows: List[WindowInfo] = []
     
     try:
         if IS_MACOS:
             windows = _get_macos_windows()
         
         elif WIN32_AVAILABLE:
-            def enum_windows_proc(hwnd, lParam):
+            def enum_windows_proc(hwnd: int, lParam: None) -> bool:
                 if win32gui.IsWindowVisible(hwnd):
                     title = win32gui.GetWindowText(hwnd)
                     if title:
@@ -131,6 +187,14 @@ def get_all_windows() -> List[WindowInfo]:
 
 
 def get_window_by_title(title: str) -> Optional[WindowInfo]:
+    """Find a window by title substring.
+    
+    Args:
+        title: Title substring to search for.
+        
+    Returns:
+        First matching WindowInfo, or None if not found.
+    """
     windows = get_all_windows()
     for win in windows:
         if title.lower() in win.title.lower():
@@ -139,11 +203,17 @@ def get_window_by_title(title: str) -> Optional[WindowInfo]:
 
 
 def get_active_window() -> Optional[WindowInfo]:
+    """Get the currently active/focused window.
+    
+    Returns:
+        WindowInfo for the active window, or None if unavailable.
+    """
     try:
         if IS_MACOS:
             script = '''
             tell application "System Events"
-                set frontApp to name of first application process whose frontmost is true
+                set frontApp to name of first application process 
+                    whose frontmost is true
             end tell
             '''
             result = subprocess.run(
@@ -185,10 +255,26 @@ def get_active_window() -> Optional[WindowInfo]:
 
 
 def focus_window(window: WindowInfo) -> bool:
+    """Bring a window to the foreground.
+    
+    Args:
+        window: WindowInfo of the window to focus.
+        
+    Returns:
+        True if focus was successful.
+    """
     if IS_MACOS and window.title:
         try:
-            app_name = window.title.split(' - ')[0] if ' - ' in window.title else window.title
-            subprocess.run(['osascript', '-e', f'tell application "{app_name}" to activate'], timeout=5)
+            app_name = (
+                window.title.split(' - ')[0] 
+                if ' - ' in window.title 
+                else window.title
+            )
+            subprocess.run(
+                ['osascript', '-e', 
+                 f'tell application "{app_name}" to activate'],
+                timeout=5
+            )
             return True
         except Exception as e:
             import logging
@@ -205,24 +291,36 @@ def focus_window(window: WindowInfo) -> bool:
 
 
 class WindowSelectorDialog(QDialog):
+    """Dialog for selecting a target window from a list."""
+    
     window_selected = pyqtSignal(object)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QDialog] = None) -> None:
+        """Initialize the window selector dialog.
+        
+        Args:
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
         self.setWindowTitle("选择目标窗口")
         self.setMinimumSize(500, 400)
-        self.selected_window = None
+        self.selected_window: Optional[WindowInfo] = None
+        self._windows: List[WindowInfo] = []
         
         self._init_ui()
         self._refresh_windows()
     
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Initialize the dialog UI components."""
         layout = QVBoxLayout(self)
         
-        info_label = QLabel("选择一个窗口作为执行目标，OCR将在该窗口区域内识别")
+        info_label = QLabel(
+            "选择一个窗口作为执行目标，OCR将在该窗口区域内识别"
+        )
         info_label.setStyleSheet("color: #666; margin-bottom: 10px;")
         layout.addWidget(info_label)
         
+        # Search bar
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("搜索:"))
         self.search_edit = QLineEdit()
@@ -231,10 +329,12 @@ class WindowSelectorDialog(QDialog):
         search_layout.addWidget(self.search_edit)
         layout.addLayout(search_layout)
         
+        # Window list
         self.window_list = QListWidget()
         self.window_list.itemDoubleClicked.connect(self._on_select)
         layout.addWidget(self.window_list)
         
+        # Info group
         info_group = QGroupBox("窗口信息")
         info_layout = QFormLayout()
         
@@ -251,6 +351,7 @@ class WindowSelectorDialog(QDialog):
         
         self.window_list.currentRowChanged.connect(self._on_window_highlight)
         
+        # Buttons
         btn_layout = QHBoxLayout()
         
         refresh_btn = QPushButton("🔄 刷新列表")
@@ -261,7 +362,9 @@ class WindowSelectorDialog(QDialog):
         
         select_btn = QPushButton("✓ 选择")
         select_btn.clicked.connect(self._on_select)
-        select_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px 16px;")
+        select_btn.setStyleSheet(
+            "background-color: #4CAF50; color: white; padding: 8px 16px;"
+        )
         btn_layout.addWidget(select_btn)
         
         cancel_btn = QPushButton("取消")
@@ -270,7 +373,8 @@ class WindowSelectorDialog(QDialog):
         
         layout.addLayout(btn_layout)
     
-    def _refresh_windows(self):
+    def _refresh_windows(self) -> None:
+        """Refresh the window list."""
         self.window_list.clear()
         self._windows = get_all_windows()
         
@@ -287,7 +391,12 @@ class WindowSelectorDialog(QDialog):
         
         self.search_edit.clear()
     
-    def _filter_windows(self, text: str):
+    def _filter_windows(self, text: str) -> None:
+        """Filter the window list by search text.
+        
+        Args:
+            text: Search text to filter by.
+        """
         text = text.lower()
         for i in range(self.window_list.count()):
             item = self.window_list.item(i)
@@ -295,13 +404,23 @@ class WindowSelectorDialog(QDialog):
             visible = text in win.title.lower() if text else True
             item.setHidden(not visible)
     
-    def _on_window_highlight(self, index):
+    def _on_window_highlight(self, index: int) -> None:
+        """Handle window list selection change.
+        
+        Args:
+            index: Index of selected item.
+        """
         if index >= 0:
             item = self.window_list.item(index)
             win = item.data(Qt.UserRole)
             
             if win:
-                self.title_label.setText(win.title[:50] + "..." if len(win.title) > 50 else win.title)
+                title_text = (
+                    win.title[:50] + "..." 
+                    if len(win.title) > 50 
+                    else win.title
+                )
+                self.title_label.setText(title_text)
                 self.position_label.setText(f"({win.left}, {win.top})")
                 self.size_label.setText(f"{win.width} × {win.height}")
             else:
@@ -309,26 +428,41 @@ class WindowSelectorDialog(QDialog):
                 self.position_label.setText("-")
                 self.size_label.setText("-")
     
-    def _on_select(self):
+    def _on_select(self) -> None:
+        """Handle window selection."""
         current = self.window_list.currentItem()
         if current:
             self.selected_window = current.data(Qt.UserRole)
             self.accept()
     
     def get_selected_window(self) -> Optional[WindowInfo]:
+        """Get the selected window.
+        
+        Returns:
+            WindowInfo of selected window, or None.
+        """
         return self.selected_window
 
 
 class QuickWindowPicker(QDialog):
+    """Quick picker dialog that picks the active window."""
+    
     window_picked = pyqtSignal(object)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QDialog] = None) -> None:
+        """Initialize the quick window picker.
+        
+        Args:
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
         self.setWindowTitle("点击目标窗口")
         self.setFixedSize(400, 150)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(
+            self.windowFlags() | Qt.WindowStaysOnTopHint
+        )
         
-        self.selected_window = None
+        self.selected_window: Optional[WindowInfo] = None
         
         layout = QVBoxLayout(self)
         
@@ -343,19 +477,23 @@ class QuickWindowPicker(QDialog):
         layout.addWidget(self.status_label)
         
         btn = QPushButton("🎯 开始选取")
-        btn.setStyleSheet("font-size: 16px; padding: 15px; background-color: #2196F3; color: white;")
+        btn.setStyleSheet(
+            "font-size: 16px; padding: 15px; "
+            "background-color: #2196F3; color: white;"
+        )
         btn.clicked.connect(self._start_pick)
         layout.addWidget(btn)
     
-    def _start_pick(self):
+    def _start_pick(self) -> None:
+        """Start the window picking process."""
         self.status_label.setText("3秒后自动获取当前活动窗口...")
         self.status_label.setStyleSheet("color: #f44336; font-weight: bold;")
         
         self.hide()
-        
         QTimer.singleShot(3000, self._get_active_window)
     
-    def _get_active_window(self):
+    def _get_active_window(self) -> None:
+        """Get the active window after delay."""
         self.selected_window = get_active_window()
         
         if self.selected_window:
@@ -368,4 +506,9 @@ class QuickWindowPicker(QDialog):
             self.show()
     
     def get_selected_window(self) -> Optional[WindowInfo]:
+        """Get the selected window.
+        
+        Returns:
+            WindowInfo of selected window, or None.
+        """
         return self.selected_window
