@@ -1,0 +1,81 @@
+{
+  "name": "Conditional Logic Example Workflow",
+  "description": "Demonstrates if/else conditional branching",
+  "variables": {
+    "status": "unknown"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "screenshot",
+      "save_path": "status_check.png",
+      "pre_delay": 0.5,
+      "comment": "Capture current screen state"
+    },
+    {
+      "id": 2,
+      "type": "ocr",
+      "image_path": "status_check.png",
+      "output_var": "screen_text",
+      "pre_delay": 0.3,
+      "comment": "Extract text from screenshot"
+    },
+    {
+      "id": 3,
+      "type": "condition",
+      "condition": "{{screen_text.includes('success')}}",
+      "true_next": 4,
+      "false_next": 6,
+      "pre_delay": 0.1,
+      "comment": "Check if success message found"
+    },
+    {
+      "id": 4,
+      "type": "set_variable",
+      "name": "status",
+      "value": "success",
+      "value_type": "string",
+      "pre_delay": 0.1,
+      "comment": "Set status to success"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "escape",
+      "pre_delay": 0.2,
+      "comment": "Dismiss success dialog"
+    },
+    {
+      "id": 6,
+      "type": "condition",
+      "condition": "{{screen_text.includes('error')}}",
+      "true_next": 7,
+      "false_next": 9,
+      "pre_delay": 0.1,
+      "comment": "Check if error message found"
+    },
+    {
+      "id": 7,
+      "type": "set_variable",
+      "name": "status",
+      "value": "error",
+      "value_type": "string",
+      "pre_delay": 0.1,
+      "comment": "Set status to error"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.1,
+      "comment": "Wait for error to be visible"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.1,
+      "comment": "End of conditional workflow"
+    }
+  ]
+}
