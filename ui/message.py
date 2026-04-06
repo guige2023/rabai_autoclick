@@ -1,45 +1,83 @@
-from PyQt5.QtWidgets import (
-    QMessageBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QTextEdit, QWidget, QApplication
-)
+"""Message and notification utilities for RabAI AutoClick.
+
+Provides toast notifications, message boxes, and a centralized
+message manager for user feedback.
+"""
+
+from typing import Dict, Optional
+
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon
-from typing import Optional, Callable
-import sys
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (
+    QApplication, QLabel, QMessageBox, QWidget
+)
+
+
+# Message level types
+MessageLevel = str  # Literal['info', 'success', 'warning', 'error']
 
 
 class ToastWidget(QWidget):
+    """Floating toast notification widget."""
+    
     closed = pyqtSignal()
     
-    def __init__(self, message: str, level: str = 'info', duration: int = 3000, parent=None):
+    # Color and icon mappings for different message levels
+    COLORS: Dict[str, str] = {
+        'info': '#2196F3',
+        'success': '#4CAF50',
+        'warning': '#FF9800',
+        'error': '#f44336'
+    }
+    
+    ICONS: Dict[str, str] = {
+        'info': 'ℹ',
+        'success': '✓',
+        'warning': '⚠',
+        'error': '✗'
+    }
+    
+    def __init__(
+        self,
+        message: str,
+        level: MessageLevel = 'info',
+        duration: int = 3000,
+        parent: Optional[QWidget] = None
+    ) -> None:
+        """Initialize a toast notification.
+        
+        Args:
+            message: Text message to display.
+            level: Message level ('info', 'success', 'warning', 'error').
+            duration: Display duration in milliseconds.
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
-        self._duration = duration
+        self._duration: int = duration
         self._init_ui(message, level)
         
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(
+            Qt.Window |
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint
+        )
         self.setAttribute(Qt.WA_TranslucentBackground)
         
+        # Auto-close after duration
         QTimer.singleShot(duration, self.close)
     
-    def _init_ui(self, message: str, level: str):
+    def _init_ui(self, message: str, level: MessageLevel) -> None:
+        """Initialize the toast UI.
+        
+        Args:
+            message: Text message to display.
+            level: Message level for styling.
+        """
         layout = QHBoxLayout(self)
         layout.setContentsMargins(15, 10, 15, 10)
         
-        colors = {
-            'info': '#2196F3',
-            'success': '#4CAF50',
-            'warning': '#FF9800',
-            'error': '#f44336'
-        }
-        icons = {
-            'info': 'ℹ',
-            'success': '✓',
-            'warning': '⚠',
-            'error': '✗'
-        }
-        
-        color = colors.get(level, colors['info'])
-        icon = icons.get(level, icons['info'])
+        color = self.COLORS.get(level, self.COLORS['info'])
+        icon = self.ICONS.get(level, self.ICONS['info'])
         
         self.setStyleSheet(f"""
             QWidget {{
@@ -62,7 +100,8 @@ class ToastWidget(QWidget):
         msg_label.setMaximumWidth(400)
         layout.addWidget(msg_label)
     
-    def show_at_corner(self):
+    def show_at_corner(self) -> None:
+        """Show the toast in the bottom-right corner of the screen."""
         screen = QApplication.primaryScreen()
         if screen:
             screen_geometry = screen.availableGeometry()
@@ -74,28 +113,65 @@ class ToastWidget(QWidget):
 
 
 class MessageManager:
-    _instance = None
+    """Centralized message manager for user notifications.
     
-    def __new__(cls):
+    Provides singleton access to various message types:
+    - Standard message boxes (info, success, warning, error)
+    - Toast notifications
+    - Confirmation dialogs
+    """
+    
+    _instance: Optional['MessageManager'] = None
+    
+    def __new__(cls) -> 'MessageManager':
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
         return cls._instance
     
-    def __init__(self):
+    def __init__(self) -> None:
         if self._initialized:
             return
         self._initialized = True
-        self._parent_widget = None
+        self._parent_widget: Optional[QWidget] = None
     
-    def set_parent(self, parent: QWidget):
+    def set_parent(self, parent: QWidget) -> None:
+        """Set the default parent widget for messages.
+        
+        Args:
+            parent: Default parent widget.
+        """
         self._parent_widget = parent
     
-    def info(self, title: str, message: str, parent: QWidget = None) -> None:
+    def info(
+        self,
+        title: str,
+        message: str,
+        parent: Optional[QWidget] = None
+    ) -> None:
+        """Show an information message box.
+        
+        Args:
+            title: Dialog title.
+            message: Message text.
+            parent: Optional parent widget override.
+        """
         parent = parent or self._parent_widget
         QMessageBox.information(parent, title, message)
     
-    def success(self, title: str, message: str, parent: QWidget = None) -> None:
+    def success(
+        self,
+        title: str,
+        message: str,
+        parent: Optional[QWidget] = None
+    ) -> None:
+        """Show a success message box with green styling.
+        
+        Args:
+            title: Dialog title.
+            message: Message text.
+            parent: Optional parent widget override.
+        """
         parent = parent or self._parent_widget
         msg_box = QMessageBox(parent)
         msg_box.setIcon(QMessageBox.Information)
@@ -118,11 +194,35 @@ class MessageManager:
         """)
         msg_box.exec_()
     
-    def warning(self, title: str, message: str, parent: QWidget = None) -> None:
+    def warning(
+        self,
+        title: str,
+        message: str,
+        parent: Optional[QWidget] = None
+    ) -> None:
+        """Show a warning message box.
+        
+        Args:
+            title: Dialog title.
+            message: Message text.
+            parent: Optional parent widget override.
+        """
         parent = parent or self._parent_widget
         QMessageBox.warning(parent, title, message)
     
-    def error(self, title: str, message: str, parent: QWidget = None) -> None:
+    def error(
+        self,
+        title: str,
+        message: str,
+        parent: Optional[QWidget] = None
+    ) -> None:
+        """Show an error message box with red styling.
+        
+        Args:
+            title: Dialog title.
+            message: Message text.
+            parent: Optional parent widget override.
+        """
         parent = parent or self._parent_widget
         msg_box = QMessageBox(parent)
         msg_box.setIcon(QMessageBox.Critical)
@@ -145,7 +245,22 @@ class MessageManager:
         """)
         msg_box.exec_()
     
-    def question(self, title: str, message: str, parent: QWidget = None) -> bool:
+    def question(
+        self,
+        title: str,
+        message: str,
+        parent: Optional[QWidget] = None
+    ) -> bool:
+        """Show a yes/no question dialog.
+        
+        Args:
+            title: Dialog title.
+            message: Question text.
+            parent: Optional parent widget override.
+            
+        Returns:
+            True if user clicked Yes, False otherwise.
+        """
         parent = parent or self._parent_widget
         reply = QMessageBox.question(
             parent, title, message,
@@ -154,48 +269,131 @@ class MessageManager:
         )
         return reply == QMessageBox.Yes
     
-    def confirm(self, title: str, message: str, parent: QWidget = None) -> bool:
+    def confirm(
+        self,
+        title: str,
+        message: str,
+        parent: Optional[QWidget] = None
+    ) -> bool:
+        """Show a confirmation dialog.
+        
+        Args:
+            title: Dialog title.
+            message: Confirmation question.
+            parent: Optional parent widget override.
+            
+        Returns:
+            True if user confirmed, False otherwise.
+        """
         return self.question(title, message, parent)
     
-    def toast(self, message: str, level: str = 'info', duration: int = 3000) -> None:
+    def toast(
+        self,
+        message: str,
+        level: MessageLevel = 'info',
+        duration: int = 3000
+    ) -> None:
+        """Show a toast notification.
+        
+        Args:
+            message: Notification text.
+            level: Message level ('info', 'success', 'warning', 'error').
+            duration: Display duration in milliseconds.
+        """
         toast = ToastWidget(message, level, duration)
         toast.show_at_corner()
     
     def toast_success(self, message: str, duration: int = 3000) -> None:
+        """Show a success toast notification.
+        
+        Args:
+            message: Notification text.
+            duration: Display duration in milliseconds.
+        """
         self.toast(message, 'success', duration)
     
     def toast_error(self, message: str, duration: int = 3000) -> None:
+        """Show an error toast notification.
+        
+        Args:
+            message: Notification text.
+            duration: Display duration in milliseconds.
+        """
         self.toast(message, 'error', duration)
     
     def toast_warning(self, message: str, duration: int = 3000) -> None:
+        """Show a warning toast notification.
+        
+        Args:
+            message: Notification text.
+            duration: Display duration in milliseconds.
+        """
         self.toast(message, 'warning', duration)
     
     def toast_info(self, message: str, duration: int = 3000) -> None:
+        """Show an info toast notification.
+        
+        Args:
+            message: Notification text.
+            duration: Display duration in milliseconds.
+        """
         self.toast(message, 'info', duration)
 
 
-message_manager = MessageManager()
+# Global singleton instance
+message_manager: MessageManager = MessageManager()
 
 
-def show_error(title: str, message: str, parent: QWidget = None):
+# Convenience functions
+def show_error(
+    title: str,
+    message: str,
+    parent: Optional[QWidget] = None
+) -> None:
+    """Show an error message box."""
     message_manager.error(title, message, parent)
 
 
-def show_success(title: str, message: str, parent: QWidget = None):
+def show_success(
+    title: str,
+    message: str,
+    parent: Optional[QWidget] = None
+) -> None:
+    """Show a success message box."""
     message_manager.success(title, message, parent)
 
 
-def show_warning(title: str, message: str, parent: QWidget = None):
+def show_warning(
+    title: str,
+    message: str,
+    parent: Optional[QWidget] = None
+) -> None:
+    """Show a warning message box."""
     message_manager.warning(title, message, parent)
 
 
-def show_info(title: str, message: str, parent: QWidget = None):
+def show_info(
+    title: str,
+    message: str,
+    parent: Optional[QWidget] = None
+) -> None:
+    """Show an information message box."""
     message_manager.info(title, message, parent)
 
 
-def show_question(title: str, message: str, parent: QWidget = None) -> bool:
+def show_question(
+    title: str,
+    message: str,
+    parent: Optional[QWidget] = None
+) -> bool:
+    """Show a yes/no question dialog."""
     return message_manager.question(title, message, parent)
 
 
-def show_toast(message: str, level: str = 'info', duration: int = 3000):
+def show_toast(
+    message: str,
+    level: MessageLevel = 'info',
+    duration: int = 3000
+) -> None:
+    """Show a toast notification."""
     message_manager.toast(message, level, duration)
