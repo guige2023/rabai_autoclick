@@ -1,4 +1,6 @@
 {
+  "name": "Loop Example Workflow",
+  "description": "Demonstrates variable setting and loop control flow",
   "variables": {
     "loop_count": 0
   },
@@ -9,7 +11,8 @@
       "name": "counter",
       "value": 0,
       "value_type": "int",
-      "pre_delay": 0
+      "pre_delay": 0,
+      "comment": "Initialize counter to 0"
     },
     {
       "id": 2,
@@ -17,7 +20,8 @@
       "loop_id": "main_loop",
       "count": 3,
       "loop_start": 2,
-      "pre_delay": 0.2
+      "pre_delay": 0.2,
+      "comment": "Loop 3 times"
     },
     {
       "id": 3,
@@ -26,7 +30,8 @@
       "y": 100,
       "button": "left",
       "output_var": "click_x",
-      "pre_delay": 0.1
+      "pre_delay": 0.1,
+      "comment": "First click position"
     },
     {
       "id": 4,
@@ -35,7 +40,8 @@
       "y": 100,
       "button": "left",
       "output_var": "click_y",
-      "pre_delay": 0.1
+      "pre_delay": 0.1,
+      "comment": "Second click position"
     },
     {
       "id": 5,
@@ -43,7 +49,8 @@
       "name": "counter",
       "value": "{{counter + 1}}",
       "value_type": "expression",
-      "pre_delay": 0.1
+      "pre_delay": 0.1,
+      "comment": "Increment counter"
     },
     {
       "id": 6,
@@ -51,13 +58,15 @@
       "condition": "{{counter < 3}}",
       "true_next": 2,
       "false_next": 7,
-      "pre_delay": 0.1
+      "pre_delay": 0.1,
+      "comment": "Check if loop should continue"
     },
     {
       "id": 7,
       "type": "delay",
       "seconds": 0.5,
-      "pre_delay": 0.1
+      "pre_delay": 0.1,
+      "comment": "Final delay after loop completes"
     }
   ]
 }
