@@ -1,21 +1,39 @@
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""Statistics dialog for RabAI AutoClick.
 
-from typing import Dict, Any, List
+Displays execution statistics, step performance metrics,
+and workflow execution history.
+"""
+
+import os
+import sys
+from typing import Dict, Any, List, Optional
+
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QTabWidget, QWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QGroupBox, QFormLayout, QTextEdit, QComboBox, QDateTimeEdit
+    QComboBox, QDateTimeEdit, QDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QPushButton, QTabWidget,
+    QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget
 )
-from PyQt5.QtCore import Qt, QDateTime
-from PyQt5.QtGui import QFont, QColor
+
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+))
 
 from utils.execution_stats import execution_stats
 
 
 class StatsDialog(QDialog):
-    def __init__(self, parent=None):
+    """Dialog displaying execution statistics and performance metrics."""
+    
+    def __init__(self, parent: Optional[QDialog] = None) -> None:
+        """Initialize the stats dialog.
+        
+        Args:
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
         self.setWindowTitle("执行统计分析")
         self.setMinimumSize(800, 600)
@@ -23,7 +41,8 @@ class StatsDialog(QDialog):
         self._init_ui()
         self._load_data()
     
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Initialize the dialog UI components."""
         layout = QVBoxLayout(self)
         
         self.tabs = QTabWidget()
@@ -33,6 +52,7 @@ class StatsDialog(QDialog):
         self._create_steps_tab()
         self._create_history_tab()
         
+        # Bottom buttons
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         
@@ -51,10 +71,12 @@ class StatsDialog(QDialog):
         
         layout.addLayout(btn_layout)
     
-    def _create_overview_tab(self):
+    def _create_overview_tab(self) -> None:
+        """Create the overview tab with summary statistics."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
+        # Summary statistics
         summary_group = QGroupBox("总体统计")
         form = QFormLayout()
         
@@ -81,13 +103,18 @@ class StatsDialog(QDialog):
         summary_group.setLayout(form)
         layout.addWidget(summary_group)
         
+        # Step type statistics
         step_group = QGroupBox("步骤类型统计")
         step_layout = QVBoxLayout()
         
         self.step_table = QTableWidget()
         self.step_table.setColumnCount(5)
-        self.step_table.setHorizontalHeaderLabels(["步骤类型", "执行次数", "平均耗时", "总耗时", "成功率"])
-        self.step_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.step_table.setHorizontalHeaderLabels([
+            "步骤类型", "执行次数", "平均耗时", "总耗时", "成功率"
+        ])
+        self.step_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
         step_layout.addWidget(self.step_table)
         
         step_group.setLayout(step_layout)
@@ -95,18 +122,23 @@ class StatsDialog(QDialog):
         
         self.tabs.addTab(tab, "📊 总览")
     
-    def _create_steps_tab(self):
+    def _create_steps_tab(self) -> None:
+        """Create the step performance tab."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
         self.step_perf_table = QTableWidget()
         self.step_perf_table.setColumnCount(7)
         self.step_perf_table.setHorizontalHeaderLabels([
-            "步骤类型", "执行次数", "平均耗时", "最小耗时", "最大耗时", "成功率", "错误数"
+            "步骤类型", "执行次数", "平均耗时", "最小耗时",
+            "最大耗时", "成功率", "错误数"
         ])
-        self.step_perf_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.step_perf_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
         layout.addWidget(self.step_perf_table)
         
+        # Common errors section
         error_group = QGroupBox("常见错误")
         error_layout = QVBoxLayout()
         
@@ -120,7 +152,8 @@ class StatsDialog(QDialog):
         
         self.tabs.addTab(tab, "⚡ 步骤性能")
     
-    def _create_history_tab(self):
+    def _create_history_tab(self) -> None:
+        """Create the execution history tab."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -129,17 +162,22 @@ class StatsDialog(QDialog):
         self.history_table.setHorizontalHeaderLabels([
             "时间", "工作流", "循环次数", "总耗时", "平均循环耗时", "状态"
         ])
-        self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.history_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
         layout.addWidget(self.history_table)
         
         self.tabs.addTab(tab, "📜 执行历史")
     
-    def _load_data(self):
+    def _load_data(self) -> None:
+        """Load and display statistics data."""
         summary = execution_stats.get_summary()
         
+        # Update summary labels
         self.total_sessions_label.setText(str(summary['total_sessions']))
         self.total_loops_label.setText(str(summary['total_loops']))
         
+        # Format duration display
         total_dur = summary['total_duration']
         if total_dur > 3600:
             self.total_duration_label.setText(f"{total_dur/3600:.1f}小时")
@@ -154,45 +192,83 @@ class StatsDialog(QDialog):
         else:
             self.avg_duration_label.setText(f"{avg_dur:.1f}秒")
         
+        # Format success rate with color coding
         rate = summary['success_rate']
         self.success_rate_label.setText(f"{rate:.1f}%")
         if rate >= 90:
-            self.success_rate_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            self.success_rate_label.setStyleSheet(
+                "color: #4CAF50; font-weight: bold;"
+            )
         elif rate >= 70:
-            self.success_rate_label.setStyleSheet("color: #FF9800; font-weight: bold;")
+            self.success_rate_label.setStyleSheet(
+                "color: #FF9800; font-weight: bold;"
+            )
         else:
-            self.success_rate_label.setStyleSheet("color: #f44336; font-weight: bold;")
+            self.success_rate_label.setStyleSheet(
+                "color: #f44336; font-weight: bold;"
+            )
         
+        # Populate step statistics table
         self.step_table.setRowCount(0)
         for stype, stats in summary['step_stats'].items():
             row = self.step_table.rowCount()
             self.step_table.insertRow(row)
-            self.step_table.setItem(row, 0, QTableWidgetItem(stype))
-            self.step_table.setItem(row, 1, QTableWidgetItem(str(stats['count'])))
-            self.step_table.setItem(row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒"))
-            self.step_table.setItem(row, 3, QTableWidgetItem(f"{stats['total_duration']:.1f}秒"))
-            self.step_table.setItem(row, 4, QTableWidgetItem(f"{stats['success_rate']:.1f}%"))
+            self.step_table.setItem(
+                row, 0, QTableWidgetItem(stype)
+            )
+            self.step_table.setItem(
+                row, 1, QTableWidgetItem(str(stats['count']))
+            )
+            self.step_table.setItem(
+                row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒")
+            )
+            self.step_table.setItem(
+                row, 3, QTableWidgetItem(f"{stats['total_duration']:.1f}秒")
+            )
+            self.step_table.setItem(
+                row, 4, QTableWidgetItem(f"{stats['success_rate']:.1f}%")
+            )
         
+        # Populate step performance table
         step_perf = execution_stats.get_step_performance()
         self.step_perf_table.setRowCount(0)
         
-        all_errors = []
+        all_errors: List[str] = []
         for stype, stats in step_perf.items():
             row = self.step_perf_table.rowCount()
             self.step_perf_table.insertRow(row)
-            self.step_perf_table.setItem(row, 0, QTableWidgetItem(stype))
-            self.step_perf_table.setItem(row, 1, QTableWidgetItem(str(stats['count'])))
-            self.step_perf_table.setItem(row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒"))
-            self.step_perf_table.setItem(row, 3, QTableWidgetItem(f"{stats['min_duration']:.2f}秒"))
-            self.step_perf_table.setItem(row, 4, QTableWidgetItem(f"{stats['max_duration']:.2f}秒"))
-            self.step_perf_table.setItem(row, 5, QTableWidgetItem(f"{stats['success_rate']:.1f}%"))
-            self.step_perf_table.setItem(row, 6, QTableWidgetItem(str(stats['error_count'])))
+            self.step_perf_table.setItem(
+                row, 0, QTableWidgetItem(stype)
+            )
+            self.step_perf_table.setItem(
+                row, 1, QTableWidgetItem(str(stats['count']))
+            )
+            self.step_perf_table.setItem(
+                row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒")
+            )
+            self.step_perf_table.setItem(
+                row, 3, QTableWidgetItem(f"{stats['min_duration']:.2f}秒")
+            )
+            self.step_perf_table.setItem(
+                row, 4, QTableWidgetItem(f"{stats['max_duration']:.2f}秒")
+            )
+            self.step_perf_table.setItem(
+                row, 5, QTableWidgetItem(f"{stats['success_rate']:.1f}%")
+            )
+            self.step_perf_table.setItem(
+                row, 6, QTableWidgetItem(str(stats['error_count']))
+            )
             
             if stats['common_errors']:
-                all_errors.extend([f"[{stype}] {e}" for e in stats['common_errors']])
+                all_errors.extend(
+                    [f"[{stype}] {e}" for e in stats['common_errors']]
+                )
         
-        self.error_text.setText('\n'.join(all_errors[-20:]) if all_errors else "暂无错误记录")
+        self.error_text.setText(
+            '\n'.join(all_errors[-20:]) if all_errors else "暂无错误记录"
+        )
         
+        # Populate history table
         recent = execution_stats.get_recent_sessions(30)
         self.history_table.setRowCount(0)
         
@@ -200,15 +276,26 @@ class StatsDialog(QDialog):
             row = self.history_table.rowCount()
             self.history_table.insertRow(row)
             
-            self.history_table.setItem(row, 0, QTableWidgetItem(session.get('date', '-')))
-            self.history_table.setItem(row, 1, QTableWidgetItem(session.get('workflow_name', '-')[:20]))
-            self.history_table.setItem(row, 2, QTableWidgetItem(str(session.get('loop_count', 1))))
+            self.history_table.setItem(
+                row, 0, QTableWidgetItem(session.get('date', '-'))
+            )
+            self.history_table.setItem(
+                row, 1,
+                QTableWidgetItem(session.get('workflow_name', '-')[:20])
+            )
+            self.history_table.setItem(
+                row, 2, QTableWidgetItem(str(session.get('loop_count', 1)))
+            )
             
             total_dur = session.get('total_duration', 0)
-            self.history_table.setItem(row, 3, QTableWidgetItem(f"{total_dur:.1f}秒"))
+            self.history_table.setItem(
+                row, 3, QTableWidgetItem(f"{total_dur:.1f}秒")
+            )
             
             avg_dur = session.get('avg_loop_duration', 0)
-            self.history_table.setItem(row, 4, QTableWidgetItem(f"{avg_dur:.1f}秒"))
+            self.history_table.setItem(
+                row, 4, QTableWidgetItem(f"{avg_dur:.1f}秒")
+            )
             
             status = "✓ 成功" if session.get('success', False) else "✗ 失败"
             status_item = QTableWidgetItem(status)
@@ -218,8 +305,10 @@ class StatsDialog(QDialog):
                 status_item.setForeground(QColor('#f44336'))
             self.history_table.setItem(row, 5, status_item)
     
-    def _clear_history(self):
+    def _clear_history(self) -> None:
+        """Clear all execution history after confirmation."""
         from PyQt5.QtWidgets import QMessageBox
+        
         reply = QMessageBox.question(
             self, '确认清除',
             '确定要清除所有执行历史记录吗？\n此操作不可恢复！',
