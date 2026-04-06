@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/guige2023/rabai_autoclick#readme
+    about: Please check the README first for usage and installation help
+  - name: GitHub Discussions
+    url: https://github.com/guige2023/rabai_autoclick/discussions
+    about: Ask questions and share ideas with the community
+  - name: Support
+    url: https://github.com/guige2023/rabai_autoclick/blob/main/SUPPORT.md
+    about: Quick fixes for common problems
