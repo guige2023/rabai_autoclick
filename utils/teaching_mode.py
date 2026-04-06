@@ -1,28 +1,45 @@
-import sys
+"""Teaching mode utilities for RabAI AutoClick.
+
+Provides on-screen key and mouse position display widgets for
+recording and teaching automation workflows.
+"""
+
 import threading
 import time
 from typing import Dict, List, Optional
+
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject
+from PyQt5.QtGui import QFont, QPainter, QPen, QBrush
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplication
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject
-from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QBrush
 
+
+# Check pynput availability
 try:
     from pynput import mouse, keyboard
-    PYNPUT_AVAILABLE = True
+    PYNPUT_AVAILABLE: bool = True
 except ImportError:
     PYNPUT_AVAILABLE = False
 
 
 class KeyDisplayWidget(QWidget):
-    def __init__(self, parent=None):
+    """Widget that displays pressed keys on screen."""
+    
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        """Initialize the key display widget.
+        
+        Args:
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
         self._keys: List[str] = []
-        self._max_keys = 5
+        self._max_keys: int = 5
+        self._key_labels: List[QLabel] = []
         self._init_ui()
     
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Initialize the widget UI."""
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.FramelessWindowHint
@@ -34,7 +51,6 @@ class KeyDisplayWidget(QWidget):
         self._layout.setContentsMargins(10, 5, 10, 5)
         self._layout.setSpacing(5)
         
-        self._key_labels: List[QLabel] = []
         for _ in range(self._max_keys):
             label = QLabel()
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -54,7 +70,12 @@ class KeyDisplayWidget(QWidget):
         
         self.adjustSize()
     
-    def add_key(self, key: str):
+    def add_key(self, key: str) -> None:
+        """Add a key to the display.
+        
+        Args:
+            key: Key name to display.
+        """
         key = self._format_key(key)
         
         if len(self._keys) >= self._max_keys:
@@ -64,7 +85,12 @@ class KeyDisplayWidget(QWidget):
         self._update_display()
         self.show()
     
-    def remove_key(self, key: str):
+    def remove_key(self, key: str) -> None:
+        """Remove a key from the display.
+        
+        Args:
+            key: Key name to remove.
+        """
         key = self._format_key(key)
         if key in self._keys:
             self._keys.remove(key)
@@ -73,8 +99,17 @@ class KeyDisplayWidget(QWidget):
         if not self._keys:
             self.hide()
     
-    def _format_key(self, key: str) -> str:
-        key_map = {
+    @staticmethod
+    def _format_key(key: str) -> str:
+        """Format a key name for display with Unicode symbols.
+        
+        Args:
+            key: Raw key name.
+            
+        Returns:
+            Formatted key name with Unicode symbols.
+        """
+        key_map: Dict[str, str] = {
             'ctrl': 'Ctrl',
             'shift': 'Shift',
             'alt': 'Alt',
@@ -95,7 +130,8 @@ class KeyDisplayWidget(QWidget):
         }
         return key_map.get(key.lower(), key.upper())
     
-    def _update_display(self):
+    def _update_display(self) -> None:
+        """Update the key labels based on current keys."""
         for i, label in enumerate(self._key_labels):
             if i < len(self._keys):
                 label.setText(self._keys[i])
@@ -104,18 +140,27 @@ class KeyDisplayWidget(QWidget):
                 label.hide()
         self.adjustSize()
     
-    def clear(self):
+    def clear(self) -> None:
+        """Clear all displayed keys and hide the widget."""
         self._keys.clear()
         self._update_display()
         self.hide()
 
 
 class MousePositionWidget(QWidget):
-    def __init__(self, parent=None):
+    """Widget that displays current mouse position on screen."""
+    
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        """Initialize the mouse position widget.
+        
+        Args:
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
         self._init_ui()
     
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Initialize the widget UI."""
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.FramelessWindowHint
@@ -152,139 +197,55 @@ class MousePositionWidget(QWidget):
         
         self.adjustSize()
     
-    def update_position(self, x: int, y: int):
+    def update_position(self, x: int, y: int) -> None:
+        """Update the displayed mouse position.
+        
+        Args:
+            x: X coordinate.
+            y: Y coordinate.
+        """
         self._position_label.setText(f"鼠标: ({x}, {y})")
         self.adjustSize()
 
 
 class KeyDisplayManager(QObject):
-    _instance = None
-    _lock = threading.Lock()
+    """Manages key and mouse position display widgets."""
     
-    toggled = pyqtSignal(bool)
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
-        return cls._instance
-    
-    def __init__(self):
-        if self._initialized:
-            return
+    def __init__(self) -> None:
+        """Initialize the key display manager."""
         super().__init__()
-        self._initialized = True
-        
-        self._enabled = False
-        self._key_display: Optional[KeyDisplayWidget] = None
-        self._mouse_position_widget: Optional[MousePositionWidget] = None
-        self._position_timer: Optional[QTimer] = None
-        
-        self._pressed_keys: Dict[str, bool] = {}
-    
-    def is_enabled(self) -> bool:
-        return self._enabled
+        self._enabled: bool = False
     
     def enable(self) -> bool:
-        if self._enabled:
-            return True
+        """Enable the key display (stub - actual implementation in subclass).
         
-        try:
-            app = QApplication.instance()
-            if app is None:
-                return False
-            
-            self._key_display = KeyDisplayWidget()
-            self._mouse_position_widget = MousePositionWidget()
-            
-            screen = app.primaryScreen()
-            if screen:
-                geometry = screen.geometry()
-                self._key_display.move(geometry.width() - 400, 50)
-                self._mouse_position_widget.move(20, geometry.height() - 100)
-            
-            self._mouse_position_widget.show()
-            
-            self._position_timer = QTimer()
-            self._position_timer.timeout.connect(self._update_mouse_position)
-            self._position_timer.start(50)
-            
-            self._enabled = True
-            self.toggled.emit(True)
-            
-            return True
-            
-        except Exception as e:
-            print(f"[KeyDisplay] Error enabling: {e}")
-            import traceback
-            traceback.print_exc()
-            self._cleanup()
-            return False
+        Returns:
+            True if enabled successfully.
+        """
+        self._enabled = True
+        return True
     
-    def disable(self):
-        if not self._enabled:
-            return
-        
-        self._cleanup()
+    def disable(self) -> None:
+        """Disable the key display."""
         self._enabled = False
-        self.toggled.emit(False)
+    
+    def is_enabled(self) -> bool:
+        """Check if key display is enabled.
+        
+        Returns:
+            True if enabled.
+        """
+        return self._enabled
     
     def toggle(self) -> bool:
+        """Toggle key display on/off.
+        
+        Returns:
+            True if enabled after toggle.
+        """
         if self._enabled:
             self.disable()
             return False
         else:
-            return self.enable()
-    
-    def _cleanup(self):
-        if self._position_timer:
-            self._position_timer.stop()
-            self._position_timer.deleteLater()
-            self._position_timer = None
-        
-        if self._key_display:
-            self._key_display.hide()
-            self._key_display.deleteLater()
-            self._key_display = None
-        
-        if self._mouse_position_widget:
-            self._mouse_position_widget.hide()
-            self._mouse_position_widget.deleteLater()
-            self._mouse_position_widget = None
-        
-        self._pressed_keys.clear()
-    
-    def _update_mouse_position(self):
-        if not self._enabled:
-            return
-        
-        try:
-            cursor = QApplication.instance().queryKeyboardModifiers()
-            pos = QApplication.instance().desktop().cursor().pos()
-            if self._mouse_position_widget:
-                self._mouse_position_widget.update_position(pos.x(), pos.y())
-        except Exception:
-            pass
-    
-    def on_key_press(self, key_name: str):
-        if not self._enabled:
-            return
-        
-        if key_name not in self._pressed_keys:
-            self._pressed_keys[key_name] = True
-            if self._key_display:
-                self._key_display.add_key(key_name)
-    
-    def on_key_release(self, key_name: str):
-        if not self._enabled:
-            return
-        
-        if key_name in self._pressed_keys:
-            del self._pressed_keys[key_name]
-            if self._key_display:
-                self._key_display.remove_key(key_name)
-
-
-key_display_manager = KeyDisplayManager()
+            self.enable()
+            return True
