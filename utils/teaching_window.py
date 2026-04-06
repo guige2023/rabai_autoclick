@@ -1,31 +1,63 @@
+#!/usr/bin/env python3
+"""Teaching window utilities for RabAI AutoClick.
+
+Provides a floating overlay window that displays pressed keys
+and click animations for teaching and demonstration mode.
+"""
+
 import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from typing import Any, Dict, List, Optional
 
+from PyQt5.QtCore import QPoint, Qt, QTimer
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QApplication
+    QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 )
-from PyQt5.QtCore import Qt, QTimer, QPoint, QRect
-from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QBrush, QPainterPath
 
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+))
+
+import os
+
+
+# Check pynput availability
 try:
     from pynput import mouse, keyboard
-    PYNPUT_AVAILABLE = True
+    PYNPUT_AVAILABLE: bool = True
 except ImportError:
     PYNPUT_AVAILABLE = False
 
 
 class TeachingWindow(QWidget):
-    def __init__(self, parent=None):
+    """Floating teaching window that displays keys and click animations.
+    
+    Shows pressed keyboard keys and animated click indicators
+    for teaching and demonstration purposes.
+    """
+    
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        """Initialize the teaching window.
+        
+        Args:
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
-        self._keys: list = []
-        self._max_keys = 8
-        self._click_animations = []
+        self._keys: List[str] = []
+        self._max_keys: int = 8
+        self._click_animations: List[Dict[str, Any]] = []
         self._init_ui()
     
-    def _init_ui(self):
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+    def _init_ui(self) -> None:
+        """Initialize the window UI."""
+        self.setWindowFlags(
+            Qt.Window |
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.Tool
+        )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         
@@ -77,7 +109,12 @@ class TeachingWindow(QWidget):
         
         self._update_keys_display()
     
-    def add_key(self, key: str):
+    def add_key(self, key: str) -> None:
+        """Add a key to the display.
+        
+        Args:
+            key: Key name to display.
+        """
         key = self._format_key(key)
         
         if key in self._keys:
@@ -89,7 +126,12 @@ class TeachingWindow(QWidget):
         self._keys.append(key)
         self._update_keys_display()
     
-    def remove_key(self, key: str):
+    def remove_key(self, key: str) -> None:
+        """Remove a key from the display.
+        
+        Args:
+            key: Key name to remove.
+        """
         key = self._format_key(key)
         
         if key in self._keys:
@@ -97,7 +139,15 @@ class TeachingWindow(QWidget):
             self._update_keys_display()
     
     def _format_key(self, key: str) -> str:
-        key_map = {
+        """Format a key name for display with Unicode symbols.
+        
+        Args:
+            key: Raw key name.
+            
+        Returns:
+            Formatted key name with Unicode symbols.
+        """
+        key_map: Dict[str, str] = {
             'ctrl': 'Ctrl',
             'shift': 'Shift',
             'alt': 'Alt',
@@ -130,7 +180,8 @@ class TeachingWindow(QWidget):
         }
         return key_map.get(key.lower(), key.upper())
     
-    def _update_keys_display(self):
+    def _update_keys_display(self) -> None:
+        """Update the displayed key labels."""
         for i in range(self.keys_container.layout().count()):
             widget = self.keys_container.layout().itemAt(i).widget()
             widget.deleteLater()
@@ -157,15 +208,22 @@ class TeachingWindow(QWidget):
         
         self.keys_container.setLayout(keys_layout)
     
-    def show_click(self, x: int, y: int, button: str):
-        colors = {
+    def show_click(self, x: int, y: int, button: str) -> None:
+        """Show a click animation at the specified position.
+        
+        Args:
+            x: X coordinate of click.
+            y: Y coordinate of click.
+            button: Button name ('left', 'right', 'middle').
+        """
+        colors: Dict[str, str] = {
             'left': '#4CAF50',
             'right': '#f44336',
             'middle': '#2196F3'
         }
         color = colors.get(button, '#2196F3')
         
-        animation = {
+        animation: Dict[str, Any] = {
             'x': x,
             'y': y,
             'button': button,
@@ -178,12 +236,18 @@ class TeachingWindow(QWidget):
         self._click_animations.append(animation)
         QTimer.singleShot(0, lambda: self._animate_click(animation))
     
-    def _animate_click(self, animation: dict):
+    def _animate_click(self, animation: Dict[str, Any]) -> None:
+        """Run a click animation.
+        
+        Args:
+            animation: Animation parameters dictionary.
+        """
         animation['start_time'] = animation['start_time'] or 0
         elapsed = 0
         duration = 300
         
-        def update():
+        def update() -> None:
+            nonlocal elapsed
             elapsed += 16
             progress = min(elapsed / duration, 1.0)
             alpha = int(255 * (1 - progress))
@@ -199,7 +263,12 @@ class TeachingWindow(QWidget):
         
         update()
     
-    def paintEvent(self, event):
+    def paintEvent(self, event) -> None:
+        """Paint click animations.
+        
+        Args:
+            event: Paint event.
+        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
@@ -229,33 +298,52 @@ class TeachingWindow(QWidget):
         
         painter.end()
     
-    def clear_keys(self):
+    def clear_keys(self) -> None:
+        """Clear all displayed keys."""
         self._keys.clear()
         self._update_keys_display()
     
-    def clear_clicks(self):
+    def clear_clicks(self) -> None:
+        """Clear all click animations."""
         self._click_animations.clear()
         self.update()
 
 
 class TeachingModeManager:
-    _instance = None
+    """Manager for teaching mode functionality.
     
-    def __new__(cls):
+    Singleton class that manages the teaching window and
+    pynput listeners for capturing input.
+    """
+    
+    _instance: Optional['TeachingModeManager'] = None
+    
+    def __new__(cls) -> 'TeachingModeManager':
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
     
-    def __init__(self):
-        self._window: TeachingWindow = None
-        self._enabled = False
-        self._mouse_listener = None
-        self._keyboard_listener = None
+    def __init__(self) -> None:
+        """Initialize the teaching mode manager."""
+        self._window: Optional[TeachingWindow] = None
+        self._enabled: bool = False
+        self._mouse_listener: Optional[Any] = None
+        self._keyboard_listener: Optional[Any] = None
     
     def is_enabled(self) -> bool:
+        """Check if teaching mode is enabled.
+        
+        Returns:
+            True if enabled.
+        """
         return self._enabled
     
     def enable(self) -> bool:
+        """Enable teaching mode.
+        
+        Returns:
+            True if enabled successfully.
+        """
         if not PYNPUT_AVAILABLE:
             return False
         
@@ -270,7 +358,9 @@ class TeachingModeManager:
         self._window.show()
         
         try:
-            self._mouse_listener = mouse.Listener(on_click=self._on_mouse_click)
+            self._mouse_listener = mouse.Listener(
+                on_click=self._on_mouse_click
+            )
             self._keyboard_listener = keyboard.Listener(
                 on_press=self._on_key_press,
                 on_release=self._on_key_release
@@ -285,7 +375,8 @@ class TeachingModeManager:
             print(f"教学模式启动失败: {e}")
             return False
     
-    def disable(self):
+    def disable(self) -> None:
+        """Disable teaching mode."""
         if not self._enabled:
             return
         
@@ -304,20 +395,48 @@ class TeachingModeManager:
         self._enabled = False
     
     def toggle(self) -> bool:
+        """Toggle teaching mode on/off.
+        
+        Returns:
+            True if enabled after toggle.
+        """
         if self._enabled:
             self.disable()
             return False
         else:
             return self.enable()
     
-    def _on_mouse_click(self, x, y, button, pressed):
+    def _on_mouse_click(
+        self,
+        x: int,
+        y: int,
+        button: mouse.Button,
+        pressed: bool
+    ) -> None:
+        """Handle mouse click event.
+        
+        Args:
+            x: Mouse X coordinate.
+            y: Mouse Y coordinate.
+            button: Mouse button.
+            pressed: True if button was pressed.
+        """
         if not self._enabled or not pressed:
             return
         
-        button_name = 'left' if button == mouse.Button.left else 'right' if button == mouse.Button.right else 'middle'
+        button_name = (
+            'left' if button == mouse.Button.left
+            else 'right' if button == mouse.Button.right
+            else 'middle'
+        )
         self._window.show_click(x, y, button_name)
     
-    def _on_key_press(self, key):
+    def _on_key_press(self, key: keyboard.Key) -> None:
+        """Handle key press event.
+        
+        Args:
+            key: Key that was pressed.
+        """
         if not self._enabled:
             return
         
@@ -333,7 +452,12 @@ class TeachingModeManager:
         except Exception:
             pass
     
-    def _on_key_release(self, key):
+    def _on_key_release(self, key: keyboard.Key) -> None:
+        """Handle key release event.
+        
+        Args:
+            key: Key that was released.
+        """
         if not self._enabled:
             return
         
@@ -350,7 +474,8 @@ class TeachingModeManager:
             pass
 
 
-teaching_mode_manager = TeachingModeManager()
+# Global singleton instance
+teaching_mode_manager: TeachingModeManager = TeachingModeManager()
 
 
 if __name__ == '__main__':
