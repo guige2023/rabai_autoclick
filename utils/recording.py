@@ -1,26 +1,45 @@
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""Recording utilities for RabAI AutoClick.
 
-import json
+Provides action recording functionality using pynput or pyautogui
+for capturing mouse and keyboard events during workflow creation.
+"""
+
+import os
+import sys
 import time
 import threading
-from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
-from PyQt5.QtWidgets import QMessageBox
+from typing import Any, Dict, List, Optional, Set
 
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+))
+
+
+# Check library availability
 try:
     from pynput import mouse, keyboard
-    PYNPUT_AVAILABLE = True
+    PYNPUT_AVAILABLE: bool = True
 except ImportError:
     PYNPUT_AVAILABLE = False
 
-import pyautogui
-PYAUTOGUI_AVAILABLE = True
+try:
+    import pyautogui
+    PYAUTOGUI_AVAILABLE: bool = True
+except ImportError:
+    PYAUTOGUI_AVAILABLE = False
 
 
 def check_pynput_permission() -> bool:
+    """Check if pynput has permission to capture input.
+    
+    Returns:
+        True if pynput can capture input, False otherwise.
+    """
     if not PYNPUT_AVAILABLE:
         return False
     try:
@@ -34,12 +53,37 @@ def check_pynput_permission() -> bool:
 
 
 class RecordedAction:
-    def __init__(self, action_type: str, timestamp: float, params: Dict[str, Any]):
-        self.action_type = action_type
-        self.timestamp = timestamp
-        self.params = params
+    """Represents a single recorded action.
     
-    def to_dict(self) -> dict:
+    Attributes:
+        action_type: Type of action ('click', 'scroll', 'key_press', etc.).
+        timestamp: Time when action occurred (seconds since epoch).
+        params: Dictionary of action parameters.
+    """
+    
+    def __init__(
+        self,
+        action_type: str,
+        timestamp: float,
+        params: Dict[str, Any]
+    ) -> None:
+        """Initialize a recorded action.
+        
+        Args:
+            action_type: Type of action.
+            timestamp: Timestamp of action.
+            params: Action parameters dictionary.
+        """
+        self.action_type: str = action_type
+        self.timestamp: float = timestamp
+        self.params: Dict[str, Any] = params
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary representation.
+        
+        Returns:
+            Dictionary with action_type, timestamp, and params.
+        """
         return {
             'action_type': self.action_type,
             'timestamp': self.timestamp,
@@ -47,7 +91,15 @@ class RecordedAction:
         }
     
     @classmethod
-    def from_dict(cls, data: dict) -> 'RecordedAction':
+    def from_dict(cls, data: Dict[str, Any]) -> 'RecordedAction':
+        """Create RecordedAction from dictionary.
+        
+        Args:
+            data: Dictionary with action data.
+            
+        Returns:
+            New RecordedAction instance.
+        """
         return cls(
             action_type=data['action_type'],
             timestamp=data['timestamp'],
@@ -56,30 +108,44 @@ class RecordedAction:
 
 
 class RecordingManager(QObject):
+    """Manages action recording for workflow capture.
+    
+    Supports both pynput (preferred) and pyautogui (fallback)
+    for capturing mouse and keyboard events.
+    """
+    
     action_recorded = pyqtSignal(str, dict)
     recording_started = pyqtSignal()
     recording_stopped = pyqtSignal(list)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        """Initialize the recording manager.
+        
+        Args:
+            parent: Optional parent QObject.
+        """
         super().__init__(parent)
-        self._is_recording = False
+        self._is_recording: bool = False
         self._actions: List[RecordedAction] = []
         self._start_time: float = 0
-        self._mouse_listener = None
-        self._keyboard_listener = None
-        self._last_action_time = 0
-        self._min_interval = 0.1
-        self._initialized = False
-        self._use_pyautogui = False
-        self._polling_timer = None
-        self._last_mouse_pos = None
-        self._last_mouse_buttons = set()
-        self._pressed_keys = set()
-        self._modifier_keys = {'shift', 'ctrl', 'alt', 'cmd', 'command', 'option', 'control'}
+        self._mouse_listener: Optional[Any] = None
+        self._keyboard_listener: Optional[Any] = None
+        self._last_action_time: float = 0
+        self._min_interval: float = 0.1
+        self._initialized: bool = False
+        self._use_pyautogui: bool = False
+        self._polling_timer: Optional[QTimer] = None
+        self._last_mouse_pos: Optional[Any] = None
+        self._last_mouse_buttons: Set[str] = set()
+        self._pressed_keys: Set[str] = set()
+        self._modifier_keys: Set[str] = {
+            'shift', 'ctrl', 'alt', 'cmd', 'command', 'option', 'control'
+        }
         
         if PYNPUT_AVAILABLE:
             try:
-                from pynput import mouse as mouse_module, keyboard as keyboard_module
+                from pynput import mouse as mouse_module
+                from pynput import keyboard as keyboard_module
                 self._mouse_module = mouse_module
                 self._keyboard_module = keyboard_module
                 self._initialized = True
@@ -94,9 +160,19 @@ class RecordingManager(QObject):
             print("[Recording] Using pyautogui fallback")
     
     def is_recording(self) -> bool:
+        """Check if recording is in progress.
+        
+        Returns:
+            True if recording, False otherwise.
+        """
         return self._is_recording
     
     def start_recording(self) -> bool:
+        """Start recording actions.
+        
+        Returns:
+            True if recording started successfully.
+        """
         if not self._initialized:
             print("[Recording] Not initialized")
             return False
@@ -117,6 +193,11 @@ class RecordingManager(QObject):
             return self._start_pynput_recording()
     
     def _start_pynput_recording(self) -> bool:
+        """Start recording using pynput.
+        
+        Returns:
+            True if started successfully.
+        """
         try:
             self._pressed_keys = set()
             
@@ -142,6 +223,11 @@ class RecordingManager(QObject):
             return self._start_pyautogui_recording()
     
     def _start_pyautogui_recording(self) -> bool:
+        """Start recording using pyautogui polling.
+        
+        Returns:
+            True if started successfully.
+        """
         try:
             self._polling_timer = QTimer(self)
             self._polling_timer.timeout.connect(self._poll_input)
@@ -154,7 +240,8 @@ class RecordingManager(QObject):
             self._is_recording = False
             return False
     
-    def _poll_input(self):
+    def _poll_input(self) -> None:
+        """Poll for mouse position changes (pyautogui fallback)."""
         if not self._is_recording:
             return
         
@@ -166,6 +253,11 @@ class RecordingManager(QObject):
             pass
     
     def stop_recording(self) -> List[RecordedAction]:
+        """Stop recording and return captured actions.
+        
+        Returns:
+            List of RecordedAction objects captured during recording.
+        """
         if not self._is_recording:
             return []
         
@@ -182,7 +274,9 @@ class RecordingManager(QObject):
                     self._mouse_listener.join(timeout=1.0)
                 except Exception as e:
                     import logging
-                    logging.getLogger("RabAI").debug(f"停止鼠标监听器失败: {e}")
+                    logging.getLogger("RabAI").debug(
+                        f"停止鼠标监听器失败: {e}"
+                    )
                 self._mouse_listener = None
             
             if self._keyboard_listener:
@@ -191,217 +285,164 @@ class RecordingManager(QObject):
                     self._keyboard_listener.join(timeout=1.0)
                 except Exception as e:
                     import logging
-                    logging.getLogger("RabAI").debug(f"停止键盘监听器失败: {e}")
+                    logging.getLogger("RabAI").debug(
+                        f"停止键盘监听器失败: {e}"
+                    )
                 self._keyboard_listener = None
         
         self.recording_stopped.emit(self._actions)
         return self._actions.copy()
     
-    def _add_action(self, action_type: str, params: Dict[str, Any]):
-        current_time = time.time() - self._start_time
+    def _on_mouse_click(
+        self,
+        x: int,
+        y: int,
+        button: Any,
+        pressed: bool
+    ) -> None:
+        """Handle mouse click event from pynput.
         
+        Args:
+            x: Mouse X coordinate.
+            y: Mouse Y coordinate.
+            button: Mouse button that was clicked.
+            pressed: True if button was pressed, False if released.
+        """
+        if not self._is_recording:
+            return
+        
+        current_time = time.time()
         if current_time - self._last_action_time < self._min_interval:
             return
         
         self._last_action_time = current_time
         
-        if self._actions:
-            last_action = self._actions[-1]
-            delay = current_time - last_action.timestamp
-            if delay > 0.05:
-                params['pre_delay'] = round(delay, 3)
+        button_name = str(button).split('.')[-1]
+        action_type = 'mouse_click'
         
-        action = RecordedAction(action_type, current_time, params)
+        if pressed:
+            action = RecordedAction(
+                action_type=action_type,
+                timestamp=current_time - self._start_time,
+                params={
+                    'x': x,
+                    'y': y,
+                    'button': button_name,
+                    'pressed': True
+                }
+            )
+            self._actions.append(action)
+            self.action_recorded.emit(action_type, action.params)
+    
+    def _on_mouse_scroll(
+        self,
+        x: int,
+        y: int,
+        dx: int,
+        dy: int
+    ) -> None:
+        """Handle mouse scroll event from pynput.
+        
+        Args:
+            x: Mouse X coordinate.
+            y: Mouse Y coordinate.
+            dx: Horizontal scroll amount.
+            dy: Vertical scroll amount.
+        """
+        if not self._is_recording:
+            return
+        
+        current_time = time.time()
+        if current_time - self._last_action_time < self._min_interval:
+            return
+        
+        self._last_action_time = current_time
+        
+        action = RecordedAction(
+            action_type='mouse_scroll',
+            timestamp=current_time - self._start_time,
+            params={
+                'x': x,
+                'y': y,
+                'dx': dx,
+                'dy': dy
+            }
+        )
         self._actions.append(action)
-        self.action_recorded.emit(action_type, params)
+        self.action_recorded.emit('mouse_scroll', action.params)
     
-    def _on_mouse_click(self, x, y, button, pressed):
-        if not self._is_recording or not pressed:
-            return
+    def _on_key_press(self, key: Any) -> None:
+        """Handle key press event from pynput.
         
-        button_name = 'left' if button == mouse.Button.left else 'right' if button == mouse.Button.right else 'middle'
-        
-        self._add_action('click', {
-            'x': int(x),
-            'y': int(y),
-            'button': button_name,
-            'clicks': 1
-        })
-    
-    def _on_mouse_scroll(self, x, y, dx, dy):
-        if not self._is_recording:
-            return
-        
-        self._add_action('scroll', {
-            'x': int(x),
-            'y': int(y),
-            'clicks': abs(int(dy)),
-            'direction': 'up' if dy > 0 else 'down'
-        })
-    
-    def _on_key_press(self, key):
+        Args:
+            key: Key that was pressed.
+        """
         if not self._is_recording:
             return
         
         try:
-            key_name = None
-            if hasattr(key, 'char') and key.char:
-                key_name = key.char
-            elif hasattr(key, 'name'):
-                key_name = key.name.lower()
+            key_name = self._get_key_name(key)
             
-            if key_name:
+            if key_name in self._modifier_keys:
                 self._pressed_keys.add(key_name)
-                
-                if len(self._pressed_keys) > 1:
-                    combo = '+'.join(sorted(self._pressed_keys))
-                    if any(mod in self._pressed_keys for mod in self._modifier_keys):
-                        return
-                elif key_name in self._modifier_keys:
+            else:
+                current_time = time.time()
+                if current_time - self._last_action_time < self._min_interval:
                     return
-                elif len(self._pressed_keys) == 1:
-                    if len(key_name) == 1:
-                        self._add_action('type_text', {
-                            'text': key_name
-                        })
-                    else:
-                        self._add_action('key_press', {
-                            'key': key_name
-                        })
-        except Exception:
-            pass
+                
+                self._last_action_time = current_time
+                
+                modifiers = list(self._pressed_keys)
+                action = RecordedAction(
+                    action_type='key_press',
+                    timestamp=current_time - self._start_time,
+                    params={
+                        'key': key_name,
+                        'modifiers': modifiers
+                    }
+                )
+                self._actions.append(action)
+                self.action_recorded.emit('key_press', action.params)
+        except Exception as e:
+            import logging
+            logging.getLogger("RabAI").debug(f"录制按键失败: {e}")
     
-    def _on_key_release(self, key):
+    def _on_key_release(self, key: Any) -> None:
+        """Handle key release event from pynput.
+        
+        Args:
+            key: Key that was released.
+        """
         if not self._is_recording:
             return
         
         try:
-            key_name = None
-            if hasattr(key, 'char') and key.char:
-                key_name = key.char
-            elif hasattr(key, 'name'):
-                key_name = key.name.lower()
+            key_name = self._get_key_name(key)
             
-            if key_name and key_name in self._pressed_keys:
+            if key_name in self._modifier_keys:
                 self._pressed_keys.discard(key_name)
-                
-                if len(self._pressed_keys) == 0 and hasattr(key, 'name'):
-                    pass
         except Exception:
             pass
     
-    def get_actions(self) -> List[RecordedAction]:
-        return self._actions.copy()
-    
-    def get_action_count(self) -> int:
-        return len(self._actions)
-    
-    def clear_actions(self) -> None:
-        self._actions = []
-    
-    def to_workflow(self) -> Dict[str, Any]:
-        steps = []
-        step_id = 1
+    def _get_key_name(self, key: Any) -> str:
+        """Convert pynput key to string name.
         
-        action_type_map = {
-            'click': 'click',
-            'scroll': 'scroll',
-            'type_text': 'type_text',
-            'key_press': 'key_press',
-            'hotkey': 'hotkey'
-        }
-        
-        for action in self._actions:
-            action_type = action_type_map.get(action.action_type, action.action_type)
+        Args:
+            key: Pynput key object.
             
-            step = {
-                'id': step_id,
-                'type': action_type,
-                'params': dict(action.params)
-            }
-            steps.append(step)
-            step_id += 1
-        
-        return {
-            'variables': {},
-            'steps': steps
-        }
-    
-    def save_to_file(self, filepath: str) -> bool:
+        Returns:
+            String name of the key.
+        """
         try:
-            data = {
-                'recorded_at': datetime.now().isoformat(),
-                'actions': [a.to_dict() for a in self._actions]
-            }
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception:
-            return False
-    
-    def load_from_file(self, filepath: str) -> bool:
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            self._actions = [RecordedAction.from_dict(a) for a in data.get('actions', [])]
-            return True
-        except Exception:
-            return False
-
-
-class RecordingEditor:
-    def __init__(self, actions: List[RecordedAction]):
-        self._actions = actions.copy()
-    
-    def get_actions(self) -> List[RecordedAction]:
-        return self._actions
-    
-    def remove_action(self, index: int) -> bool:
-        if 0 <= index < len(self._actions):
-            del self._actions[index]
-            return True
-        return False
-    
-    def insert_action(self, index: int, action: RecordedAction) -> bool:
-        if 0 <= index <= len(self._actions):
-            self._actions.insert(index, action)
-            return True
-        return False
-    
-    def modify_action(self, index: int, params: Dict[str, Any]) -> bool:
-        if 0 <= index < len(self._actions):
-            self._actions[index].params.update(params)
-            return True
-        return False
-    
-    def merge_consecutive_types(self) -> int:
-        merged = 0
-        i = 0
-        while i < len(self._actions) - 1:
-            current = self._actions[i]
-            next_action = self._actions[i + 1]
-            
-            if current.action_type == 'type_text' and next_action.action_type == 'type_text':
-                current.params['text'] += next_action.params['text']
-                del self._actions[i + 1]
-                merged += 1
+            if hasattr(key, 'char') and key.char:
+                return key.char.lower()
+            elif hasattr(key, 'name'):
+                return key.name.lower()
             else:
-                i += 1
-        
-        return merged
-    
-    def add_delay_after(self, index: int, delay: float) -> bool:
-        if 0 <= index < len(self._actions):
-            delay_action = RecordedAction('delay', self._actions[index].timestamp + 0.001, {'seconds': delay})
-            self._actions.insert(index + 1, delay_action)
-            return True
-        return False
-    
-    def optimize_delays(self, min_delay: float = 0.1) -> int:
-        optimized = 0
-        for action in self._actions:
-            if 'pre_delay' in action.params and action.params['pre_delay'] < min_delay:
-                del action.params['pre_delay']
-                optimized += 1
-        return optimized
+                return str(key).split('.')[-1].lower()
+        except Exception:
+            return 'unknown'
+
+
+# Import pyautogui at module level (already imported above)
+# This is needed for the recording functions
