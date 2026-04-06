@@ -1,23 +1,22 @@
 # Workflows Directory
 
-This directory contains example workflow files for RabAI AutoClick.
+This directory contains example and user workflow definitions.
 
-## Example Workflows
+## Files
 
 | File | Description |
 |------|-------------|
-| `example_basic.json` | Basic click and type workflow |
-| `example_loop.json` | Workflow demonstrating loop functionality |
-| `example_ocr.json` | OCR-based text recognition workflow |
-| `example_script.json` | Script execution workflow |
-| `example_workflow.json` | General workflow example |
+| `README.md` | This file |
+| `example_basic.json` | Basic workflow example |
+| `example_loop.json` | Loop workflow example |
+| `example_ocr.json` | OCR workflow example |
 
-## Workflow JSON Structure
+## Workflow Format
 
 ```json
 {
   "variables": {
-    "variable_name": "value"
+    "key": "value"
   },
   "steps": [
     {
@@ -26,46 +25,60 @@ This directory contains example workflow files for RabAI AutoClick.
       "x": 100,
       "y": 200,
       "button": "left",
-      "clicks": 1
+      "clicks": 1,
+      "pre_delay": 0.5
     }
+  ]
+}
+```
+
+## Step Types
+
+| Type | Description | Required Params |
+|------|-------------|-----------------|
+| `click` | Mouse click | `x`, `y` |
+| `type_text` | Keyboard input | `text` |
+| `key_press` | Single key | `key` |
+| `delay` | Wait | `seconds` |
+| `scroll` | Scroll mouse | `x`, `y` |
+| `move` | Move mouse | `x`, `y` |
+| `ocr` | Text recognition | `image_path` |
+| `click_image` | Image match click | `image_path` |
+| `screenshot` | Take screenshot | `save_path` |
+| `condition` | Conditional branch | `condition` |
+| `loop` | Loop block | `count`, `loop_start` |
+| `set_variable` | Set variable | `name`, `value` |
+| `script` | Run script | `code` |
+
+## Creating Workflows
+
+### Using GUI
+
+1. Open RabAI AutoClick
+2. Click "New Workflow"
+3. Add steps using the action panel
+4. Save workflow
+
+### Using JSON
+
+Create a JSON file in this directory:
+
+```json
+{
+  "variables": {},
+  "steps": [
+    {"id": 1, "type": "delay", "seconds": 1},
+    {"id": 2, "type": "click", "x": 100, "y": 200}
   ]
 }
 ```
 
 ## Loading Workflows
 
-### Via GUI
-
-1. Click the "Load" button
-2. Select the workflow JSON file
-3. The workflow will appear in the step list
-
-### Via Code
-
 ```python
 from core.engine import FlowEngine
 
 engine = FlowEngine()
-engine.load_workflow_from_file("workflows/example_basic.json")
+engine.load_workflow_from_file("./workflows/my_workflow.json")
 engine.run()
 ```
-
-## Creating Your Own
-
-1. Create a new JSON file in this directory
-2. Follow the structure shown above
-3. Use action types from the `actions/` module
-
-### Available Action Types
-
-- `click` - Mouse click
-- `type_text` - Keyboard input
-- `key_press` - Special keys
-- `delay` - Wait
-- `condition` - Conditional
-- `loop` - Loop
-- `set_variable` - Set variable
-- `click_image` - Image match click
-- `ocr` - OCR click
-- `screenshot` - Capture screen
-- `get_mouse_pos` - Get mouse position
