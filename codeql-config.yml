@@ -1,0 +1,27 @@
+# CodeQL Configuration
+# GitHub Advanced Security code scanning
+
+name: RabAI-AutoClick-CodeQL
+
+paths:
+  - src
+  - core
+  - actions
+  - utils
+  - ui
+  - cli
+
+paths-ignore:
+  - tests
+  - docs
+  - scripts
+
+queries:
+  security-and-quality:
+    - use:
+        - codeql/cpp-queries
+        - codeql/python-queries
+
+  exclude:
+    - security/SweakCrypto
+    - security/InsecureRandomness
