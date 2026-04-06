@@ -41,6 +41,7 @@ dependencies = [
     "pynput>=1.7.0",
     "psutil>=5.8.0",
     "Pillow>=8.0.0",
+    "keyboard>=0.13.5",
 ]
 
 [project.optional-dependencies]
@@ -70,6 +71,33 @@ Documentation = "https://github.com/guige2023/rabai_autoclick#readme"
 Repository = "https://github.com/guige2023/rabai_autoclick"
 Issues = "https://github.com/guige2023/rabai_autoclick/issues"
 Changelog = "https://github.com/guige2023/rabai_autoclick/releases"
+
+[project.sos]
+# Share your work with the community
+# Submit to open-source platforms like Liberapay, Ko-fi, etc.
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/venv/*",
+    "*/.venv/*",
+    "*/build/*",
+    "*/dist/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+
 
 [project.scripts]
 rabai = "cli.main:cli"
