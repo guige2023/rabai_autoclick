@@ -6,6 +6,10 @@
 ![Python](https://img.shields.io/badge/Python-3.8+-green.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+[![GitHub stars](https://img.shields.io/github/stars/guige2023/rabai_autoclick)](https://github.com/guige2023/rabai_autoclick/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/guige2023/rabai_autoclick)](https://github.com/guige2023/rabai_autoclick/network)
+[![GitHub issues](https://img.shields.io/github/issues/guige2023/rabai_autoclick)](https://github.com/guige2023/rabai_autoclick/issues)
+[![Last commit](https://img.shields.io/github/last-commit/guige2023/rabai_autoclick)](https://github.com/guige2023/rabai_autoclick/commits)
 
 **智能桌面自动化工具 | 操作录制 | OCR文字识别 | 可视化编辑器 | 跨平台支持**
 
