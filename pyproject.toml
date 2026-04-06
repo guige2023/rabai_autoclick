@@ -168,3 +168,20 @@ ignore = [
 [tool.ruff.per-file-ignores]
 "__init__.py" = ["F401"]
 "tests/*" = ["B011"]
+
+[tool.pyright]
+include = ["."]
+exclude = [
+    "**/__pycache__",
+    "**/venv",
+    "**/.venv",
+    "**/build",
+    "**/dist",
+]
+pythonVersion = "3.8"
+typeCheckingMode = "basic"
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportOptionalMemberAccess = true
+reportTypedDictExtras = true
+
