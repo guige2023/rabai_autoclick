@@ -6,20 +6,25 @@ This script is used with py2app to create a standalone .app bundle:
     python setup.py py2app
 
 For development, use the main.py directly instead.
+
+Usage:
+    # Build the application
+    python setup.py py2app
+    
+    # The app will be created in dist/RabAI AutoClick.app
 """
 
 import os
 import sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from typing import List, Tuple, Dict, Any
 
 from setuptools import setup
 
 
 # Application bundle configuration
-APP = ['main.py']
+APP: List[str] = ['main.py']
 
-DATA_FILES = [
+DATA_FILES: List[Tuple[str, List[str]]] = [
     ('resources', ['resources']),
     ('actions', ['actions']),
     ('core', ['core']),
@@ -27,10 +32,14 @@ DATA_FILES = [
     ('utils', ['utils']),
 ]
 
-OPTIONS = {
+OPTIONS: Dict[str, Any] = {
     'argv_emulation': False,
     'packages': [
-        'PyQt5', 'pynput', 'cv2', 'numpy', 'rapidocr_onnxruntime'
+        'PyQt5',
+        'pynput',
+        'cv2',
+        'numpy',
+        'rapidocr_onnxruntime',
     ],
     'includes': [
         'PyQt5.QtCore',
@@ -66,6 +75,7 @@ OPTIONS = {
         ),
     },
 }
+
 
 setup(
     name='RabAI AutoClick',
