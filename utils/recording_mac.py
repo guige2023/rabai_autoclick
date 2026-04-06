@@ -1,41 +1,60 @@
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""Mac-specific recording utilities for RabAI AutoClick.
 
-import json
-import time
-import threading
+Provides recording functionality using pynput with process isolation
+to avoid Qt thread conflicts on macOS.
+"""
+
+import multiprocessing as mp
+import os
 import platform
 import subprocess
-import multiprocessing as mp
-from typing import Dict, Any, List, Optional
+import sys
+import threading
+import time
 from datetime import datetime
 from queue import Empty
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer, QThread
+from typing import Any, Dict, List, Optional, Set
+
+from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QMessageBox
 
 import pyautogui
 
-IS_MACOS = platform.system() == 'Darwin'
 
+# Add project root to path
+sys.path.insert(0, os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+))
+
+
+# Platform detection
+IS_MACOS: bool = platform.system() == 'Darwin'
+
+# Check pynput availability
 try:
     from pynput import mouse, keyboard
-    PYNPUT_AVAILABLE = True
+    PYNPUT_AVAILABLE: bool = True
 except ImportError:
     PYNPUT_AVAILABLE = False
 
 
 class MacPermissionChecker:
-    """macOS 权限检查器"""
+    """macOS permission checker for accessibility features."""
     
     @staticmethod
     def check_accessibility_permission() -> bool:
+        """Check if accessibility permission is granted.
+        
+        Returns:
+            True if permission is granted.
+        """
         if not IS_MACOS:
             return True
         
         try:
             result = subprocess.run(
-                ['osascript', '-e', 'tell application "System Events" to get name of processes'],
+                ['osascript', '-e',
+                 'tell application "System Events" to get name of processes'],
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -58,7 +77,17 @@ class MacPermissionChecker:
         return False
     
     @staticmethod
-    def request_accessibility_permission(parent=None) -> bool:
+    def request_accessibility_permission(
+        parent: Optional[QMessageBox] = None
+    ) -> bool:
+        """Request accessibility permission from the user.
+        
+        Args:
+            parent: Optional parent widget for the dialog.
+            
+        Returns:
+            True if permission is granted or user chose to skip.
+        """
         if not IS_MACOS:
             return True
         
@@ -87,41 +116,66 @@ class MacPermissionChecker:
         
         if result == QMessageBox.Yes:
             try:
-                subprocess.run(['open', 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'])
+                subprocess.run([
+                    'open',
+                    'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
+                ])
             except Exception:
                 pass
         
         return False
 
 
-def pynput_listener_process(event_queue: mp.Queue, stop_event: mp.Event, stop_hotkeys: list = None):
-    """独立进程中的 pynput 监听器 - 彻底隔离 Qt 线程"""
+def pynput_listener_process(
+    event_queue: mp.Queue,
+    stop_event: mp.Event,
+    stop_hotkeys: Optional[List[str]] = None
+) -> None:
+    """Pynput listener running in a separate process.
     
+    This function runs in a separate process to avoid Qt thread conflicts.
+    
+    Args:
+        event_queue: Queue for passing events to the main process.
+        stop_event: Event to signal listener shutdown.
+        stop_hotkeys: List of hotkeys that stop recording.
+    """
     if stop_hotkeys is None:
         stop_hotkeys = ['f9', 'f10']
     
-    last_click_time = 0
-    last_click_pos = (0, 0)
-    last_click_button = None
-    double_click_threshold = 0.3
+    last_click_time: float = 0
+    last_click_pos: tuple = (0, 0)
+    last_click_button: Optional[str] = None
+    double_click_threshold: float = 0.3
     
-    def on_click(x, y, button, pressed):
+    def on_click(x: int, y: int, button: mouse.Button, pressed: bool) -> bool:
+        """Handle mouse click events.
+        
+        Args:
+            x: Mouse X coordinate.
+            y: Mouse Y coordinate.
+            button: Mouse button.
+            pressed: True if button was pressed.
+            
+        Returns:
+            False to stop listener, True to continue.
+        """
         nonlocal last_click_time, last_click_pos, last_click_button
         
         if stop_event.is_set():
             return False
         
         if pressed:
-            button_name = 'left'
+            button_name: str = 'left'
             if button == mouse.Button.right:
                 button_name = 'right'
             elif button == mouse.Button.middle:
                 button_name = 'middle'
             
-            current_time = time.time()
-            current_pos = (int(x), int(y))
+            current_time: float = time.time()
+            current_pos: tuple = (int(x), int(y))
             
-            is_double_click = (
+            is_double_click: bool = (
                 current_time - last_click_time < double_click_threshold and
                 current_pos == last_click_pos and
                 button_name == last_click_button
@@ -149,7 +203,18 @@ def pynput_listener_process(event_queue: mp.Queue, stop_event: mp.Event, stop_ho
                 pass
         return True
     
-    def on_scroll(x, y, dx, dy):
+    def on_scroll(x: int, y: int, dx: int, dy: int) -> bool:
+        """Handle mouse scroll events.
+        
+        Args:
+            x: Mouse X coordinate.
+            y: Mouse Y coordinate.
+            dx: Horizontal scroll amount.
+            dy: Vertical scroll amount.
+            
+        Returns:
+            False to stop listener, True to continue.
+        """
         if stop_event.is_set():
             return False
         try:
@@ -163,16 +228,26 @@ def pynput_listener_process(event_queue: mp.Queue, stop_event: mp.Event, stop_ho
             pass
         return True
     
-    pressed_keys = set()
-    modifier_keys = {'shift', 'ctrl', 'alt', 'cmd', 'command', 'option', 'control'}
+    pressed_keys: Set[str] = set()
+    modifier_keys: Set[str] = {
+        'shift', 'ctrl', 'alt', 'cmd', 'command', 'option', 'control'
+    }
     
-    def get_key_name(key):
+    def get_key_name(key: Any) -> Optional[str]:
+        """Get the string name of a key.
+        
+        Args:
+            key: Pynput key object.
+            
+        Returns:
+            Key name string or None.
+        """
         try:
             if hasattr(key, 'char') and key.char:
                 return key.char
             elif hasattr(key, 'name'):
                 name = key.name.lower()
-                name_map = {
+                name_map: Dict[str, str] = {
                     'cmd_l': 'cmd', 'cmd_r': 'cmd',
                     'ctrl_l': 'ctrl', 'ctrl_r': 'ctrl',
                     'alt_l': 'alt', 'alt_r': 'alt',
@@ -183,14 +258,30 @@ def pynput_listener_process(event_queue: mp.Queue, stop_event: mp.Event, stop_ho
             pass
         return None
     
-    def is_stop_hotkey(combo):
+    def is_stop_hotkey(combo: str) -> bool:
+        """Check if a combo is a stop hotkey.
+        
+        Args:
+            combo: Key combination string.
+            
+        Returns:
+            True if combo is a stop hotkey.
+        """
         combo_lower = combo.lower()
         for hk in stop_hotkeys:
             if hk.lower() in combo_lower or combo_lower in hk.lower():
                 return True
         return False
     
-    def on_press(key):
+    def on_press(key: keyboard.Key) -> bool:
+        """Handle key press events.
+        
+        Args:
+            key: Key that was pressed.
+            
+        Returns:
+            False to stop listener, True to continue.
+        """
         if stop_event.is_set():
             return False
         
@@ -208,7 +299,11 @@ def pynput_listener_process(event_queue: mp.Queue, stop_event: mp.Event, stop_ho
                 modifiers = [k for k in pressed_keys if k in modifier_keys]
                 if modifiers:
                     modifier_order = ['ctrl', 'cmd', 'alt', 'option', 'shift']
-                    sorted_modifiers = sorted(modifiers, key=lambda x: modifier_order.index(x) if x in modifier_order else 999)
+                    sorted_modifiers = sorted(
+                        modifiers,
+                        key=lambda x: modifier_order.index(x)
+                        if x in modifier_order else 999
+                    )
                     combo = '+'.join(sorted_modifiers + [key_name])
                     
                     if is_stop_hotkey(combo):
@@ -229,7 +324,15 @@ def pynput_listener_process(event_queue: mp.Queue, stop_event: mp.Event, stop_ho
         
         return True
     
-    def on_release(key):
+    def on_release(key: keyboard.Key) -> bool:
+        """Handle key release events.
+        
+        Args:
+            key: Key that was released.
+            
+        Returns:
+            False to stop listener, True to continue.
+        """
         if stop_event.is_set():
             return False
         key_name = get_key_name(key)
@@ -238,8 +341,14 @@ def pynput_listener_process(event_queue: mp.Queue, stop_event: mp.Event, stop_ho
         return True
     
     try:
-        mouse_listener = mouse.Listener(on_click=on_click, on_scroll=on_scroll)
-        keyboard_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        mouse_listener = mouse.Listener(
+            on_click=on_click,
+            on_scroll=on_scroll
+        )
+        keyboard_listener = keyboard.Listener(
+            on_press=on_press,
+            on_release=on_release
+        )
         
         mouse_listener.start()
         keyboard_listener.start()
@@ -257,17 +366,28 @@ def pynput_listener_process(event_queue: mp.Queue, stop_event: mp.Event, stop_ho
 
 
 class EventReaderThread(QThread):
-    """从多进程队列读取事件的线程"""
+    """Thread that reads events from the multiprocessing queue."""
     
     action_ready = pyqtSignal(str, dict)
     listener_stopped = pyqtSignal()
     
-    def __init__(self, event_queue, parent=None):
+    def __init__(
+        self,
+        event_queue: mp.Queue,
+        parent: Optional[QThread] = None
+    ) -> None:
+        """Initialize the event reader thread.
+        
+        Args:
+            event_queue: Queue to read events from.
+            parent: Optional parent thread.
+        """
         super().__init__(parent)
         self._event_queue = event_queue
-        self._running = True
+        self._running: bool = True
     
-    def run(self):
+    def run(self) -> None:
+        """Main thread loop - read events from queue."""
         while self._running:
             try:
                 event = self._event_queue.get(timeout=0.1)
@@ -281,49 +401,75 @@ class EventReaderThread(QThread):
             except Exception as e:
                 print(f"[EventReader] Error: {e}")
     
-    def stop(self):
+    def stop(self) -> None:
+        """Stop the reader thread."""
         self._running = False
         self.wait(2000)
 
 
 class MacRecordingManager(QObject):
-    """Mac 专用录屏管理器 - 使用独立进程隔离 pynput"""
+    """Mac-specific recording manager using process isolation.
+    
+    Uses a separate process for pynput to avoid Qt thread conflicts.
+    """
     
     action_recorded = pyqtSignal(str, dict)
     recording_started = pyqtSignal()
     recording_stopped = pyqtSignal(list)
     recording_error = pyqtSignal(str)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        """Initialize the Mac recording manager.
+        
+        Args:
+            parent: Optional parent QObject.
+        """
         super().__init__(parent)
-        self._is_recording = False
+        self._is_recording: bool = False
         self._actions: List[Dict[str, Any]] = []
         self._start_time: float = 0
-        self._last_action_time = 0
-        self._min_interval = 0.05
-        self._initialized = PYNPUT_AVAILABLE
-        self._listener_process = None
-        self._event_queue = None
-        self._stop_event = None
-        self._reader_thread = None
-        self._lock = threading.RLock()
+        self._last_action_time: float = 0
+        self._min_interval: float = 0.05
+        self._initialized: bool = PYNPUT_AVAILABLE
+        self._listener_process: Optional[mp.Process] = None
+        self._event_queue: Optional[mp.Queue] = None
+        self._stop_event: Optional[mp.Event] = None
+        self._reader_thread: Optional[EventReaderThread] = None
+        self._lock: threading.RLock = threading.RLock()
         
         if PYNPUT_AVAILABLE:
             print("[MacRecording] pynput available, using process isolation mode")
     
     def is_recording(self) -> bool:
+        """Check if recording is in progress."""
         with self._lock:
             return self._is_recording
     
     def is_initialized(self) -> bool:
+        """Check if manager is initialized."""
         return self._initialized
     
     def check_permission(self) -> bool:
+        """Check if recording permission is available."""
         return MacPermissionChecker.check_accessibility_permission()
     
-    def start_recording(self, stop_hotkeys: list = None) -> bool:
+    def start_recording(
+        self,
+        stop_hotkeys: Optional[List[str]] = None
+    ) -> bool:
+        """Start recording.
+        
+        Args:
+            stop_hotkeys: List of hotkeys to stop recording.
+            
+        Returns:
+            True if recording started successfully.
+        """
         if stop_hotkeys is None:
-            stop_hotkeys = ['f9', 'f10', 'ctrl+f9', 'ctrl+f10', 'cmd+f9', 'cmd+f10']
+            stop_hotkeys = [
+                'f9', 'f10', 'ctrl+f9', 'ctrl+f10',
+                'cmd+f9', 'cmd+f10'
+            ]
         
         with self._lock:
             if not self._initialized:
@@ -362,10 +508,15 @@ class MacRecordingManager(QObject):
             
             self._reader_thread = EventReaderThread(self._event_queue, self)
             self._reader_thread.action_ready.connect(self._on_action_ready)
-            self._reader_thread.listener_stopped.connect(self._on_listener_stopped)
+            self._reader_thread.listener_stopped.connect(
+                self._on_listener_stopped
+            )
             self._reader_thread.start()
             
-            print(f"[MacRecording] Listener process started (PID: {self._listener_process.pid})")
+            print(
+                f"[MacRecording] Listener process started "
+                f"(PID: {self._listener_process.pid})"
+            )
             self.recording_started.emit()
             return True
             
@@ -375,27 +526,33 @@ class MacRecordingManager(QObject):
             self._cleanup()
             return False
     
-    def _on_listener_stopped(self):
-        """监听进程意外停止"""
+    def _on_listener_stopped(self) -> None:
+        """Handle listener process unexpected stop."""
         with self._lock:
             if self._is_recording:
                 self.recording_error.emit("监听进程意外停止")
                 self._do_stop_recording()
     
     def stop_recording(self) -> List[Dict[str, Any]]:
+        """Stop recording and return captured actions.
+        
+        Returns:
+            List of recorded actions.
+        """
         with self._lock:
             if not self._is_recording:
                 return []
             self._do_stop_recording()
         return self._actions.copy()
     
-    def _do_stop_recording(self):
+    def _do_stop_recording(self) -> None:
+        """Internal stop recording without locking."""
         self._is_recording = False
         self._cleanup()
         self.recording_stopped.emit(self._actions.copy())
     
-    def _cleanup(self):
-        """清理资源"""
+    def _cleanup(self) -> None:
+        """Clean up resources."""
         if self._stop_event:
             self._stop_event.set()
         
@@ -403,7 +560,8 @@ class MacRecordingManager(QObject):
             self._reader_thread.stop()
             self._reader_thread = None
         
-        if self._listener_process and self._listener_process.is_alive():
+        if (self._listener_process and
+                self._listener_process.is_alive()):
             self._listener_process.terminate()
             self._listener_process.join(timeout=2)
             if self._listener_process.is_alive():
@@ -420,7 +578,13 @@ class MacRecordingManager(QObject):
         
         self._stop_event = None
     
-    def _on_action_ready(self, action_type: str, params: dict):
+    def _on_action_ready(self, action_type: str, params: dict) -> None:
+        """Handle action ready signal from reader thread.
+        
+        Args:
+            action_type: Type of action.
+            params: Action parameters.
+        """
         with self._lock:
             if not self._is_recording:
                 return
@@ -438,7 +602,7 @@ class MacRecordingManager(QObject):
                 if delay > 0.05:
                     params['pre_delay'] = round(delay, 3)
             
-            action = {
+            action: Dict[str, Any] = {
                 'action_type': action_type,
                 'timestamp': current_time,
                 'params': params.copy()
@@ -448,20 +612,28 @@ class MacRecordingManager(QObject):
             self.action_recorded.emit(action_type, params)
     
     def get_actions(self) -> List[Dict[str, Any]]:
+        """Get all recorded actions."""
         with self._lock:
             return self._actions.copy()
     
     def get_action_count(self) -> int:
+        """Get the number of recorded actions."""
         with self._lock:
             return len(self._actions)
     
-    def clear_actions(self):
+    def clear_actions(self) -> None:
+        """Clear all recorded actions."""
         with self._lock:
             self._actions = []
     
     def to_workflow(self) -> Dict[str, Any]:
+        """Convert recorded actions to workflow format.
+        
+        Returns:
+            Workflow dictionary.
+        """
         with self._lock:
-            steps = []
+            steps: List[Dict[str, Any]] = []
             for i, action in enumerate(self._actions, 1):
                 steps.append({
                     'id': i,
@@ -471,9 +643,17 @@ class MacRecordingManager(QObject):
             return {'variables': {}, 'steps': steps}
     
     def save_to_file(self, filepath: str) -> bool:
+        """Save recorded actions to a file.
+        
+        Args:
+            filepath: Path to save to.
+            
+        Returns:
+            True if saved successfully.
+        """
         try:
             with self._lock:
-                data = {
+                data: Dict[str, Any] = {
                     'recorded_at': datetime.now().isoformat(),
                     'actions': self._actions.copy()
                 }
@@ -484,6 +664,14 @@ class MacRecordingManager(QObject):
             return False
     
     def load_from_file(self, filepath: str) -> bool:
+        """Load recorded actions from a file.
+        
+        Args:
+            filepath: Path to load from.
+            
+        Returns:
+            True if loaded successfully.
+        """
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -494,7 +682,17 @@ class MacRecordingManager(QObject):
             return False
 
 
-def create_recording_manager(parent=None):
+def create_recording_manager(
+    parent: Optional[QObject] = None
+) -> Any:
+    """Create an appropriate recording manager for the platform.
+    
+    Args:
+        parent: Optional parent QObject.
+        
+    Returns:
+        Recording manager instance.
+    """
     if IS_MACOS and PYNPUT_AVAILABLE:
         return MacRecordingManager(parent)
     else:
@@ -503,12 +701,27 @@ def create_recording_manager(parent=None):
 
 
 def check_recording_permission() -> bool:
+    """Check if recording permission is available.
+    
+    Returns:
+        True if permission is available.
+    """
     if IS_MACOS:
         return MacPermissionChecker.check_accessibility_permission()
     return True
 
 
-def request_recording_permission(parent=None) -> bool:
+def request_recording_permission(
+    parent: Optional[QMessageBox] = None
+) -> bool:
+    """Request recording permission from the user.
+    
+    Args:
+        parent: Optional parent widget for the dialog.
+        
+    Returns:
+        True if permission is granted or user skipped.
+    """
     if IS_MACOS:
         return MacPermissionChecker.request_accessibility_permission(parent)
     return True
