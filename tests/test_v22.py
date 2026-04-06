@@ -1,41 +1,57 @@
+#!/usr/bin/env python3
+"""RabAI AutoClick v22 test suite.
+
+Tests for v22 features:
+- Workflow sharing system
+- Pipeline integration mode
+- Screen recording to workflow conversion
+- Enhanced workflow diagnostics
 """
-RabAI AutoClick v22 测试套件
-"""
-import pytest
-import json
-import time
+
 import os
-import tempfile
 import shutil
+import sys
+import tempfile
+import time
 from pathlib import Path
+from typing import Any, Dict
+
+import pytest
 
 
-# 测试配置
-TEST_DATA_DIR = tempfile.mkdtemp()
+# Setup test data directory
+TEST_DATA_DIR: str = tempfile.mkdtemp()
 
 
-def setup_module(module):
-    """测试模块初始化"""
+def setup_module(module: Any) -> None:
+    """Initialize test module.
+    
+    Args:
+        module: Test module.
+    """
     os.makedirs(TEST_DATA_DIR, exist_ok=True)
 
 
-def teardown_module(module):
-    """测试模块清理"""
+def teardown_module(module: Any) -> None:
+    """Cleanup test module.
+    
+    Args:
+        module: Test module.
+    """
     if os.path.exists(TEST_DATA_DIR):
         shutil.rmtree(TEST_DATA_DIR)
 
 
 class TestWorkflowShare:
-    """测试工作流分享系统"""
+    """Test workflow sharing system."""
     
-    def test_create_share_link(self):
-        """测试创建分享链接"""
+    def test_create_share_link(self) -> None:
+        """Test creating share link."""
         from src.workflow_share import create_share_system, ShareType
         
         share = create_share_system(TEST_DATA_DIR)
         
-        # 注册工作流
-        workflow = {
+        workflow: Dict[str, Any] = {
             "workflow_id": "wf_test",
             "name": "测试工作流",
             "description": "测试",
@@ -44,46 +60,44 @@ class TestWorkflowShare:
         wf_id = share.register_workflow(workflow)
         assert wf_id == "wf_test"
         
-        # 创建分享链接
         link = share.create_share_link(wf_id, ShareType.PUBLIC, expires_in_days=7)
         assert link is not None
         assert link.share_type == ShareType.PUBLIC
         assert link.expires_at is not None
     
-    def test_export_import(self):
-        """测试导出导入"""
+    def test_export_import(self) -> None:
+        """Test export and import functionality."""
         from src.workflow_share import create_share_system
         
         share = create_share_system(TEST_DATA_DIR)
         
-        # 注册并导出
-        workflow = {
+        workflow: Dict[str, Any] = {
             "workflow_id": "wf_export",
             "name": "导出测试",
             "steps": [{"action": "click"}]
         }
         share.register_workflow(workflow)
         
-        # 导出为JSON
         json_str = share.export_to_json("wf_export")
         assert json_str is not None
         
-        # 导出为Base64
         b64 = share.export_to_base64("wf_export")
         assert b64 is not None
         
-        # 导入
         report = share.import_workflow(b64, "base64")
         assert report.result.value == "success"
     
-    def test_share_stats(self):
-        """测试分享统计"""
+    def test_share_stats(self) -> None:
+        """Test share statistics."""
         from src.workflow_share import create_share_system, ShareType
         
         share = create_share_system(TEST_DATA_DIR)
         
-        # 注册工作流并创建链接 - 使用唯一ID避免与其他测试冲突
-        workflow = {"workflow_id": "wf_stats_test", "name": "StatsTest", "steps": []}
+        workflow: Dict[str, Any] = {
+            "workflow_id": "wf_stats_test",
+            "name": "StatsTest",
+            "steps": []
+        }
         share.register_workflow(workflow)
         share.create_share_link("wf_stats_test", ShareType.PUBLIC)
         
@@ -93,10 +107,10 @@ class TestWorkflowShare:
 
 
 class TestPipelineMode:
-    """测试管道集成模式"""
+    """Test pipeline integration mode."""
     
-    def test_create_chain(self):
-        """测试创建管道链"""
+    def test_create_chain(self) -> None:
+        """Test creating pipeline chain."""
         from src.pipeline_mode import create_pipeline_runner, PipeMode
         
         runner = create_pipeline_runner(TEST_DATA_DIR)
@@ -105,8 +119,8 @@ class TestPipelineMode:
         assert chain.name == "测试管道"
         assert chain.mode == PipeMode.LINEAR
     
-    def test_add_step(self):
-        """测试添加步骤"""
+    def test_add_step(self) -> None:
+        """Test adding step to chain."""
         from src.pipeline_mode import create_pipeline_runner, PipeMode
         
         runner = create_pipeline_runner(TEST_DATA_DIR)
@@ -117,17 +131,15 @@ class TestPipelineMode:
         assert step is not None
         assert step.name == "步骤1"
     
-    def test_execute_chain(self):
-        """测试执行管道链"""
+    def test_execute_chain(self) -> None:
+        """Test executing pipeline chain."""
         from src.pipeline_mode import create_pipeline_runner, PipeMode
         
         runner = create_pipeline_runner(TEST_DATA_DIR)
         
-        # 创建并添加步骤
         chain = runner.create_chain("执行测试", PipeMode.LINEAR)
         runner.add_step(chain.chain_id, "测试", "echo 'test'")
         
-        # 执行
         result = runner.execute_chain(chain.chain_id, {"test": "data"})
         
         assert result.chain_id == chain.chain_id
@@ -135,33 +147,30 @@ class TestPipelineMode:
 
 
 class TestScreenRecorder:
-    """测试屏幕录制转工作流"""
+    """Test screen recording to workflow conversion."""
     
-    def test_start_stop_recording(self):
-        """测试开始停止录制"""
+    def test_start_stop_recording(self) -> None:
+        """Test starting and stopping recording."""
         from src.screen_recorder import create_screen_recorder
         
         converter = create_screen_recorder(TEST_DATA_DIR)
         
-        # 开始录制
         rec = converter.start_recording("测试录制", "描述")
         assert rec.recording_id is not None
         
-        # 停止录制
         rec = converter.stop_recording(rec.recording_id)
         assert rec is not None
         assert len(rec.actions) == 0
     
-    def test_add_action(self):
-        """测试添加动作"""
+    def test_add_action(self) -> None:
+        """Test adding action to recording."""
         from src.screen_recorder import create_screen_recorder
         
         converter = create_screen_recorder(TEST_DATA_DIR)
         
         rec = converter.start_recording("录制1")
         
-        # 添加动作
-        action_data = {
+        action_data: Dict[str, Any] = {
             "action_type": "click",
             "x": 100,
             "y": 200,
@@ -173,15 +182,14 @@ class TestScreenRecorder:
         rec = converter.get_recording(rec.recording_id)
         assert len(rec.actions) == 1
     
-    def test_convert_to_workflow(self):
-        """测试转换为工作流"""
+    def test_convert_to_workflow(self) -> None:
+        """Test converting recording to workflow."""
         from src.screen_recorder import create_screen_recorder, ElementDetection
         
         converter = create_screen_recorder(TEST_DATA_DIR)
         
         rec = converter.start_recording("转换测试")
         
-        # 添加动作
         for i in range(3):
             converter.add_action(rec.recording_id, {
                 "action_type": "click",
@@ -192,8 +200,10 @@ class TestScreenRecorder:
         
         rec = converter.stop_recording(rec.recording_id)
         
-        # 转换
-        result = converter.convert_to_workflow(rec.recording_id, detection_mode=ElementDetection.IMAGE)
+        result = converter.convert_to_workflow(
+            rec.recording_id,
+            detection_mode=ElementDetection.IMAGE
+        )
         
         assert result is not None
         assert result.success is True
@@ -201,15 +211,14 @@ class TestScreenRecorder:
 
 
 class TestDiagnosticsV2:
-    """测试增强版诊断"""
+    """Test enhanced workflow diagnostics."""
     
-    def test_record_execution(self):
-        """测试记录执行"""
+    def test_record_execution(self) -> None:
+        """Test recording workflow execution."""
         from src.workflow_diagnostics import create_diagnostics
         
         diag = create_diagnostics(TEST_DATA_DIR)
         
-        # 记录执行
         diag.record_execution(
             "wf_test",
             "测试工作流",
@@ -221,13 +230,12 @@ class TestDiagnosticsV2:
         assert "wf_test" in diag.execution_history
         assert len(diag.execution_history["wf_test"]) == 1
     
-    def test_diagnose(self):
-        """测试诊断"""
+    def test_diagnose(self) -> None:
+        """Test workflow diagnosis."""
         from src.workflow_diagnostics import create_diagnostics
         
         diag = create_diagnostics(TEST_DATA_DIR)
         
-        # 添加多条执行记录
         for i in range(10):
             success = i < 8
             diag.record_execution(
@@ -239,7 +247,6 @@ class TestDiagnosticsV2:
                 None if success else "test error"
             )
         
-        # 诊断
         report = diag.diagnose("wf_diag")
         
         assert report.workflow_id == "wf_diag"
@@ -247,13 +254,12 @@ class TestDiagnosticsV2:
         assert report.success_rate == 0.8
         assert report.health_score > 0
     
-    def test_trend_analysis(self):
-        """测试趋势分析"""
+    def test_trend_analysis(self) -> None:
+        """Test trend analysis."""
         from src.workflow_diagnostics import create_diagnostics
         
         diag = create_diagnostics(TEST_DATA_DIR)
         
-        # 添加历史数据
         for i in range(20):
             diag.record_execution(
                 "wf_trend",
@@ -264,18 +270,23 @@ class TestDiagnosticsV2:
             )
         
         report = diag.diagnose("wf_trend")
-        assert len(report.trends) >= 0  # 可能没有趋势数据
+        assert len(report.trends) >= 0
     
-    def test_root_cause_analysis(self):
-        """测试根因分析"""
+    def test_root_cause_analysis(self) -> None:
+        """Test root cause analysis."""
         from src.workflow_diagnostics import create_diagnostics
         
         diag = create_diagnostics(TEST_DATA_DIR)
         
-        # 添加有错误的执行
-        diag.record_execution("wf_error", "错误测试", [], 1.0, False, "Connection timeout")
-        diag.record_execution("wf_error", "错误测试", [], 1.0, False, "Connection timeout")
-        diag.record_execution("wf_error", "错误测试", [], 1.0, False, "Permission denied")
+        diag.record_execution(
+            "wf_error", "错误测试", [], 1.0, False, "Connection timeout"
+        )
+        diag.record_execution(
+            "wf_error", "错误测试", [], 1.0, False, "Connection timeout"
+        )
+        diag.record_execution(
+            "wf_error", "错误测试", [], 1.0, False, "Permission denied"
+        )
         
         report = diag.diagnose("wf_error")
         
@@ -284,14 +295,13 @@ class TestDiagnosticsV2:
 
 
 class TestIntegration:
-    """集成测试"""
+    """Integration tests for v22 features."""
     
-    def test_full_workflow_share_convert(self):
-        """完整流程测试：录制 -> 转换 -> 分享"""
+    def test_full_workflow_share_convert(self) -> None:
+        """Full flow test: record -> convert -> share."""
         from src.screen_recorder import create_screen_recorder, ElementDetection
         from src.workflow_share import create_share_system
         
-        # 1. 录制
         converter = create_screen_recorder(TEST_DATA_DIR)
         rec = converter.start_recording("完整测试")
         
@@ -308,21 +318,24 @@ class TestIntegration:
         
         rec = converter.stop_recording(rec.recording_id)
         
-        # 2. 转换
-        result = converter.convert_to_workflow(rec.recording_id, ElementDetection.IMAGE)
+        result = converter.convert_to_workflow(
+            rec.recording_id,
+            ElementDetection.IMAGE
+        )
         assert result.success
         
-        # 3. 分享
         share = create_share_system(TEST_DATA_DIR)
-        workflow = {
+        workflow: Dict[str, Any] = {
             "workflow_id": result.workflow_id,
             "name": result.workflow_name,
-            "steps": [{"action": s.action, "target": s.target} for s in result.steps]
+            "steps": [
+                {"action": s.action, "target": s.target}
+                for s in result.steps
+            ]
         }
         wf_id = share.register_workflow(workflow)
         assert wf_id == result.workflow_id
 
 
-# 运行测试
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
