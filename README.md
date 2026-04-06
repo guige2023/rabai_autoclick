@@ -316,3 +316,111 @@ A: macOS 需要授权辅助功能权限：
 **Made with ❤️ by RabAI Team**
 
 </div>
+
+---
+
+## 🛠️ 开发指南
+
+### 项目结构
+
+```
+rabai_autoclick/
+├── actions/          # Action implementations (click, keyboard, OCR, etc.)
+├── cli/              # CLI command-line interface
+├── core/             # Core engine, context, and action loader
+├── gui/              # GUI components
+├── src/              # Advanced features (pipeline, diagnostics, etc.)
+├── tests/            # Test suite
+├── ui/               # PyQt5 UI components
+├── utils/            # Utility modules (hotkey, logging, etc.)
+├── main.py           # Main entry point
+└── pyproject.toml    # Project configuration
+```
+
+### 开发环境设置
+
+```bash
+# 克隆并进入目录
+git clone https://github.com/guige2023/rabai_autoclick.git
+cd rabai_autoclick
+
+# 创建虚拟环境 (推荐)
+python3 -m venv .venv
+source .venv/bin/activate  # macOS/Linux
+# .\.venv\\Scripts\\activate  # Windows
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 安装开发依赖
+pip install pytest pytest-cov black ruff
+
+# 运行测试
+pytest tests/test_core.py -v
+
+# 代码格式化
+black .
+
+# 代码检查
+ruff check .
+```
+
+### 添加新动作
+
+1. 在 `actions/` 目录创建新文件，例如 `my_action.py`
+2. 继承 `BaseAction` 并实现 `execute()` 方法
+3. 定义 `action_type`, `display_name`, `description` 类属性
+4. 实现 `get_required_params()` 和 `get_optional_params()` 方法
+
+```python
+from core.base_action import BaseAction, ActionResult
+from typing import Any, Dict, List
+
+class MyAction(BaseAction):
+    action_type = "my_action"
+    display_name = "我的动作"
+    description = "这是一个示例动作"
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        # Your action logic here
+        return ActionResult(success=True, message="操作成功")
+    
+    def get_required_params(self) -> List[str]:
+        return ['param1']
+    
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'param2': 'default_value'}
+```
+
+### 运行测试
+
+```bash
+# 运行所有测试
+pytest tests/ -v
+
+# 运行带覆盖率的测试
+pytest tests/ --cov=. --cov-report=html
+
+# 运行特定测试文件
+pytest tests/test_core.py -v
+```
+
+### 代码规范
+
+- 遵循 PEP 8 规范
+- 使用 type hints 标注函数签名
+- 所有公开方法需要 docstring
+- 使用 black 格式化代码 (line-length: 100)
+- 使用 ruff 进行代码检查
+
+## 📄 许可证
+
+本项目基于 MIT 许可证开源。详见 [LICENSE](LICENSE) 文件。
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+---
+
+**Made with ❤️ by RabAI Team**
