@@ -1,0 +1,117 @@
+{
+  "name": "Marketing Lead Nurturing Workflow",
+  "description": "Automate lead nurturing process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "leads_to_nurture": 51,
+    "current_lead": 0,
+    "nurtured_leads": 0,
+    "failed_nurturing": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "lead_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize lead counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open lead nurturing system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "lead_nurturing_loop",
+      "count": "{{leads_to_nurture}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start lead nurturing loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select lead for nurturing"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for nurturing"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/lead_nurturing_{{lead_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture nurturing screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "lead_counter",
+      "value": "{{lead_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment lead counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{lead_counter < leads_to_nurture}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more leads"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next lead"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/marketing_lead_nurturing_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
