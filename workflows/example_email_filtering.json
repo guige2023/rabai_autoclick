@@ -1,0 +1,162 @@
+{
+  "name": "Email Filtering Workflow",
+  "description": "Automate email organization and filtering",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "emails_to_process": 50,
+    "current_email": 0,
+    "important_count": 0,
+    "archived_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "email_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize email counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open email client"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for client"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "email_loop",
+      "count": "{{emails_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start email processing loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click email"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for email"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/email_{{email_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture email screenshot"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{email_counter % 3 == 0}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check email importance"
+    },
+    {
+      "id": 9,
+      "type": "click",
+      "x": 300,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Mark as important"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 13,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 11,
+      "type": "click",
+      "x": 400,
+      "y": 400,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Archive email"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "archived_count",
+      "value": "{{archived_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment archived count"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "email_counter",
+      "value": "{{email_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment email counter"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{email_counter < emails_to_process}}",
+      "true_next": 15,
+      "false_next": 16,
+      "pre_delay": 0.1,
+      "comment": "Check if more emails"
+    },
+    {
+      "id": 15,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next email"
+    },
+    {
+      "id": 16,
+      "type": "screenshot",
+      "save_path": "./screenshots/email_filtering_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
