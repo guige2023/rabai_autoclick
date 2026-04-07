@@ -1,0 +1,175 @@
+{
+  "name": "Education Student Enrollment Workflow",
+  "description": "Automate student enrollment process including document verification and class assignment",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "enrollments_to_process": 50,
+    "current_enrollment": 0,
+    "enrolled_students": 0,
+    "pending_verification": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "enrollment_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize enrollment counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open student information system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for SIS to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "enrollment_loop",
+      "count": "{{enrollments_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start enrollment loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 160,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Open enrollment application"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for application"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/enrollment_{{enrollment_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture enrollment screenshot"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 340,
+      "y": 230,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Verify submitted documents"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for verification"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 460,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Check prerequisite compliance"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for compliance check"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 580,
+      "y": 370,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Assign to classes"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for assignment"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/enrollment_complete_{{enrollment_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture enrollment confirmation"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "enrollment_counter",
+      "value": "{{enrollment_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment enrollment counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{enrollment_counter < enrollments_to_process}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more enrollments"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next enrollment"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/enrollment_batch_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture batch completion"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

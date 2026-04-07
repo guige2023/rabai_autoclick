@@ -1,0 +1,175 @@
+{
+  "name": "Education Online Exam Monitoring Workflow",
+  "description": "Automate online exam monitoring including proctoring verification and异常 detection",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "exams_to_monitor": 45,
+    "current_exam": 0,
+    "monitored_exams": 0,
+    "flagged_violations": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "exam_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize exam counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open exam proctoring dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "exam_monitoring_loop",
+      "count": "{{exams_to_monitor}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start exam monitoring loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 160,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Open exam session"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for session data"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/exam_session_{{exam_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture exam session screenshot"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 320,
+      "y": 220,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Verify student identity"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for verification"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 440,
+      "y": 290,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Monitor for suspicious activity"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for monitoring"
+    },
+    {
+      "id": 12,
+      "type": "screenshot",
+      "save_path": "./screenshots/exam_activity_{{exam_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture activity log"
+    },
+    {
+      "id": 13,
+      "type": "click",
+      "x": 560,
+      "y": 360,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Review browser behavior"
+    },
+    {
+      "id": 14,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for review"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "exam_counter",
+      "value": "{{exam_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment exam counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{exam_counter < exams_to_monitor}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more exams"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next exam"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/exam_monitoring_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
