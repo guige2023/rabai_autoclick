@@ -1,0 +1,117 @@
+{
+  "name": "IP Reputation Check Workflow",
+  "description": "Automate IP reputation monitoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "ip_addresses_to_check": 40,
+    "current_ip": 0,
+    "clean_count": 0,
+    "malicious_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "ip_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize IP counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open IP reputation tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "ip_reputation_loop",
+      "count": "{{ip_addresses_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start IP reputation loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select IP address"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for reputation check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/ip_reputation_{{ip_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture reputation screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "ip_counter",
+      "value": "{{ip_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment IP counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{ip_counter < ip_addresses_to_check}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more IPs"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next IP"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/ip_reputation_check_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
