@@ -1,0 +1,117 @@
+{
+  "name": "Security Windows Event Log Analysis Workflow",
+  "description": "Automate Windows security event log analysis",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "event_logs_to_analyze": 52,
+    "current_log": 0,
+    "analyzed_logs": 0,
+    "suspicious_logs": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "log_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize log counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open Windows Event Viewer"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for Event Viewer"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "event_log_loop",
+      "count": "{{event_logs_to_analyze}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start event log analysis loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select event log entry"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for log analysis"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/event_log_{{log_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture event log screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "log_counter",
+      "value": "{{log_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment log counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{log_counter < event_logs_to_analyze}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more logs"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next log"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_windows_event_log_analysis_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
