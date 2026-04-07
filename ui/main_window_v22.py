@@ -1648,15 +1648,15 @@ class DiagnosticsWidget(QWidget):
                 return
 
             for wf_id in self.diagnostics.execution_history.keys():
-            try:
-                report = self.diagnostics.diagnose(wf_id)
-                emoji = "🟢" if report.overall_health == HealthLevel.EXCELLENT else \
-                        "🟡" if report.overall_health == HealthLevel.GOOD else \
-                        "🟠" if report.overall_health == HealthLevel.FAIR else \
-                        "🔴" if report.overall_health == HealthLevel.POOR else "⛔"
-                self.workflow_list.addItem(f"{emoji} {report.workflow_name} (分数: {report.health_score:.0f})")
-            except Exception as e:
-                self.workflow_list.addItem(f"⛔ {wf_id} (诊断失败)")
+                try:
+                    report = self.diagnostics.diagnose(wf_id)
+                    emoji = "🟢" if report.overall_health == HealthLevel.EXCELLENT else \
+                            "🟡" if report.overall_health == HealthLevel.GOOD else \
+                            "🟠" if report.overall_health == HealthLevel.FAIR else \
+                            "🔴" if report.overall_health == HealthLevel.POOR else "⛔"
+                    self.workflow_list.addItem(f"{emoji} {report.workflow_name} (分数: {report.health_score:.0f})")
+                except Exception as e:
+                    self.workflow_list.addItem(f"⛔ {wf_id} (诊断失败)")
     
     def _diagnose(self):
         current = self.workflow_list.currentRow()
