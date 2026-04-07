@@ -1,0 +1,165 @@
+{
+  "name": "Recruitment Screening Workflow",
+  "description": "Automate candidate screening and initial review",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "job_position": "Software Engineer",
+    "candidates_to_screen": 20,
+    "current_candidate": 0,
+    "shortlisted_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "candidate_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize candidate counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open ATS system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for ATS"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "screening_loop",
+      "count": "{{candidates_to_screen}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start screening loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on candidate"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for candidate details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/candidate_{{candidate_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture candidate screenshot"
+    },
+    {
+      "id": 8,
+      "type": "ocr",
+      "region": [100, 100, 500, 300],
+      "output_var": "resume_text",
+      "pre_delay": 0.3,
+      "comment": "Read resume"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{resume_text.includes('experience')}}",
+      "true_next": 10,
+      "false_next": 12,
+      "pre_delay": 0.1,
+      "comment": "Check if qualified"
+    },
+    {
+      "id": 10,
+      "type": "click_image",
+      "template": "./templates/shortlist_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click shortlist button"
+    },
+    {
+      "id": 11,
+      "type": "goto",
+      "step_id": 16,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 12,
+      "type": "click_image",
+      "template": "./templates/reject_candidate.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click reject button"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for rejection"
+    },
+    {
+      "id": 14,
+      "type": "set_variable",
+      "name": "candidate_counter",
+      "value": "{{candidate_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment candidate counter"
+    },
+    {
+      "id": 15,
+      "type": "condition",
+      "condition": "{{candidate_counter < candidates_to_screen}}",
+      "true_next": 16,
+      "false_next": 17,
+      "pre_delay": 0.1,
+      "comment": "Check if more candidates"
+    },
+    {
+      "id": 16,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next candidate"
+    },
+    {
+      "id": 17,
+      "type": "screenshot",
+      "save_path": "./screenshots/recruitment_screening_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 18,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}
