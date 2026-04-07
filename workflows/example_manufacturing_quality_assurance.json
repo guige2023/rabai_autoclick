@@ -1,0 +1,117 @@
+{
+  "name": "Manufacturing Quality Assurance Workflow",
+  "description": "Automate quality assurance process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "items_to_inspect": 51,
+    "current_item": 0,
+    "inspected_items": 0,
+    "rejected_items": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "qa_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize QA counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open quality assurance system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "quality_assurance_loop",
+      "count": "{{items_to_inspect}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start quality assurance loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select item for inspection"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for inspection"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/quality_assurance_{{qa_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture inspection screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "qa_counter",
+      "value": "{{qa_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment QA counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{qa_counter < items_to_inspect}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more items"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next item"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/manufacturing_quality_assurance_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
