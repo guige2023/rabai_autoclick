@@ -1,0 +1,192 @@
+{
+  "name": "Finance Investment Portfolio Rebalancing Workflow",
+  "description": "Automate portfolio rebalancing process based on target allocation and threshold limits",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "portfolios_to_rebalance": 25,
+    "current_portfolio": 0,
+    "rebalanced_portfolios": 0,
+    "threshold_violations": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "portfolio_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize portfolio counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open portfolio management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "rebalancing_loop",
+      "count": "{{portfolios_to_rebalance}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start rebalancing loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 160,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select portfolio for review"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for portfolio data"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/portfolio_{{portfolio_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture portfolio snapshot"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 320,
+      "y": 220,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Review current allocation vs target"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for comparison"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 440,
+      "y": 290,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Calculate rebalancing trades"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for calculation"
+    },
+    {
+      "id": 12,
+      "type": "screenshot",
+      "save_path": "./screenshots/rebalancing_plan_{{portfolio_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture rebalancing plan"
+    },
+    {
+      "id": 13,
+      "type": "click",
+      "x": 560,
+      "y": 360,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Submit rebalancing orders"
+    },
+    {
+      "id": 14,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for order execution"
+    },
+    {
+      "id": 15,
+      "type": "click",
+      "x": 620,
+      "y": 420,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Log rebalancing activity"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for logging"
+    },
+    {
+      "id": 17,
+      "type": "set_variable",
+      "name": "portfolio_counter",
+      "value": "{{portfolio_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment portfolio counter"
+    },
+    {
+      "id": 18,
+      "type": "condition",
+      "condition": "{{portfolio_counter < portfolios_to_rebalance}}",
+      "true_next": 19,
+      "false_next": 20,
+      "pre_delay": 0.1,
+      "comment": "Check if more portfolios"
+    },
+    {
+      "id": 19,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next portfolio"
+    },
+    {
+      "id": 20,
+      "type": "screenshot",
+      "save_path": "./screenshots/rebalancing_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 21,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

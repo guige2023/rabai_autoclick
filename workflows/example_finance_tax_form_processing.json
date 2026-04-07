@@ -1,0 +1,175 @@
+{
+  "name": "Finance Tax Form Processing Workflow",
+  "description": "Automate tax form processing including W-9, W-4, and 1099 distribution",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "forms_to_process": 60,
+    "current_form": 0,
+    "processed_forms": 0,
+    "flagged_forms": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "form_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize form counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open tax form management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "tax_form_loop",
+      "count": "{{forms_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start tax form processing loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 160,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Open next form in queue"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for form to load"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/tax_form_{{form_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture form screenshot"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 340,
+      "y": 240,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Validate form completeness"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for validation"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 460,
+      "y": 310,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Verify TIN/SSN matching"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for verification"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 580,
+      "y": 380,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Process and archive form"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for processing"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/form_processed_{{form_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture processed form"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "form_counter",
+      "value": "{{form_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment form counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{form_counter < forms_to_process}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more forms"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next form"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/tax_forms_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture batch completion"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
