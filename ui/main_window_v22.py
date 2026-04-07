@@ -2812,7 +2812,7 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
     
-    def _on_select_window(self):
+    def _on_select_window(self) -> None:
         from utils.window_selector import WindowSelectorDialog
         
         if self._target_region and self.region_btn.text() != "📐 区域":
@@ -2857,7 +2857,7 @@ class MainWindow(QMainWindow):
         self.window_btn.setStyleSheet("")
         show_toast("已清除窗口选择", 'info')
     
-    def _on_select_region(self):
+    def _on_select_region(self) -> None:
         if self._target_region and self._window_mode:
             reply = QMessageBox.question(
                 self, '确认',
