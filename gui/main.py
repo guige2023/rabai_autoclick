@@ -761,10 +761,22 @@ class SceneTab(BaseTab):
         Create a new scene with the specified name, description, and icon.
         """
         def do_create():
+            """
+            Create a new scene with the specified parameters.
+            
+            Returns:
+                The created scene object.
+            """
             manager = create_scene_manager(str(DATA_DIR))
             return manager.create_scene(self.scene_name_var.get(), self.scene_desc_var.get(), self.scene_icon_var.get())
 
-        def show_result(scene):
+        def show_result(scene: Any) -> None:
+            """
+            Handle the result of scene creation.
+            
+            Args:
+                scene: The created scene object.
+            """
             self.log(f"✅ 已创建场景: {scene.name} (ID: {scene.scene_id})")
             self.scene_name_var.set("")
             self.scene_desc_var.set("")
@@ -776,10 +788,22 @@ class SceneTab(BaseTab):
         Retrieve and display scene statistics.
         """
         def do_stats():
+            """
+            Retrieve scene statistics from the manager.
+            
+            Returns:
+                Dictionary of scene statistics.
+            """
             manager = create_scene_manager(str(DATA_DIR))
             return manager.get_scene_statistics()
 
-        def show_result(stats):
+        def show_result(stats: Dict[str, Any]) -> None:
+            """
+            Display scene statistics.
+            
+            Args:
+                stats: Dictionary containing scene statistics.
+            """
             self.scene_stats_result.configure(state='normal')
             self.scene_stats_result.delete(1.0, tk.END)
             self.scene_stats_result.insert(tk.END, "📊 场景统计\n\n")
