@@ -846,11 +846,12 @@ class MainWindow(QMainWindow):
         self.open_btn = QPushButton("📂 打开")
         self.save_btn = QPushButton("💾 保存")
         self.history_btn = QPushButton("📚 记录")
-        
+
+        colors = theme_manager.colors
         self.run_btn = QPushButton("▶ 运行")
-        self.run_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px 16px;")
+        self.run_btn.setStyleSheet(f"background-color: {colors['success']}; color: white; font-weight: bold; padding: 8px 16px;")
         self.stop_btn = QPushButton("⏹ 停止")
-        self.stop_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px 16px;")
+        self.stop_btn.setStyleSheet(f"background-color: {colors['error']}; color: white; padding: 8px 16px;")
         self.pause_btn = QPushButton("⏸ 暂停")
         
         self.on_top_btn = QPushButton("📌 置顶")
@@ -1215,27 +1216,29 @@ class MainWindow(QMainWindow):
     
     def _toggle_always_on_top(self):
         self._always_on_top = not self._always_on_top
-        
+        colors = theme_manager.colors
+
         if self._always_on_top:
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
             self.on_top_btn.setChecked(True)
-            self.on_top_btn.setStyleSheet("background-color: #2196F3; color: white;")
+            self.on_top_btn.setStyleSheet(f"background-color: {colors['primary']}; color: white;")
             show_toast("窗口已置顶", 'info')
         else:
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
             self.on_top_btn.setChecked(False)
             self.on_top_btn.setStyleSheet("")
             show_toast("窗口取消置顶", 'info')
-        
+
         self.show()
         app_logger.info(f"窗口置顶: {self._always_on_top}", "UI")
-    
+
     def _toggle_teaching_mode(self):
         self._teaching_mode = key_display_window.toggle()
-        
+        colors = theme_manager.colors
+
         if self._teaching_mode:
             self.teaching_btn.setChecked(True)
-            self.teaching_btn.setStyleSheet("background-color: #9C27B0; color: white;")
+            self.teaching_btn.setStyleSheet(f"background-color: {colors['warning']}; color: white;")
             show_toast("教学模式已开启 - 按键和鼠标点击将显示在屏幕上", 'success')
         else:
             self.teaching_btn.setChecked(False)
@@ -1491,10 +1494,11 @@ class MainWindow(QMainWindow):
     
     def _set_target_window(self, window):
         """设置目标窗口"""
+        colors = theme_manager.colors
         self._target_region = window.region
         self._window_mode = True
         self.window_btn.setText(f"🪟 {window.title[:10]}...")
-        self.window_btn.setStyleSheet("background-color: #2196F3; color: white;")
+        self.window_btn.setStyleSheet(f"background-color: {colors['primary']}; color: white;")
         self.region_btn.setText("📐 区域")
         self.region_btn.setStyleSheet("")
         show_toast(f"已选择窗口: {window.title}", 'success')
@@ -1547,10 +1551,11 @@ class MainWindow(QMainWindow):
     
     def _on_region_selected(self, x, y, w, h):
         """区域选择完成"""
+        colors = theme_manager.colors
         self._target_region = (x, y, w, h)
         self._window_mode = False
         self.region_btn.setText(f"📐 ({x},{y},{w}x{h})")
-        self.region_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+        self.region_btn.setStyleSheet(f"background-color: {colors['success']}; color: white;")
         self.window_btn.setText("🪟 窗口")
         self.window_btn.setStyleSheet("")
         self.showNormal()
@@ -1606,14 +1611,15 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             self._loop_count = loop_spin.value()
             self._loop_interval = interval_spin.value()
-            
+            colors = theme_manager.colors
+
             if self._loop_count > 1:
                 self.loop_btn.setText(f"🔄 x{self._loop_count}")
-                self.loop_btn.setStyleSheet("background-color: #FF9800; color: white;")
+                self.loop_btn.setStyleSheet(f"background-color: {colors['warning']}; color: white;")
             else:
                 self.loop_btn.setText("🔄 循环")
                 self.loop_btn.setStyleSheet("")
-            
+
             show_toast(f"循环设置: {self._loop_count}次, 间隔{self._loop_interval}秒", 'success')
             app_logger.info(f"循环设置: {self._loop_count}次, 间隔{self._loop_interval}秒", "UI")
     
