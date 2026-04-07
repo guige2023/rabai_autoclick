@@ -57,7 +57,7 @@ def weak_cache(func: Callable[..., T]) -> Callable[..., T | None]:
     """
     cache: dict[Any, weakref.ref] = {}
     def cached(*args: Any, **kwargs: Any) -> T | None:
-        key = (args, tuple(sorted(kwargs.items()))
+        key = (args, tuple(sorted(kwargs.items())))
         if key in cache:
             result = cache[key]()
             if result is not None:
