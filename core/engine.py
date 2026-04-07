@@ -10,12 +10,49 @@ import threading
 import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
+try:
+    import jsonschema
+    HAS_JSONSCHEMA = True
+except ImportError:
+    HAS_JSONSCHEMA = False
+
 from .context import ContextManager
 from .action_loader import ActionLoader
 from .base_action import ActionResult
 
 
 logger = logging.getLogger(__name__)
+
+
+# Workflow JSON Schema for validation
+WORKFLOW_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "version": {"type": "string"},
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "variables": {
+            "type": "object",
+            "additionalProperties": True
+        },
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["id", "type"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "type": {"type": "string"},
+                    "pre_delay": {"type": "number"},
+                    "post_delay": {"type": "number"},
+                    "output_var": {"type": "string"},
+                    "next": {"type": "string"}
+                }
+            }
+        }
+    },
+    "required": ["steps"]
+}
 
 
 class FlowEngine:
@@ -41,47 +78,76 @@ class FlowEngine:
         self._is_paused: bool = False
         self._stop_requested: bool = False
         self._loop_counters: Dict[str, int] = {}
-        
+
         # Callbacks
         self._on_step_start: Optional[Callable[[Dict], None]] = None
         self._on_step_end: Optional[Callable[[Dict, ActionResult], None]] = None
         self._on_workflow_end: Optional[Callable[[bool], None]] = None
         self._on_error: Optional[Callable[[Dict, str], None]] = None
     
+    def _validate_workflow(self, workflow: Dict[str, Any]) -> bool:
+        """Validate a workflow dictionary against the schema.
+
+        Args:
+            workflow: Workflow dictionary to validate.
+
+        Returns:
+            True if valid, False otherwise.
+        """
+        if not HAS_JSONSCHEMA:
+            logger.warning("jsonschema not installed, skipping workflow validation")
+            return True
+        try:
+            jsonschema.validate(instance=workflow, schema=WORKFLOW_SCHEMA)
+            return True
+        except jsonschema.ValidationError as e:
+            logger.error(f"工作流Schema验证失败: {e.message}")
+            return False
+        except jsonschema.SchemaError as e:
+            logger.error(f"工作流Schema格式错误: {e.message}")
+            return False
+
     def load_workflow(self, workflow_path: str) -> bool:
         """Load a workflow from a JSON file.
-        
+
         Args:
             workflow_path: Path to the workflow JSON file.
-            
+
         Returns:
             True if loaded successfully, False otherwise.
         """
         try:
             with open(workflow_path, 'r', encoding='utf-8') as f:
-                self._workflow = json.load(f)
-            
+                workflow = json.load(f)
+
+            if not self._validate_workflow(workflow):
+                return False
+
+            self._workflow = workflow
             if 'variables' in self._workflow:
                 self.context.set_all(self._workflow['variables'])
-            
+
             return True
         except Exception as e:
             logger.error(f"加载工作流失败: {e}")
             return False
-    
+
     def load_workflow_from_dict(
-        self, 
+        self,
         workflow: Dict[str, Any]
     ) -> bool:
         """Load a workflow from a dictionary.
-        
+
         Args:
             workflow: Workflow dictionary.
-            
+
         Returns:
             True if loaded successfully, False otherwise.
         """
         try:
+            if not self._validate_workflow(workflow):
+                return False
+
             self._workflow = workflow
             if 'variables' in self._workflow:
                 self.context.set_all(self._workflow['variables'])
