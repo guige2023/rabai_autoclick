@@ -14,6 +14,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout
 )
 
+from ui.theme import theme_manager
+
 
 class HotkeyEdit(QLineEdit):
     """Custom line edit for capturing hotkey input.
@@ -202,7 +204,8 @@ class HotkeySettingsDialog(QDialog):
             "点击输入框后按下新的快捷键进行设置\n"
             "支持组合键，如: Ctrl+Shift+A"
         )
-        info_label.setStyleSheet("color: gray; font-size: 11px;")
+        colors = theme_manager.colors
+        info_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 11px;")
         layout.addWidget(info_label)
         
         # Workflow control group
