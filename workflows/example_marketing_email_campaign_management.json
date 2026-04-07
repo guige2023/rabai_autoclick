@@ -1,0 +1,117 @@
+{
+  "name": "Marketing Email Campaign Management Workflow",
+  "description": "Automate email campaign tracking and analytics",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "email_campaigns_to_track": 46,
+    "current_campaign": 0,
+    "tracked_campaigns": 0,
+    "campaign_metrics": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "email_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize email campaign counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open email marketing platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "email_campaign_loop",
+      "count": "{{email_campaigns_to_track}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start email campaign tracking loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select email campaign"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for tracking update"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/email_campaign_tracking_{{email_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture email campaign screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "email_counter",
+      "value": "{{email_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment email counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{email_counter < email_campaigns_to_track}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more campaigns"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next campaign"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/marketing_email_campaign_management_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
