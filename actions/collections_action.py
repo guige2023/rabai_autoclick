@@ -1,5 +1,7 @@
-"""
-Collections extensions - Counter, defaultdict, OrderedDict, deque operations.
+"""collections action extensions for rabai_autoclick.
+
+Provides utilities for working with Python collections including
+counters, ordered dicts, default dicts, named tuples, and more.
 """
 
 from __future__ import annotations
@@ -10,583 +12,658 @@ from collections import (
     OrderedDict,
     defaultdict,
     deque,
+    namedtuple,
 )
 from typing import (
     Any,
     Callable,
-    Dict,
+    Generic,
     Iterator,
-    List,
-    Optional,
-    Tuple,
     TypeVar,
 )
+
+__all__ = [
+    "Counter",
+    "OrderedDict",
+    "defaultdict",
+    "deque",
+    "namedtuple",
+    "count_items",
+    "most_common",
+    "least_common",
+    "count_by",
+    "group_by",
+    "partition",
+    "flatten",
+    "unflatten",
+    "merge_dicts",
+    "chain_iterables",
+    "chunk_iterable",
+    "window_iterable",
+    "unique_iterable",
+    "unique_everseen",
+    "partition_by",
+    "frequency",
+    "count_values",
+    "invert_dict",
+    "safe_get",
+    "safe_set",
+    "deep_get",
+    "deep_set",
+    "deep_defaultdict",
+    "FrozenCounter",
+    "LRUCache",
+    "FIFOCache",
+    "SortedDict",
+    "OrderedDefaultDict",
+    "ExpiringDict",
+]
+
 
 T = TypeVar("T")
 K = TypeVar("K")
 V = TypeVar("V")
 
 
-def counter_most_common(
-    counter: Counter,
-    n: Optional[int] = None,
-    reverse: bool = False,
-) -> List[Tuple[Any, int]]:
-    """
-    Get most common elements from a Counter.
-    
+def count_items(iterable: Iterable, /) -> Counter:
+    """Count items in iterable.
+
     Args:
-        counter: Counter object
-        n: Number of elements to return (None for all)
-        reverse: If True, return least common instead
-    
+        iterable: Items to count.
+
     Returns:
-        List of (element, count) tuples
-    
-    Example:
-        >>> counter_most_common(Counter(['a', 'b', 'a', 'c', 'a']), 2)
-        [('a', 3), ('b', 1)]
+        Counter with counts.
+    """
+    return collections.Counter(iterable)
+
+
+def most_common(
+    counter: Counter,
+    n: int | None = None,
+    reverse: bool = True,
+) -> list[tuple[Any, int]]:
+    """Get most common elements.
+
+    Args:
+        counter: Counter object.
+        n: Return top n elements (None for all).
+        reverse: Sort descending (most common first).
+
+    Returns:
+        List of (item, count) tuples.
     """
     if reverse:
-        return counter.most_common()[:-n-1:-1] if n else counter.most_common()[::-1]
-    return counter.most_common(n)
+        return counter.most_common(n)
+    items = counter.most_common()
+    if n is not None:
+        items = items[-n:]
+    return list(reversed(items))
 
 
-def counter_update(
+def least_common(
     counter: Counter,
-    data: Any,
-    increment: int = 1,
-) -> Counter:
-    """
-    Update counter with data (list, dict, or single element).
-    
+    n: int | None = None,
+) -> list[tuple[Any, int]]:
+    """Get least common elements.
+
     Args:
-        counter: Counter to update
-        data: Data to add (list, dict, or single element)
-        increment: Increment value for single elements
-    
+        counter: Counter object.
+        n: Return bottom n elements (None for all).
+
     Returns:
-        Updated counter
-    
-    Example:
-        >>> c = Counter(); c.update(['a', 'b', 'a'])
-        >>> c['a']
-        2
+        List of (item, count) tuples.
     """
-    counter.update(data)
-    return counter
-
-
-def counter_subtract_from(
-    counter: Counter,
-    data: Any,
-) -> Counter:
-    """
-    Subtract counts from counter.
-    
-    Args:
-        counter: Counter to update
-        data: Data to subtract (list, dict, or single element)
-    
-    Returns:
-        Updated counter
-    
-    Example:
-        >>> c = Counter(['a', 'b', 'a', 'c'])
-        >>> c.subtract(['a'])
-        >>> c['a']
-        1
-    """
-    counter.subtract(data)
-    return counter
-
-
-def counter_intersection(
-    counter1: Counter,
-    counter2: Counter,
-) -> Counter:
-    """
-    Get intersection (min of counts) of two counters.
-    
-    Args:
-        counter1: First counter
-        counter2: Second counter
-    
-    Returns:
-        New counter with minimum counts
-    
-    Example:
-        >>> c1 = Counter(['a', 'b', 'a'])
-        >>> c2 = Counter(['a', 'b', 'b', 'c'])
-        >>> counter_intersection(c1, c2)
-        Counter({'a': 1, 'b': 1})
-    """
-    return counter1 & counter2
-
-
-def counter_union(
-    counter1: Counter,
-    counter2: Counter,
-) -> Counter:
-    """
-    Get union (max of counts) of two counters.
-    
-    Args:
-        counter1: First counter
-        counter2: Second counter
-    
-    Returns:
-        New counter with maximum counts
-    
-    Example:
-        >>> c1 = Counter(['a', 'b', 'a'])
-        >>> c2 = Counter(['a', 'b', 'b', 'c'])
-        >>> counter_union(c1, c2)
-        Counter({'a': 2, 'b': 2, 'c': 1})
-    """
-    return counter1 | counter2
-
-
-def counter_elements(
-    counter: Counter,
-) -> Iterator[Any]:
-    """
-    Iterate over all elements in counter (repeating per count).
-    
-    Args:
-        counter: Counter object
-    
-    Yields:
-        Elements repeated by their count
-    
-    Example:
-        >>> list(counter_elements(Counter(['a', 'b', 'a'])))
-        ['a', 'a', 'b']
-    """
-    for elem, count in counter.elements():
-        yield elem
-
-
-def defaultdict_factory(
-    default_factory: Callable[[], Any],
-    initial: Optional[Dict[K, V]] = None,
-) -> defaultdict:
-    """
-    Create a defaultdict with specified default factory.
-    
-    Args:
-        default_factory: Factory function for default values (list, int, dict, etc.)
-        initial: Optional initial dictionary
-    
-    Returns:
-        Configured defaultdict
-    
-    Example:
-        >>> d = defaultdict_factory(list)
-        >>> d['key'].append('value')
-        >>> d['key']
-        ['value']
-    """
-    d = defaultdict(default_factory)
-    if initial:
-        d.update(initial)
-    return d
-
-
-def defaultdict_set_default(
-    d: defaultdict,
-    key: K,
-    default: Any,
-) -> Any:
-    """
-    Set default value for key if not exists, return value.
-    
-    Args:
-        d: defaultdict
-        key: Key to check/set
-        default: Default value if key doesn't exist
-    
-    Returns:
-        The value (existing or newly set)
-    
-    Example:
-        >>> d = defaultdict_factory(int)
-        >>> defaultdict_set_default(d, 'count', 0)
-        0
-    """
-    if key not in d:
-        d[key] = default
-    return d[key]
-
-
-def ordered_dict_move_to_end(
-    od: OrderedDict,
-    key: K,
-    last: bool = True,
-) -> OrderedDict:
-    """
-    Move a key to the beginning or end of OrderedDict.
-    
-    Args:
-        od: OrderedDict
-        key: Key to move
-        last: If True, move to end; else to beginning
-    
-    Returns:
-        Updated OrderedDict
-    
-    Raises:
-        KeyError: If key not in dict
-    """
-    od.move_to_end(key, last=last)
-    return od
-
-
-def ordered_dict_remove_last(
-    od: OrderedDict,
-    n: int = 1,
-) -> List[Tuple[K, V]]:
-    """
-    Remove and return the last n items from OrderedDict.
-    
-    Args:
-        od: OrderedDict
-        n: Number of items to remove
-    
-    Returns:
-        List of (key, value) tuples removed
-    
-    Example:
-        >>> od = OrderedDict([('a', 1), ('b', 2), ('c', 3)])
-        >>> ordered_dict_remove_last(od, 2)
-        [('b', 2), ('c', 3)]
-    """
-    results = []
-    for _ in range(min(n, len(od))):
-        key = next(iter(od))
-        results.append((key, od.pop(key)))
-    return results
-
-
-def ordered_dict_remove_first(
-    od: OrderedDict,
-    n: int = 1,
-) -> List[Tuple[K, V]]:
-    """
-    Remove and return the first n items from OrderedDict.
-    
-    Args:
-        od: OrderedDict
-        n: Number of items to remove
-    
-    Returns:
-        List of (key, value) tuples removed
-    """
-    results = ordered_dict_remove_last(od, n)
-    return results[::-1]
-
-
-def deque_appendleft_many(
-    dq: deque,
-    items: List[T],
-) -> deque:
-    """
-    Extend deque on the left side.
-    
-    Args:
-        dq: deque to extend
-        items: Items to add
-    
-    Returns:
-        Updated deque
-    
-    Example:
-        >>> d = deque([3, 4])
-        >>> deque_appendleft_many(d, [1, 2])
-        deque([1, 2, 3, 4])
-    """
-    dq.extendleft(items)
-    return dq
-
-
-def deque_remove_all(
-    dq: deque,
-    value: Any,
-) -> int:
-    """
-    Remove all occurrences of value from deque.
-    
-    Args:
-        dq: deque to modify
-        value: Value to remove
-    
-    Returns:
-        Number of items removed
-    
-    Example:
-        >>> d = deque([1, 2, 1, 3, 1])
-        >>> deque_remove_all(d, 1)
-        3
-        >>> d
-        deque([2, 3])
-    """
-    original_len = len(dq)
-    while value in dq:
-        dq.remove(value)
-    return original_len - len(dq)
-
-
-def deque_rotate_n(
-    dq: deque,
-    n: int,
-) -> deque:
-    """
-    Rotate deque by n positions.
-    
-    Args:
-        dq: deque to rotate
-        n: Number of positions (positive = right, negative = left)
-    
-    Returns:
-        Updated deque
-    
-    Example:
-        >>> d = deque([1, 2, 3, 4, 5])
-        >>> deque_rotate_n(d, 2)
-        deque([4, 5, 1, 2, 3])
-    """
-    dq.rotate(n)
-    return dq
-
-
-def deque_slice(
-    dq: deque,
-    start: int,
-    end: int,
-) -> deque:
-    """
-    Get a slice of deque as new deque.
-    
-    Args:
-        dq: Source deque
-        start: Start index
-        end: End index
-    
-    Returns:
-        New deque with sliced elements
-    
-    Example:
-        >>> d = deque([1, 2, 3, 4, 5])
-        >>> deque_slice(d, 1, 4)
-        deque([2, 3, 4])
-    """
-    return deque(list(dq)[start:end])
-
-
-def deque_filter(
-    dq: deque,
-    predicate: Callable[[Any], bool],
-) -> deque:
-    """
-    Filter deque elements by predicate.
-    
-    Args:
-        dq: deque to filter
-        predicate: Function that returns True to keep element
-    
-    Returns:
-        New deque with filtered elements
-    
-    Example:
-        >>> d = deque([1, 2, 3, 4, 5])
-        >>> deque_filter(d, lambda x: x > 2)
-        deque([3, 4, 5])
-    """
-    return deque(x for x in dq if predicate(x))
-
-
-def chain_maps(
-    *maps: Dict[K, V],
-) -> Iterator[Tuple[K, V]]:
-    """
-    Chain multiple dictionaries together.
-    
-    Args:
-        *maps: Variable number of dictionaries
-    
-    Yields:
-        (key, value) tuples from all maps in order
-    
-    Example:
-        >>> dict(chain_maps({'a': 1}, {'b': 2}, {'a': 3}))
-        {'a': 3, 'b': 2}
-    """
-    for m in maps:
-        yield from m.items()
-
-
-def merge_counters(
-    *counters: Counter,
-) -> Counter:
-    """
-    Merge multiple counters (sum all counts).
-    
-    Args:
-        *counters: Variable number of Counter objects
-    
-    Returns:
-        Merged Counter with summed counts
-    
-    Example:
-        >>> c1 = Counter(['a', 'b'])
-        >>> c2 = Counter(['b', 'c'])
-        >>> merge_counters(c1, c2)
-        Counter({'b': 2, 'a': 1, 'c': 1})
-    """
-    result = Counter()
-    for c in counters:
-        result.update(c)
-    return result
-
-
-def counter_difference(
-    counter1: Counter,
-    counter2: Counter,
-) -> Counter:
-    """
-    Get elements in counter1 that are not in counter2.
-    
-    Args:
-        counter1: First counter
-        counter2: Second counter (subtracted)
-    
-    Returns:
-        New counter with counts from counter1 minus counter2
-    
-    Example:
-        >>> c1 = Counter(['a', 'b', 'a', 'c'])
-        >>> c2 = Counter(['a', 'b'])
-        >>> counter_difference(c1, c2)
-        Counter({'c': 1})
-    """
-    return counter1 - counter2
-
-
-def flatten_dict_values(
-    d: Dict[K, List[V]],
-) -> Iterator[V]:
-    """
-    Flatten dictionary of lists/iterables.
-    
-    Args:
-        d: Dictionary with list/tuple values
-    
-    Yields:
-        Individual values from all lists
-    
-    Example:
-        >>> list(flatten_dict_values({'a': [1, 2], 'b': [3]}))
-        [1, 2, 3]
-    """
-    for values in d.values():
-        yield from values
-
-
-def group_by_key(
-    items: List[Dict[K, V]],
-    key: K,
-) -> Dict[K, List[Dict[K, V]]]:
-    """
-    Group list of dicts by a common key.
-    
-    Args:
-        items: List of dictionaries
-        key: Key to group by
-    
-    Returns:
-        Dictionary mapping key values to lists of items
-    
-    Example:
-        >>> items = [{'type': 'a', 'v': 1}, {'type': 'b'}, {'type': 'a', 'v': 2}]
-        >>> group_by_key(items, 'type')
-        {'a': [{'type': 'a', 'v': 1}, {'type': 'a', 'v': 2}], 'b': [{'type': 'b'}]}
-    """
-    result: Dict[K, List[Dict[K, V]]] = defaultdict(list)
-    for item in items:
-        if key in item:
-            result[item[key]].append(item)
-    return dict(result)
+    items = counter.most_common()
+    if n is not None:
+        items = items[:-n-1:-1]
+    else:
+        items = list(reversed(items))
+    return items
 
 
 def count_by(
-    items: List[T],
-    key: Callable[[T], K],
-) -> Dict[K, int]:
-    """
-    Count items by a key function.
-    
+    iterable: Iterable,
+    key: Callable[[Any], Any] | None = None,
+) -> dict[Any, int]:
+    """Count items by key function.
+
     Args:
-        items: List of items
-        key: Function to extract grouping key
-    
+        iterable: Items to count.
+        key: Function to group by.
+
     Returns:
-        Dictionary mapping keys to counts
-    
-    Example:
-        >>> count_by([1, 2, 3, 4, 5], lambda x: x % 2)
-        {1: 3, 0: 2}
+        Dict of key to count.
     """
-    result: Dict[K, int] = defaultdict(int)
-    for item in items:
-        result[key(item)] += 1
-    return dict(result)
+    counter: Counter = collections.Counter()
+    for item in iterable:
+        k = key(item) if key else item
+        counter[k] += 1
+    return dict(counter)
 
 
-def invert_dict(
-    d: Dict[K, V],
-) -> Dict[V, List[K]]:
-    """
-    Invert dictionary (values become keys).
-    
+def group_by(
+    iterable: Iterable,
+    key: Callable[[Any], K],
+) -> dict[K, list]:
+    """Group items by key function.
+
     Args:
-        d: Dictionary to invert
-    
+        iterable: Items to group.
+        key: Function to group by.
+
     Returns:
-        Dictionary mapping values to lists of original keys
-    
-    Example:
-        >>> invert_dict({'a': 1, 'b': 2, 'c': 1})
-        {1: ['a', 'c'], 2: ['b']}
+        Dict of key to list of items.
     """
-    result: Dict[V, List[K]] = defaultdict(list)
-    for k, v in d.items():
-        result[v].append(k)
-    return dict(result)
+    result: dict[K, list] = {}
+    for item in iterable:
+        k = key(item)
+        if k not in result:
+            result[k] = []
+        result[k].append(item)
+    return result
+
+
+def partition(
+    iterable: Iterable,
+    predicate: Callable[[Any], bool],
+) -> tuple[list, list]:
+    """Partition iterable by predicate.
+
+    Args:
+        iterable: Items to partition.
+        predicate: Function returning True for first group.
+
+    Returns:
+        Tuple of (matching, non-matching).
+    """
+    matching = []
+    non_matching = []
+    for item in iterable:
+        if predicate(item):
+            matching.append(item)
+        else:
+            non_matching.append(item)
+    return matching, non_matching
+
+
+def flatten(nested: Iterable[Iterable[T]]) -> list[T]:
+    """Flatten nested iterables.
+
+    Args:
+        nested: Nested iterable structure.
+
+    Returns:
+        Flattened list.
+    """
+    result = []
+    for item in nested:
+        if isinstance(item, (list, tuple, set)):
+            result.extend(flatten(item))  # type: ignore
+        else:
+            result.append(item)
+    return result
+
+
+def unflatten(flat: list[T], structure: list[int]) -> list[list[T]]:
+    """Unflatten list into nested structure.
+
+    Args:
+        flat: Flattened list.
+        structure: Sizes of sublists.
+
+    Returns:
+        Nested list.
+    """
+    result = []
+    idx = 0
+    for size in structure:
+        result.append(flat[idx:idx+size])
+        idx += size
+    return result
+
+
+def merge_dicts(*dicts: dict[K, V], strategy: str = "last") -> dict[K, V]:
+    """Merge multiple dicts.
+
+    Args:
+        *dicts: Dicts to merge.
+        strategy: "last" keeps last value, "first" keeps first.
+
+    Returns:
+        Merged dict.
+    """
+    result: dict[K, V] = {}
+    for d in dicts:
+        for k, v in d.items():
+            if strategy == "last" or k not in result:
+                result[k] = v
+    return result
+
+
+def chain_iterables(*iterables: Iterable) -> Iterator:
+    """Chain multiple iterables.
+
+    Args:
+        *iterables: Iterables to chain.
+
+    Returns:
+        Iterator over all items.
+    """
+    return (item for iterable in iterables for item in iterable)
+
+
+def chunk_iterable(
+    iterable: Iterable,
+    size: int,
+) -> Iterator[list]:
+    """Split iterable into chunks.
+
+    Args:
+        iterable: Items to chunk.
+        size: Chunk size.
+
+    Yields:
+        Lists of chunk size.
+    """
+    items = list(iterable)
+    for i in range(0, len(items), size):
+        yield items[i:i+size]
+
+
+def window_iterable(
+    iterable: Iterable,
+    size: int,
+    step: int = 1,
+) -> Iterator[list]:
+    """Create sliding window over iterable.
+
+    Args:
+        iterable: Items to window.
+        size: Window size.
+        step: Step between windows.
+
+    Yields:
+        Lists of window size.
+    """
+    items = list(iterable)
+    for i in range(0, len(items) - size + 1, step):
+        yield items[i:i+size]
+
+
+def unique_iterable(iterable: Iterable, /, key: Callable | None = None) -> list:
+    """Get unique items preserving order.
+
+    Args:
+        iterable: Items to dedupe.
+        key: Optional key function.
+
+    Returns:
+        List of unique items.
+    """
+    if key is None:
+        seen = set()
+        result = []
+        for item in iterable:
+            if item not in seen:
+                seen.add(item)
+                result.append(item)
+        return result
+    else:
+        seen = set()
+        result = []
+        for item in iterable:
+            k = key(item)
+            if k not in seen:
+                seen.add(k)
+                result.append(item)
+        return result
+
+
+def unique_everseen(iterable: Iterable, /, key: Callable | None = None) -> Iterator:
+    """Yield unique items in order, unseen.
+
+    Args:
+        iterable: Items to dedupe.
+        key: Optional key function.
+
+    Yields:
+        Unique items.
+    """
+    seen = set()
+    for item in iterable:
+        k = key(item) if key else item
+        if k not in seen:
+            seen.add(k)
+            yield item
 
 
 def partition_by(
-    items: List[T],
-    predicate: Callable[[T], bool],
-) -> Tuple[List[T], List[T]]:
-    """
-    Partition items into two lists based on predicate.
-    
+    iterable: Iterable,
+    key: Callable[[Any], Any] | None = None,
+) -> Iterator[list]:
+    """Partition by consecutive same keys.
+
     Args:
-        items: List of items to partition
-        predicate: Function returning True for first group
-    
-    Returns:
-        Tuple of (matching, non-matching) lists
-    
-    Example:
-        >>> partition_by([1, 2, 3, 4, 5], lambda x: x > 2)
-        ([3, 4, 5], [1, 2])
+        iterable: Items to partition.
+        key: Key function.
+
+    Yields:
+        Lists of consecutive items.
     """
-    true_list: List[T] = []
-    false_list: List[T] = []
-    for item in items:
-        if predicate(item):
-            true_list.append(item)
+    current_key = None
+    current_group = []
+
+    for item in iterable:
+        k = key(item) if key else item
+        if k != current_key:
+            if current_group:
+                yield current_group
+            current_key = k
+            current_group = [item]
         else:
-            false_list.append(item)
-    return true_list, false_list
+            current_group.append(item)
+
+    if current_group:
+        yield current_group
+
+
+def frequency(iterable: Iterable) -> dict[Any, int]:
+    """Count frequency of items.
+
+    Args:
+        iterable: Items to count.
+
+    Returns:
+        Dict of item to frequency.
+    """
+    return dict(collections.Counter(iterable))
+
+
+def count_values(iterable: Iterable) -> int:
+    """Count total number of values.
+
+    Args:
+        iterable: Items to count.
+
+    Returns:
+        Total count.
+    """
+    return sum(collections.Counter(iterable).values())
+
+
+def invert_dict(d: dict[K, V]) -> dict[V, K]:
+    """Invert dict (swap keys and values).
+
+    Args:
+        d: Dict to invert.
+
+    Returns:
+        Inverted dict.
+
+    Raises:
+        ValueError: If values are not hashable.
+    """
+    return {v: k for k, v in d.items()}
+
+
+def safe_get(d: dict, *keys: Any, default: Any = None) -> Any:
+    """Safely get nested dict value.
+
+    Args:
+        d: Dict to search.
+        *keys: Sequence of keys.
+        default: Default if not found.
+
+    Returns:
+        Value or default.
+    """
+    result = d
+    for key in keys:
+        if isinstance(result, dict) and key in result:
+            result = result[key]
+        else:
+            return default
+    return result
+
+
+def safe_set(d: dict, *keys: Any, value: Any = None) -> None:
+    """Safely set nested dict value.
+
+    Args:
+        d: Dict to modify.
+        *keys: Sequence of keys (last is value).
+        value: Value to set (if keys empty).
+    """
+    if not keys:
+        return
+
+    *key_path, final_key = keys
+    target = d
+
+    for key in key_path:
+        if key not in target:
+            target[key] = {}
+        target = target[key]
+
+    target[final_key] = value
+
+
+def deep_get(d: dict, path: list[str], default: Any = None) -> Any:
+    """Get value from nested dict using path.
+
+    Args:
+        d: Dict to search.
+        path: List of keys.
+        default: Default if not found.
+
+    Returns:
+        Value or default.
+    """
+    return safe_get(d, *path, default=default)
+
+
+def deep_set(d: dict, path: list[str], value: Any) -> None:
+    """Set value in nested dict using path.
+
+    Args:
+        d: Dict to modify.
+        path: List of keys.
+        value: Value to set.
+    """
+    if not path:
+        return
+    *key_path, final_key = path
+    safe_set(d, *key_path, **{final_key: value})
+
+
+def deep_defaultdict(default_factory: Callable) -> defaultdict:
+    """Create infinitely nested defaultdict.
+
+    Args:
+        default_factory: Factory for missing values.
+
+    Returns:
+        Nested defaultdict.
+    """
+    return collections.defaultdict(lambda: deep_defaultdict(default_factory))
+
+
+class FrozenCounter(collections.Counter):
+    """Immutable Counter with hash support."""
+
+    def __hash__(self) -> int:
+        return hash(tuple(sorted(self.elements())))
+
+    def __setitem__(self, key: Any, value: int) -> None:
+        raise TypeError("FrozenCounter is immutable")
+
+    def __delitem__(self, key: Any) -> None:
+        raise TypeError("FrozenCounter is immutable")
+
+    def clear(self) -> None:
+        raise TypeError("FrozenCounter is immutable")
+
+
+class LRUCache(Generic[K, V]):
+    """Least Recently Used cache."""
+
+    def __init__(self, maxsize: int = 128) -> None:
+        self._cache: OrderedDict[K, V] = OrderedDict()
+        self._maxsize = maxsize
+
+    def get(self, key: K) -> V | None:
+        """Get value, moving to end (most recent)."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return None
+
+    def set(self, key: K, value: V) -> None:
+        """Set value, evicting LRU if full."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self._maxsize:
+                self._cache.popitem(last=False)
+        self._cache[key] = value
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+
+class FIFOCache(Generic[K, V]):
+    """First In First Out cache."""
+
+    def __init__(self, maxsize: int = 128) -> None:
+        self._cache: dict[K, V] = {}
+        self._order: deque[K] = deque()
+        self._maxsize = maxsize
+
+    def get(self, key: K) -> V | None:
+        """Get value."""
+        return self._cache.get(key)
+
+    def set(self, key: K, value: V) -> None:
+        """Set value, evicting oldest if full."""
+        if key in self._cache:
+            return
+        if len(self._cache) >= self._maxsize:
+            oldest = self._order.popleft()
+            del self._cache[oldest]
+        self._cache[key] = value
+        self._order.append(key)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+class SortedDict(Generic[K, V]):
+    """Dict with sorted keys."""
+
+    def __init__(self, data: dict[K, V] | None = None) -> None:
+        self._data: dict[K, V] = data or {}
+        self._keys: list[K] = sorted(self._data.keys())
+
+    def __getitem__(self, key: K) -> V:
+        return self._data[key]
+
+    def __setitem__(self, key: K, value: V) -> None:
+        if key not in self._data:
+            self._keys.append(key)
+            self._keys.sort()
+        self._data[key] = value
+
+    def __delitem__(self, key: K) -> None:
+        del self._data[key]
+        self._keys.remove(key)
+
+    def __iter__(self) -> Iterator[K]:
+        return iter(self._keys)
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def keys(self) -> list[K]:
+        return self._keys.copy()
+
+    def values(self) -> list[V]:
+        return [self._data[k] for k in self._keys]
+
+    def items(self) -> list[tuple[K, V]]:
+        return [(k, self._data[k]) for k in self._keys]
+
+
+class OrderedDefaultDict(collections.defaultdict):
+    """DefaultDict that maintains insertion order."""
+
+    def __init__(self, default_factory: Callable | None = None) -> None:
+        super().__init__(default_factory)
+        self._order: list = []
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if key not in self:
+            self._order.append(key)
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key: Any) -> None:
+        super().__delitem__(key)
+        self._order.remove(key)
+
+    def __iter__(self) -> Iterator:
+        return iter(self._order)
+
+    def keys(self) -> list:
+        return self._order.copy()
+
+    def values(self) -> list:
+        return [self[k] for k in self._order]
+
+    def items(self) -> list[tuple]:
+        return [(k, self[k]) for k in self._order]
+
+
+class ExpiringDict(dict):
+    """Dict with TTL for each entry."""
+
+    def __init__(self, ttl: float = 60.0) -> None:
+        import time
+        super().__init__()
+        self._ttl = ttl
+        self._times: dict = {}
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        import time
+        super().__setitem__(key, value)
+        self._times[key] = time.time()
+
+    def __getitem__(self, key: Any) -> Any:
+        import time
+        if super().__contains__(key):
+            if time.time() - self._times[key] > self._ttl:
+                del self[key]
+                del self._times[key]
+                raise KeyError(key)
+        return super().__getitem__(key)
+
+    def cleanup(self) -> None:
+        """Remove expired entries."""
+        import time
+        expired = [
+            k for k, t in self._times.items()
+            if time.time() - t > self._ttl
+        ]
+        for k in expired:
+            del self[k]
+            del self._times[k]
+
+
+from collections.abc import Iterable

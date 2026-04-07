@@ -1,288 +1,632 @@
-"""Textwrap action module for RabAI AutoClick.
+"""textwrap action extensions for rabai_autoclick.
 
-Provides text wrapping and indentation operations:
-- TextwrapWrapAction: Wrap text to specified width
-- TextwrapFillAction: Wrap and fill text
-- TextwrapIndentAction: Add prefix to each line
-- TextwrapDedentAction: Remove common leading whitespace
-- TextwrapShortenAction: Truncate text with ellipsis
-- TextwrapWrapManyAction: Wrap multiple strings
+Provides text wrapping, indentation, and formatting utilities
+for working with text content.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from __future__ import annotations
+
 import textwrap
-import sys
+import re
+from typing import Callable
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+__all__ = [
+    "wrap",
+    "fill",
+    "dedent",
+    "indent",
+    " shorten",
+    "wrap_text",
+    "align_left",
+    "align_center",
+    "align_right",
+    "center_text",
+    "left_justify",
+    "right_justify",
+    "wrap_paragraphs",
+    "indent_lines",
+    "unindent",
+    "strip_indent",
+    "normalize_whitespace",
+    "collapse_whitespace",
+    "word_wrap",
+    "character_wrap",
+    "prefix_lines",
+    "suffix_lines",
+    "remove_prefix",
+    "remove_suffix",
+    "wrap_string",
+    "TextWrapper",
+    "indent_width",
+    "prefix_width",
+    "ColumnFormatter",
+    "TableFormatter",
+]
 
 
-class TextwrapWrapAction(BaseAction):
-    """Wrap text to specified width."""
-    action_type = "textwrap_wrap"
-    display_name = "文本换行"
-    description = "将文本按指定宽度换行"
+def wrap(
+    text: str,
+    width: int = 70,
+    *,
+    initial_indent: str = "",
+    subsequent_indent: str = "",
+    break_long_words: bool = True,
+    break_on_hyphens: bool = True,
+) -> list[str]:
+    """Wrap text to specified width.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute textwrap wrap operation.
+    Args:
+        text: Text to wrap.
+        width: Maximum line width.
+        initial_indent: Indent for first line.
+        subsequent_indent: Indent for subsequent lines.
+        break_long_words: Break long words.
+        break_on_hyphens: Break on hyphens.
+
+    Returns:
+        List of wrapped lines.
+    """
+    wrapper = textwrap.TextWrapper(
+        width=width,
+        initial_indent=initial_indent,
+        subsequent_indent=subsequent_indent,
+        break_long_words=break_long_words,
+        break_on_hyphens=break_on_hyphens,
+    )
+    return wrapper.wrap(text)
+
+
+def fill(
+    text: str,
+    width: int = 70,
+    *,
+    initial_indent: str = "",
+    subsequent_indent: str = "",
+) -> str:
+    """Fill text to specified width.
+
+    Args:
+        text: Text to fill.
+        width: Maximum line width.
+        initial_indent: Indent for first line.
+        subsequent_indent: Indent for subsequent lines.
+
+    Returns:
+        Filled text.
+    """
+    return textwrap.fill(
+        text,
+        width=width,
+        initial_indent=initial_indent,
+        subsequent_indent=subsequent_indent,
+    )
+
+
+def dedent(text: str) -> str:
+    """Remove common leading whitespace.
+
+    Args:
+        text: Text to dedent.
+
+    Returns:
+        Dedented text.
+    """
+    return textwrap.dedent(text)
+
+
+def indent(text: str, prefix: str, predicate: Callable[[str], bool] | None = None) -> str:
+    """Indent text with prefix.
+
+    Args:
+        text: Text to indent.
+        prefix: Prefix to add.
+        predicate: Optional line filter.
+
+    Returns:
+        Indented text.
+    """
+    return textwrap.indent(text, prefix, predicate=predicate)
+
+
+def shorten(
+    text: str,
+    width: int = 80,
+    *,
+    placeholder: str = "...",
+    break_long_words: bool = True,
+) -> str:
+    """Shorten text to width.
+
+    Args:
+        text: Text to shorten.
+        width: Maximum width.
+        placeholder: String to append if shortened.
+        break_long_words: Break long words.
+
+    Returns:
+        Shortened text.
+    """
+    return textwrap.shorten(
+        text,
+        width=width,
+        placeholder=placeholder,
+        break_long_words=break_long_words,
+    )
+
+
+def wrap_text(
+    text: str,
+    width: int = 70,
+    style: str = "left",
+) -> str:
+    """Wrap text with alignment.
+
+    Args:
+        text: Text to wrap.
+        width: Maximum line width.
+        style: Alignment style ("left", "center", "right").
+
+    Returns:
+        Wrapped and aligned text.
+    """
+    lines = wrap(text, width)
+    if style == "center":
+        return "\n".join(line.center(width) for line in lines)
+    elif style == "right":
+        return "\n".join(line.rjust(width) for line in lines)
+    return "\n".join(lines)
+
+
+def align_left(text: str, width: int | None = None) -> str:
+    """Align text to left.
+
+    Args:
+        text: Text to align.
+        width: Total width (uses max line length if None).
+
+    Returns:
+        Left-aligned text.
+    """
+    if width is None:
+        width = max(len(line) for line in text.split("\n")) if text else 0
+    return "\n".join(line.ljust(width) for line in text.split("\n"))
+
+
+def align_center(text: str, width: int | None = None) -> str:
+    """Align text to center.
+
+    Args:
+        text: Text to align.
+        width: Total width.
+
+    Returns:
+        Center-aligned text.
+    """
+    if width is None:
+        width = max(len(line) for line in text.split("\n")) if text else 0
+    return "\n".join(line.center(width) for line in text.split("\n"))
+
+
+def align_right(text: str, width: int | None = None) -> str:
+    """Align text to right.
+
+    Args:
+        text: Text to align.
+        width: Total width.
+
+    Returns:
+        Right-aligned text.
+    """
+    if width is None:
+        width = max(len(line) for line in text.split("\n")) if text else 0
+    return "\n".join(line.rjust(width) for line in text.split("\n"))
+
+
+def center_text(text: str, width: int | None = None) -> str:
+    """Center text (alias for align_center).
+
+    Args:
+        text: Text to center.
+        width: Total width.
+
+    Returns:
+        Centered text.
+    """
+    return align_center(text, width)
+
+
+def left_justify(text: str, width: int | None = None) -> str:
+    """Left justify text.
+
+    Args:
+        text: Text to justify.
+        width: Total width.
+
+    Returns:
+        Left-justified text.
+    """
+    return align_left(text, width)
+
+
+def right_justify(text: str, width: int | None = None) -> str:
+    """Right justify text.
+
+    Args:
+        text: Text to justify.
+        width: Total width.
+
+    Returns:
+        Right-justified text.
+    """
+    return align_right(text, width)
+
+
+def wrap_paragraphs(
+    text: str,
+    width: int = 70,
+    **kwargs: Any,
+) -> str:
+    """Wrap text preserving paragraphs.
+
+    Args:
+        text: Text with paragraphs.
+        width: Maximum line width.
+        **kwargs: Additional wrap arguments.
+
+    Returns:
+        Wrapped text.
+    """
+    paragraphs = text.split("\n\n")
+    wrapped = []
+    for para in paragraphs:
+        if para.strip():
+            wrapped.append(fill(para, width=width, **kwargs))
+        else:
+            wrapped.append("")
+    return "\n\n".join(wrapped)
+
+
+def indent_lines(
+    text: str,
+    indent: str,
+    skip_first: bool = False,
+) -> str:
+    """Indent all lines in text.
+
+    Args:
+        text: Text to indent.
+        indent: Indentation string.
+        skip_first: Skip indenting first line.
+
+    Returns:
+        Indented text.
+    """
+    lines = text.split("\n")
+    if skip_first:
+        return lines[0] + "\n" + "\n".join(indent + line for line in lines[1:])
+    return "\n".join(indent + line for line in lines)
+
+
+def unindent(text: str, spaces: int = 4) -> str:
+    """Unindent text by removing leading spaces.
+
+    Args:
+        text: Text to unindent.
+        spaces: Number of spaces to remove.
+
+    Returns:
+        Unindented text.
+    """
+    prefix = " " * spaces
+    return "\n".join(
+        line[len(prefix):] if line.startswith(prefix) else line
+        for line in text.split("\n")
+    )
+
+
+def strip_indent(text: str) -> str:
+    """Strip common leading indentation.
+
+    Args:
+        text: Text to strip.
+
+    Returns:
+        Stripped text.
+    """
+    return textwrap.dedent(text)
+
+
+def normalize_whitespace(text: str) -> str:
+    """Normalize all whitespace to single spaces.
+
+    Args:
+        text: Text to normalize.
+
+    Returns:
+        Normalized text.
+    """
+    return " ".join(text.split())
+
+
+def collapse_whitespace(text: str) -> str:
+    """Collapse multiple spaces into one.
+
+    Args:
+        text: Text to process.
+
+    Returns:
+        Collapsed text.
+    """
+    return re.sub(r"[ \t]+", " ", text)
+
+
+def word_wrap(
+    text: str,
+    width: int = 70,
+    break_words: bool = False,
+) -> list[str]:
+    """Word wrap text.
+
+    Args:
+        text: Text to wrap.
+        width: Maximum line width.
+        break_words: Allow breaking words.
+
+    Returns:
+        List of wrapped lines.
+    """
+    return wrap(
+        text,
+        width=width,
+        break_long_words=break_words,
+    )
+
+
+def character_wrap(text: str, width: int) -> list[str]:
+    """Wrap text by characters.
+
+    Args:
+        text: Text to wrap.
+        width: Characters per line.
+
+    Returns:
+        List of character-wrapped lines.
+    """
+    return [text[i:i+width] for i in range(0, len(text), width)]
+
+
+def prefix_lines(text: str, prefix: str) -> str:
+    """Add prefix to all lines.
+
+    Args:
+        text: Text to prefix.
+        prefix: Prefix to add.
+
+    Returns:
+        Prefixed text.
+    """
+    return "\n".join(prefix + line for line in text.split("\n"))
+
+
+def suffix_lines(text: str, suffix: str) -> str:
+    """Add suffix to all lines.
+
+    Args:
+        text: Text to suffix.
+        suffix: Suffix to add.
+
+    Returns:
+        Suffixed text.
+    """
+    return "\n".join(line + suffix for line in text.split("\n"))
+
+
+def remove_prefix(text: str, prefix: str) -> str:
+    """Remove prefix from string.
+
+    Args:
+        text: Text to process.
+        prefix: Prefix to remove.
+
+    Returns:
+        Text without prefix.
+    """
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
+def remove_suffix(text: str, suffix: str) -> str:
+    """Remove suffix from string.
+
+    Args:
+        text: Text to process.
+        suffix: Suffix to remove.
+
+    Returns:
+        Text without suffix.
+    """
+    if text.endswith(suffix):
+        return text[:-len(suffix)]
+    return text
+
+
+def wrap_string(
+    s: str,
+    width: int = 80,
+    wrap_chars: str = "\n",
+) -> str:
+    """Wrap string at width.
+
+    Args:
+        s: String to wrap.
+        width: Wrap width.
+        wrap_chars: Character to use for line breaks.
+
+    Returns:
+        Wrapped string.
+    """
+    return wrap_chars.join([s[i:i+width] for i in range(0, len(s), width)])
+
+
+class TextWrapper(textwrap.TextWrapper):
+    """Extended TextWrapper with more options."""
+
+    def __init__(
+        self,
+        width: int = 70,
+        *,
+        tabsize: int = 8,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(width=width, tabsize=tabsize, **kwargs)
+
+
+def indent_width(text: str) -> int:
+    """Get the minimum indentation width.
+
+    Args:
+        text: Text to measure.
+
+    Returns:
+        Minimum indentation in spaces.
+    """
+    lines = text.split("\n")
+    non_empty = [line for line in lines if line.strip()]
+    if not non_empty:
+        return 0
+
+    min_indent = float("inf")
+    for line in non_empty:
+        match = re.match(r"^(\s*)", line)
+        if match:
+            indent = len(match.group(1))
+            min_indent = min(min_indent, indent)
+
+    return int(min_indent) if min_indent != float("inf") else 0
+
+
+def prefix_width(text: str) -> int:
+    """Get the common prefix width.
+
+    Args:
+        text: Text to analyze.
+
+    Returns:
+        Prefix width in characters.
+    """
+    lines = text.split("\n")
+    if not lines:
+        return 0
+
+    common = []
+    for chars in zip(*lines):
+        if len(set(chars)) == 1:
+            common.append(chars[0])
+        else:
+            break
+
+    return len("".join(common))
+
+
+class ColumnFormatter:
+    """Format text into columns."""
+
+    def __init__(
+        self,
+        columns: int = 2,
+        spacing: int = 2,
+        align: str = "left",
+    ) -> None:
+        self._columns = columns
+        self._spacing = spacing
+        self._align = align
+
+    def format(self, items: list[str], width: int = 80) -> str:
+        """Format items into columns.
 
         Args:
-            context: Execution context.
-            params: Dict with text, width, break_long_words, break_on_hyphens, drop_whitespace, output_var.
+            items: Items to format.
+            width: Total width.
 
         Returns:
-            ActionResult with wrapped text (as list of lines).
+            Formatted text.
         """
-        text = params.get('text', '')
-        width = params.get('width', 70)
-        break_long_words = params.get('break_long_words', True)
-        break_on_hyphens = params.get('break_on_hyphens', True)
-        drop_whitespace = params.get('drop_whitespace', True)
-        output_var = params.get('output_var', 'textwrap_result')
-
-        if not text:
-            return ActionResult(success=False, message="text is required")
-
-        try:
-            resolved_text = context.resolve_value(text)
-            resolved_width = context.resolve_value(width)
-            resolved_break_long = context.resolve_value(break_long_words)
-            resolved_break_hyphen = context.resolve_value(break_on_hyphens)
-            resolved_drop_ws = context.resolve_value(drop_whitespace)
-
-            wrapper = textwrap.TextWrapper(
-                width=resolved_width,
-                break_long_words=resolved_break_long,
-                break_on_hyphens=resolved_break_hyphen,
-                drop_whitespace=resolved_drop_ws
-            )
-
-            wrapped = wrapper.wrap(resolved_text)
-
-            context.set(output_var, wrapped)
-            context.set(f'{output_var}_string', '\n'.join(wrapped))
-            return ActionResult(success=True, data=wrapped,
-                               message=f"Wrapped text to {len(wrapped)} lines")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Textwrap wrap error: {str(e)}")
-
-
-class TextwrapFillAction(BaseAction):
-    """Wrap text and fill (single string output)."""
-    action_type = "textwrap_fill"
-    display_name = "文本填充"
-    description = "将文本换行并合并为单字符串"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute textwrap fill operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with text, width, initial_indent, subsequent_indent, output_var.
-
-        Returns:
-            ActionResult with filled text string.
-        """
-        text = params.get('text', '')
-        width = params.get('width', 70)
-        initial_indent = params.get('initial_indent', '')
-        subsequent_indent = params.get('subsequent_indent', '')
-        output_var = params.get('output_var', 'textwrap_filled')
-
-        if not text:
-            return ActionResult(success=False, message="text is required")
-
-        try:
-            resolved_text = context.resolve_value(text)
-            resolved_width = context.resolve_value(width)
-            resolved_init = context.resolve_value(initial_indent)
-            resolved_sub = context.resolve_value(subsequent_indent)
-
-            wrapper = textwrap.TextWrapper(
-                width=resolved_width,
-                initial_indent=resolved_init,
-                subsequent_indent=resolved_sub
-            )
-
-            filled = wrapper.fill(resolved_text)
-
-            context.set(output_var, filled)
-            return ActionResult(success=True, data=filled,
-                               message=f"Filled text: {len(filled)} chars")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Textwrap fill error: {str(e)}")
-
-
-class TextwrapIndentAction(BaseAction):
-    """Add prefix to each line."""
-    action_type = "textwrap_indent"
-    display_name = "文本缩进"
-    description = "为每行添加前缀/缩进"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute textwrap indent operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with text, prefix, predicate, output_var.
-
-        Returns:
-            ActionResult with indented text.
-        """
-        text = params.get('text', '')
-        prefix = params.get('prefix', '    ')
-        predicate = params.get('predicate', None)
-        output_var = params.get('output_var', 'textwrap_indented')
-
-        if not text:
-            return ActionResult(success=False, message="text is required")
-        if not prefix:
-            return ActionResult(success=False, message="prefix is required")
-
-        try:
-            resolved_text = context.resolve_value(text)
-            resolved_prefix = context.resolve_value(prefix)
-
-            if predicate is not None:
-                resolved_predicate = context.resolve_value(predicate)
-                indented = textwrap.indent(resolved_text, resolved_prefix, predicate=resolved_predicate)
+        col_width = (width - (self._columns - 1) * self._spacing) // self._columns
+        rows = []
+        for i in range(0, len(items), self._columns):
+            row_items = items[i:i + self._columns]
+            if self._align == "right":
+                row = " " * self._spacing.join(
+                    item.rjust(col_width) for item in row_items
+                )
+            elif self._align == "center":
+                row = " " * self._spacing.join(
+                    item.center(col_width) for item in row_items
+                )
             else:
-                indented = textwrap.indent(resolved_text, resolved_prefix)
+                row = " " * self._spacing.join(
+                    item.ljust(col_width) for item in row_items
+                )
+            rows.append(row)
 
-            context.set(output_var, indented)
-            return ActionResult(success=True, data=indented,
-                               message=f"Indented text: {len(indented)} chars")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Textwrap indent error: {str(e)}")
+        return "\n".join(rows)
 
 
-class TextwrapDedentAction(BaseAction):
-    """Remove common leading whitespace."""
-    action_type = "textwrap_dedent"
-    display_name = "文本去缩进"
-    description = "移除共同的前导空白"
+class TableFormatter:
+    """Format text into a table."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute textwrap dedent operation.
+    def __init__(
+        self,
+        headers: list[str],
+        alignments: list[str] | None = None,
+    ) -> None:
+        self._headers = headers
+        self._alignments = alignments or ["left"] * len(headers)
+        self._rows: list[list[str]] = []
 
-        Args:
-            context: Execution context.
-            params: Dict with text, output_var.
-
-        Returns:
-            ActionResult with dedented text.
-        """
-        text = params.get('text', '')
-        output_var = params.get('output_var', 'textwrap_dedented')
-
-        if not text:
-            return ActionResult(success=False, message="text is required")
-
-        try:
-            resolved_text = context.resolve_value(text)
-
-            dedented = textwrap.dedent(resolved_text)
-
-            context.set(output_var, dedented)
-            return ActionResult(success=True, data=dedented,
-                               message=f"Dedented text: {len(dedented)} chars")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Textwrap dedent error: {str(e)}")
-
-
-class TextwrapShortenAction(BaseAction):
-    """Truncate text with ellipsis."""
-    action_type = "textwrap_shorten"
-    display_name = "文本截断"
-    description = "截断文本并添加省略号"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute textwrap shorten operation.
+    def add_row(self, *values: str) -> None:
+        """Add a row to the table.
 
         Args:
-            context: Execution context.
-            params: Dict with text, width, placeholder, output_var.
+            *values: Column values.
+        """
+        self._rows.append(list(values))
+
+    def format(self) -> str:
+        """Format the table.
 
         Returns:
-            ActionResult with shortened text.
+            Formatted table string.
         """
-        text = params.get('text', '')
-        width = params.get('width', 80)
-        placeholder = params.get('placeholder', ' [...]')
-        output_var = params.get('output_var', 'textwrap_shortened')
+        if not self._rows:
+            return ""
 
-        if not text:
-            return ActionResult(success=False, message="text is required")
+        col_widths = [len(h) for h in self._headers]
+        for row in self._rows:
+            for i, cell in enumerate(row):
+                col_widths[i] = max(col_widths[i], len(str(cell)))
 
-        try:
-            resolved_text = context.resolve_value(text)
-            resolved_width = context.resolve_value(width)
-            resolved_placeholder = context.resolve_value(placeholder)
+        lines = []
 
-            shortened = textwrap.shorten(
-                resolved_text,
-                width=resolved_width,
-                placeholder=resolved_placeholder
+        header_line = "|".join(
+            h.center(w) if a == "center"
+            else h.rjust(w) if a == "right"
+            else h.ljust(w)
+            for h, w, a in zip(self._headers, col_widths, self._alignments)
+        )
+        lines.append(header_line)
+
+        sep = "+".join("-" * w for w in col_widths)
+        lines.append(sep)
+
+        for row in self._rows:
+            row_line = "|".join(
+                str(cell).center(w) if a == "center"
+                else str(cell).rjust(w) if a == "right"
+                else str(cell).ljust(w)
+                for cell, w, a in zip(row, col_widths, self._alignments)
             )
+            lines.append(row_line)
 
-            context.set(output_var, shortened)
-            return ActionResult(success=True, data=shortened,
-                               message=f"Shortened text: {len(shortened)} chars")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Textwrap shorten error: {str(e)}")
-
-
-class TextwrapWrapManyAction(BaseAction):
-    """Wrap multiple strings."""
-    action_type = "textwrap_wrap_many"
-    display_name = "批量文本换行"
-    description = "批量将多个字符串换行"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute textwrap wrap many operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with texts, width, break_long_words, output_var.
-
-        Returns:
-            ActionResult with list of wrapped texts.
-        """
-        texts = params.get('texts', [])
-        width = params.get('width', 70)
-        break_long_words = params.get('break_long_words', True)
-        output_var = params.get('output_var', 'textwrap_many_result')
-
-        if not texts:
-            return ActionResult(success=False, message="texts is required")
-
-        try:
-            resolved_texts = context.resolve_value(texts)
-            resolved_width = context.resolve_value(width)
-            resolved_break = context.resolve_value(break_long_words)
-
-            wrapper = textwrap.TextWrapper(
-                width=resolved_width,
-                break_long_words=resolved_break
-            )
-
-            results = []
-            for text in resolved_texts:
-                if isinstance(text, str):
-                    wrapped = wrapper.wrap(text)
-                    results.append('\n'.join(wrapped))
-                else:
-                    results.append(text)
-
-            context.set(output_var, results)
-            return ActionResult(success=True, data=results,
-                               message=f"Wrapped {len(results)} texts")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Textwrap wrap many error: {str(e)}")
+        return "\n".join(lines)
