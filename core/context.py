@@ -173,7 +173,15 @@ class ContextManager:
             result = eval(expr, {"__builtins__": {}}, allowed_names)
             return result
         except Exception:
-            return expr
+            # Fallback: try to parse as int/float if eval failed
+            try:
+                # Handle expressions like "123" that eval failed on
+                return int(expr)
+            except ValueError:
+                try:
+                    return float(expr)
+                except ValueError:
+                    return expr
     
     def safe_exec(
         self, 
