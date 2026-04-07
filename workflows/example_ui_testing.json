@@ -1,0 +1,122 @@
+{
+  "name": "UI Testing Workflow",
+  "description": "Automated UI testing for desktop applications",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "app_name": "Calculator",
+    "test_results": [],
+    "passed_tests": 0,
+    "failed_tests": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "screenshot",
+      "save_path": "./screenshots/ui_test_start.png",
+      "pre_delay": 1.0,
+      "comment": "Capture test start state"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 500,
+      "y": 500,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click calculator button 5"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 550,
+      "y": 500,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click calculator button +"
+    },
+    {
+      "id": 4,
+      "type": "click",
+      "x": 600,
+      "y": 500,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click calculator button 3"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 650,
+      "y": 550,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click calculator button ="
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for result"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/ui_test_result.png",
+      "pre_delay": 0.5,
+      "comment": "Capture result screenshot"
+    },
+    {
+      "id": 8,
+      "type": "ocr",
+      "region": [400, 350, 500, 420],
+      "output_var": "result_text",
+      "pre_delay": 0.3,
+      "comment": "Read calculator result"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{result_text.includes('8')}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Test 1: Verify 5+3=8"
+    },
+    {
+      "id": 10,
+      "type": "set_variable",
+      "name": "passed_tests",
+      "value": "{{passed_tests + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.1,
+      "comment": "Test passed"
+    },
+    {
+      "id": 11,
+      "type": "set_variable",
+      "name": "failed_tests",
+      "value": "{{failed_tests + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.1,
+      "comment": "Test failed"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay after tests"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": false,
+    "continue_on_error": true
+  }
+}

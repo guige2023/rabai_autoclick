@@ -1,0 +1,204 @@
+{
+  "name": "Customer Support Ticket Workflow",
+  "description": "Automate customer support ticket processing",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "ticket_status": "open",
+    "priority_filter": "high",
+    "tickets_processed": 0,
+    "max_tickets": 20
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize ticket counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open support dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard to load"
+    },
+    {
+      "id": 4,
+      "type": "click_image",
+      "template": "./templates/filter_high_priority.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Filter by high priority"
+    },
+    {
+      "id": 5,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for filter to apply"
+    },
+    {
+      "id": 6,
+      "type": "loop",
+      "loop_id": "ticket_loop",
+      "count": "{{max_tickets}}",
+      "loop_start": 7,
+      "pre_delay": 0.3,
+      "comment": "Start ticket processing loop"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.5,
+      "comment": "Click on ticket"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for ticket details"
+    },
+    {
+      "id": 9,
+      "type": "screenshot",
+      "save_path": "./screenshots/ticket_{{counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture ticket screenshot"
+    },
+    {
+      "id": 10,
+      "type": "ocr",
+      "region": [50, 100, 500, 400],
+      "output_var": "ticket_content",
+      "pre_delay": 0.3,
+      "comment": "Read ticket content"
+    },
+    {
+      "id": 11,
+      "type": "condition",
+      "condition": "{{ticket_content.includes('refund')}}",
+      "true_next": 12,
+      "false_next": 14,
+      "pre_delay": 0.1,
+      "comment": "Check if refund request"
+    },
+    {
+      "id": 12,
+      "type": "click_image",
+      "template": "./templates/refund_template.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Apply refund template"
+    },
+    {
+      "id": 13,
+      "type": "goto",
+      "step_id": 18,
+      "pre_delay": 0.1,
+      "comment": "Skip to close"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{ticket_content.includes('technical')}}",
+      "true_next": 15,
+      "false_next": 17,
+      "pre_delay": 0.1,
+      "comment": "Check if technical issue"
+    },
+    {
+      "id": 15,
+      "type": "click_image",
+      "template": "./templates/escalate_template.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Escalate to technical team"
+    },
+    {
+      "id": 16,
+      "type": "goto",
+      "step_id": 18,
+      "pre_delay": 0.1,
+      "comment": "Skip to close"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Generic response"
+    },
+    {
+      "id": 18,
+      "type": "set_variable",
+      "name": "counter",
+      "value": "{{counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment processed counter"
+    },
+    {
+      "id": 19,
+      "type": "click_image",
+      "template": "./templates/close_ticket.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Close ticket"
+    },
+    {
+      "id": 20,
+      "type": "condition",
+      "condition": "{{counter < max_tickets}}",
+      "true_next": 21,
+      "false_next": 22,
+      "pre_delay": 0.1,
+      "comment": "Check if more tickets"
+    },
+    {
+      "id": 21,
+      "type": "goto",
+      "step_id": 6,
+      "pre_delay": 0.2,
+      "comment": "Continue to next ticket"
+    },
+    {
+      "id": 22,
+      "type": "screenshot",
+      "save_path": "./screenshots/support_summary.png",
+      "pre_delay": 0.5,
+      "comment": "Capture summary screenshot"
+    },
+    {
+      "id": 23,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}

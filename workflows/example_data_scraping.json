@@ -1,0 +1,168 @@
+{
+  "name": "Data Scraping Workflow",
+  "description": "Extract data from web pages using OCR",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "url": "https://example.com/data",
+    "items_per_page": 10,
+    "max_pages": 5,
+    "current_page": 1,
+    "extracted_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "page_counter",
+      "value": 1,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize page counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 3,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.1,
+      "comment": "Select all"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "key": "delete",
+      "pre_delay": 0.1,
+      "comment": "Clear address bar"
+    },
+    {
+      "id": 5,
+      "type": "type_text",
+      "text": "{{url}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to target page"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for page to load"
+    },
+    {
+      "id": 7,
+      "type": "loop",
+      "loop_id": "items_loop",
+      "count": "{{items_per_page}}",
+      "loop_start": 8,
+      "pre_delay": 0.3,
+      "comment": "Loop through items on page"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 200,
+      "y": 250,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click on item"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for item details"
+    },
+    {
+      "id": 10,
+      "type": "screenshot",
+      "save_path": "./screenshots/item_{{current_page}}_{{extracted_count}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture item details"
+    },
+    {
+      "id": 11,
+      "type": "ocr",
+      "region": [100, 100, 600, 400],
+      "output_var": "item_data",
+      "pre_delay": 0.3,
+      "comment": "Extract item data"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "extracted_count",
+      "value": "{{extracted_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment extracted count"
+    },
+    {
+      "id": 13,
+      "type": "key_press",
+      "key": "escape",
+      "pre_delay": 0.3,
+      "comment": "Close item details"
+    },
+    {
+      "id": 14,
+      "type": "click",
+      "x": 700,
+      "y": 600,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click next item"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "page_counter",
+      "value": "{{page_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment page counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{page_counter <= max_pages}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more pages"
+    },
+    {
+      "id": 17,
+      "type": "click_image",
+      "template": "./templates/next_page.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click next page button"
+    },
+    {
+      "id": 18,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay after scraping"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
