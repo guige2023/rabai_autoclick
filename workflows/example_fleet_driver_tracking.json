@@ -1,0 +1,117 @@
+{
+  "name": "Fleet Driver Tracking Workflow",
+  "description": "Automate fleet driver performance tracking",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "drivers_to_track": 48,
+    "current_driver": 0,
+    "tracked_drivers": 0,
+    "performance_alerts": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "driver_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize driver counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open driver tracking system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "driver_tracking_loop",
+      "count": "{{drivers_to_track}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start driver tracking loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select driver for tracking"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for tracking"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/driver_tracking_{{driver_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture driver screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "driver_counter",
+      "value": "{{driver_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment driver counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{driver_counter < drivers_to_track}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more drivers"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next driver"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/fleet_driver_tracking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

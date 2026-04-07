@@ -1,0 +1,117 @@
+{
+  "name": "Fleet Vehicle Inspection Workflow",
+  "description": "Automate fleet vehicle inspection tracking",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "vehicles_to_inspect": 45,
+    "current_vehicle": 0,
+    "inspected_vehicles": 0,
+    "issues_found": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "inspection_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize inspection counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open fleet inspection system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "vehicle_inspection_loop",
+      "count": "{{vehicles_to_inspect}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start vehicle inspection loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select vehicle for inspection"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for inspection"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/vehicle_inspection_{{inspection_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture inspection screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "inspection_counter",
+      "value": "{{inspection_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment inspection counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{inspection_counter < vehicles_to_inspect}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more vehicles"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next vehicle"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/fleet_vehicle_inspection_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
