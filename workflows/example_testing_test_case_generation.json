@@ -1,0 +1,117 @@
+{
+  "name": "Testing Test Case Generation Workflow",
+  "description": "Automate test case generation",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "test_cases_to_generate": 52,
+    "current_test_case": 0,
+    "generated_test_cases": 0,
+    "failed_generations": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "test_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize test counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open test generation tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "test_case_generation_loop",
+      "count": "{{test_cases_to_generate}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start test case generation loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select test case for generation"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for generation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/test_case_generation_{{test_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture test screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "test_counter",
+      "value": "{{test_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment test counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{test_counter < test_cases_to_generate}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more test cases"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next test case"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/testing_test_case_generation_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
