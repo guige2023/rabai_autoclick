@@ -1,0 +1,117 @@
+{
+  "name": "Security Log Aggregation Review Workflow",
+  "description": "Automate security log aggregation and analysis",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "log_sources_to_review": 56,
+    "current_source": 0,
+    "active_sources": 0,
+    "inactive_sources": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "source_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize source counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open log management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "log_review_loop",
+      "count": "{{log_sources_to_review}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start log review loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select log source"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for log analysis"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/log_review_{{source_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture log review screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "source_counter",
+      "value": "{{source_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment source counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{source_counter < log_sources_to_review}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more sources"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next source"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_log_aggregation_review_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
