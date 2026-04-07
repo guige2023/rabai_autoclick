@@ -1607,9 +1607,10 @@ class MainWindow(QMainWindow):
         form.addRow("循环间隔(秒):", interval_spin)
         
         layout.addLayout(form)
-        
+
+        colors = theme_manager.colors
         info_label = QLabel("提示: 循环次数>1时，工作流将重复执行")
-        info_label.setStyleSheet("color: #666; font-size: 11px;")
+        info_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 11px;")
         layout.addWidget(info_label)
         
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1620,7 +1621,6 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             self._loop_count = loop_spin.value()
             self._loop_interval = interval_spin.value()
-            colors = theme_manager.colors
 
             if self._loop_count > 1:
                 self.loop_btn.setText(f"🔄 x{self._loop_count}")
