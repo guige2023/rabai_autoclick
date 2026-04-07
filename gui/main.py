@@ -163,6 +163,63 @@ class BaseTab(ttk.Frame):
         thread = threading.Thread(target=wrapper, daemon=True)
         thread.start()
 
+    def validate_int(self, value: str, field_name: str) -> tuple[bool, int]:
+        """
+        Validate that a string value can be converted to an integer.
+        
+        Args:
+            value: The string value to validate.
+            field_name: Name of the field for error messages.
+            
+        Returns:
+            Tuple of (is_valid, parsed_value).
+        """
+        if not value:
+            return True, 0
+        try:
+            return True, int(value)
+        except ValueError:
+            self.log(f"❌ {field_name} 必须是整数: {value}")
+            return False, 0
+
+    def validate_float(self, value: str, field_name: str) -> tuple[bool, float]:
+        """
+        Validate that a string value can be converted to a float.
+        
+        Args:
+            value: The string value to validate.
+            field_name: Name of the field for error messages.
+            
+        Returns:
+            Tuple of (is_valid, parsed_value).
+        """
+        if not value:
+            return True, 0.0
+        try:
+            return True, float(value)
+        except ValueError:
+            self.log(f"❌ {field_name} 必须是数字: {value}")
+            return False, 0.0
+
+    def validate_json(self, value: str, field_name: str) -> tuple[bool, Dict[str, Any]]:
+        """
+        Validate that a string value is valid JSON.
+        
+        Args:
+            value: The string value to validate.
+            field_name: Name of the field for error messages.
+            
+        Returns:
+            Tuple of (is_valid, parsed_dict).
+        """
+        if not value or value == "{}":
+            return True, {}
+        try:
+            return True, json.loads(value)
+        except json.JSONDecodeError as e:
+            self.log(f"❌ {field_name} JSON格式错误: {str(e)}")
+            return False, {}
+
 
 class PredictTab(BaseTab):
     """
