@@ -124,3 +124,54 @@ def destination_point(
         latitude=math.degrees(lat2),
         longitude=math.degrees(lon2) % 360
     )
+
+
+def is_within_radius(
+    center: Coordinate,
+    point: Coordinate,
+    radius_km: float
+) -> bool:
+    """Check if a point is within a radius of a center point."""
+    return center.distance_to(point, "km") <= radius_km
+
+
+def midpoint(
+    coord1: Coordinate,
+    coord2: Coordinate
+) -> Coordinate:
+    """Calculate the midpoint between two coordinates."""
+    lat1 = math.radians(coord1.latitude)
+    lat2 = math.radians(coord2.latitude)
+    lon1 = math.radians(coord1.longitude)
+    dlon = math.radians(coord2.longitude - coord1.longitude)
+
+    bx = math.cos(lat2) * math.cos(dlon)
+    by = math.cos(lat2) * math.sin(dlon)
+
+    lat3 = math.atan2(
+        math.sin(lat1) + math.sin(lat2),
+        math.sqrt((math.cos(lat1) + bx) ** 2 + by ** 2)
+    )
+    lon3 = lon1 + math.atan2(by, math.cos(lat1) + bx)
+
+    return Coordinate(
+        latitude=math.degrees(lat3),
+        longitude=math.degrees(lon3)
+    )
+
+
+def bounding_box(
+    coord: Coordinate,
+    radius_km: float,
+    points: int = 8
+) -> List[Coordinate]:
+    """
+    Generate bounding box coordinates around a center point.
+
+    Args:
+        coord: Center coordinate
+        radius_km: Radius in kilometers
+        points: Number of points to generate
+    """
+    bearings = [360 / points * i for i in range(points)]
+    return [destination_point(coord, b, radius_km, "km") for b in bearings]
