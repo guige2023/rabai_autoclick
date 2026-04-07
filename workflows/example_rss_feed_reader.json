@@ -1,0 +1,185 @@
+{
+  "name": "RSS Feed Reader Workflow",
+  "description": "Automatically check and aggregate RSS feeds",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "feeds": [
+      "https://example.com/feed1.xml",
+      "https://example.com/feed2.xml",
+      "https://example.com/feed3.xml"
+    ],
+    "current_feed": 0,
+    "articles_read": 0,
+    "max_articles": 15
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "feed_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize feed index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "feeds_loop",
+      "count": 3,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Loop through feeds"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.1,
+      "comment": "Select all"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "delete",
+      "pre_delay": 0.1,
+      "comment": "Clear address bar"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "{{feeds[feed_index]}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to feed URL"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for feed to load"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/feed_{{feed_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture feed screenshot"
+    },
+    {
+      "id": 9,
+      "type": "loop",
+      "loop_id": "articles_loop",
+      "count": 5,
+      "loop_start": 10,
+      "pre_delay": 0.3,
+      "comment": "Loop through articles"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.5,
+      "comment": "Click on article"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for article to load"
+    },
+    {
+      "id": 12,
+      "type": "screenshot",
+      "save_path": "./screenshots/article_{{feed_index}}_{{articles_read}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture article screenshot"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "articles_read",
+      "value": "{{articles_read + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment article counter"
+    },
+    {
+      "id": 14,
+      "type": "key_press",
+      "key": "backspace",
+      "pre_delay": 0.3,
+      "comment": "Go back to feed list"
+    },
+    {
+      "id": 15,
+      "type": "click",
+      "x": 200,
+      "y": 250,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click next article"
+    },
+    {
+      "id": 16,
+      "type": "set_variable",
+      "name": "feed_index",
+      "value": "{{feed_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment feed index"
+    },
+    {
+      "id": 17,
+      "type": "condition",
+      "condition": "{{feed_index < 3}}",
+      "true_next": 18,
+      "false_next": 19,
+      "pre_delay": 0.1,
+      "comment": "Check if more feeds"
+    },
+    {
+      "id": 18,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next feed"
+    },
+    {
+      "id": 19,
+      "type": "screenshot",
+      "save_path": "./screenshots/feed_summary.png",
+      "pre_delay": 0.5,
+      "comment": "Capture summary screenshot"
+    },
+    {
+      "id": 20,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "name": "Log File Aggregator Workflow",
+  "description": "Aggregate and analyze log files from multiple sources",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "log_sources": ["/var/log/syslog", "/var/log/auth.log", "/var/log/nginx/access.log"],
+    "current_source": 0,
+    "errors_found": 0,
+    "max_errors": 50
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "source_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize source index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "sources_loop",
+      "count": 3,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Loop through log sources"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open terminal"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for terminal"
+    },
+    {
+      "id": 5,
+      "type": "type_text",
+      "text": "tail -100 {{log_sources[source_index]}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "View recent log entries"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for log output"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/log_{{source_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture log screenshot"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "grep -i error {{log_sources[source_index]}} | tail -20",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Search for errors"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for grep output"
+    },
+    {
+      "id": 10,
+      "type": "screenshot",
+      "save_path": "./screenshots/errors_{{source_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture error screenshot"
+    },
+    {
+      "id": 11,
+      "type": "set_variable",
+      "name": "source_index",
+      "value": "{{source_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment source index"
+    },
+    {
+      "id": 12,
+      "type": "condition",
+      "condition": "{{source_index < 3}}",
+      "true_next": 13,
+      "false_next": 14,
+      "pre_delay": 0.1,
+      "comment": "Check if more sources"
+    },
+    {
+      "id": 13,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next source"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/log_analysis_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture final summary"
+    },
+    {
+      "id": 15,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
