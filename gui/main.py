@@ -1260,7 +1260,18 @@ class PipeTab(BaseTab):
 
 
 class RecTab(BaseTab):
-    def setup_ui(self):
+    """
+    Screen recording tab for capturing and converting user actions to workflows.
+    
+    Features:
+        - Record screen actions
+        - Manually add action records
+        - List and analyze recordings
+        - Convert recordings to workflows
+    """
+    
+    def setup_ui(self) -> None:
+        """Set up the tab's UI components."""
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -1276,7 +1287,13 @@ class RecTab(BaseTab):
         notebook.add(convert_frame, text="转换工作流")
         self._setup_convert_tab(convert_frame)
 
-    def _setup_record_tab(self, parent):
+    def _setup_record_tab(self, parent: Any) -> None:
+        """
+        Set up the recording subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="屏幕录制", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -1323,7 +1340,13 @@ class RecTab(BaseTab):
 
         ttk.Button(add_frame, text="➕ 添加动作", command=self._add_action).grid(row=3, column=0, columnspan=5, pady=5)
 
-    def _setup_list_tab(self, parent):
+    def _setup_list_tab(self, parent: Any) -> None:
+        """
+        Set up the recording list subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="录制列表", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -1348,7 +1371,13 @@ class RecTab(BaseTab):
         self.rec_analysis_result = scrolledtext.ScrolledText(frame, height=8, state='disabled')
         self.rec_analysis_result.pack(fill=tk.BOTH, expand=True, pady=5)
 
-    def _setup_convert_tab(self, parent):
+    def _setup_convert_tab(self, parent: Any) -> None:
+        """
+        Set up the workflow conversion subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="转换为工作流", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -1369,7 +1398,10 @@ class RecTab(BaseTab):
         self.convert_result = scrolledtext.ScrolledText(frame, height=10, state='disabled')
         self.convert_result.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _start_recording(self):
+    def _start_recording(self) -> None:
+        """
+        Start a new screen recording session.
+        """
         def do_start():
             converter = create_screen_recorder(str(DATA_DIR))
             return converter.start_recording(self.rec_name_var.get(), self.rec_desc_var.get())
@@ -1380,7 +1412,10 @@ class RecTab(BaseTab):
 
         self.run_async(do_start, show_result)
 
-    def _stop_recording(self):
+    def _stop_recording(self) -> None:
+        """
+        Stop the current recording session.
+        """
         rec_id = self.add_action_rec_id_var.get()
         if not rec_id:
             messagebox.showwarning("提示", "请输入录制 ID")
@@ -1399,7 +1434,10 @@ class RecTab(BaseTab):
 
         self.run_async(do_stop, show_result)
 
-    def _add_action(self):
+    def _add_action(self) -> None:
+        """
+        Manually add an action to the current recording.
+        """
         rec_id = self.add_action_rec_id_var.get()
         if not rec_id:
             messagebox.showwarning("提示", "请输入录制 ID")
@@ -1429,7 +1467,10 @@ class RecTab(BaseTab):
 
         self.run_async(do_add, show_result)
 
-    def _list_recordings(self):
+    def _list_recordings(self) -> None:
+        """
+        List all recordings in the tree view.
+        """
         def do_list():
             converter = create_screen_recorder(str(DATA_DIR))
             return converter.list_recordings()
@@ -1444,7 +1485,10 @@ class RecTab(BaseTab):
 
         self.run_async(do_list, show_result)
 
-    def _analyze_recording(self):
+    def _analyze_recording(self) -> None:
+        """
+        Analyze the selected recording and display statistics.
+        """
         selected = self.rec_tree.selection()
         if not selected:
             messagebox.showwarning("提示", "请先选择一个录制")
@@ -1475,7 +1519,10 @@ class RecTab(BaseTab):
 
         self.run_async(do_analyze, show_result)
 
-    def _convert_workflow(self):
+    def _convert_workflow(self) -> None:
+        """
+        Convert a recording to a workflow with the specified detection mode.
+        """
         rec_id = self.convert_rec_id_var.get()
         if not rec_id:
             messagebox.showwarning("提示", "请输入录制 ID")
