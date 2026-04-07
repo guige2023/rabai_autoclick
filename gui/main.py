@@ -312,7 +312,16 @@ class PredictTab(BaseTab):
 
 
 class HealTab(BaseTab):
-    def setup_ui(self):
+    """
+    Self-healing system tab for error analysis and fix suggestions.
+    
+    Features:
+        - Analyze errors and provide fix suggestions
+        - View error statistics and recovery rates
+    """
+    
+    def setup_ui(self) -> None:
+        """Set up the tab's UI components."""
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -358,7 +367,10 @@ class HealTab(BaseTab):
         self.stats_result = scrolledtext.ScrolledText(frame, height=15, state='disabled')
         self.stats_result.pack(fill=tk.BOTH, expand=True, pady=10)
 
-    def _analyze_error(self):
+    def _analyze_error(self) -> None:
+        """
+        Analyze error and get fix suggestions.
+        """
         def do_analyze():
             system = create_self_healing_system(str(DATA_DIR))
             
@@ -394,7 +406,10 @@ class HealTab(BaseTab):
 
         self.run_async(do_analyze, show_result)
 
-    def _get_stats(self):
+    def _get_stats(self) -> None:
+        """
+        Retrieve and display error statistics.
+        """
         def do_stats():
             system = create_self_healing_system(str(DATA_DIR))
             return system.get_error_statistics()
