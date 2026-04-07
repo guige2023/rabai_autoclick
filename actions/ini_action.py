@@ -1,134 +1,34 @@
-"""INI action module for RabAI AutoClick.
+"""INI file action module for RabAI AutoClick.
 
-Provides INI/CFG file operations:
-- INIParseAction: Parse INI file/string
-- INIDumpAction: Convert dict to INI string
-- INIReadAction: Read INI file
-- INIWriteAction: Write dict to INI file
-- INIGetAction: Get value from section/key
-- INISetAction: Set value in section/key
-- INIGetSectionAction: Get entire section
+Provides INI file operations:
+- IniReadAction: Read INI file
+- IniWriteAction: Write INI file
+- IniGetAction: Get INI value
+- IniSetAction: Set INI value
+- IniSectionsAction: List INI sections
 """
 
-from typing import Any, Dict, List, Optional, Union
-import configparser
-import os
-import sys
+from __future__ import annotations
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import sys
+import os
+from typing import Any, Dict, List, Optional
+
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class INIParseAction(BaseAction):
-    """Parse INI string into ConfigParser."""
-    action_type = "ini_parse"
-    display_name = "INI解析"
-    description = "解析INI格式字符串"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute INI parse operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with ini_content, output_var.
-
-        Returns:
-            ActionResult with parsed INI data.
-        """
-        ini_content = params.get('ini_content', '')
-        output_var = params.get('output_var', 'ini_data')
-
-        if not ini_content:
-            return ActionResult(success=False, message="ini_content is required")
-
-        try:
-            resolved_content = context.resolve_value(ini_content)
-
-            parser = configparser.ConfigParser()
-            parser.read_string(resolved_content)
-
-            data = {section: dict(parser.items(section)) for section in parser.sections()}
-
-            context.set(output_var, data)
-            context.set(f'{output_var}_parser', parser)
-            return ActionResult(success=True, data=data,
-                               message=f"Parsed INI with {len(data)} sections")
-
-        except configparser.Error as e:
-            return ActionResult(success=False, message=f"INI parse error: {str(e)}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"INI error: {str(e)}")
-
-
-class INIDumpAction(BaseAction):
-    """Convert dict to INI string."""
-    action_type = "ini_dump"
-    display_name = "INI输出"
-    description = "将字典转换为INI格式字符串"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute INI dump operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, default_section, output_var.
-
-        Returns:
-            ActionResult with INI string.
-        """
-        data = params.get('data', {})
-        default_section = params.get('default_section', 'DEFAULT')
-        output_var = params.get('output_var', 'ini_string')
-
-        try:
-            resolved_data = context.resolve_value(data)
-            resolved_default = context.resolve_value(default_section)
-
-            parser = configparser.ConfigParser()
-
-            if isinstance(resolved_data, dict):
-                for section, values in resolved_data.items():
-                    if isinstance(values, dict):
-                        parser.add_section(section)
-                        for key, val in values.items():
-                            parser.set(section, key, str(val))
-                    elif section != resolved_default:
-                        parser.add_section(section)
-                        parser.set(section, 'value', str(values))
-            else:
-                parser.add_section(resolved_default)
-                parser.set(resolved_default, 'data', str(resolved_data))
-
-            from io import StringIO
-            output = StringIO()
-            parser.write(output)
-            ini_str = output.getvalue()
-
-            context.set(output_var, ini_str)
-            return ActionResult(success=True, data=ini_str,
-                               message=f"Dumped INI: {len(ini_str)} chars")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"INI dump error: {str(e)}")
-
-
-class INIReadAction(BaseAction):
+class IniReadAction(BaseAction):
     """Read INI file."""
     action_type = "ini_read"
     display_name = "INI读取"
-    description = "读取INI配置文件"
+    description = "读取INI文件"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute INI read operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with file_path, output_var.
-
-        Returns:
-            ActionResult with INI file data.
-        """
+        """Execute INI read."""
         file_path = params.get('file_path', '')
         output_var = params.get('output_var', 'ini_data')
 
@@ -136,94 +36,86 @@ class INIReadAction(BaseAction):
             return ActionResult(success=False, message="file_path is required")
 
         try:
-            resolved_path = context.resolve_value(file_path)
+            import configparser
 
+            resolved_path = context.resolve_value(file_path) if context else file_path
             parser = configparser.ConfigParser()
-            parser.read(resolved_path, encoding='utf-8')
+            parser.read(resolved_path)
 
-            data = {section: dict(parser.items(section)) for section in parser.sections()}
+            data = {s: dict(parser[s]) for s in parser.sections()}
+            result = {'sections': list(parser.sections()), 'data': data}
 
-            context.set(output_var, data)
-            context.set(f'{output_var}_parser', parser)
-            return ActionResult(success=True, data=data,
-                               message=f"Read INI: {len(data)} sections from {resolved_path}")
-
-        except FileNotFoundError:
-            return ActionResult(success=False, message=f"File not found: {resolved_path}")
+            if context:
+                context.set(output_var, data)
+            return ActionResult(success=True, message=f"Read INI with {len(parser.sections())} sections", data=result)
         except Exception as e:
             return ActionResult(success=False, message=f"INI read error: {str(e)}")
 
+    def get_required_params(self) -> List[str]:
+        return ['file_path']
 
-class INIWriteAction(BaseAction):
-    """Write dict to INI file."""
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'ini_data'}
+
+
+class IniWriteAction(BaseAction):
+    """Write INI file."""
     action_type = "ini_write"
     display_name = "INI写入"
-    description = "将字典写入INI文件"
+    description = "写入INI文件"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute INI write operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with file_path, data, output_var.
-
-        Returns:
-            ActionResult with write status.
-        """
+        """Execute INI write."""
         file_path = params.get('file_path', '')
-        data = params.get('data', {})
+        data = params.get('data', {})  # {section: {key: value}}
         output_var = params.get('output_var', 'ini_write_result')
 
         if not file_path:
             return ActionResult(success=False, message="file_path is required")
 
         try:
-            resolved_path = context.resolve_value(file_path)
-            resolved_data = context.resolve_value(data)
+            import configparser
 
+            resolved_path = context.resolve_value(file_path) if context else file_path
+            resolved_data = context.resolve_value(data) if context else data
+
+            _os.makedirs(_os.path.dirname(resolved_path) or '.', exist_ok=True)
             parser = configparser.ConfigParser()
 
-            if isinstance(resolved_data, dict):
-                for section, values in resolved_data.items():
-                    if isinstance(values, dict):
-                        parser.add_section(section)
-                        for key, val in values.items():
-                            parser.set(section, key, str(val))
-                    else:
-                        parser.add_section(section)
-                        parser.set(section, 'value', str(values))
+            for section, values in resolved_data.items():
+                parser.add_section(section)
+                if isinstance(values, dict):
+                    for k, v in values.items():
+                        parser.set(section, k, str(v))
 
-            os.makedirs(os.path.dirname(resolved_path) or '.', exist_ok=True)
-
-            with open(resolved_path, 'w', encoding='utf-8') as f:
+            with open(resolved_path, 'w') as f:
                 parser.write(f)
 
-            context.set(output_var, True)
-            return ActionResult(success=True, data=True,
-                               message=f"Wrote INI to {resolved_path}")
-
+            result = {'written': True, 'sections': len(resolved_data), 'path': resolved_path}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Written INI to {resolved_path}", data=result)
         except Exception as e:
             return ActionResult(success=False, message=f"INI write error: {str(e)}")
 
+    def get_required_params(self) -> List[str]:
+        return ['file_path', 'data']
 
-class INIGetAction(BaseAction):
-    """Get value from INI section and key."""
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'ini_write_result'}
+
+
+class IniGetAction(BaseAction):
+    """Get INI value."""
     action_type = "ini_get"
-    display_name = "INI取值"
-    description = "从INI获取section/key的值"
+    display_name = "INI获取"
+    description = "获取INI值"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute INI get operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, section, key, default, output_var.
-
-        Returns:
-            ActionResult with value.
-        """
-        data = params.get('data', None)
-        parser = params.get('parser', None)
+        """Execute INI get."""
+        ini_var = params.get('ini_var', 'ini_data')
         section = params.get('section', '')
         key = params.get('key', '')
         default = params.get('default', None)
@@ -233,132 +125,111 @@ class INIGetAction(BaseAction):
             return ActionResult(success=False, message="section and key are required")
 
         try:
-            resolved_section = context.resolve_value(section)
-            resolved_key = context.resolve_value(key)
+            resolved_section = context.resolve_value(section) if context else section
+            resolved_key = context.resolve_value(key) if context else key
 
-            if parser is not None:
-                resolved_parser = context.resolve_value(parser)
-                if isinstance(resolved_parser, configparser.ConfigParser):
-                    value = resolved_parser.get(resolved_section, resolved_key, fallback=default)
-                    context.set(output_var, value)
-                    return ActionResult(success=True, data=value,
-                                       message=f"Got {resolved_section}.{resolved_key} = {value}")
+            ini_data = context.resolve_value(ini_var) if context else None
+            if ini_data is None:
+                ini_data = context.resolve_value(ini_var)
 
-            if data is not None:
-                resolved_data = context.resolve_value(data)
-                if isinstance(resolved_data, dict) and resolved_section in resolved_data:
-                    section_data = resolved_data[resolved_section]
-                    if isinstance(section_data, dict):
-                        value = section_data.get(resolved_key, default)
-                    else:
-                        value = default
-                else:
-                    value = default
+            if isinstance(ini_data, dict) and resolved_section in ini_data:
+                value = ini_data[resolved_section].get(resolved_key, default)
+            else:
+                value = default
 
+            result = {'section': resolved_section, 'key': resolved_key, 'value': value}
+            if context:
                 context.set(output_var, value)
-                return ActionResult(success=True, data=value,
-                                   message=f"Got {resolved_section}.{resolved_key} = {value}")
-
-            return ActionResult(success=False, message="data or parser required")
-
+            return ActionResult(success=True, message=f"{resolved_section}.{resolved_key} = {value}", data=result)
         except Exception as e:
             return ActionResult(success=False, message=f"INI get error: {str(e)}")
 
+    def get_required_params(self) -> List[str]:
+        return ['section', 'key']
 
-class INISetAction(BaseAction):
-    """Set value in INI section and key."""
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'ini_var': 'ini_data', 'default': None, 'output_var': 'ini_value'}
+
+
+class IniSetAction(BaseAction):
+    """Set INI value."""
     action_type = "ini_set"
-    display_name = "INI设值"
-    description = "设置INI section/key的值"
+    display_name = "INI设置"
+    description = "设置INI值"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute INI set operation.
-
-        Args:
-            context: Execution context.
-            params: Dict with parser, section, key, value, output_var.
-
-        Returns:
-            ActionResult with update status.
-        """
-        parser = params.get('parser', None)
+        """Execute INI set."""
+        ini_var = params.get('ini_var', 'ini_data')
         section = params.get('section', '')
         key = params.get('key', '')
-        value = params.get('value', None)
+        value = params.get('value', '')
         output_var = params.get('output_var', 'ini_set_result')
 
         if not section or not key:
             return ActionResult(success=False, message="section and key are required")
 
         try:
-            resolved_section = context.resolve_value(section)
-            resolved_key = context.resolve_value(key)
+            import copy
 
-            if parser is not None:
-                resolved_parser = context.resolve_value(parser)
-                if isinstance(resolved_parser, configparser.ConfigParser):
-                    if not resolved_parser.has_section(resolved_section):
-                        resolved_parser.add_section(resolved_section)
-                    resolved_parser.set(resolved_section, resolved_key, str(context.resolve_value(value)))
-                    context.set(output_var, True)
-                    return ActionResult(success=True, data=True,
-                                       message=f"Set {resolved_section}.{resolved_key}")
+            resolved_section = context.resolve_value(section) if context else section
+            resolved_key = context.resolve_value(key) if context else key
+            resolved_value = context.resolve_value(value) if context else value
 
-            return ActionResult(success=False, message="parser required for set operation")
+            ini_data = context.resolve_value(ini_var) if context else None
+            if ini_data is None or not isinstance(ini_data, dict):
+                ini_data = {}
 
+            if resolved_section not in ini_data:
+                ini_data[resolved_section] = {}
+            ini_data[resolved_section][resolved_key] = str(resolved_value)
+
+            result = {'section': resolved_section, 'key': resolved_key, 'value': str(resolved_value)}
+            if context:
+                context.set(ini_var, ini_data)
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Set {resolved_section}.{resolved_key} = {resolved_value}", data=result)
         except Exception as e:
             return ActionResult(success=False, message=f"INI set error: {str(e)}")
 
+    def get_required_params(self) -> List[str]:
+        return ['section', 'key', 'value']
 
-class INIGetSectionAction(BaseAction):
-    """Get entire INI section."""
-    action_type = "ini_get_section"
-    display_name = "INI取Section"
-    description = "获取整个INI section的数据"
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'ini_var': 'ini_data', 'output_var': 'ini_set_result'}
+
+
+class IniSectionsAction(BaseAction):
+    """List INI sections."""
+    action_type = "ini_sections"
+    display_name = "INI节列表"
+    description = "列出INI节"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute INI get section operation.
+        """Execute INI sections."""
+        file_path = params.get('file_path', '')
+        output_var = params.get('output_var', 'ini_sections')
 
-        Args:
-            context: Execution context.
-            params: Dict with data or parser, section, output_var.
-
-        Returns:
-            ActionResult with section data.
-        """
-        data = params.get('data', None)
-        parser = params.get('parser', None)
-        section = params.get('section', '')
-        output_var = params.get('output_var', 'ini_section')
-
-        if not section:
-            return ActionResult(success=False, message="section is required")
+        if not file_path:
+            return ActionResult(success=False, message="file_path is required")
 
         try:
-            resolved_section = context.resolve_value(section)
+            import configparser
 
-            if parser is not None:
-                resolved_parser = context.resolve_value(parser)
-                if isinstance(resolved_parser, configparser.ConfigParser):
-                    if resolved_parser.has_section(resolved_section):
-                        section_data = dict(resolved_parser.items(resolved_section))
-                    else:
-                        section_data = {}
-                    context.set(output_var, section_data)
-                    return ActionResult(success=True, data=section_data,
-                                       message=f"Got section '{resolved_section}'")
+            resolved_path = context.resolve_value(file_path) if context else file_path
+            parser = configparser.ConfigParser()
+            parser.read(resolved_path)
 
-            if data is not None:
-                resolved_data = context.resolve_value(data)
-                if isinstance(resolved_data, dict) and resolved_section in resolved_data:
-                    section_data = resolved_data[resolved_section]
-                else:
-                    section_data = {}
-                context.set(output_var, section_data)
-                return ActionResult(success=True, data=section_data,
-                                   message=f"Got section '{resolved_section}'")
-
-            return ActionResult(success=False, message="data or parser required")
-
+            result = {'sections': parser.sections(), 'count': len(parser.sections())}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"INI has {len(parser.sections())} sections", data=result)
         except Exception as e:
-            return ActionResult(success=False, message=f"INI get section error: {str(e)}")
+            return ActionResult(success=False, message=f"INI sections error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['file_path']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'ini_sections'}

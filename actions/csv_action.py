@@ -1,428 +1,374 @@
 """CSV data processing action module for RabAI AutoClick.
 
-Provides CSV file operations:
-- CsvReadAction: Read CSV file into list of dicts
-- CsvWriteAction: Write data to CSV file
-- CsvAppendAction: Append rows to existing CSV
+Provides CSV operations:
+- CsvParseAction: Parse CSV string to records
+- CsvEncodeAction: Encode records to CSV string
 - CsvFilterAction: Filter CSV rows by condition
-- CsvMergeAction: Merge multiple CSV files
-- CsvSortAction: Sort CSV by column
-- CsvDedupeAction: Remove duplicate rows
-- CsvStatsAction: Compute statistics on CSV data
+- CsvSortAction: Sort CSV by column(s)
+- CsvJoinAction: Join multiple CSV datasets
+- CsvPivotAction: Pivot CSV data
 """
 
-from __future__ import annotations
-
 import csv
-import os
-from typing import Any, Dict, List, Optional
+import io
+from typing import Any, Dict, List, Optional, Callable
 
 import sys
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class CsvReadAction(BaseAction):
-    """Read CSV file into list of dictionaries."""
-    action_type = "csv_read"
-    display_name = "读取CSV文件"
-    description = "将CSV文件读取为字典列表"
-    version = "1.0"
+class CsvParseAction(BaseAction):
+    """Parse CSV string to list of records."""
+    action_type = "csv_parse"
+    display_name = "CSV解析"
+    description = "解析CSV字符串为记录列表"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CSV read."""
-        file_path = params.get('file_path', '')
-        encoding = params.get('encoding', 'utf-8')
-        delimiter = params.get('delimiter', ',')
-        has_header = params.get('has_header', True)
-        output_var = params.get('output_var', 'csv_data')
-
-        if not file_path:
-            return ActionResult(success=False, message="file_path is required")
-
         try:
-            resolved_path = context.resolve_value(file_path) if context else file_path
-            resolved_encoding = context.resolve_value(encoding) if context else encoding
-            resolved_delimiter = context.resolve_value(delimiter) if context else delimiter
+            csv_str = params.get("csv_str", "")
+            delimiter = params.get("delimiter", ",")
+            quotechar = params.get("quotechar", '"')
+            has_header = params.get("has_header", True)
+            skip_rows = params.get("skip_rows", 0)
 
-            rows = []
-            with open(resolved_path, 'r', encoding=resolved_encoding, newline='') as f:
-                if has_header:
-                    reader = csv.DictReader(f, delimiter=resolved_delimiter)
-                    rows = list(reader)
-                else:
-                    reader = csv.reader(f, delimiter=resolved_delimiter)
-                    rows = [{f'col_{i}': v for i, v in enumerate(row)} for row in reader]
+            if not csv_str:
+                return ActionResult(success=False, message="csv_str is required")
 
-            result = {'rows': rows, 'count': len(rows)}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Read {len(rows)} rows", data=result)
-        except FileNotFoundError:
-            return ActionResult(success=False, message=f"File not found: {resolved_path}")
+            lines = csv_str.strip().split("\n")
+            if skip_rows > 0:
+                lines = lines[skip_rows:]
+
+            reader = csv.reader(lines, delimiter=delimiter, quotechar=quotechar)
+            rows = list(reader)
+
+            if not rows:
+                return ActionResult(success=True, message="Empty CSV", data={"records": [], "columns": []})
+
+            if has_header:
+                columns = rows[0]
+                records = [dict(zip(columns, row)) for row in rows[1:] if len(row) == len(columns)]
+                return ActionResult(
+                    success=True,
+                    message=f"Parsed {len(records)} records",
+                    data={"records": records, "columns": columns, "row_count": len(records)}
+                )
+            else:
+                return ActionResult(
+                    success=True,
+                    message=f"Parsed {len(rows)} rows",
+                    data={"rows": rows, "row_count": len(rows)}
+                )
+
+        except csv.Error as e:
+            return ActionResult(success=False, message=f"CSV parse error: {str(e)}")
         except Exception as e:
-            return ActionResult(success=False, message=f"CSV read error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['file_path']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'encoding': 'utf-8', 'delimiter': ',', 'has_header': True, 'output_var': 'csv_data'}
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
 
-class CsvWriteAction(BaseAction):
-    """Write data to CSV file."""
-    action_type = "csv_write"
-    display_name = "写入CSV文件"
-    description = "将数据写入CSV文件"
-    version = "1.0"
+class CsvEncodeAction(BaseAction):
+    """Encode records to CSV string."""
+    action_type = "csv_encode"
+    display_name = "CSV编码"
+    description = "将记录编码为CSV字符串"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CSV write."""
-        file_path = params.get('file_path', '')
-        data = params.get('data', [])
-        fieldnames = params.get('fieldnames', None)
-        encoding = params.get('encoding', 'utf-8')
-        delimiter = params.get('delimiter', ',')
-        write_header = params.get('write_header', True)
-
-        if not file_path:
-            return ActionResult(success=False, message="file_path is required")
-        if not data:
-            return ActionResult(success=False, message="data is required")
-
         try:
-            resolved_path = context.resolve_value(file_path) if context else file_path
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_encoding = context.resolve_value(encoding) if context else encoding
+            records = params.get("records", [])
+            columns = params.get("columns", None)
+            delimiter = params.get("delimiter", ",")
+            quotechar = params.get("quotechar", '"')
+            include_header = params.get("include_header", True)
 
-            _os.makedirs(_os.path.dirname(resolved_path) or '.', exist_ok=True)
+            if not records and not columns:
+                return ActionResult(success=False, message="records or columns is required")
 
-            fields = fieldnames
-            if not fields and resolved_data:
-                if isinstance(resolved_data[0], dict):
-                    fields = list(resolved_data[0].keys())
+            if not columns and records:
+                if isinstance(records[0], dict):
+                    columns = list(records[0].keys())
 
-            with open(resolved_path, 'w', encoding=resolved_encoding, newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fields, delimiter=delimiter)
-                if write_header and fields:
-                    writer.writeheader()
-                for row in resolved_data:
-                    if isinstance(row, dict):
-                        writer.writerow(row)
-                    elif isinstance(row, (list, tuple)) and fields:
-                        writer.writerow(dict(zip(fields, row)))
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter=delimiter, quotechar=quotechar, lineterminator="\n")
 
+            if include_header and columns:
+                writer.writerow(columns)
+
+            for record in records:
+                if isinstance(record, dict):
+                    writer.writerow([record.get(col, "") for col in columns])
+                elif isinstance(record, (list, tuple)):
+                    writer.writerow(record)
+
+            csv_str = output.getvalue()
             return ActionResult(
                 success=True,
-                message=f"Wrote {len(resolved_data)} rows to {resolved_path}",
-                data={'rows_written': len(resolved_data), 'file_path': resolved_path}
+                message=f"Encoded {len(records)} records",
+                data={"csv_str": csv_str, "length": len(csv_str), "row_count": len(records)}
             )
+
+        except csv.Error as e:
+            return ActionResult(success=False, message=f"CSV encode error: {str(e)}")
         except Exception as e:
-            return ActionResult(success=False, message=f"CSV write error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['file_path', 'data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'fieldnames': None, 'encoding': 'utf-8', 'delimiter': ',', 'write_header': True}
-
-
-class CsvAppendAction(BaseAction):
-    """Append rows to existing CSV."""
-    action_type = "csv_append"
-    display_name = "追加CSV行"
-    description = "向现有CSV文件追加行"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CSV append."""
-        file_path = params.get('file_path', '')
-        data = params.get('data', [])
-        delimiter = params.get('delimiter', ',')
-        encoding = params.get('encoding', 'utf-8')
-
-        if not file_path:
-            return ActionResult(success=False, message="file_path is required")
-
-        try:
-            resolved_path = context.resolve_value(file_path) if context else file_path
-            resolved_data = context.resolve_value(data) if context else data
-
-            with open(resolved_path, 'a', encoding=encoding, newline='') as f:
-                writer = csv.writer(f, delimiter=delimiter)
-                for row in resolved_data:
-                    if isinstance(row, dict):
-                        writer.writerow(list(row.values()))
-                    elif isinstance(row, (list, tuple)):
-                        writer.writerow(row)
-                    else:
-                        writer.writerow([row])
-
-            return ActionResult(
-                success=True,
-                message=f"Appended {len(resolved_data)} rows",
-                data={'rows_appended': len(resolved_data)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"CSV append error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['file_path', 'data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'delimiter': ',', 'encoding': 'utf-8'}
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
 
 class CsvFilterAction(BaseAction):
     """Filter CSV rows by condition."""
     action_type = "csv_filter"
-    display_name = "过滤CSV行"
+    display_name = "CSV过滤"
     description = "按条件过滤CSV行"
-    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CSV filter."""
-        data = params.get('data', [])
-        column = params.get('column', '')
-        operator = params.get('operator', 'eq')
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'filtered_data')
-
-        if not data:
-            return ActionResult(success=False, message="data is required")
-        if not column:
-            return ActionResult(success=False, message="column is required")
-
         try:
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_value = context.resolve_value(value) if context else value
+            records = params.get("records", [])
+            column = params.get("column", "")
+            operator = params.get("operator", "eq")
+            value = params.get("value", None)
+            expression = params.get("expression", "")
 
-            operators = {
-                'eq': lambda a, b: str(a) == str(b),
-                'ne': lambda a, b: str(a) != str(b),
-                'gt': lambda a, b: _try_num(a) > _try_num(b),
-                'lt': lambda a, b: _try_num(a) < _try_num(b),
-                'ge': lambda a, b: _try_num(a) >= _try_num(b),
-                'le': lambda a, b: _try_num(a) <= _try_num(b),
-                'contains': lambda a, b: str(b) in str(a),
-            }
+            if not records:
+                return ActionResult(success=False, message="records list is required")
 
-            op_func = operators.get(operator, operators['eq'])
-            filtered = [row for row in resolved_data if isinstance(row, dict) and op_func(row.get(column, ''), resolved_value)]
+            filtered = []
 
-            result = {'rows': filtered, 'count': len(filtered)}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Filtered to {len(filtered)} rows", data=result)
+            for record in records:
+                if isinstance(record, dict):
+                    if expression:
+                        try:
+                            row_globals = {"row": record}
+                            if not eval(expression, {"__builtins__": {}}, row_globals):
+                                continue
+                        except Exception:
+                            continue
+                    elif column:
+                        cell = record.get(column, "")
+                        if not self._compare(cell, operator, value):
+                            continue
+
+                    filtered.append(record)
+
+            return ActionResult(
+                success=True,
+                message=f"Filtered to {len(filtered)} records",
+                data={"records": filtered, "original_count": len(records), "filtered_count": len(filtered)}
+            )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"CSV filter error: {str(e)}")
+            return ActionResult(success=False, message=f"Filter error: {str(e)}")
 
-    def get_required_params(self) -> List[str]:
-        return ['data', 'column']
+    def _compare(self, cell: Any, operator: str, value: Any) -> bool:
+        """Compare cell value with condition."""
+        ops = {
+            "eq": lambda a, b: a == b,
+            "ne": lambda a, b: a != b,
+            "gt": lambda a, b: a > b,
+            "ge": lambda a, b: a >= b,
+            "lt": lambda a, b: a < b,
+            "le": lambda a, b: a <= b,
+            "contains": lambda a, b: str(b) in str(a),
+            "startswith": lambda a, b: str(a).startswith(str(b)),
+            "endswith": lambda a, b: str(a).endswith(str(b)),
+            "in": lambda a, b: a in b if isinstance(b, (list, tuple)) else a == b,
+            "not_in": lambda a, b: a not in b if isinstance(b, (list, tuple)) else a != b,
+        }
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'operator': 'eq', 'value': '', 'output_var': 'filtered_data'}
-
-
-class CsvMergeAction(BaseAction):
-    """Merge multiple CSV files."""
-    action_type = "csv_merge"
-    display_name = "合并CSV文件"
-    description = "合并多个CSV文件"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CSV merge."""
-        file_paths = params.get('file_paths', [])
-        output_path = params.get('output_path', '')
-        encoding = params.get('encoding', 'utf-8')
-        delimiter = params.get('delimiter', ',')
-        output_var = params.get('output_var', 'merged_data')
-
-        if not file_paths or not output_path:
-            return ActionResult(success=False, message="file_paths and output_path are required")
-
+        op_func = ops.get(operator, ops["eq"])
         try:
-            resolved_paths = context.resolve_value(file_paths) if context else file_paths
-            resolved_output = context.resolve_value(output_path) if context else output_path
-
-            all_rows = []
-            for path in resolved_paths:
-                with open(path, 'r', encoding=encoding, newline='') as f:
-                    reader = csv.DictReader(f, delimiter=delimiter)
-                    all_rows.extend(list(reader))
-
-            _os.makedirs(_os.path.dirname(resolved_output) or '.', exist_ok=True)
-            if all_rows:
-                fields = list(all_rows[0].keys())
-                with open(resolved_output, 'w', encoding=encoding, newline='') as f:
-                    writer = csv.DictWriter(f, fieldnames=fields, delimiter=delimiter)
-                    writer.writeheader()
-                    writer.writerows(all_rows)
-
-            result = {'count': len(all_rows), 'output_path': resolved_output, 'files_merged': len(resolved_paths)}
-            if context:
-                context.set(output_var, all_rows)
-            return ActionResult(success=True, message=f"Merged {len(all_rows)} rows from {len(resolved_paths)} files", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"CSV merge error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['file_paths', 'output_path']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'encoding': 'utf-8', 'delimiter': ',', 'output_var': 'merged_data'}
+            return op_func(cell, value)
+        except (TypeError, ValueError):
+            return False
 
 
 class CsvSortAction(BaseAction):
-    """Sort CSV data by column."""
+    """Sort CSV by column(s)."""
     action_type = "csv_sort"
-    display_name = "排序CSV"
-    description = "按列排序CSV数据"
-    version = "1.0"
+    display_name = "CSV排序"
+    description = "按列排序CSV"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CSV sort."""
-        data = params.get('data', [])
-        sort_by = params.get('sort_by', '')
-        reverse = params.get('reverse', False)
-        output_var = params.get('output_var', 'sorted_data')
-
-        if not data:
-            return ActionResult(success=False, message="data is required")
-
         try:
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_reverse = context.resolve_value(reverse) if context else reverse
+            records = params.get("records", [])
+            sort_by = params.get("sort_by", [])
+            ascending = params.get("ascending", True)
 
-            dict_rows = [r for r in resolved_data if isinstance(r, dict)]
-            if sort_by:
-                sorted_rows = sorted(dict_rows, key=lambda r: r.get(sort_by, ''), reverse=resolved_reverse)
-            else:
-                sorted_rows = dict_rows
+            if not records:
+                return ActionResult(success=False, message="records list is required")
 
-            result = {'rows': sorted_rows, 'count': len(sorted_rows)}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Sorted {len(sorted_rows)} rows", data=result)
+            if isinstance(sort_by, str):
+                sort_by = [sort_by]
+
+            if not sort_by:
+                return ActionResult(success=False, message="sort_by column(s) required")
+
+            def sort_key(record):
+                values = []
+                for col in sort_by:
+                    val = record.get(col, "") if isinstance(record, dict) else record[col] if isinstance(record, (list, tuple)) else record
+                    try:
+                        values.append(float(val))
+                    except (TypeError, ValueError):
+                        values.append(str(val).lower())
+                return values
+
+            sorted_records = sorted(records, key=sort_key, reverse=not ascending)
+
+            return ActionResult(
+                success=True,
+                message=f"Sorted {len(sorted_records)} records",
+                data={"records": sorted_records}
+            )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"CSV sort error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'sort_by': '', 'reverse': False, 'output_var': 'sorted_data'}
+            return ActionResult(success=False, message=f"Sort error: {str(e)}")
 
 
-class CsvDedupeAction(BaseAction):
-    """Remove duplicate rows from CSV."""
-    action_type = "csv_dedupe"
-    display_name = "CSV去重"
-    description = "删除CSV中的重复行"
-    version = "1.0"
+class CsvJoinAction(BaseAction):
+    """Join multiple CSV datasets."""
+    action_type = "csv_join"
+    display_name = "CSV连接"
+    description = "连接多个CSV数据集"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CSV dedupe."""
-        data = params.get('data', [])
-        columns = params.get('columns', None)
-        output_var = params.get('output_var', 'deduped_data')
-
-        if not data:
-            return ActionResult(success=False, message="data is required")
-
         try:
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_columns = context.resolve_value(columns) if context else columns
+            datasets = params.get("datasets", [])
+            join_type = params.get("join_type", "inner")
+            left_key = params.get("left_key", "")
+            right_key = params.get("right_key", "")
+            suffixes = params.get("suffixes", ["_left", "_right"])
 
-            seen = set()
-            deduped = []
-            for row in resolved_data:
-                if isinstance(row, dict):
-                    if resolved_columns:
-                        key = tuple(row.get(c, '') for c in resolved_columns)
-                    else:
-                        key = tuple(sorted(row.items()))
-                    if key not in seen:
-                        seen.add(key)
-                        deduped.append(row)
+            if not datasets or len(datasets) < 2:
+                return ActionResult(success=False, message="At least 2 datasets required")
 
-            result = {'rows': deduped, 'count': len(deduped), 'removed': len(resolved_data) - len(deduped)}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Deduplication: {len(resolved_data)} -> {len(deduped)} rows", data=result)
+            left = datasets[0]
+            right = datasets[1]
+
+            if not isinstance(left, list) or not isinstance(right, list):
+                return ActionResult(success=False, message="Datasets must be lists of records")
+
+            left_columns = list(left[0].keys()) if left else []
+            right_columns = list(right[0].keys()) if right else []
+
+            if not left_columns or not right_columns:
+                return ActionResult(success=False, message="Datasets must have columns")
+
+            results = []
+            right_lookup = {row.get(right_key, ""): row for row in right}
+
+            for left_row in left:
+                left_val = left_row.get(left_key, "")
+                right_row = right_lookup.get(left_val)
+
+                if right_row is None:
+                    if join_type in ("left", "outer"):
+                        merged = dict(left_row)
+                        for col in right_columns:
+                            merged[f"{col}{suffixes[1]}"] = None
+                        results.append(merged)
+                else:
+                    if join_type in ("inner", "left", "outer"):
+                        merged = dict(left_row)
+                        for col in right_columns:
+                            if col == right_key:
+                                continue
+                            new_col = f"{col}{suffixes[1]}" if col in left_columns else col
+                            merged[new_col] = right_row.get(col)
+                        results.append(merged)
+
+            if join_type == "outer":
+                right_used = set()
+                for left_row in left:
+                    left_val = left_row.get(left_key, "")
+                    if left_val in right_lookup:
+                        right_used.add(left_val)
+
+                for right_row in right:
+                    right_val = right_row.get(right_key, "")
+                    if right_val not in right_used:
+                        merged = {}
+                        for col in left_columns:
+                            merged[col] = None
+                        for col in right_columns:
+                            if col == right_key:
+                                continue
+                            new_col = f"{col}{suffixes[1]}" if col in left_columns else col
+                            merged[new_col] = right_row.get(col)
+                        results.append(merged)
+
+            return ActionResult(
+                success=True,
+                message=f"Joined to {len(results)} records",
+                data={"records": results, "row_count": len(results)}
+            )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"CSV dedupe error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'columns': None, 'output_var': 'deduped_data'}
+            return ActionResult(success=False, message=f"Join error: {str(e)}")
 
 
-class CsvStatsAction(BaseAction):
-    """Compute statistics on CSV data."""
-    action_type = "csv_stats"
-    display_name = "CSV统计"
-    description = "计算CSV数据统计信息"
-    version = "1.0"
+class CsvPivotAction(BaseAction):
+    """Pivot CSV data."""
+    action_type = "csv_pivot"
+    display_name = "CSV透视"
+    description = "透视CSV数据"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CSV stats."""
-        data = params.get('data', [])
-        column = params.get('column', '')
-        output_var = params.get('output_var', 'csv_stats')
-
-        if not data:
-            return ActionResult(success=False, message="data is required")
-
         try:
-            resolved_data = context.resolve_value(data) if context else data
+            records = params.get("records", [])
+            index_col = params.get("index_col", "")
+            column_col = params.get("column_col", "")
+            value_col = params.get("value_col", "")
+            agg_func = params.get("agg_func", "sum")
 
-            if column:
-                values = [row.get(column) for row in resolved_data if isinstance(row, dict) and column in row]
-                numeric_values = [_try_num(v) for v in values]
-                numeric_values = [v for v in numeric_values if v is not None]
+            if not records:
+                return ActionResult(success=False, message="records list is required")
 
-                stats = {
-                    'count': len(values),
-                    'unique': len(set(str(v) for v in values)),
-                    'numeric_count': len(numeric_values),
-                }
-                if numeric_values:
-                    stats.update({
-                        'min': min(numeric_values),
-                        'max': max(numeric_values),
-                        'sum': sum(numeric_values),
-                        'avg': sum(numeric_values) / len(numeric_values),
-                    })
-            else:
-                stats = {
-                    'total_rows': len(resolved_data),
-                    'columns': list(resolved_data[0].keys()) if resolved_data else [],
-                }
+            if not all([index_col, column_col, value_col]):
+                return ActionResult(success=False, message="index_col, column_col, value_col required")
 
-            result = {'stats': stats, 'column': column}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message="CSV stats computed", data=result)
+            pivot = {}
+            index_values = set()
+
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                index_val = record.get(index_col, "")
+                column_val = record.get(column_col, "")
+                cell_val = record.get(value_col, 0)
+
+                try:
+                    cell_val = float(cell_val)
+                except (TypeError, ValueError):
+                    cell_val = 0
+
+                index_values.add(index_val)
+
+                if index_val not in pivot:
+                    pivot[index_val] = {}
+                if column_val not in pivot[index_val]:
+                    pivot[index_val][column_val] = []
+                pivot[index_val][column_val].append(cell_val)
+
+            aggs = {"sum": sum, "avg": lambda x: sum(x) / len(x) if x else 0, "count": len, "min": min, "max": max}
+            agg_fn = aggs.get(agg_func, sum)
+
+            column_values = sorted(set(col for row_data in pivot.values() for col in row_data.keys()))
+            result_records = []
+
+            for index_val in sorted(index_values):
+                row = {index_col: index_val}
+                if index_val in pivot:
+                    for col in column_values:
+                        values = pivot[index_val].get(col, [])
+                        row[col] = agg_fn(values) if values else None
+                result_records.append(row)
+
+            return ActionResult(
+                success=True,
+                message=f"Pivoted to {len(result_records)} rows",
+                data={"records": result_records, "columns": [index_col] + column_values}
+            )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"CSV stats error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'column': '', 'output_var': 'csv_stats'}
-
-
-def _try_num(v: Any) -> Optional[float]:
-    """Try to convert value to number."""
-    try:
-        return float(v)
-    except (ValueError, TypeError):
-        return None
+            return ActionResult(success=False, message=f"Pivot error: {str(e)}")
