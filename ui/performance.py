@@ -64,6 +64,7 @@ class SignalThrottler:
         """
         self._delay_ms = delay_ms
         self._timer: Optional[QTimer] = None
+        self._pending_func: Optional[Callable[..., None]] = None
         self._pending_args: tuple = ()
         self._pending_kwargs: Dict[str, Any] = {}
 
@@ -75,6 +76,7 @@ class SignalThrottler:
             *args: Positional arguments.
             **kwargs: Keyword arguments.
         """
+        self._pending_func = func
         self._pending_args = args
         self._pending_kwargs = kwargs
 
