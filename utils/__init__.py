@@ -562,6 +562,18 @@ _LAZY_IMPORTS = {
     'progress_callback': ('utils.cli_utils', 'progress_callback'),
     'multiline_input': ('utils.cli_utils', 'multiline_input'),
     'select_items': ('utils.cli_utils', 'select_items'),
+    # Cache Utils - no PyQt5
+    'CacheEntry': ('utils.cache_utils', 'CacheEntry'),
+    'LRUCache': ('utils.cache_utils', 'LRUCache'),
+    'TTLCache': ('utils.cache_utils', 'TTLCache'),
+    'memoize': ('utils.cache_utils', 'memoize'),
+    'cached': ('utils.cache_utils', 'cached'),
+    'hashlib_md5': ('utils.cache_utils', 'hashlib_md5'),
+    'hashlib_sha256': ('utils.cache_utils', 'hashlib_sha256'),
+    'CacheStats': ('utils.cache_utils', 'CacheStats'),
+    'in_memory_cache': ('utils.cache_utils', 'in_memory_cache'),
+    'lru_cacheDecorator': ('utils.cache_utils', 'lru_cacheDecorator'),
+    'fifo_cache': ('utils.cache_utils', 'fifo_cache'),
     # Event Bus - PyQt5 dependent
     'Event': ('utils.event_bus', 'Event'),
     'EventPriority': ('utils.event_bus', 'EventPriority'),
