@@ -1,399 +1,313 @@
-"""Data transformation utilities for RabAI AutoClick.
+"""
+Signal transformation utilities.
 
-Provides:
-- Data transformations (map, filter, reduce)
-- Record transformations
-- Nested data access
-- Type coercion
-- Data normalization
+Provides Fourier transform, Laplace transform, Z-transform,
+discrete cosine transform, and Walsh-Hadamard transform.
 """
 
 from __future__ import annotations
 
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    TypeVar,
-    Union,
-)
+import math
+from typing import Callable, Sequence
 
 
-T = TypeVar("T")
-U = TypeVar("U")
+def next_power_of_2(n: int) -> int:
+    if n <= 0:
+        return 1
+    return 1 << (n - 1).bit_length()
 
 
-def transform_keys(
-    data: Dict[T, U],
-    func: Callable[[T], Any],
-) -> Dict[Any, U]:
-    """Transform dictionary keys.
-
-    Args:
-        data: Input dictionary.
-        func: Function to apply to each key.
-
-    Returns:
-        New dictionary with transformed keys.
-    """
-    return {func(k): v for k, v in data.items()}
-
-
-def transform_values(
-    data: Dict[T, U],
-    func: Callable[[U], Any],
-) -> Dict[T, Any]:
-    """Transform dictionary values.
-
-    Args:
-        data: Input dictionary.
-        func: Function to apply to each value.
-
-    Returns:
-        New dictionary with transformed values.
-    """
-    return {k: func(v) for k, v in data.items()}
-
-
-def transform_items(
-    data: Dict[T, U],
-    func: Callable[[T, U], tuple[Any, Any]],
-) -> Dict[Any, Any]:
-    """Transform dictionary key-value pairs.
-
-    Args:
-        data: Input dictionary.
-        func: Function (key, value) -> (new_key, new_value).
-
-    Returns:
-        New dictionary with transformed pairs.
-    """
-    return {func(k, v)[0]: func(k, v)[1] for k, v in data.items()}
-
-
-def pick(
-    data: Dict[str, Any],
-    keys: List[str],
-    default: Any = None,
-) -> Dict[str, Any]:
-    """Pick specified keys from dictionary.
-
-    Args:
-        data: Input dictionary.
-        keys: Keys to pick.
-        default: Default value for missing keys.
-
-    Returns:
-        New dictionary with only specified keys.
-    """
-    return {k: data.get(k, default) for k in keys}
-
-
-def omit(
-    data: Dict[str, Any],
-    keys: List[str],
-) -> Dict[str, Any]:
-    """Omit specified keys from dictionary.
-
-    Args:
-        data: Input dictionary.
-        keys: Keys to omit.
-
-    Returns:
-        New dictionary without specified keys.
-    """
-    return {k: v for k, v in data.items() if k not in keys}
-
-
-def deep_get(
-    data: Any,
-    path: str,
-    default: Any = None,
-    delimiter: str = ".",
-) -> Any:
-    """Get nested value using dot notation path.
-
-    Args:
-        data: Nested data structure.
-        path: Dot-separated path (e.g., "user.profile.name").
-        default: Default value if path not found.
-        delimiter: Path delimiter (default ".").
-
-    Returns:
-        Value at path or default.
-    """
-    keys = path.split(delimiter)
-    current = data
-    for key in keys:
-        if isinstance(current, dict):
-            current = current.get(key)
-        elif isinstance(current, (list, tuple)):
-            try:
-                current = current[int(key)]
-            except (ValueError, IndexError):
-                return default
-        else:
-            return default
-        if current is None:
-            return default
-    return current
-
-
-def deep_set(
-    data: Dict[str, Any],
-    path: str,
-    value: Any,
-    delimiter: str = ".",
-    create_missing: bool = True,
-) -> None:
-    """Set nested value using dot notation path.
-
-    Args:
-        data: Target dictionary.
-        path: Dot-separated path.
-        value: Value to set.
-        delimiter: Path delimiter.
-        create_missing: If True, create missing intermediate dicts.
-    """
-    keys = path.split(delimiter)
-    current = data
-    for key in keys[:-1]:
-        if key not in current:
-            if create_missing:
-                current[key] = {}
-            else:
-                return
-        current = current[key]
-    current[keys[-1]] = value
-
-
-def flatten(
-    data: Any,
-    parent_key: str = "",
-    sep: str = ".",
-) -> Dict[str, Any]:
-    """Flatten nested dictionary.
-
-    Args:
-        data: Nested dictionary.
-        parent_key: Prefix for keys.
-        sep: Separator for flattened keys.
-
-    Returns:
-        Flattened dictionary.
-    """
-    items: Dict[str, Any] = {}
-    if isinstance(data, dict):
-        for key, value in data.items():
-            new_key = f"{parent_key}{sep}{key}" if parent_key else key
-            if isinstance(value, dict):
-                items.update(flatten(value, new_key, sep))
-            elif isinstance(value, list):
-                for i, item in enumerate(value):
-                    if isinstance(item, dict):
-                        items.update(flatten(item, f"{new_key}[{i}]", sep))
-                    else:
-                        items[f"{new_key}[{i}]"] = item
-            else:
-                items[new_key] = value
-    elif isinstance(data, list):
-        for i, item in enumerate(data):
-            new_key = f"{parent_key}[{i}]" if parent_key else f"[{i}]"
-            if isinstance(item, dict):
-                items.update(flatten(item, new_key, sep))
-            else:
-                items[new_key] = item
-    else:
-        items[parent_key] = data
-    return items
-
-
-def unflatten(data: Dict[str, Any], sep: str = ".") -> Dict[str, Any]:
-    """Unflatten dictionary with dot notation keys.
-
-    Args:
-        data: Flattened dictionary.
-        sep: Separator used in keys.
-
-    Returns:
-        Nested dictionary.
-    """
-    result: Dict[str, Any] = {}
-    for flat_key, value in data.items():
-        keys = flat_key.split(sep)
-        current = result
-        for key in keys[:-1]:
-            if key not in current:
-                current[key] = {}
-            current = current[key]
-        current[keys[-1]] = value
+def fft(signal: list[complex]) -> list[complex]:
+    """Cooley-Tukey iterative FFT."""
+    n = len(signal)
+    if n == 1:
+        return list(signal)
+    if n & (n - 1):
+        padded = signal + [0.0j] * (next_power_of_2(n) - n)
+        result = fft(padded)
+        return result[:n]
+    n2 = n // 2
+    even = fft([signal[i] for i in range(0, n, 2)])
+    odd = fft([signal[i] for i in range(1, n, 2)])
+    result = [0.0j] * n
+    for k in range(n2):
+        twiddle = math.e ** (-2j * math.pi * k / n) * odd[k]
+        result[k] = even[k] + twiddle
+        result[k + n2] = even[k] - twiddle
     return result
 
 
-def merge(
-    *dicts: Dict[str, Any],
-    strategy: str = "override",
-) -> Dict[str, Any]:
-    """Merge multiple dictionaries.
+def ifft(spectrum: list[complex]) -> list[complex]:
+    """Inverse FFT."""
+    n = len(spectrum)
+    conjugated = [c.conjugate() for c in spectrum]
+    time_domain = fft(conjugated)
+    return [c.conjugate() / n for c in time_domain]
 
-    Args:
-        *dicts: Dictionaries to merge.
-        strategy: Merge strategy - "override", "keep", "combine".
 
-    Returns:
-        Merged dictionary.
+def dft(signal: list[complex]) -> list[complex]:
     """
-    result: Dict[str, Any] = {}
-    for d in dicts:
-        for key, value in d.items():
-            if key in result:
-                if strategy == "override":
-                    result[key] = value
-                elif strategy == "keep":
-                    pass
-                elif strategy == "combine":
-                    if isinstance(result[key], list) and isinstance(value, list):
-                        result[key] = result[key] + value
-                    elif isinstance(result[key], dict) and isinstance(value, dict):
-                        result[key] = merge(result[key], value)
-                    else:
-                        result[key] = value
-            else:
-                result[key] = value
+    Naive O(n^2) Discrete Fourier Transform.
+
+    For production use, prefer fft().
+    """
+    n = len(signal)
+    result: list[complex] = []
+    for k in range(n):
+        sum_val = 0.0j
+        for n_i, x in enumerate(signal):
+            angle = -2j * math.pi * k * n_i / n
+            sum_val += x * math.e ** angle
+        result.append(sum_val)
     return result
 
 
-def group_by(
-    data: List[Dict[str, Any]],
-    key: str,
-) -> Dict[Any, List[Dict[str, Any]]]:
-    """Group list of dictionaries by key.
-
-    Args:
-        data: List of dictionaries.
-        key: Key to group by.
-
-    Returns:
-        Dictionary mapping key value to list of items.
-    """
-    result: Dict[Any, List[Dict[str, Any]]] = {}
-    for item in data:
-        if key in item:
-            group_key = item[key]
-            if group_key not in result:
-                result[group_key] = []
-            result[group_key].append(item)
+def idft(spectrum: list[complex]) -> list[complex]:
+    """Naive inverse DFT."""
+    n = len(spectrum)
+    result: list[complex] = []
+    for k in range(n):
+        sum_val = 0.0j
+        for n_i, X in enumerate(spectrum):
+            angle = 2j * math.pi * k * n_i / n
+            sum_val += X * math.e ** angle
+        result.append(sum_val / n)
     return result
 
 
-def sort_by(
-    data: List[Dict[str, Any]],
-    key: str,
-    reverse: bool = False,
-) -> List[Dict[str, Any]]:
-    """Sort list of dictionaries by key.
+def discrete_cosine_transform(signal: list[float]) -> list[float]:
+    """
+    DCT Type-II (used in JPEG, MP3).
 
     Args:
-        data: List of dictionaries.
-        key: Key to sort by.
-        reverse: If True, sort descending.
+        signal: Input signal
 
     Returns:
-        Sorted list.
+        DCT coefficients.
     """
-    return sorted(data, key=lambda x: x.get(key), reverse=reverse)
-
-
-def deduplicate(
-    data: List[Dict[str, Any]],
-    keys: List[str],
-) -> List[Dict[str, Any]]:
-    """Remove duplicates based on specified keys.
-
-    Args:
-        data: List of dictionaries.
-        keys: Keys to check for duplicates.
-
-    Returns:
-        Deduplicated list.
-    """
-    seen: set = set()
-    result: List[Dict[str, Any]] = []
-    for item in data:
-        signature = tuple(item.get(k) for k in keys)
-        if signature not in seen:
-            seen.add(signature)
-            result.append(item)
+    n = len(signal)
+    result: list[float] = []
+    for k in range(n):
+        ck = 0.0
+        for i in range(n):
+            ck += signal[i] * math.cos(math.pi * k * (2 * i + 1) / (2 * n))
+        result.append(ck * (2 / n if k != 0 else 1 / n))
     return result
 
 
-def coerce_types(
-    data: Dict[str, Any],
-    schema: Dict[str, type],
-) -> Dict[str, Any]:
-    """Coerce dictionary values to specified types.
-
-    Args:
-        data: Input dictionary.
-        schema: Mapping of key to target type.
-
-    Returns:
-        Dictionary with coerced values.
-    """
-    result = {}
-    for key, value in data.items():
-        if key in schema:
-            try:
-                result[key] = schema[key](value)
-            except (ValueError, TypeError):
-                result[key] = value
-        else:
-            result[key] = value
+def inverse_dct(dct_coeffs: list[float]) -> list[float]:
+    """Inverse DCT Type-II."""
+    n = len(dct_coeffs)
+    result: list[float] = []
+    for i in range(n):
+        x_i = dct_coeffs[0] / 2
+        for k in range(1, n):
+            x_i += dct_coeffs[k] * math.cos(math.pi * k * (2 * i + 1) / (2 * n))
+        result.append(x_i)
     return result
 
 
-def normalize_string(s: str, lowercase: bool = True, strip: bool = True) -> str:
-    """Normalize a string.
+def walsh_hadamard_transform(signal: list[float]) -> list[float]:
+    """
+    Walsh-Hadamard Transform (Hadamard ordered).
+
+    Useful for signal processing and quantum computing simulation.
+    """
+    n = len(signal)
+    if n & (n - 1):
+        padded = signal + [0.0] * (next_power_of_2(n) - n)
+        result = walsh_hadamard_transform(padded)
+        return result[:n]
+
+    # In-place Hadamard transform
+    h = list(signal)
+    step = 1
+    while step < n:
+        for i in range(0, n, step * 2):
+            for j in range(step):
+                u = h[i + j]
+                v = h[i + j + step]
+                h[i + j] = u + v
+                h[i + j + step] = u - v
+        step *= 2
+    return [x / n for x in h]
+
+
+def laplace_transform(
+    f: Callable[[float], float],
+    s: float,
+    method: str = "gauss_legendre",
+    n_points: int = 32,
+) -> float:
+    """
+    Numerical Laplace transform F(s) = ∫_0^∞ f(t) * e^{-st} dt.
 
     Args:
-        s: Input string.
-        lowercase: Convert to lowercase.
-        strip: Strip whitespace.
+        f: Time-domain function
+        s: Laplace variable (complex allowed)
+        method: Integration method
+        n_points: Number of quadrature points
 
     Returns:
-        Normalized string.
+        Approximate F(s).
     """
-    if strip:
-        s = s.strip()
-    if lowercase:
-        s = s.lower()
-    return s
+    if method == "gauss_legendre":
+        # Gauss-Legendre quadrature on [0, 1]
+        # Use precomputed nodes and weights (order 8)
+        nodes = [0.019855070, 0.10166676, 0.23723379, 0.40828268, 0.59462447, 0.75884936, 0.8822128, 0.98255826]
+        weights = [0.05061427, 0.11119051, 0.15685332, 0.18134189, 0.15685332, 0.11119051, 0.05061427, 0.02783447]
+        # Scale to [0, infinity] using t = -ln(u) transformation
+        result = 0.0
+        for u, w in zip(nodes, weights):
+            t = -math.log(u + 1e-15)
+            result += w * f(t) * math.e ** (-s * t) / u
+        return result
+    return 0.0
 
 
-def normalize_dict(
-    data: Dict[str, Any],
-    normalize_strings: bool = True,
-    remove_empty: bool = False,
-) -> Dict[str, Any]:
-    """Normalize dictionary values.
+def z_transform(
+    signal: list[float],
+    z: complex,
+) -> complex:
+    """
+    Z-transform: X(z) = Σ x[n] * z^{-n}
 
     Args:
-        data: Input dictionary.
-        normalize_strings: Normalize string values.
-        remove_empty: Remove None and empty values.
+        signal: Discrete-time signal
+        z: Z-domain value (complex)
 
     Returns:
-        Normalized dictionary.
+        X(z) value.
     """
-    result: Dict[str, Any] = {}
-    for key, value in data.items():
-        if remove_empty and (value is None or value == "" or value == []):
-            continue
-        if normalize_strings and isinstance(value, str):
-            result[key] = normalize_string(value)
-        else:
-            result[key] = value
+    result = 0.0j
+    for n, x in enumerate(signal):
+        result += x * (z ** -n)
     return result
+
+
+def short_time_fourier_transform(
+    signal: list[float],
+    window_size: int = 256,
+    hop_size: int = 128,
+) -> list[list[complex]]:
+    """
+    Short-Time Fourier Transform (STFT).
+
+    Args:
+        signal: Input signal
+        window_size: Analysis window size
+        hop_size: Hop between windows
+
+    Returns:
+        2D spectrogram (time frames x frequency bins).
+    """
+    n = len(signal)
+    frames: list[list[complex]] = []
+    for start in range(0, n - window_size, hop_size):
+        frame = signal[start:start + window_size]
+        # Apply Hann window
+        windowed = [frame[i] * 0.5 * (1 - math.cos(2 * math.pi * i / (window_size - 1))) for i in range(window_size)]
+        spectrum = fft([complex(x, 0) for x in windowed])
+        frames.append(spectrum[:window_size // 2])
+    return frames
+
+
+def spectrogram(
+    signal: list[float],
+    sample_rate: float = 1.0,
+    window_size: int = 256,
+    hop_size: int = 128,
+) -> tuple[list[float], list[float], list[list[float]]]:
+    """
+    Compute spectrogram.
+
+    Returns:
+        Tuple of (frequencies, time_bins, magnitude_spectrogram).
+    """
+    stft_result = short_time_fourier_transform(signal, window_size, hop_size)
+    freqs = [i * sample_rate / window_size for i in range(window_size // 2)]
+    times = [i * hop_size / sample_rate for i in range(len(stft_result))]
+    magnitudes = [[abs(v) for v in frame] for frame in stft_result]
+    return freqs, times, magnitudes
+
+
+def convolution_theorem(
+    signal1: list[float],
+    signal2: list[float],
+) -> list[float]:
+    """
+    Fast convolution using FFT (O(n log n)).
+
+    Args:
+        signal1: First signal
+        signal2: Second signal
+
+    Returns:
+        Convolution result.
+    """
+    n = len(signal1) + len(signal2) - 1
+    n_fft = next_power_of_2(n)
+    f1 = fft([complex(x, 0) for x in signal1] + [0.0j] * (n_fft - len(signal1)))
+    f2 = fft([complex(x, 0) for x in signal2] + [0.0j] * (n_fft - len(signal2)))
+    product = [a * b for a, b in zip(f1, f2)]
+    result = ifft(product)
+    # Take real part (imaginary part should be near zero)
+    return [c.real for c in result[:n]]
+
+
+def chirp_z_transform(
+    signal: list[float],
+    omega_start: float,
+    omega_end: float,
+    num_points: int,
+) -> list[complex]:
+    """
+    Chirp Z-transform for arbitrary spiral contour evaluation.
+
+    Args:
+        signal: Input signal
+        omega_start: Start frequency (radians/sample)
+        omega_end: End frequency (radians/sample)
+        num_points: Number of output points
+
+    Returns:
+        Z-transform values along spiral.
+    """
+    n = len(signal)
+    result: list[complex] = []
+    for k in range(num_points):
+        theta = omega_start + (omega_end - omega_start) * k / (num_points - 1)
+        z = math.e ** (1j * theta)
+        val = z_transform(signal, z)
+        result.append(val)
+    return result
+
+
+def goertzel_algorithm(
+    signal: list[float],
+    target_freq: float,
+    sample_rate: float,
+) -> float:
+    """
+    Goertzel algorithm for single DFT bin (efficient for few frequencies).
+
+    Args:
+        signal: Input signal
+        target_freq: Frequency to detect (Hz)
+        sample_rate: Sample rate (Hz)
+
+    Returns:
+        Magnitude at target frequency.
+    """
+    k = int(0.5 + (len(signal) * target_freq) / sample_rate)
+    omega = 2 * math.pi * k / len(signal)
+    coeff = 2 * math.cos(omega)
+    s0 = 0.0
+    s1 = 0.0
+    s2 = 0.0
+    for sample in signal:
+        s0 = sample + coeff * s1 - s2
+        s2 = s1
+        s1 = s0
+    power = s1 * s1 + s2 * s2 - coeff * s1 * s2
+    return math.sqrt(power)
