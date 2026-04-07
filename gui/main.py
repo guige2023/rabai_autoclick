@@ -1483,11 +1483,23 @@ class PipeTab(BaseTab):
         Create a new pipeline chain with the specified name and mode.
         """
         def do_create():
+            """
+            Create a new pipeline chain.
+            
+            Returns:
+                The created chain object.
+            """
             runner = create_pipeline_runner(str(DATA_DIR))
             pipe_mode = PipeMode(self.pipe_mode_var.get())
             return runner.create_chain(self.pipe_name_var.get(), pipe_mode)
 
-        def show_result(chain):
+        def show_result(chain: Any) -> None:
+            """
+            Handle the result of chain creation.
+            
+            Args:
+                chain: The created chain object.
+            """
             self.log(f"✅ 已创建管道链: {chain.chain_id}")
             self.pipe_name_var.set("")
             self._list_chains()
