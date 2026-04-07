@@ -969,12 +969,31 @@ class MainWindow(QMainWindow):
                 item.setToolTip(f"{info['description']}\n类型: {action_type}")
                 self.action_list.addItem(item)
 
-        with batch_updates(self.config_stack):
-            self.config_widgets = {}
-            for action_type, info in action_info.items():
-                widget = ActionConfigWidget(info)
-                self.config_widgets[action_type] = widget
-                self.config_stack.addWidget(widget)
+        # Use lazy loading for config widgets to improve startup time
+        self._action_info = action_info
+        self.config_widgets = {}
+        # Config widgets will be created on-demand when selected
+        # Signal connections will be made when widgets are created
+
+    def _ensure_config_widget(self, action_type: str) -> Optional[ActionConfigWidget]:
+        """Lazily create and cache a config widget for an action type.
+
+        Args:
+            action_type: The action type to get/create widget for.
+
+        Returns:
+            The ActionConfigWidget for the action type.
+        """
+        if action_type not in self.config_widgets:
+            info = self._action_info.get(action_type)
+            if info:
+                with batch_updates(self.config_stack):
+                    widget = ActionConfigWidget(info)
+                    self.config_widgets[action_type] = widget
+                    self.config_stack.addWidget(widget)
+                    # Connect config_changed signal for lazy-loaded widget
+                    widget.config_changed.connect(self._on_config_changed)
+        return self.config_widgets.get(action_type)
     
     def _setup_hotkeys(self):
         if self.hotkey_manager.is_available():
@@ -1025,9 +1044,9 @@ class MainWindow(QMainWindow):
         self.step_list.up_btn.clicked.connect(self._on_move_up)
         self.step_list.down_btn.clicked.connect(self._on_move_down)
         self.step_list.step_selected.connect(self._on_step_selected)
-        
-        for widget in self.config_widgets.values():
-            widget.config_changed.connect(self._on_config_changed)
+
+        # Note: config_widget signals are connected lazily when widgets are created
+        # This improves startup time by deferring widget creation
 
         self.engine_signals = EngineSignals()
         # Use QueuedConnection for thread-safe signal-slot communication
@@ -1290,36 +1309,38 @@ class MainWindow(QMainWindow):
         if index >= 0:
             item = self.action_list.item(index)
             action_type = item.data(Qt.UserRole)
-            if action_type in self.config_widgets:
-                self.config_stack.setCurrentWidget(self.config_widgets[action_type])
-    
+            widget = self._ensure_config_widget(action_type)
+            if widget:
+                self.config_stack.setCurrentWidget(widget)
+
     def _on_add_step(self):
         current_row = self.action_list.currentRow()
         if current_row < 0:
             show_warning("提示", "请先选择一个动作类型")
             return
-        
+
         item = self.action_list.item(current_row)
         action_type = item.data(Qt.UserRole)
         action_info = self.engine.get_action_info().get(action_type, {})
-        
+
         step_id = self.next_step_id
         self.next_step_id += 1
-        
-        config_widget = self.config_widgets.get(action_type)
+
+        # Use lazy loading to get or create config widget
+        config_widget = self._ensure_config_widget(action_type)
         if config_widget:
             config = config_widget.get_config()
         else:
             config = {}
-        
+
         config['id'] = step_id
         config['type'] = action_type
         self.step_configs[step_id] = config
-        
+
         display_name = action_info.get('display_name', action_type)
         self.step_list.add_step(step_id, action_type, display_name)
         self.step_list.set_current_index(self.step_list.get_step_count() - 1)
-        
+
         app_logger.info(f"添加步骤: {display_name}", "Editor")
     
     def _on_remove_step(self):
@@ -1355,12 +1376,14 @@ class MainWindow(QMainWindow):
             data = item.data(Qt.UserRole)
             step_id = data['id']
             action_type = data['type']
-            
-            if action_type in self.config_widgets:
-                self.config_stack.setCurrentWidget(self.config_widgets[action_type])
-                
+
+            # Use lazy loading to get or create config widget
+            widget = self._ensure_config_widget(action_type)
+            if widget:
+                self.config_stack.setCurrentWidget(widget)
+
                 if step_id in self.step_configs:
-                    self.config_widgets[action_type].set_config(self.step_configs[step_id])
+                    widget.set_config(self.step_configs[step_id])
     
     def _on_config_changed(self):
         index = self.step_list.get_current_index()
