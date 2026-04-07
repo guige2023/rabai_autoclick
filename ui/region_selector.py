@@ -144,13 +144,14 @@ class RegionSelector(QWidget):
     
     def _draw_info(self, painter: QPainter) -> None:
         """Draw informational text overlay.
-        
+
         Args:
             painter: QPainter to draw with.
         """
+        colors = theme_manager.colors
         painter.setPen(QColor(255, 255, 255))
         painter.setFont(QFont('Microsoft YaHei', 10))
-        
+
         if self.mode == 'region':
             info_text = "拖拽选择区域 | Enter确认 | Esc取消"
         else:
@@ -160,9 +161,11 @@ class RegionSelector(QWidget):
         x = (self.width() - text_rect.width()) // 2
         y = 30
 
+        # Use semi-transparent dark background for readability
+        info_bg = QColor(33, 33, 33, 200)
         painter.fillRect(
             x - 10, y - 5, text_rect.width() + 20,
-            text_rect.height() + 10, QColor(33, 33, 33, 200)
+            text_rect.height() + 10, info_bg
         )
         painter.drawText(x, y + text_rect.height() - 5, info_text)
         
@@ -189,7 +192,7 @@ class RegionSelector(QWidget):
             
             painter.fillRect(
                 x2 - 5, y2 - 3, text_rect2.width() + 10,
-                text_rect2.height() + 6, QColor(33, 33, 33, 200)
+                text_rect2.height() + 6, info_bg
             )
             painter.drawText(
                 x2, y2 + text_rect2.height() - 3, rect_info
