@@ -1189,8 +1189,8 @@ class MainWindow(QMainWindow):
         
         self.current_workflow['steps'] = steps
         self.current_workflow['variables'] = self.variables_widget.get_variables()
-    
-    def _on_run(self):
+
+    def _on_run(self) -> None:
         if self.engine.is_running():
             return
         
@@ -1239,8 +1239,8 @@ class MainWindow(QMainWindow):
         
         self.engine.load_workflow_from_dict(self.current_workflow)
         self.engine.run_async()
-    
-    def _on_stop(self):
+
+    def _on_stop(self) -> None:
         self._is_looping = False
         self._current_loop = 0
         self.engine.stop()
@@ -1254,8 +1254,8 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         app_logger.warning("停止工作流", "Workflow")
         show_toast("工作流已停止", 'warning')
-    
-    def _on_pause(self):
+
+    def _on_pause(self) -> None:
         if self.engine.is_paused():
             self.engine.resume()
             self.pause_btn.setText("⏸ 暂停")
