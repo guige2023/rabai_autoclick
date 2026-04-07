@@ -1727,7 +1727,7 @@ class MainWindow(QMainWindow):
         show_toast(f"主题已切换为{'深色' if new_theme == ThemeType.DARK else '浅色'}模式", 'info')
         app_logger.info(f"主题切换: {new_theme.value}", "UI")
 
-    def _apply_theme(self):
+    def _apply_theme(self) -> None:
         """Apply the current theme to all UI components."""
         self.setStyleSheet(theme_manager.get_stylesheet("main_window"))
         self.log_widget.text_edit.setStyleSheet(theme_manager.get_stylesheet("log"))
