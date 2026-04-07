@@ -581,6 +581,24 @@ class ThemeManager(QObject):
                     background-color: {c['border']};
                 }}
             """,
+            "progress_animated": f"""
+                QProgressBar {{
+                    border: 1px solid {c['border']};
+                    border-radius: 4px;
+                    background-color: {c['bg_widget']};
+                    text-align: center;
+                }}
+                QProgressBar::chunk {{
+                    background-color: {c['primary']};
+                    border-radius: 3px;
+                    animation: progress_pulse 1.5s infinite;
+                }}
+                @keyframes progress_pulse {{
+                    0% {{ opacity: 1.0; }}
+                    50% {{ opacity: 0.6; }}
+                    100% {{ opacity: 1.0; }}
+                }}
+            """,
         }
         return stylesheets.get(component, "")
 
@@ -764,6 +782,24 @@ class ThemeManager(QObject):
                 }}
                 QSplitter::handle {{
                     background-color: {c['border']};
+                }}
+            """,
+            "progress_animated": f"""
+                QProgressBar {{
+                    border: 1px solid {c['border']};
+                    border-radius: 4px;
+                    background-color: {c['bg_widget']};
+                    text-align: center;
+                }}
+                QProgressBar::chunk {{
+                    background-color: {c['primary']};
+                    border-radius: 3px;
+                    animation: progress_pulse 1.5s infinite;
+                }}
+                @keyframes progress_pulse {{
+                    0% {{ opacity: 1.0; }}
+                    50% {{ opacity: 0.6; }}
+                    100% {{ opacity: 1.0; }}
                 }}
             """,
         }
