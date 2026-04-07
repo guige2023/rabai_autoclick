@@ -597,12 +597,13 @@ class VariablesWidget(QWidget):
         return variables
     
     def set_variables(self, variables: Dict[str, Any]) -> None:
-        self.table.setRowCount(0)
-        for name, value in variables.items():
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            self.table.setItem(row, 0, QTableWidgetItem(name))
-            self.table.setItem(row, 1, QTableWidgetItem(json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)))
+        with batch_updates(self.table):
+            self.table.setRowCount(0)
+            for name, value in variables.items():
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, QTableWidgetItem(name))
+                self.table.setItem(row, 1, QTableWidgetItem(json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)))
 
 
 class LogWidget(QWidget):
