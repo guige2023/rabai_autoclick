@@ -9,13 +9,63 @@ import time
 import threading
 import logging
 from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
 
 from .context import ContextManager
 from .action_loader import ActionLoader
 from .base_action import ActionResult
+from .exceptions import (
+    StepExecutionError,
+    ActionNotFoundError,
+    WorkflowError,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StepStats:
+    """Statistics for a single step execution."""
+    step_id: str = ""
+    step_type: str = ""
+    duration: float = 0.0
+    attempts: int = 1
+    success: bool = False
+    error_message: str = ""
+
+
+@dataclass
+class ExecutionStats:
+    """Statistics for an entire workflow execution."""
+    total_steps: int = 0
+    completed_steps: int = 0
+    failed_steps: int = 0
+    total_duration: float = 0.0
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    step_stats: List[StepStats] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'total_steps': self.total_steps,
+            'completed_steps': self.completed_steps,
+            'failed_steps': self.failed_steps,
+            'total_duration': self.total_duration,
+            'start_time': self.start_time,
+            'end_time': self.end_time,
+            'step_stats': [
+                {
+                    'step_id': s.step_id,
+                    'step_type': s.step_type,
+                    'duration': s.duration,
+                    'attempts': s.attempts,
+                    'success': s.success,
+                    'error_message': s.error_message
+                }
+                for s in self.step_stats
+            ]
+        }
 
 
 class FlowEngine:
@@ -27,21 +77,28 @@ class FlowEngine:
     
     def __init__(self, actions_dir: Optional[str] = None) -> None:
         """Initialize the flow engine.
-        
+
         Args:
             actions_dir: Optional custom actions directory path.
         """
         self.context: ContextManager = ContextManager()
         self.action_loader: ActionLoader = ActionLoader(actions_dir)
         self.action_loader.load_all()
-        
+
         self._workflow: Dict[str, Any] = {}
         self._current_step_index: int = 0
         self._is_running: bool = False
         self._is_paused: bool = False
         self._stop_requested: bool = False
         self._loop_counters: Dict[str, int] = {}
-        
+
+        # Retry configuration
+        self._max_step_retries: int = 3
+        self._step_retry_delay: float = 1.0
+
+        # Statistics
+        self._stats: ExecutionStats = ExecutionStats()
+
         # Callbacks
         self._on_step_start: Optional[Callable[[Dict], None]] = None
         self._on_step_end: Optional[Callable[[Dict, ActionResult], None]] = None
@@ -110,48 +167,57 @@ class FlowEngine:
     
     def run(self) -> bool:
         """Execute the loaded workflow synchronously.
-        
+
         Returns:
             True if workflow completed normally, False if stopped.
         """
         if self._is_running:
             return False
-        
+
         self._is_running = True
         self._stop_requested = False
         self._is_paused = False
         self._current_step_index = 0
-        
+
         steps: List[Dict[str, Any]] = self._workflow.get('steps', [])
-        
+
         if not steps:
             self._is_running = False
             return False
-        
+
+        # Initialize statistics
+        self._stats = ExecutionStats(
+            total_steps=len(steps),
+            start_time=time.time()
+        )
+
         # Build step index map for quick lookup
         step_map: Dict[str, int] = {step['id']: i for i, step in enumerate(steps)}
         current_step: Optional[Dict[str, Any]] = steps[0]
-        
+
         while current_step is not None and not self._stop_requested:
             # Wait while paused
             while self._is_paused and not self._stop_requested:
                 time.sleep(0.1)
-            
+
             if self._stop_requested:
                 break
-            
+
             result: ActionResult = self._execute_step(current_step)
-            
+            self._stats.completed_steps += 1
+
             if not result.success:
+                self._stats.failed_steps += 1
                 if self._on_error:
                     self._on_error(current_step, result.message)
                 break
-            
+
             # Determine next step
             if result.next_step_id is not None:
                 if result.next_step_id in step_map:
                     current_step = steps[step_map[result.next_step_id]]
                 else:
+                    logger.warning(f"Next step ID not found: {result.next_step_id}")
                     break
             else:
                 current_id = current_step['id']
@@ -160,11 +226,19 @@ class FlowEngine:
                     current_step = steps[next_index]
                 else:
                     current_step = None
-        
+
         self._is_running = False
+        self._stats.end_time = time.time()
+        self._stats.total_duration = self._stats.end_time - (self._stats.start_time or 0)
+
+        logger.info(
+            f"Workflow completed: {self._stats.completed_steps}/{self._stats.total_steps} "
+            f"steps in {self._stats.total_duration:.2f}s"
+        )
+
         if self._on_workflow_end:
             self._on_workflow_end(not self._stop_requested)
-        
+
         return not self._stop_requested
     
     def run_async(
@@ -189,68 +263,101 @@ class FlowEngine:
         return thread
     
     def _execute_step(self, step: Dict[str, Any]) -> ActionResult:
-        """Execute a single workflow step.
-        
+        """Execute a single workflow step with retry support.
+
         Args:
             step: Step dictionary with type and parameters.
-            
+
         Returns:
             ActionResult from the executed action.
         """
         step_type: str = step.get('type', '')
+        step_id: str = step.get('id', '')
         start_time: float = time.time()
-        
+
+        # Create step stats entry
+        step_stats = StepStats(step_id=step_id, step_type=step_type)
+
         if self._on_step_start:
             self._on_step_start(step)
-        
+
         # Pre-delay
         pre_delay: float = step.get('pre_delay', 0)
         if pre_delay > 0:
             time.sleep(pre_delay)
-        
+
         # Get action class
         action_class = self.action_loader.get_action(step_type)
-        
+
         if not action_class:
+            error_msg = f"未找到动作类型: {step_type}"
+            step_stats.error_message = error_msg
+            self._stats.step_stats.append(step_stats)
             return ActionResult(
                 success=False,
-                message=f"未找到动作类型: {step_type}"
+                message=error_msg
             )
-        
-        try:
-            action = action_class()
-            params: Dict[str, Any] = step.copy()
-            # Remove metadata keys
-            for key in ('type', 'id', 'next', 'pre_delay', 'post_delay'):
-                params.pop(key, None)
-            
-            # Resolve variable references in params
-            params = self.context.resolve_value(params)
-            
-            result: ActionResult = action.execute(self.context, params)
-            
-            result.duration = time.time() - start_time
-            
-            # Store output to context variable if specified
-            if result.success and 'output_var' in step and result.data is not None:
-                self.context.set(step['output_var'], result.data)
-            
-            # Post-delay
-            post_delay: float = step.get('post_delay', 0)
-            if post_delay > 0:
-                time.sleep(post_delay)
-            
-            if self._on_step_end:
-                self._on_step_end(step, result)
-            
-            return result
-        
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"执行步骤失败: {str(e)}",
-                duration=time.time() - start_time
-            )
+
+        # Retry loop
+        max_retries = step.get('retries', self._max_step_retries)
+        retry_delay = step.get('retry_delay', self._step_retry_delay)
+        last_result: ActionResult | None = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                action = action_class()
+                params: Dict[str, Any] = step.copy()
+                # Remove metadata keys
+                for key in ('type', 'id', 'next', 'pre_delay', 'post_delay', 'retries', 'retry_delay'):
+                    params.pop(key, None)
+
+                # Resolve variable references in params
+                params = self.context.resolve_value(params)
+
+                result: ActionResult = action.execute(self.context, params)
+                last_result = result
+                result.duration = time.time() - start_time
+
+                # Update step stats
+                step_stats.duration = result.duration
+                step_stats.attempts = attempt + 1
+                step_stats.success = result.success
+                step_stats.error_message = result.message if not result.success else ""
+
+                # Store output to context variable if specified
+                if result.success and 'output_var' in step and result.data is not None:
+                    self.context.set(step['output_var'], result.data)
+
+                # Post-delay
+                post_delay: float = step.get('post_delay', 0)
+                if post_delay > 0:
+                    time.sleep(post_delay)
+
+                if self._on_step_end:
+                    self._on_step_end(step, result)
+
+                # Break on success or if retries exhausted
+                if result.success or attempt == max_retries:
+                    self._stats.step_stats.append(step_stats)
+                    return result
+
+            except Exception as e:
+                last_result = ActionResult(
+                    success=False,
+                    message=f"执行步骤失败: {str(e)}",
+                    duration=time.time() - start_time
+                )
+                step_stats.error_message = str(e)
+                logger.warning(
+                    f"Step '{step_id}' attempt {attempt + 1} failed: {e}"
+                )
+
+            # Wait before retry
+            if attempt < max_retries:
+                time.sleep(retry_delay)
+
+        self._stats.step_stats.append(step_stats)
+        return last_result or ActionResult(success=False, message="执行步骤失败")
     
     def stop(self) -> None:
         """Stop the currently running workflow."""
@@ -311,8 +418,34 @@ class FlowEngine:
     
     def get_action_info(self) -> Dict[str, Dict[str, Any]]:
         """Get information about all registered actions.
-        
+
         Returns:
             Dictionary mapping action types to their metadata.
         """
         return self.action_loader.get_action_info()
+
+    def get_execution_stats(self) -> ExecutionStats:
+        """Get execution statistics for the last run.
+
+        Returns:
+            ExecutionStats object with execution details.
+        """
+        return self._stats
+
+    def set_retry_config(
+        self,
+        max_retries: int = 3,
+        retry_delay: float = 1.0
+    ) -> None:
+        """Configure default retry behavior for steps.
+
+        Args:
+            max_retries: Maximum number of retry attempts per step.
+            retry_delay: Delay between retries in seconds.
+        """
+        self._max_step_retries = max_retries
+        self._step_retry_delay = retry_delay
+
+    def reset_stats(self) -> None:
+        """Reset execution statistics."""
+        self._stats = ExecutionStats()
