@@ -1,294 +1,532 @@
-"""Typing action module for RabAI AutoClick.
+"""typing action extensions for rabai_autoclick.
 
-Provides typing utilities:
-- GetTypeHintsAction: Get type hints
-- GetAnnotationsAction: Get annotations
-- IsTypeAction: Check if value is of type
-- CastAction: Type cast
-- NewTypeAction: Create new type
-- GenericAliasAction: Generic alias operations
-- UnionCheckAction: Check union types
-- OptionalCheckAction: Check optional types
-- LiteralCheckAction: Literal type checking
-- FinalCheckAction: Final type checking
+Provides utilities for type checking, type hints manipulation,
+runtime type validation, and generic type operations.
 """
 
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union, get_type_hints, get_origin, get_args
+from __future__ import annotations
+
 import sys
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Generic,
+    Literal,
+    Optional,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
-_parent_dir = __import__('os').path.dirname(__import__('os').path.dirname(__import__('os').path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class TypingGetTypeHintsAction(BaseAction):
-    """Get type hints."""
-    action_type = "typing_get_type_hints"
-    display_name = "获取类型提示"
-    description = "获取函数或类的类型提示"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute get type hints."""
-        obj = params.get('object', None)
-        output_var = params.get('output_var', 'type_hints_result')
-
-        try:
-            if obj is None:
-                return ActionResult(success=False, message="object is required")
-            
-            resolved_obj = context.resolve_value(obj) if isinstance(obj, str) else obj
-            hints = get_type_hints(resolved_obj)
-            
-            hints_str = {k: str(v) for k, v in hints.items()}
-            context.set_variable(output_var, hints_str)
-            return ActionResult(success=True, message=f"got {len(hints)} type hints")
-        except Exception as e:
-            return ActionResult(success=False, message=f"get_type_hints failed: {e}")
-
-
-class TypingGetAnnotationsAction(BaseAction):
-    """Get annotations."""
-    action_type = "typing_get_annotations"
-    display_name = "获取注解"
-    description = "获取对象的注解"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute get annotations."""
-        obj = params.get('object', None)
-        output_var = params.get('output_var', 'annotations_result')
-
-        try:
-            if obj is None:
-                return ActionResult(success=False, message="object is required")
-            
-            resolved_obj = context.resolve_value(obj) if isinstance(obj, str) else obj
-            annotations = getattr(resolved_obj, '__annotations__', {})
-            
-            annotations_str = {k: str(v) for k, v in annotations.items()}
-            context.set_variable(output_var, annotations_str)
-            return ActionResult(success=True, message=f"got {len(annotations)} annotations")
-        except Exception as e:
-            return ActionResult(success=False, message=f"get_annotations failed: {e}")
-
-
-class TypingIsTypeAction(BaseAction):
-    """Check if value is of type."""
-    action_type = "typing_is_type"
-    display_name = "类型检查"
-    description = "检查值是否是指定类型"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute is type check."""
-        value = params.get('value', None)
-        type_str = params.get('type', 'Any')
-        output_var = params.get('output_var', 'is_type_result')
-
-        try:
-            resolved_value = context.resolve_value(value) if isinstance(value, str) else value
-            resolved_type_str = context.resolve_value(type_str) if isinstance(type_str, str) else type_str
-            
-            target_type = eval(resolved_type_str, {"__builtins__": __builtins__, "typing": __import__('typing')}, {})
-            result = isinstance(resolved_value, target_type)
-            context.set_variable(output_var, result)
-            return ActionResult(success=True, message=f"is {resolved_type_str}: {result}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"is_type failed: {e}")
+__all__ = [
+    "is_type",
+    "is_subtype",
+    "is_union",
+    "is_optional",
+    "is_list",
+    "is_dict",
+    "is_tuple",
+    "is_callable",
+    "is_literal",
+    "is_generic",
+    "get_type_vars",
+    "resolve_type",
+    "type_name",
+    "type_args",
+    "cast",
+    "safe_cast",
+    "NoneType",
+    "AnyType",
+    "IntType",
+    "StrType",
+    "FloatType",
+    "BoolType",
+    "ListType",
+    "DictType",
+    "TupleType",
+    "UnionType",
+    "OptionalType",
+    "CallableType",
+    "TypedDict",
+    "NamedTuple",
+    "Protocol",
+    "runtime_type",
+    "validate_type",
+    "type_guard",
+    "overload",
+    "TypeChecker",
+    "TypeBuilder",
+    "TypeCache",
+]
 
 
-class TypingCastAction(BaseAction):
-    """Type cast."""
-    action_type = "typing_cast"
-    display_name = "类型转换"
-    description = "类型转换"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cast."""
-        type_str = params.get('type', 'Any')
-        value = params.get('value', None)
-        output_var = params.get('output_var', 'cast_result')
-
-        try:
-            resolved_type_str = context.resolve_value(type_str) if isinstance(type_str, str) else type_str
-            resolved_value = context.resolve_value(value) if isinstance(value, str) else value
-            
-            from typing import cast
-            target_type = eval(resolved_type_str, {"__builtins__": __builtins__, "typing": __import__('typing')}, {})
-            result = cast(target_type, resolved_value)
-            context.set_variable(output_var, result)
-            return ActionResult(success=True, message=f"cast to {resolved_type_str}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"cast failed: {e}")
+NoneType = type(None)
+AnyType = object
+IntType = int
+StrType = str
+FloatType = float
+BoolType = bool
 
 
-class TypingNewTypeAction(BaseAction):
-    """Create new type."""
-    action_type = "typing_new_type"
-    display_name = "创建新类型"
-    description = "创建新的类型别名"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute new type."""
-        name = params.get('name', 'NewType')
-        type_str = params.get('type', 'Any')
-        output_var = params.get('output_var', 'new_type_result')
-
-        try:
-            resolved_name = context.resolve_value(name) if isinstance(name, str) else name
-            resolved_type_str = context.resolve_value(type_str) if isinstance(type_str, str) else type_str
-            
-            from typing import NewType
-            base_type = eval(resolved_type_str, {"__builtins__": __builtins__, "typing": __import__('typing')}, {})
-            new_type = NewType(resolved_name, base_type)
-            
-            context.set_variable(output_var, new_type)
-            return ActionResult(success=True, message=f"created NewType: {resolved_name}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"new_type failed: {e}")
+ListType = TypeVar("ListType")
+DictType = TypeVar("DictType")
+TupleType = TypeVar("TupleType")
+UnionType = TypeVar("UnionType")
+OptionalType = TypeVar("OptionalType")
+CallableType = TypeVar("CallableType")
 
 
-class TypingGenericAliasAction(BaseAction):
-    """Generic alias operations."""
-    action_type = "typing_generic_alias"
-    display_name = "泛型别名"
-    description = "处理泛型别名"
+def type_name(tp: Any) -> str:
+    """Get a human-readable name for a type.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute generic alias."""
-        type_str = params.get('type', 'List[int]')
-        output_var = params.get('output_var', 'generic_alias_result')
+    Args:
+        tp: Type to get name for.
 
-        try:
-            resolved_type_str = context.resolve_value(type_str) if isinstance(type_str, str) else type_str
-            
-            generic_type = eval(resolved_type_str, {"__builtins__": __builtins__, "typing": __import__('typing')}, {})
-            origin = get_origin(generic_type)
-            args = get_args(generic_type)
-            
-            context.set_variable(output_var, {
-                "origin": str(origin) if origin else None,
-                "args": [str(a) for a in args] if args else [],
-                "str": resolved_type_str
-            })
-            return ActionResult(success=True, message=f"generic alias: {resolved_type_str}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"generic_alias failed: {e}")
+    Returns:
+        String name of the type.
+    """
+    origin = get_origin(tp)
+    if origin is None:
+        name = getattr(tp, "__name__", str(tp))
+        return name
+
+    args = get_args(tp)
+    if args:
+        arg_names = ", ".join(type_name(a) for a in args)
+        return f"{origin.__name__}[{arg_names}]"
+
+    return origin.__name__
 
 
-class TypingUnionCheckAction(BaseAction):
-    """Check union types."""
-    action_type = "typing_union_check"
-    display_name = "联合类型检查"
-    description = "检查联合类型"
+def is_type(obj: Any, tp: Any) -> bool:
+    """Check if object is an instance of type or generic type.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute union check."""
-        value = params.get('value', None)
-        union_str = params.get('union', 'Union[str, int]')
-        output_var = params.get('output_var', 'union_check_result')
+    Args:
+        obj: Object to check.
+        tp: Type to check against.
 
-        try:
-            resolved_value = context.resolve_value(value) if isinstance(value, str) else value
-            resolved_union_str = context.resolve_value(union_str) if isinstance(union_str, str) else union_str
-            
-            from typing import Union, get_args, get_origin
-            union_type = eval(resolved_union_str, {"__builtins__": __builtins__, "typing": __import__('typing')}, {})
-            args = get_args(union_type)
-            
-            result = isinstance(resolved_value, args) if args else False
-            context.set_variable(output_var, {
-                "is_union_member": result,
-                "union_types": [str(a) for a in args] if args else []
-            })
-            return ActionResult(success=True, message=f"union check: {result}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"union_check failed: {e}")
+    Returns:
+        True if obj is instance of tp.
+    """
+    if tp is AnyType:
+        return True
+
+    origin = get_origin(tp)
+    if origin is None:
+        return isinstance(obj, tp)
+
+    return isinstance(obj, origin)
 
 
-class TypingOptionalCheckAction(BaseAction):
-    """Check optional types."""
-    action_type = "typing_optional_check"
-    display_name = "可选类型检查"
-    description = "检查可选类型"
+def is_subtype(tp1: Any, tp2: Any) -> bool:
+    """Check if tp1 is a subtype of tp2.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute optional check."""
-        value = params.get('value', None)
-        optional_str = params.get('optional', 'Optional[str]')
-        output_var = params.get('output_var', 'optional_check_result')
+    Args:
+        tp1: Potential subtype.
+        tp2: Potential supertype.
 
-        try:
-            resolved_value = context.resolve_value(value) if isinstance(value, str) else value
-            resolved_optional_str = context.resolve_value(optional_str) if isinstance(optional_str, str) else optional_str
-            
-            from typing import Optional, get_args
-            optional_type = eval(resolved_optional_str, {"__builtins__": __builtins__, "typing": __import__('typing')}, {})
-            args = get_args(optional_type)
-            
-            is_none = resolved_value is None
-            is_valid = is_none or isinstance(resolved_value, args)
-            
-            context.set_variable(output_var, {
-                "is_optional_valid": is_valid,
-                "is_none": is_none,
-                "inner_type": str(args[0]) if args else None
-            })
-            return ActionResult(success=True, message=f"optional check: {is_valid}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"optional_check failed: {e}")
+    Returns:
+        True if tp1 is subtype of tp2.
+    """
+    try:
+        from typing import get_origin
+
+        o1, o2 = get_origin(tp1), get_origin(tp2)
+        if o1 is None and o2 is None:
+            return issubclass(tp1, tp2)
+        if o1 is not None and o2 is not None:
+            return issubclass(o1, o2)
+        return False
+    except Exception:
+        return False
 
 
-class TypingLiteralCheckAction(BaseAction):
-    """Literal type checking."""
-    action_type = "typing_literal_check"
-    display_name = "字面量检查"
-    description = "检查字面量类型"
+def is_union(tp: Any) -> bool:
+    """Check if type is a Union type.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute literal check."""
-        value = params.get('value', None)
-        literal_str = params.get('literal', 'Literal["a", "b", "c"]')
-        output_var = params.get('output_var', 'literal_check_result')
+    Args:
+        tp: Type to check.
 
-        try:
-            resolved_value = context.resolve_value(value) if isinstance(value, str) else value
-            resolved_literal_str = context.resolve_value(literal_str) if isinstance(literal_str, str) else literal_str
-            
-            from typing import Literal, get_args
-            literal_type = eval(resolved_literal_str, {"__builtins__": __builtins__, "typing": __import__('typing')}, {})
-            args = get_args(literal_type)
-            
-            result = resolved_value in args if args else False
-            context.set_variable(output_var, {
-                "is_literal_match": result,
-                "literal_values": list(args) if args else []
-            })
-            return ActionResult(success=True, message=f"literal check: {result}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"literal_check failed: {e}")
+    Returns:
+        True if tp is Union.
+    """
+    return get_origin(tp) is Union
 
 
-class TypingFinalCheckAction(BaseAction):
-    """Final type checking."""
-    action_type = "typing_final_check"
-    display_name = "Final类型检查"
-    description = "检查Final类型"
+def is_optional(tp: Any) -> bool:
+    """Check if type is Optional (Union with None).
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute final check."""
-        obj = params.get('object', None)
-        output_var = params.get('output_var', 'final_check_result')
+    Args:
+        tp: Type to check.
 
-        try:
-            resolved_obj = context.resolve_value(obj) if isinstance(obj, str) else obj
-            
-            from typing import Final, get_type_hints
-            hints = get_type_hints(resolved_obj) if hasattr(resolved_obj, '__annotations__') else {}
-            final_attrs = {k: v for k, v in hints.items() if hasattr(v, '__origin__') and str(v).__contains__('Final')}
-            
-            context.set_variable(output_var, {
-                "has_final": len(final_attrs) > 0,
-                "final_attrs": list(final_attrs.keys())
-            })
-            return ActionResult(success=True, message=f"final check: {len(final_attrs)} final attrs")
-        except Exception as e:
-            return ActionResult(success=False, message=f"final_check failed: {e}")
+    Returns:
+        True if tp is Optional.
+    """
+    if get_origin(tp) is Union:
+        args = get_args(tp)
+        return NoneType in args
+    return False
+
+
+def is_list(tp: Any) -> bool:
+    """Check if type is List or list.
+
+    Args:
+        tp: Type to check.
+
+    Returns:
+        True if tp is a list type.
+    """
+    origin = get_origin(tp)
+    return origin in (list, List) or tp is list
+
+
+def is_dict(tp: Any) -> bool:
+    """Check if type is Dict or dict.
+
+    Args:
+        tp: Type to check.
+
+    Returns:
+        True if tp is a dict type.
+    """
+    origin = get_origin(tp)
+    return origin in (dict, Dict) or tp is dict
+
+
+def is_tuple(tp: Any) -> bool:
+    """Check if type is Tuple or tuple.
+
+    Args:
+        tp: Type to check.
+
+    Returns:
+        True if tp is a tuple type.
+    """
+    origin = get_origin(tp)
+    return origin in (tuple, Tuple) or tp is tuple
+
+
+def is_callable(tp: Any) -> bool:
+    """Check if type is Callable.
+
+    Args:
+        tp: Type to check.
+
+    Returns:
+        True if tp is callable.
+    """
+    return callable(tp) or get_origin(tp) is Callable
+
+
+def is_literal(tp: Any) -> bool:
+    """Check if type is Literal.
+
+    Args:
+        tp: Type to check.
+
+    Returns:
+        True if tp is Literal.
+    """
+    return get_origin(tp) is Literal
+
+
+def is_generic(tp: Any) -> bool:
+    """Check if type is a generic type with parameters.
+
+    Args:
+        tp: Type to check.
+
+    Returns:
+        True if tp has type parameters.
+    """
+    try:
+        from typing import _GenericAlias
+
+        return isinstance(tp, _GenericAlias) and bool(get_args(tp))
+    except Exception:
+        return hasattr(tp, "__parameters__") and len(getattr(tp, "__parameters__", [])) > 0
+
+
+def get_type_vars(tp: Any) -> tuple:
+    """Get type variables from a generic type.
+
+    Args:
+        tp: Generic type.
+
+    Returns:
+        Tuple of type variables.
+    """
+    try:
+        return getattr(tp, "__parameters__", ())
+    except Exception:
+        return ()
+
+
+def resolve_type(tp: Any, type_vars: dict[Any, Any]) -> Any:
+    """Resolve a generic type by substituting type variables.
+
+    Args:
+        tp: Generic type to resolve.
+        type_vars: Mapping of type variables to concrete types.
+
+    Returns:
+        Resolved type.
+    """
+    args = get_args(tp)
+    if not args:
+        return tp
+
+    resolved_args = tuple(type_vars.get(arg, arg) for arg in args)
+    origin = get_origin(tp)
+    if origin is not None:
+        return origin[resolved_args]
+    return tp
+
+
+def type_args(tp: Any) -> tuple:
+    """Get type arguments from a generic type.
+
+    Args:
+        tp: Generic type.
+
+    Returns:
+        Tuple of type arguments.
+    """
+    return get_args(tp)
+
+
+def safe_cast(tp: Any, value: Any, default: Any = None) -> Any:
+    """Safely cast a value to a type, returning default on failure.
+
+    Args:
+        tp: Target type.
+        value: Value to cast.
+        default: Default value if cast fails.
+
+    Returns:
+        Cast value or default.
+    """
+    try:
+        if not is_type(value, tp):
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def runtime_type(obj: Any) -> str:
+    """Get runtime type name of an object.
+
+    Args:
+        obj: Object to inspect.
+
+    Returns:
+        Type name string.
+    """
+    return type(obj).__name__
+
+
+def validate_type(value: Any, expected_type: Any) -> tuple[bool, str | None]:
+    """Validate a value against an expected type.
+
+    Args:
+        value: Value to validate.
+        expected_type: Type to validate against.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    try:
+        if expected_type is AnyType:
+            return True, None
+
+        origin = get_origin(expected_type)
+        if origin is None:
+            if not isinstance(value, expected_type):
+                return False, f"Expected {type_name(expected_type)}, got {runtime_type(value)}"
+            return True, None
+
+        if origin in (list, List):
+            if not isinstance(value, list):
+                return False, f"Expected list, got {runtime_type(value)}"
+            args = get_args(expected_type)
+            if args:
+                for i, item in enumerate(value):
+                    valid, err = validate_type(item, args[0])
+                    if not valid:
+                        return False, f"Item[{i}]: {err}"
+            return True, None
+
+        if origin in (dict, Dict):
+            if not isinstance(value, dict):
+                return False, f"Expected dict, got {runtime_type(value)}"
+            args = get_args(expected_type)
+            if args and len(args) == 2:
+                for k, v in value.items():
+                    valid_k, err_k = validate_type(k, args[0])
+                    if not valid_k:
+                        return False, f"Key {k}: {err_k}"
+                    valid_v, err_v = validate_type(v, args[1])
+                    if not valid_v:
+                        return False, f"Value[{k}]: {err_v}"
+            return True, None
+
+        if not isinstance(value, origin):
+            return False, f"Expected {type_name(expected_type)}, got {runtime_type(value)}"
+
+        return True, None
+
+    except Exception as e:
+        return False, f"Validation error: {e}"
+
+
+def type_guard(tp: Any) -> Callable[[Callable], Callable]:
+    """Decorator to add runtime type checking to a function.
+
+    Args:
+        tp: Expected return type.
+
+    Returns:
+        Decorator function.
+    """
+    def decorator(func: Callable) -> Callable:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            result = func(*args, **kwargs)
+            valid, err = validate_type(result, tp)
+            if not valid:
+                raise TypeError(f"{func.__name__} return type error: {err}")
+            return result
+        wrapper.__name__ = func.__name__
+        wrapper.__doc__ = func.__doc__
+        return wrapper
+    return decorator
+
+
+class TypedDict(dict):
+    """A dict with type checking on keys and values.
+
+    Example:
+        class MyDict(TypedDict):
+            __key_types__ = {"name": str, "age": int}
+    """
+
+    __key_types__: dict[str, type] = {}
+
+    def __init__(self, data: dict | None = None, **kwargs: Any) -> None:
+        super().__init__()
+        if data:
+            self._validate_and_set(data)
+        self._validate_and_set(kwargs)
+
+    def _validate_and_set(self, data: dict) -> None:
+        for key, value in data.items():
+            expected_type = self.__key_types__.get(key, Any)
+            if not isinstance(value, expected_type) and expected_type is not Any:
+                raise TypeError(f"Key '{key}' expects {expected_type}, got {type(value)}")
+            super().__setitem__(key, value)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        expected_type = self.__key_types__.get(key, Any)
+        if not isinstance(value, expected_type) and expected_type is not Any:
+            raise TypeError(f"Key '{key}' expects {expected_type}, got {type(value)}")
+        super().__setitem__(key, value)
+
+
+class TypeChecker:
+    """Runtime type checker with caching."""
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple, bool] = {}
+
+    def check(self, value: Any, tp: Any) -> bool:
+        """Check if value matches type.
+
+        Args:
+            value: Value to check.
+            tp: Type to check against.
+
+        Returns:
+            True if valid.
+        """
+        cache_key = (id(value), id(tp))
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        result = is_type(value, tp)
+        self._cache[cache_key] = result
+        return result
+
+    def clear_cache(self) -> None:
+        """Clear the type cache."""
+        self._cache.clear()
+
+
+class TypeBuilder(Generic[T]):
+    """Builder for constructing complex types programmatically."""
+
+    def __init__(self, base_type: type[T]) -> None:
+        self._base = base_type
+        self._type_args: list[type] = []
+
+    def add_arg(self, tp: type) -> TypeBuilder[T]:
+        """Add a type argument.
+
+        Args:
+            tp: Type argument to add.
+
+        Returns:
+            Self for chaining.
+        """
+        self._type_args.append(tp)
+        return self
+
+    def build(self) -> Any:
+        """Build the final type.
+
+        Returns:
+            Constructed type.
+        """
+        if not self._type_args:
+            return self._base
+        return self._base[tuple(self._type_args)]
+
+
+class TypeCache:
+    """Cache for type-related computations."""
+
+    def __init__(self) -> None:
+        self._type_names: dict[Any, str] = {}
+        self._type_hints: dict[Callable, dict[str, type]] = {}
+
+    def get_type_name(self, tp: Any) -> str:
+        """Get cached type name.
+
+        Args:
+            tp: Type to name.
+
+        Returns:
+            Cached name.
+        """
+        if tp not in self._type_names:
+            self._type_names[tp] = type_name(tp)
+        return self._type_names[tp]
+
+    def get_type_hints(self, func: Callable) -> dict[str, type]:
+        """Get cached type hints for a function.
+
+        Args:
+            func: Function to get hints for.
+
+        Returns:
+            Dict of parameter names to types.
+        """
+        if func not in self._type_hints:
+            try:
+                self._type_hints[func] = get_type_hints(func)
+            except Exception:
+                self._type_hints[func] = {}
+        return self._type_hints[func]
