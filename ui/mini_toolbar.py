@@ -197,6 +197,55 @@ class MiniToolbar(QWidget):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color};")
 
+    def set_running(self, is_running: bool) -> None:
+        """Update toolbar appearance for running state.
+
+        Args:
+            is_running: True if workflow is running, False otherwise.
+        """
+        if is_running:
+            self.run_btn.setText("⏳ 运行中")
+            self.run_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF9800;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                    font-size: 12px;
+                    min-width: 60px;
+                    animation: pulse 1s infinite;
+                }
+                @keyframes pulse {
+                    0% { opacity: 1.0; }
+                    50% { opacity: 0.7; }
+                    100% { opacity: 1.0; }
+                }
+            """)
+        else:
+            self.run_btn.setText("▶ 运行")
+            colors = ThemeColors.DARK
+            self.run_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {colors['success']};
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                    font-size: 12px;
+                    min-width: 60px;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {colors['success_hover']};
+                    transform: translateY(-1px);
+                }}
+            """)
+            color: CSS color string for text color.
+        """
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color: {color};")
+
     def set_region(self, x: int, y: int, w: int, h: int) -> None:
         """Set the region button to show selected region.
 
