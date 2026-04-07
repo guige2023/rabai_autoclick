@@ -1,0 +1,117 @@
+{
+  "name": "Customer Customer Journey Mapping Workflow",
+  "description": "Automate customer journey mapping",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "journeys_to_map": 48,
+    "current_journey": 0,
+    "mapped_journeys": 0,
+    "failed_mapping": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "journey_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize journey counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open journey mapping tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "journey_mapping_loop",
+      "count": "{{journeys_to_map}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start journey mapping loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select journey for mapping"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for mapping"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/journey_mapping_{{journey_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture mapping screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "journey_counter",
+      "value": "{{journey_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment journey counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{journey_counter < journeys_to_map}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more journeys"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next journey"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/customer_customer_journey_mapping_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
