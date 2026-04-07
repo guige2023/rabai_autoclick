@@ -1,0 +1,87 @@
+{
+  "name": "File Automation Workflow",
+  "description": "Automates file operations like renaming and organizing",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "source_dir": "./downloads",
+    "dest_dir": "./organized",
+    "file_pattern": "*.txt"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "screenshot",
+      "save_path": "./screenshots/file_organizer_start.png",
+      "pre_delay": 0.5,
+      "comment": "Capture start state"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open file manager"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for file manager to load"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.2,
+      "comment": "Select all files"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "keys": ["ctrl", "c"],
+      "pre_delay": 0.2,
+      "comment": "Copy selected files"
+    },
+    {
+      "id": 6,
+      "type": "click",
+      "x": 400,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to destination folder"
+    },
+    {
+      "id": 7,
+      "type": "key_press",
+      "keys": ["ctrl", "v"],
+      "pre_delay": 0.5,
+      "comment": "Paste files"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.5,
+      "comment": "Wait for paste operation"
+    },
+    {
+      "id": 9,
+      "type": "screenshot",
+      "save_path": "./screenshots/file_organizer_end.png",
+      "pre_delay": 0.5,
+      "comment": "Capture end state"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

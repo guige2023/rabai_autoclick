@@ -1,0 +1,115 @@
+{
+  "name": "Batch Processing Workflow",
+  "description": "Process multiple items in batch with progress tracking",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "batch_size": 10,
+    "processed_count": 0,
+    "error_count": 0,
+    "max_errors": 3
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "batch_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize batch counter"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "batch_loop",
+      "count": "{{batch_size}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start batch processing loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 200,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.5,
+      "comment": "Click on current item"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 0.3,
+      "pre_delay": 0.2,
+      "comment": "Brief pause"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "enter",
+      "pre_delay": 0.5,
+      "comment": "Process item"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for processing"
+    },
+    {
+      "id": 7,
+      "type": "set_variable",
+      "name": "batch_counter",
+      "value": "{{batch_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment processed count"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/batch_progress_{{batch_counter}}.png",
+      "pre_delay": 0.3,
+      "comment": "Capture progress screenshot"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "key": "page_down",
+      "pre_delay": 0.3,
+      "comment": "Move to next item"
+    },
+    {
+      "id": 10,
+      "type": "condition",
+      "condition": "{{batch_counter < batch_size}}",
+      "true_next": 11,
+      "false_next": 12,
+      "pre_delay": 0.1,
+      "comment": "Check if more items to process"
+    },
+    {
+      "id": 11,
+      "type": "goto",
+      "step_id": 3,
+      "pre_delay": 0.2,
+      "comment": "Continue to next item"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay after batch complete"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}

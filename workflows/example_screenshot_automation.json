@@ -1,0 +1,106 @@
+{
+  "name": "Screenshot Capture Workflow",
+  "description": "Automated screenshot capture with annotations and naming",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "screenshot_prefix": "capture",
+    "capture_count": 5,
+    "interval_seconds": 3
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize counter"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "screenshot_loop",
+      "count": "{{capture_count}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start screenshot capture loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 10,
+      "y": 10,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.2,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "keys": ["ctrl", "l"],
+      "pre_delay": 0.1,
+      "comment": "Select address bar content"
+    },
+    {
+      "id": 5,
+      "type": "type_text",
+      "text": "about:blank",
+      "enter_after": true,
+      "pre_delay": 0.5,
+      "comment": "Navigate to blank page for clean capture"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for page to load"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/{{screenshot_prefix}}_{{counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Take screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "counter",
+      "value": "{{counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{counter < capture_count}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more captures needed"
+    },
+    {
+      "id": 10,
+      "type": "delay",
+      "seconds": "{{interval_seconds}}",
+      "pre_delay": 0.3,
+      "comment": "Wait before next capture"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay after all captures complete"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": false
+  }
+}

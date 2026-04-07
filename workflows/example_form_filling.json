@@ -1,0 +1,199 @@
+{
+  "name": "Form Auto-Fill Workflow",
+  "description": "Automated web form filling with dynamic data",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "first_name": "John",
+    "last_name": "Doe",
+    "email": "john.doe@example.com",
+    "phone": "123-456-7890",
+    "company": "Example Corp",
+    "address": "123 Main Street",
+    "city": "New York",
+    "state": "NY",
+    "zip_code": "10001",
+    "country": "United States"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "screenshot",
+      "save_path": "./screenshots/form_start.png",
+      "pre_delay": 1.0,
+      "comment": "Capture form start state"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 300,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click first name field"
+    },
+    {
+      "id": 3,
+      "type": "type_text",
+      "text": "{{first_name}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter first name"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to last name field"
+    },
+    {
+      "id": 5,
+      "type": "type_text",
+      "text": "{{last_name}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter last name"
+    },
+    {
+      "id": 6,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to email field"
+    },
+    {
+      "id": 7,
+      "type": "type_text",
+      "text": "{{email}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter email"
+    },
+    {
+      "id": 8,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to phone field"
+    },
+    {
+      "id": 9,
+      "type": "type_text",
+      "text": "{{phone}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter phone"
+    },
+    {
+      "id": 10,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to company field"
+    },
+    {
+      "id": 11,
+      "type": "type_text",
+      "text": "{{company}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter company"
+    },
+    {
+      "id": 12,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to address field"
+    },
+    {
+      "id": 13,
+      "type": "type_text",
+      "text": "{{address}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter address"
+    },
+    {
+      "id": 14,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to city field"
+    },
+    {
+      "id": 15,
+      "type": "type_text",
+      "text": "{{city}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter city"
+    },
+    {
+      "id": 16,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to state dropdown"
+    },
+    {
+      "id": 17,
+      "type": "type_text",
+      "text": "{{state}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter state"
+    },
+    {
+      "id": 18,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to zip code field"
+    },
+    {
+      "id": 19,
+      "type": "type_text",
+      "text": "{{zip_code}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter zip code"
+    },
+    {
+      "id": 20,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to country field"
+    },
+    {
+      "id": 21,
+      "type": "type_text",
+      "text": "{{country}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter country"
+    },
+    {
+      "id": 22,
+      "type": "screenshot",
+      "save_path": "./screenshots/form_filled.png",
+      "pre_delay": 0.5,
+      "comment": "Capture filled form"
+    },
+    {
+      "id": 23,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
