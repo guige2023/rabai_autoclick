@@ -127,11 +127,13 @@ class IntervalTimer:
     def _run(self) -> None:
         """Main timer loop."""
         while not self._stop_event.is_set():
+            self._stop_event.wait(self.interval)
+            if self._stop_event.is_set():
+                break
             try:
                 self.callback()
             except Exception:
                 pass
-            self._stop_event.wait(self.interval)
 
     @property
     def is_running(self) -> bool:
@@ -231,7 +233,6 @@ class Debouncer:
 
     def debounce(self, func: Callable[..., T]) -> Callable[..., Optional[T]]:
         """Decorator to debounce function calls."""
-        @property
         def wrapper(*args: Any, **kwargs: Any) -> Optional[T]:
             with self._lock:
                 if self._timer:
