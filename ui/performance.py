@@ -285,3 +285,66 @@ def cached_signal(sender: QObject, signal_name: str, timeout_ms: int = 100):
         throttler.throttle(lambda: signal.emit(*args, **kwargs))
 
     return throttler_emit
+
+
+class RateLimiter:
+    """Rate limiter to control the frequency of function calls.
+
+    Useful for limiting user input handling, search queries, etc.
+    """
+
+    def __init__(self, max_calls: int = 1, time_window_ms: int = 1000) -> None:
+        """Initialize rate limiter.
+
+        Args:
+            max_calls: Maximum number of calls allowed.
+            time_window_ms: Time window in milliseconds.
+        """
+        self._max_calls = max_calls
+        self._time_window_ms = time_window_ms
+        self._calls: list = []
+        self._lock = threading.Lock()
+
+    def is_allowed(self) -> bool:
+        """Check if a new call is allowed under the rate limit.
+
+        Returns:
+            True if call is allowed, False otherwise.
+        """
+        import time
+        with self._lock:
+            now = time.time() * 1000
+            # Remove old calls outside the time window
+            self._calls = [t for t in self._calls if now - t < self._time_window_ms]
+
+            if len(self._calls) < self._max_calls:
+                self._calls.append(now)
+                return True
+            return False
+
+    def reset(self) -> None:
+        """Reset the rate limiter."""
+        with self._lock:
+            self._calls = []
+
+
+def throttle_calls(max_calls: int = 1, time_window_ms: int = 1000):
+    """Decorator to throttle function calls based on rate limit.
+
+    Args:
+        max_calls: Maximum number of calls allowed.
+        time_window_ms: Time window in milliseconds.
+
+    Returns:
+        Decorator function.
+    """
+    limiter = RateLimiter(max_calls, time_window_ms)
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if limiter.is_allowed():
+                return func(*args, **kwargs)
+            return None
+        return wrapper
+    return decorator
