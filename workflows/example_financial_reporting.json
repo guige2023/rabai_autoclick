@@ -1,0 +1,153 @@
+{
+  "name": "Financial Reporting Workflow",
+  "description": "Automate financial report generation and distribution",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "report_period": "Q1 2024",
+    "departments": ["sales", "marketing", "operations"],
+    "current_dept": 0,
+    "report_types": ["revenue", "expenses", "profit"]
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "dept_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize department index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "dept_loop",
+      "count": 3,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start department loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open financial system"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click report section"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for section"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 300,
+      "y": 250,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click period selector"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{report_period}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Select report period"
+    },
+    {
+      "id": 9,
+      "type": "click",
+      "x": 400,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click department filter"
+    },
+    {
+      "id": 10,
+      "type": "type_text",
+      "text": "{{departments[dept_index]}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Select department"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/financial_report_{{dept_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture report screenshot"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "dept_index",
+      "value": "{{dept_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment department index"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{dept_index < 3}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more departments"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next department"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/financial_reporting_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
