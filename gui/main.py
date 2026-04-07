@@ -63,6 +63,25 @@ LOG_TEXT_HEIGHT = 5
 TREE_ROW_HEIGHT = 25
 NOTEBOOK TAB_PADDING = [15, 5]
 
+# Action type constants for recording
+ACTION_TYPES = ["click", "type", "hotkey", "wait", "launch_app"]
+
+# Result status constants
+RESULT_SUCCESS = "success"
+RESULT_FAILURE = "failure"
+
+# Share type constants
+SHARE_TYPES = ["public", "private", "team"]
+
+# Pipeline mode constants
+PIPE_MODES = ["linear", "branch", "parallel"]
+
+# Detection mode constants
+DETECTION_MODES = ["image", "text", "coordinate"]
+
+# Scene icon options
+SCENE_ICONS = ["📦", "🏠", "💼", "🎮", "📚", "🎵", "📧", "🔧"]
+
 
 class OutputRedirector:
     """
