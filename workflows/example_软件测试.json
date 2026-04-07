@@ -1,0 +1,187 @@
+{
+  "name": "软件部署自动化工作流",
+  "description": "自动化软件部署流程",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "environment": "staging",
+    "deploy_steps": ["pull", "build", "test", "deploy"],
+    "current_step": 0,
+    "deploy_status": "success"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "step_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "初始化步骤索引"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "打开部署终端"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "等待终端启动"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "deploy_loop",
+      "count": 4,
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "开始部署循环"
+    },
+    {
+      "id": 5,
+      "type": "condition",
+      "condition": "{{deploy_steps[step_index] == 'pull'}}",
+      "true_next": 6,
+      "false_next": 8,
+      "pre_delay": 0.1,
+      "comment": "检查是否为pull步骤"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "git pull origin main",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "执行git pull"
+    },
+    {
+      "id": 7,
+      "type": "goto",
+      "step_id": 15,
+      "pre_delay": 0.1,
+      "comment": "跳转到下一步"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{deploy_steps[step_index] == 'build'}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "检查是否为build步骤"
+    },
+    {
+      "id": 9,
+      "type": "type_text",
+      "text": "npm run build",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "执行构建"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 15,
+      "pre_delay": 0.1,
+      "comment": "跳转到下一步"
+    },
+    {
+      "id": 11,
+      "type": "condition",
+      "condition": "{{deploy_steps[step_index] == 'test'}}",
+      "true_next": 12,
+      "false_next": 14,
+      "pre_delay": 0.1,
+      "comment": "检查是否为test步骤"
+    },
+    {
+      "id": 12,
+      "type": "type_text",
+      "text": "npm test",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "执行测试"
+    },
+    {
+      "id": 13,
+      "type": "goto",
+      "step_id": 15,
+      "pre_delay": 0.1,
+      "comment": "跳转到下一步"
+    },
+    {
+      "id": 14,
+      "type": "type_text",
+      "text": "kubectl apply -f deployment.yaml",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "执行部署"
+    },
+    {
+      "id": 15,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "等待步骤完成"
+    },
+    {
+      "id": 16,
+      "type": "screenshot",
+      "save_path": "./screenshots/deploy_step_{{step_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "截图部署步骤"
+    },
+    {
+      "id": 17,
+      "type": "set_variable",
+      "name": "step_index",
+      "value": "{{step_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加步骤索引"
+    },
+    {
+      "id": 18,
+      "type": "condition",
+      "condition": "{{step_index < 4}}",
+      "true_next": 19,
+      "false_next": 20,
+      "pre_delay": 0.1,
+      "comment": "检查是否有更多步骤"
+    },
+    {
+      "id": 19,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "继续下一步"
+    },
+    {
+      "id": 20,
+      "type": "screenshot",
+      "save_path": "./screenshots/deployment_complete.png",
+      "pre_delay": 0.5,
+      "comment": "截图完成状态"
+    },
+    {
+      "id": 21,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
