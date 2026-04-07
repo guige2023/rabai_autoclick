@@ -1,0 +1,207 @@
+{
+  "name": "Recurring Task Automation Workflow",
+  "description": "Automate daily recurring tasks like email processing and reporting",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "task_list": ["check_email", "update_spreadsheet", "generate_report", "send_summary"],
+    "current_task": 0,
+    "tasks_completed": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "task_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize task index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "task_loop",
+      "count": 4,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start task loop"
+    },
+    {
+      "id": 3,
+      "type": "condition",
+      "condition": "{{task_list[task_index] == 'check_email'}}",
+      "true_next": 4,
+      "false_next": 7,
+      "pre_delay": 0.1,
+      "comment": "Check if email task"
+    },
+    {
+      "id": 4,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open email client"
+    },
+    {
+      "id": 5,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for email"
+    },
+    {
+      "id": 6,
+      "type": "goto",
+      "step_id": 17,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 7,
+      "type": "condition",
+      "condition": "{{task_list[task_index] == 'update_spreadsheet'}}",
+      "true_next": 8,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if spreadsheet task"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 200,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open spreadsheet"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for spreadsheet"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 17,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 11,
+      "type": "condition",
+      "condition": "{{task_list[task_index] == 'generate_report'}}",
+      "true_next": 12,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if report task"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 300,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open reporting tool"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for report tool"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 17,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 15,
+      "type": "click",
+      "x": 400,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open email for summary"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for email"
+    },
+    {
+      "id": 17,
+      "type": "screenshot",
+      "save_path": "./screenshots/task_{{task_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture task screenshot"
+    },
+    {
+      "id": 18,
+      "type": "set_variable",
+      "name": "task_index",
+      "value": "{{task_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment task index"
+    },
+    {
+      "id": 19,
+      "type": "set_variable",
+      "name": "tasks_completed",
+      "value": "{{tasks_completed + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment completed count"
+    },
+    {
+      "id": 20,
+      "type": "condition",
+      "condition": "{{task_index < 4}}",
+      "true_next": 21,
+      "false_next": 22,
+      "pre_delay": 0.1,
+      "comment": "Check if more tasks"
+    },
+    {
+      "id": 21,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next task"
+    },
+    {
+      "id": 22,
+      "type": "screenshot",
+      "save_path": "./screenshots/daily_tasks_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 23,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
