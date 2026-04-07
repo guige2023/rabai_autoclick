@@ -1,0 +1,117 @@
+{
+  "name": "Authentication Health Check Workflow",
+  "description": "Automate authentication system health verification",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "auth_systems_to_check": 15,
+    "current_system": 0,
+    "healthy_count": 0,
+    "degraded_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "auth_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize auth counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open authentication monitoring"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for monitoring"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "auth_health_loop",
+      "count": "{{auth_systems_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start auth health loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select auth system"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for health check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/auth_health_{{auth_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture health screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "auth_counter",
+      "value": "{{auth_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment auth counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{auth_counter < auth_systems_to_check}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more systems"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next system"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/authentication_health_check_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
