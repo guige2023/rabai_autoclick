@@ -1,0 +1,166 @@
+{
+  "name": "Expense Report Processing Workflow",
+  "description": "Automate expense report submission and approval",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "expense_reports": 15,
+    "current_report": 0,
+    "approved_count": 0,
+    "rejected_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "report_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize report counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open expense system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "expense_loop",
+      "count": "{{expense_reports}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start expense loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on report"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for report details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/expense_{{report_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture expense screenshot"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{report_counter % 3 == 0}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if should reject"
+    },
+    {
+      "id": 9,
+      "type": "click_image",
+      "template": "./templates/reject_expense.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click reject button"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 14,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 11,
+      "type": "click_image",
+      "template": "./templates/approve_expense.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click approve button"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "approved_count",
+      "value": "{{approved_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment approved count"
+    },
+    {
+      "id": 13,
+      "type": "goto",
+      "step_id": 14,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 14,
+      "type": "set_variable",
+      "name": "report_counter",
+      "value": "{{report_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment report counter"
+    },
+    {
+      "id": 15,
+      "type": "condition",
+      "condition": "{{report_counter < expense_reports}}",
+      "true_next": 16,
+      "false_next": 17,
+      "pre_delay": 0.1,
+      "comment": "Check if more reports"
+    },
+    {
+      "id": 16,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next report"
+    },
+    {
+      "id": 17,
+      "type": "screenshot",
+      "save_path": "./screenshots/expense_processing_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 18,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}
