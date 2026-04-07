@@ -535,6 +535,52 @@ class ThemeManager(QObject):
                     transform: translateY(0px);
                 }}
             """,
+            "button_info": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['info']};
+                    color: white;
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['info_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['info_hover']};
+                    transform: translateY(0px);
+                }}
+            """,
+            "button_warning": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['warning']};
+                    color: white;
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['warning_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['warning_hover']};
+                    transform: translateY(0px);
+                }}
+            """,
+            "splitter": f"""
+                QSplitter {{
+                    background-color: {c['bg_widget']};
+                }}
+                QSplitter::handle {{
+                    background-color: {c['border']};
+                }}
+            """,
         }
         return stylesheets.get(component, "")
 
@@ -672,6 +718,52 @@ class ThemeManager(QObject):
                 QPushButton:pressed {{
                     background-color: {c['error_hover']};
                     transform: translateY(0px);
+                }}
+            """,
+            "button_info": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['info']};
+                    color: white;
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['info_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['info_hover']};
+                    transform: translateY(0px);
+                }}
+            """,
+            "button_warning": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['warning']};
+                    color: white;
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['warning_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['warning_hover']};
+                    transform: translateY(0px);
+                }}
+            """,
+            "splitter": f"""
+                QSplitter {{
+                    background-color: {c['bg_widget']};
+                }}
+                QSplitter::handle {{
+                    background-color: {c['border']};
                 }}
             """,
         }
