@@ -1804,10 +1804,22 @@ class RecTab(BaseTab):
         List all recordings in the tree view.
         """
         def do_list():
+            """
+            Retrieve all recordings from the screen recorder.
+            
+            Returns:
+                List of recording objects.
+            """
             converter = create_screen_recorder(str(DATA_DIR))
             return converter.list_recordings()
 
-        def show_result(recordings):
+        def show_result(recordings: List[Any]) -> None:
+            """
+            Display recordings in the tree view.
+            
+            Args:
+                recordings: List of recording objects.
+            """
             for item in self.rec_tree.get_children():
                 self.rec_tree.delete(item)
             
