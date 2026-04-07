@@ -1,0 +1,117 @@
+{
+  "name": "Security VoIP Security Audit Workflow",
+  "description": "Automate VoIP security auditing",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "voip_extensions_to_audit": 50,
+    "current_extension": 0,
+    "secure_extensions": 0,
+    "vulnerable_extensions": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "extension_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize extension counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open VoIP management console"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for console"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "voip_audit_loop",
+      "count": "{{voip_extensions_to_audit}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start VoIP audit loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select VoIP extension"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for extension check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/voip_extension_{{extension_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture VoIP screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "extension_counter",
+      "value": "{{extension_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment extension counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{extension_counter < voip_extensions_to_audit}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more extensions"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next extension"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_voip_security_audit_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
