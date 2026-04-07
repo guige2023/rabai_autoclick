@@ -5,7 +5,7 @@ Provides:
 - Strategy registry
 """
 
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, Callable, Dict, Generic, Optional, TypeVar
 
 
 T = TypeVar("T")

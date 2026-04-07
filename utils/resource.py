@@ -13,7 +13,10 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
+
+# Type variable for generic classes
+T = TypeVar("T")
 
 
 class ResourceType(Enum):
@@ -286,12 +289,6 @@ class ResourcePool(Generic[T]):
         """Get in-use resource count."""
         with self._lock:
             return len(self._in_use)
-
-
-from typing import TypeVar, Generic
-
-
-T = TypeVar("T")
 
 
 class MemoryPressureDetector:
