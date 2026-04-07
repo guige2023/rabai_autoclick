@@ -1,0 +1,117 @@
+{
+  "name": "Hydroelectric Dam Monitoring Workflow",
+  "description": "Automate hydroelectric dam monitoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "dams_to_monitor": 53,
+    "current_dam": 0,
+    "monitored_dams": 0,
+    "alerts_triggered": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "dam_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize dam counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open dam monitoring system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "dam_monitoring_loop",
+      "count": "{{dams_to_monitor}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start dam monitoring loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select dam for monitoring"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for monitoring"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/dam_monitoring_{{dam_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture monitoring screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "dam_counter",
+      "value": "{{dam_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment dam counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{dam_counter < dams_to_monitor}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more dams"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next dam"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/hydro_dam_monitoring_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
