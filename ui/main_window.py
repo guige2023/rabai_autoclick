@@ -1734,6 +1734,9 @@ class MainWindow(QMainWindow):
         self.pause_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         self.theme_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
 
+        # Apply splitter styling
+        splitter_style = theme_manager.get_stylesheet("splitter")
+
     def changeEvent(self, event):
         """Handle window state changes to optimize timer usage."""
         if event.type() == event.WindowStateChange:
