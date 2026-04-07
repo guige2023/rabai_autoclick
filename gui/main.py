@@ -507,7 +507,13 @@ class SceneTab(BaseTab):
         notebook.add(stats_frame, text="场景统计")
         self._setup_stats_tab(stats_frame)
 
-    def _setup_list_tab(self, parent):
+    def _setup_list_tab(self, parent: Any) -> None:
+        """
+        Set up the scene list subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="场景列表", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -534,7 +540,13 @@ class SceneTab(BaseTab):
 
         ttk.Button(frame, text="▶ 激活选中场景", command=self._activate_scene).pack(pady=5)
 
-    def _setup_create_tab(self, parent):
+    def _setup_create_tab(self, parent: Any) -> None:
+        """
+        Set up the scene creation subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="创建新场景", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -672,7 +684,13 @@ class DiagTab(BaseTab):
         notebook.add(report_frame, text="详细报告")
         self._setup_report_tab(report_frame)
 
-    def _setup_run_tab(self, parent):
+    def _setup_run_tab(self, parent: Any) -> None:
+        """
+        Set up the diagnostic run subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="运行诊断", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -685,7 +703,13 @@ class DiagTab(BaseTab):
         self.diag_result = scrolledtext.ScrolledText(frame, height=15, state='disabled')
         self.diag_result.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _setup_summary_tab(self, parent):
+    def _setup_summary_tab(self, parent: Any) -> None:
+        """
+        Set up the health summary subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="健康概览", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -694,7 +718,14 @@ class DiagTab(BaseTab):
         self.summary_result = scrolledtext.ScrolledText(frame, height=15, state='disabled')
         self.summary_result.pack(fill=tk.BOTH, expand=True, pady=10)
 
-    def _setup_report_tab(self, parent):
+    def _setup_report_tab(self, parent: Any) -> None:
+        """
+        Set up the report generation subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
+        frame = ttk.LabelFrame(parent, text="生成详细报告", padding=10)
         frame = ttk.LabelFrame(parent, text="生成详细报告", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -858,7 +889,13 @@ class ShareTab(BaseTab):
         notebook.add(list_frame, text="分享列表")
         self._setup_list_tab(list_frame)
 
-    def _setup_register_tab(self, parent):
+    def _setup_register_tab(self, parent: Any) -> None:
+        """
+        Set up the workflow registration subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="注册工作流", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -869,7 +906,13 @@ class ShareTab(BaseTab):
 
         ttk.Button(frame, text="✅ 注册工作流", command=self._register_workflow).grid(row=1, column=0, columnspan=3, pady=15)
 
-    def _setup_link_tab(self, parent):
+    def _setup_link_tab(self, parent: Any) -> None:
+        """
+        Set up the share link creation subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="创建分享链接", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -890,7 +933,13 @@ class ShareTab(BaseTab):
         self.link_result = scrolledtext.ScrolledText(frame, height=6, state='disabled')
         self.link_result.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _setup_import_export_tab(self, parent):
+    def _setup_import_export_tab(self, parent: Any) -> None:
+        """
+        Set up the import/export subtab container.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         notebook = ttk.Notebook(parent)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -902,7 +951,13 @@ class ShareTab(BaseTab):
         notebook.add(export_frame, text="导出")
         self._setup_export_tab(export_frame)
 
-    def _setup_import_tab(self, parent):
+    def _setup_import_tab(self, parent: Any) -> None:
+        """
+        Set up the import subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="导入工作流", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -919,7 +974,13 @@ class ShareTab(BaseTab):
         self.import_result = scrolledtext.ScrolledText(frame, height=8, state='disabled')
         self.import_result.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _setup_export_tab(self, parent):
+    def _setup_export_tab(self, parent: Any) -> None:
+        """
+        Set up the export subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="导出工作流", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
