@@ -1,164 +1,336 @@
 """
-Generic parser utilities for various data formats.
+Parser combinator and text parsing utilities.
+
+Provides regex parsers, tokenizer, JSON path query,
+CSV parsing utilities, and simple parser combinators.
 """
 
+from __future__ import annotations
+
 import re
-import json
 import csv
 import io
-from typing import Any, Callable, Dict, List, Optional, Tuple, Pattern
+from typing import Any, Callable, Optional
 
 
-def parse_bool(value: str, default: bool = False) -> bool:
-    """Parse a string to boolean."""
-    truthy = {"true", "1", "yes", "on", "t", "y", "✅", "有"}
-    falsy = {"false", "0", "no", "off", "f", "n", "❌", "无", ""}
-    normalized = value.strip().lower()
-    if normalized in truthy:
-        return True
-    if normalized in falsy:
-        return False
-    return default
+class Token:
+    """Token for tokenization."""
+    def __init__(self, type: str, value: str, pos: int = 0):
+        self.type = type
+        self.value = value
+        self.pos = pos
+
+    def __repr__(self) -> str:
+        return f"Token({self.type!r}, {self.value!r})"
 
 
-def parse_int(
-    value: str,
-    default: int = 0,
-    base: int = 10,
-    min_val: Optional[int] = None,
-    max_val: Optional[int] = None
-) -> int:
-    """Parse a string to integer with validation."""
-    try:
-        result = int(value.strip(), base)
-        if min_val is not None:
-            result = max(result, min_val)
-        if max_val is not None:
-            result = min(result, max_val)
-        return result
-    except ValueError:
-        return default
+class Lexer:
+    """Simple lexer/tokenizer."""
+
+    def __init__(self, rules: list[tuple[str, str]]):
+        """
+        Args:
+            rules: List of (token_type, pattern) tuples
+        """
+        self.rules = sorted(rules, key=lambda x: -len(x[1]))
+        self.pattern = re.compile('|'.join(f"(?P<{t}>{p})" for t, p in self.rules))
+
+    def tokenize(self, text: str) -> list[Token]:
+        tokens: list[Token] = []
+        pos = 0
+        for match in self.pattern.finditer(text):
+            for name, value in match.groupdict().items():
+                if value is not None:
+                    if name != "SKIP":
+                        tokens.append(Token(name, value, pos))
+                    pos = match.end()
+                    break
+        return tokens
 
 
-def parse_float(
-    value: str,
-    default: float = 0.0,
-    min_val: Optional[float] = None,
-    max_val: Optional[float] = None
-) -> float:
-    """Parse a string to float with validation."""
-    try:
-        result = float(value.strip())
-        if min_val is not None:
-            result = max(result, min_val)
-        if max_val is not None:
-            result = min(result, max_val)
-        return result
-    except ValueError:
-        return default
+class Parser:
+    """Simple recursive descent parser."""
+
+    def __init__(self):
+        self._tokens: list[Token] = []
+        self._pos = 0
+
+    def parse(self, tokens: list[Token]) -> Any:
+        self._tokens = tokens
+        self._pos = 0
+        return self._parse_expr()
+
+    def _peek(self) -> Token | None:
+        return self._tokens[self._pos] if self._pos < len(self._tokens) else None
+
+    def _consume(self, expected_type: str | None = None) -> Token:
+        token = self._peek()
+        if token is None:
+            raise Exception("Unexpected end of input")
+        if expected_type and token.type != expected_type:
+            raise Exception(f"Expected {expected_type}, got {token.type}")
+        self._pos += 1
+        return token
+
+    def _parse_expr(self) -> Any:
+        return self._parse_add()
+
+    def _parse_add(self) -> Any:
+        left = self._parse_mul()
+        while True:
+            token = self._peek()
+            if token and token.type == "PLUS":
+                self._consume("PLUS")
+                right = self._parse_mul()
+                left = left + right
+            elif token and token.type == "MINUS":
+                self._consume("MINUS")
+                right = self._parse_mul()
+                left = left - right
+            else:
+                break
+        return left
+
+    def _parse_mul(self) -> Any:
+        left = self._parse_unary()
+        while True:
+            token = self._peek()
+            if token and token.type == "MUL":
+                self._consume("MUL")
+                right = self._parse_unary()
+                left = left * right
+            elif token and token.type == "DIV":
+                self._consume("DIV")
+                right = self._parse_unary()
+                left = left / right
+            else:
+                break
+        return left
+
+    def _parse_unary(self) -> Any:
+        token = self._peek()
+        if token and token.type == "MINUS":
+            self._consume("MINUS")
+            return -self._parse_primary()
+        return self._parse_primary()
+
+    def _parse_primary(self) -> Any:
+        token = self._consume()
+        if token.type == "NUMBER":
+            return float(token.value)
+        elif token.type == "LPAREN":
+            result = self._parse_expr()
+            self._consume("RPAREN")
+            return result
+        raise Exception(f"Unexpected token: {token.type}")
 
 
-def parse_json(
+def tokenize_python_code(code: str) -> list[Token]:
+    """Tokenize Python source code (simplified)."""
+    rules = [
+        ("NUMBER", r"\d+\.?\d*"),
+        ("STRING", r"\"[^\"]*\"|'[^']*'"),
+        ("NAME", r"[a-zA-Z_][a-zA-Z0-9_]*"),
+        ("PLUS", r"\+"),
+        ("MINUS", r"-"),
+        ("MUL", r"\*"),
+        ("DIV", r"/"),
+        ("LPAREN", r"\("),
+        ("RPAREN", r"\)"),
+        ("WS", r"\s+"),
+    ]
+    lexer = Lexer(rules)
+    return lexer.tokenize(code)
+
+
+def json_path_query(obj: Any, path: str) -> list[Any]:
+    """
+    Simple JSONPath-like query.
+
+    Supports:
+        $.key - child
+        $[i] - array index
+        ..key - recursive descent
+        [*] - wildcard
+
+    Args:
+        obj: JSON object
+        path: JSONPath expression
+
+    Returns:
+        List of matching values.
+    """
+    results: list[Any] = []
+    if not path:
+        return [obj]
+
+    parts = re.split(r'\.(?![^\[]*\])', path)
+    current = [obj]
+
+    for part in parts:
+        next_current: list[Any] = []
+        if part == "*":
+            for item in current:
+                if isinstance(item, list):
+                    next_current.extend(item)
+                elif isinstance(item, dict):
+                    next_current.extend(item.values())
+        elif part.startswith("[") and part.endswith("]"):
+            # Array index or wildcard
+            if part == "[*]":
+                for item in current:
+                    if isinstance(item, list):
+                        next_current.extend(item)
+            else:
+                indices = re.findall(r'\[(\d+)\]', part)
+                for item in current:
+                    if isinstance(item, list):
+                        for idx in indices:
+                            idx = int(idx)
+                            if 0 <= idx < len(item):
+                                next_current.append(item[idx])
+        elif part.startswith(".."):
+            # Recursive descent
+            key = part[2:]
+            next_current = _recursive_search(current, key)
+        else:
+            # Child
+            for item in current:
+                if isinstance(item, dict) and key in item:
+                    next_current.append(item[key])
+        current = next_current
+
+    return current
+
+
+def _recursive_search(items: list, key: str) -> list:
+    results: list = []
+    for item in items:
+        if isinstance(item, dict):
+            if key in item:
+                results.append(item[key])
+            results.extend(_recursive_search(list(item.values()), key))
+        elif isinstance(item, list):
+            results.extend(_recursive_search(item, key))
+    return results
+
+
+def parse_csv(
     text: str,
-    default: Any = None,
-    strict: bool = False
-) -> Any:
-    """Parse JSON string with error handling."""
-    try:
-        return json.loads(text, strict=strict)
-    except (json.JSONDecodeError, ValueError):
-        return default
-
-
-def parse_csv_line(
-    line: str,
     delimiter: str = ",",
-    quotechar: str = '"'
-) -> List[str]:
-    """Parse a single CSV line."""
-    reader = csv.reader(io.StringIO(line), delimiter=delimiter, quotechar=quotechar)
-    return next(reader)
+    quotechar: str = '"',
+    skip_header: bool = True,
+) -> tuple[list[str], list[list[str]]]:
+    """
+    Parse CSV text.
+
+    Args:
+        text: CSV content
+        delimiter: Field delimiter
+        quotechar: Quote character
+        skip_header: If True, first row is header
+
+    Returns:
+        Tuple of (headers, rows).
+    """
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter, quotechar=quotechar)
+    rows = list(reader)
+    if not rows:
+        return [], []
+    if skip_header:
+        headers = rows[0]
+        data = rows[1:]
+    else:
+        headers = [f"col{i}" for i in range(len(rows[0]))]
+        data = rows
+    return headers, data
 
 
-def parse_key_value(
-    text: str,
-    delimiter: str = "=",
-) -> Dict[str, str]:
-    """Parse key=value delimited text into a dict."""
-    result = {}
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(delimiter, 1)
-        if len(parts) == 2:
-            result[parts[0].strip()] = parts[1].strip()
+def parse_tsv(text: str, skip_header: bool = True) -> tuple[list[str], list[list[str]]]:
+    """Parse TSV (tab-separated values)."""
+    return parse_csv(text, delimiter="\t", skip_header=skip_header)
+
+
+def parse_query_string(qs: str) -> dict[str, str]:
+    """
+    Parse URL query string.
+
+    Args:
+        qs: Query string (e.g., "a=1&b=2")
+
+    Returns:
+        Dictionary of parameters.
+    """
+    result: dict[str, str] = {}
+    if not qs:
+        return result
+    for pair in qs.split("&"):
+        if "=" in pair:
+            key, value = pair.split("=", 1)
+            result[key] = value
     return result
 
 
-def parse_url_params(url: str) -> Dict[str, str]:
-    """Extract query parameters from URL."""
-    from urllib.parse import parse_qs, urlparse
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query)
-    return {k: v[0] if len(v) == 1 else v for k, v in params.items()}
+def build_query_string(params: dict[str, Any]) -> str:
+    """Build URL query string."""
+    from urllib.parse import urlencode
+    return urlencode(params)
 
 
-def parse_list(
+def regex_extract_all(pattern: str, text: str, group: int = 0) -> list[str]:
+    """Extract all regex matches."""
+    return [m.group(group) for m in re.finditer(pattern, text)]
+
+
+def regex_replace(
+    pattern: str,
     text: str,
-    delimiter: str = None,
-    strip: bool = True,
-    filter_empty: bool = True
-) -> List[str]:
-    """Parse comma/semicolon/line-separated list."""
-    if delimiter is None:
-        for d in [",", ";", "，", "；", "\n"]:
-            if d in text:
-                delimiter = d
-                break
-        else:
-            delimiter = ","
-    items = text.split(delimiter)
-    if strip:
-        items = [i.strip() for i in items]
-    if filter_empty:
-        items = [i for i in items if i]
-    return items
+    replacement: str | Callable[[re.Match], str],
+) -> str:
+    """Replace regex matches."""
+    return re.sub(pattern, replacement, text)
 
 
-def parse_number_range(text: str) -> Tuple[Optional[float], Optional[float]]:
-    """Parse text like '1-10' or '5.5~7.5' into (min, max)."""
-    text = text.strip()
-    for sep in ["-", "~", " to ", ".."]:
-        if sep in text:
-            parts = text.split(sep, 1)
-            if len(parts) == 2:
-                min_val = parse_float(parts[0]) if parts[0].strip() else None
-                max_val = parse_float(parts[1]) if parts[1].strip() else None
-                return (min_val, max_val)
-    val = parse_float(text)
-    return (val, val)
+def split_sentences(text: str) -> list[str]:
+    """Split text into sentences."""
+    sentence_end = r'[.!?]+[\s]+'
+    sentences = re.split(sentence_end, text)
+    return [s.strip() for s in sentences if s.strip()]
 
 
-def parse_version(text: str) -> Tuple[int, ...]:
-    """Parse version string like '1.2.3' into tuple of integers."""
-    parts = re.findall(r"\d+", text)
-    return tuple(int(p) for p in parts)
+def split_words(text: str) -> list[str]:
+    """Split text into words."""
+    return re.findall(r'\b\w+\b', text.lower())
 
 
-class RegexParser:
-    """Regex-based parser with named groups."""
+def word_count(text: str) -> dict[str, int]:
+    """Count word frequencies."""
+    words = split_words(text)
+    counts: dict[str, int] = {}
+    for w in words:
+        counts[w] = counts.get(w, 0) + 1
+    return counts
 
-    def __init__(self, pattern: str, flags: int = 0):
-        self.pattern = re.compile(pattern, flags)
 
-    def parse(self, text: str) -> Optional[Dict[str, str]]:
-        """Parse text using regex pattern with named groups."""
-        match = self.pattern.search(text)
-        if match:
-            return match.groupdict()
-        return None
+def parse_ini_file(text: str) -> dict[str, dict[str, str]]:
+    """
+    Parse INI file format.
 
-    def parse_all(self, text: str) -> List[Dict[str, str]]:
-        """Parse all occurrences."""
-        return [m.groupdict() for m in self.pattern.finditer(text)]
+    Returns:
+        Nested dict of {section: {key: value}}.
+    """
+    result: dict[str, dict[str, str]] = {}
+    current_section = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line[1:-1]
+            result[current_section] = {}
+        elif "=" in line:
+            key, value = line.split("=", 1)
+            section = result.get(current_section, {})
+            section[key.strip()] = value.strip()
+            result[current_section] = section
+    return result

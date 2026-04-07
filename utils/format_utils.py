@@ -1,327 +1,297 @@
 """
-String and number formatting utilities.
+Formatting and serialization utilities.
 
-Provides:
-- String padding, alignment, wrapping
-- Number formatting (currency, scientific, engineering)
-- Template interpolation
-- Case conversion utilities
+Provides pretty printing, table formatting, number formatting,
+unit conversion, and data structure serialization.
 """
 
 from __future__ import annotations
 
-import re
-import string
-import textwrap
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
+import json
+import xml.etree.ElementTree as ET
+from typing import Any, Sequence
 
 
-def pad_left(text: str, width: int, char: str = " ") -> str:
-    """Pad string to the left."""
-    return text.rjust(width, char)
+def format_number(n: float, precision: int = 2, unit: str = "") -> str:
+    """Format number with precision and optional unit."""
+    formatted = f"{n:.{precision}f}"
+    return f"{formatted} {unit}".strip() if unit else formatted
 
 
-def pad_right(text: str, width: int, char: str = " ") -> str:
-    """Pad string to the right."""
-    return text.ljust(width, char)
+def format_bytes(size: int) -> str:
+    """Format byte size in human-readable form."""
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    size = float(size)
+    for unit in units:
+        if abs(size) < 1024.0:
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} PB"
 
 
-def pad_center(text: str, width: int, char: str = " ") -> str:
-    """Center-align string."""
-    return text.center(width, char)
+def format_duration(seconds: float) -> str:
+    """Format duration in human-readable form."""
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes}m {secs:.0f}s"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{hours}h {minutes}m"
 
 
-def wrap_text(text: str, width: int, indent: str = "", subsequent_indent: Optional[str] = None) -> str:
+def format_percentage(value: float, total: float, precision: int = 1) -> str:
+    """Format as percentage."""
+    if total == 0:
+        return "0.0%"
+    return f"{value / total * 100:.{precision}f}%"
+
+
+def format_table(
+    headers: list[str],
+    rows: list[list[Any]],
+    align: str = "left",
+) -> str:
     """
-    Wrap text to specified width.
+    Format data as ASCII table.
 
     Args:
-        text: Text to wrap
-        width: Maximum line width
-        indent: Indentation for first line
-        subsequent_indent: Indentation for subsequent lines
+        headers: Column headers
+        rows: Data rows
+        align: 'left', 'right', or 'center'
 
     Returns:
-        Wrapped text
+        Formatted table string.
     """
-    if subsequent_indent is None:
-        subsequent_indent = indent
-    wrapper = textwrap.TextWrapper(width=width, subsequent_indent=subsequent_indent, break_long_words=False, break_on_hyphens=False)
-    if indent:
-        return textwrap.indent(wrapper.wrap(text) or [""], indent)
-    return "\n".join(wrapper.wrap(text))
+    if not rows:
+        return ""
+
+    # Convert all to strings
+    str_headers = [str(h) for h in headers]
+    str_rows = [[str(cell) for cell in row] for row in rows]
+
+    # Compute column widths
+    col_widths = [len(h) for h in str_headers]
+    for row in str_rows:
+        for i, cell in enumerate(row):
+            if i < len(col_widths):
+                col_widths[i] = max(col_widths[i], len(cell))
+
+    def format_cell(cell: str, width: int) -> str:
+        if align == "right":
+            return cell.rjust(width)
+        elif align == "center":
+            return cell.center(width)
+        return cell.ljust(width)
+
+    # Build table
+    lines: list[str] = []
+    sep = "+" + "+".join("-" * w for w in col_widths) + "+"
+    lines.append(sep)
+    lines.append("|" + "|".join(format_cell(h, w) for h, w in zip(str_headers, col_widths)) + "|")
+    lines.append(sep)
+    for row in str_rows:
+        cells = [format_cell(row[i] if i < len(row) else "", w) for i, w in enumerate(col_widths)]
+        lines.append("|" + "|".join(cells) + "|")
+    lines.append(sep)
+    return "\n".join(lines)
 
 
-def format_currency(amount: float, currency_symbol: str = "$", decimal_places: int = 2, thousands_sep: str = ",") -> str:
-    """
-    Format a number as currency.
-
-    Args:
-        amount: The amount
-        currency_symbol: Currency symbol
-        decimal_places: Number of decimal places
-        thousands_sep: Thousands separator
-
-    Returns:
-        Formatted currency string
-
-    Example:
-        >>> format_currency(1234567.89)
-        '$1,234,567.89'
-    """
-    int_part = int(abs(amount))
-    dec_part = abs(amount) - int_part
-
-    formatted_int = f"{int_part:,}".replace(",", thousands_sep)
-    if amount < 0:
-        formatted_int = f"-{formatted_int}"
-
-    if decimal_places == 0:
-        return f"{currency_symbol}{formatted_int}"
-
-    dec_str = f"{dec_part:.{decimal_places}f}".split(".")[1]
-    return f"{currency_symbol}{formatted_int}.{dec_str}"
+def format_json(data: Any, indent: int = 2) -> str:
+    """Pretty print JSON."""
+    return json.dumps(data, indent=indent, ensure_ascii=False, sort_keys=False)
 
 
-def format_scientific(value: float, precision: int = 4) -> str:
-    """
-    Format number in scientific notation.
-
-    Args:
-        value: Number to format
-        precision: Decimal precision
-
-    Returns:
-        Scientific notation string
-
-    Example:
-        >>> format_scientific(0.000001234)
-        '1.234e-06'
-    """
-    return f"{value:.{precision}e}"
+def parse_json(text: str) -> Any:
+    """Parse JSON text."""
+    return json.loads(text)
 
 
-def format_engineering(value: float, precision: int = 4) -> str:
-    """
-    Format number in engineering notation.
-
-    Args:
-        value: Number to format
-        precision: Decimal precision
-
-    Returns:
-        Engineering notation string
-
-    Example:
-        >>> format_engineering(0.000001234)
-        '1.234u'
-    """
-    if value == 0:
-        return "0"
-
-    import math
-
-    exp = int(math.floor(math.log10(abs(value))))
-    exp3 = exp - (exp % 3)
-    mantissa = value / (10**exp3)
-
-    suffixes = {-18: "a", -15: "f", -12: "p", -9: "n", -6: "u", -3: "m", 0: "", 3: "k", 6: "M", 9: "G", 12: "T", 15: "P", 18: "E"}
-
-    suffix = suffixes.get(exp3, f"e{exp3}")
-    return f"{mantissa:.{precision}f}{suffix}"
+def format_xml(element: ET.Element, indent: str = "  ") -> str:
+    """Format XML element as string."""
+    return ET.tostring(element, encoding="unicode")
 
 
-def format_phone(phone: str, format_str: str = "(XXX) XXX-XXXX") -> str:
-    """
-    Format a phone number.
-
-    Args:
-        phone: Digits-only phone number
-        format_str: Format template with X placeholders
-
-    Returns:
-        Formatted phone number
-
-    Example:
-        >>> format_phone("5551234567")
-        '(555) 123-4567'
-    """
-    digits = re.sub(r"\D", "", phone)
-    if len(digits) > 10:
-        format_str = "+" + format_str
-
-    result = []
-    digit_idx = 0
-    for char in format_str:
-        if char == "X":
-            if digit_idx < len(digits):
-                result.append(digits[digit_idx])
-                digit_idx += 1
-        else:
-            result.append(char)
-    return "".join(result)
+def indent_text(text: str, spaces: int = 4) -> str:
+    """Indent text by spaces."""
+    pad = " " * spaces
+    return "\n".join(pad + line for line in text.splitlines())
 
 
-def camel_to_snake(text: str) -> str:
-    """
-    Convert camelCase to snake_case.
-
-    Example:
-        >>> camel_to_snake("camelCase")
-        'camel_case'
-        >>> camel_to_snake("XMLParser")
-        'xml_parser'
-    """
-    text = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", text)
-    return re.sub("([a-z0-9])([A-Z])", r"\1_\2", text).lower()
-
-
-def snake_to_camel(text: str, capitalize_first: bool = False) -> str:
-    """
-    Convert snake_case to camelCase.
-
-    Example:
-        >>> snake_to_camel("snake_case")
-        'snakeCase'
-        >>> snake_to_camel("snake_case", capitalize_first=True)
-        'SnakeCase'
-    """
-    components = text.split("_")
-    if capitalize_first:
-        return "".join(comp.capitalize() for comp in components)
-    return components[0] + "".join(comp.capitalize() for comp in components[1:])
-
-
-def kebab_to_snake(text: str) -> str:
-    """Convert kebab-case to snake_case."""
-    return text.replace("-", "_")
-
-
-def snake_to_kebab(text: str) -> str:
-    """Convert snake_case to kebab-case."""
-    return text.replace("_", "-")
-
-
-def pascal_to_camel(text: str) -> str:
-    """Convert PascalCase to camelCase."""
-    if not text:
+def truncate(text: str, max_length: int, suffix: str = "...") -> str:
+    """Truncate text to max length."""
+    if len(text) <= max_length:
         return text
-    return text[0].lower() + text[1:]
+    return text[:max_length - len(suffix)] + suffix
 
 
-def title_to_snake(text: str) -> str:
-    """Convert Title Case to snake_case."""
-    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", text)
-    text = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", text)
-    return text.replace(" ", "_").replace("__", "_").lower()
+def word_wrap(text: str, width: int = 80) -> list[str]:
+    """Wrap text to specified width."""
+    words = text.split()
+    lines: list[str] = []
+    current_line: list[str] = []
+    current_len = 0
+    for word in words:
+        if current_len + len(word) + len(current_line) <= width:
+            current_line.append(word)
+            current_len += len(word)
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+            current_line = [word]
+            current_len = len(word)
+    if current_line:
+        lines.append(" ".join(current_line))
+    return lines
 
 
-@dataclass
-class TemplateFormatter:
-    """String template formatter with custom delimiters."""
-
-    template: str
-    delimiter: str = "{"
-    re_escape: str = r"\{([^}]+)\}"
-
-    def __post_init__(self) -> None:
-        if self.delimiter != "{":
-            pattern = self.re_escape.replace("{", self.delimiter)
-            self._compiled = re.compile(pattern)
-
-    def format(self, **kwargs: Any) -> str:
-        """Format template with keyword arguments."""
-        if self.delimiter == "{":
-            return self.template.format(**kwargs)
-
-        def replacer(match: re.Match) -> str:
-            key = match.group(1)
-            keys = key.split(".")
-            val: Any = kwargs
-            for k in keys:
-                if isinstance(val, dict):
-                    val = val.get(k, match.group(0))
-                else:
-                    val = getattr(val, k, match.group(0))
-            return str(val)
-
-        return self._compiled.sub(replacer, self.template)
-
-    def format_map(self, mapping: dict[str, Any]) -> str:
-        """Format template with a mapping object."""
-        return self.format(**dict(mapping))
+def pluralize(word: str, count: int, plural: str | None = None) -> str:
+    """Add plural suffix to word based on count."""
+    if plural:
+        return f"{count} {plural if count != 1 else word}"
+    if count == 1:
+        return f"{count} {word}"
+    if word.endswith("y"):
+        return f"{count} {word[:-1]}ies"
+    if word.endswith(("s", "x", "z", "ch", "sh")):
+        return f"{count} {word}es"
+    return f"{count} {word}s"
 
 
-def interpolate(text: str, values: dict[str, Any]) -> str:
+def format_list(items: list[str], conjunction: str = "and") -> str:
+    """Format list with proper Oxford comma."""
+    n = len(items)
+    if n == 0:
+        return ""
+    if n == 1:
+        return items[0]
+    if n == 2:
+        return f"{items[0]} {conjunction} {items[1]}"
+    return ", ".join(items[:-1]) + f", {conjunction} {items[-1]}"
+
+
+def format_dict(data: dict, indent: int = 2) -> str:
+    """Format dictionary as pretty string."""
+    lines: list[str] = []
+    for key, value in data.items():
+        if isinstance(value, dict):
+            lines.append(f"{key}:")
+            lines.append(format_dict(value, indent))
+        elif isinstance(value, list):
+            lines.append(f"{key}: {value}")
+        else:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def format_progress_bar(
+    progress: float,
+    width: int = 40,
+    filled: str = "#",
+    empty: str = "-",
+) -> str:
+    """Format progress bar."""
+    progress = max(0.0, min(1.0, progress))
+    filled_count = int(width * progress)
+    empty_count = width - filled_count
+    return f"[{filled * filled_count}{empty * empty_count}] {progress * 100:.1f}%"
+
+
+def format_tree(
+    items: dict[str, Any],
+    indent: int = 0,
+    prefix: str = "",
+) -> list[str]:
+    """Format nested dict as tree."""
+    lines: list[str] = []
+    keys = sorted(items.keys())
+    for i, key in enumerate(keys):
+        is_last = i == len(keys) - 1
+        current_prefix = prefix
+        if indent == 0:
+            lines.append(str(key))
+        else:
+            connector = "`--" if is_last else "|--"
+            lines.append(f"{current_prefix}{connector} {key}")
+        value = items[key]
+        if isinstance(value, dict):
+            extension = "`   " if is_last else "|   "
+            lines.extend(format_tree(value, indent + 1, prefix + extension))
+    return lines
+
+
+def to_csv_row(values: list[Any], delimiter: str = ",") -> str:
+    """Format values as CSV row."""
+    def escape(v: Any) -> str:
+        s = str(v)
+        if delimiter in s or '"' in s or '\n' in s:
+            return f'"{s.replace("\"", "\"\"")}"'
+        return s
+    return delimiter.join(escape(v) for v in values)
+
+
+def from_csv_row(row: str, delimiter: str = ",") -> list[str]:
+    """Parse CSV row into values."""
+    values: list[str] = []
+    current = ""
+    in_quotes = False
+    i = 0
+    while i < len(row):
+        ch = row[i]
+        if ch == '"':
+            if in_quotes and i + 1 < len(row) and row[i + 1] == '"':
+                current += '"'
+                i += 1
+            else:
+                in_quotes = not in_quotes
+        elif ch == delimiter and not in_quotes:
+            values.append(current)
+            current = ""
+        else:
+            current += ch
+        i += 1
+    values.append(current)
+    return values
+
+
+def unit_convert(value: float, from_unit: str, to_unit: str) -> float:
     """
-    Simple variable interpolation.
+    Simple unit conversion.
 
-    Args:
-        text: Template with {variable} placeholders
-        values: Dictionary of values
-
-    Returns:
-        Interpolated string
-
-    Example:
-        >>> interpolate("Hello, {name}!", {"name": "World"})
-        'Hello, World!'
+    Supports: length (m, km, mi, ft, in, cm, mm), weight (kg, g, lb, oz),
+    temperature (C, F, K).
     """
-    formatter = TemplateFormatter(text)
-    return formatter.format_map(values)
+    conversions: dict[str, dict[str, float]] = {
+        # to meters
+        "m": {"km": 1000, "mi": 1609.344, "ft": 0.3048, "in": 0.0254, "cm": 0.01, "mm": 0.001, "m": 1},
+        # to kg
+        "kg": {"g": 0.001, "lb": 0.453592, "oz": 0.0283495, "kg": 1},
+    }
 
+    # Temperature special cases
+    if from_unit in "CFK" and to_unit in "CFK":
+        c = 0.0
+        if from_unit == "C":
+            c = value
+        elif from_unit == "F":
+            c = (value - 32) * 5 / 9
+        else:  # Kelvin
+            c = value - 273.15
+        if to_unit == "C":
+            return c
+        elif to_unit == "F":
+            return c * 9 / 5 + 32
+        else:  # Kelvin
+            return c + 273.15
 
-def word_count(text: str) -> dict[str, int]:
-    """
-    Count words in text.
+    # Find category
+    for category, table in conversions.items():
+        if from_unit in table and to_unit in table:
+            base = value * table[from_unit]
+            return base / table[to_unit]
 
-    Returns:
-        Dictionary of word -> count
-    """
-    words = re.findall(r"\b\w+\b", text.lower())
-    return {word: words.count(word) for word in sorted(set(words))}
-
-
-def highlight_keywords(text: str, keywords: list[str], prefix: str = "**", suffix: str = "**") -> str:
-    """
-    Highlight keywords in text.
-
-    Args:
-        text: Text to process
-        keywords: Keywords to highlight
-        prefix: Prefix for highlighted text
-        suffix: Suffix for highlighted text
-
-    Returns:
-        Text with highlighted keywords
-    """
-    for kw in keywords:
-        pattern = re.compile(re.escape(kw), re.IGNORECASE)
-        text = pattern.sub(f"{prefix}{kw}{suffix}", text)
-    return text
-
-
-def remove_punctuation(text: str, keep: str = "") -> str:
-    """
-    Remove punctuation from text.
-
-    Args:
-        text: Input text
-        keep: Punctuation to keep
-
-    Returns:
-        Text without punctuation
-    """
-    punct = set(string.punctuation) - set(keep)
-    return "".join(c for c in text if c not in punct)
-
-
-def dedupe_whitespace(text: str) -> str:
-    """Replace multiple whitespace with single space."""
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def split_camel_case(text: str) -> list[str]:
-    """Split camelCase or PascalCase into words."""
-    return re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+", text)
+    raise ValueError(f"Unknown unit conversion: {from_unit} to {to_unit}")
