@@ -94,20 +94,20 @@ def chunk_process(
     items: List[T],
     processor: Callable[[List[T]], List[R]],
     chunk_size: int = 100,
-) -> Generator[List[R], None, None]:
-    """Process items in chunks.
+) -> Generator[List[T], None, None]:
+    """Split items into chunks.
 
     Args:
-        items: Items to process.
-        processor: Function to process chunk.
+        items: Items to chunk.
+        processor: Unused parameter (for API compatibility).
         chunk_size: Size of each chunk.
 
     Yields:
-        Processing results for each chunk.
+        Each chunk of items.
     """
     for i in range(0, len(items), chunk_size):
         chunk = items[i:i + chunk_size]
-        yield processor(chunk)
+        yield chunk
 
 
 @dataclass
@@ -220,5 +220,8 @@ def starmap(
     Returns:
         List of results.
     """
+    def unpack_and_apply(args):
+        return func(*args)
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        return list(executor.starmap(func, args_list))
+        return list(executor.map(unpack_and_apply, args_list))
