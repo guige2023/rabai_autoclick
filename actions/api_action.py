@@ -1,781 +1,434 @@
-"""API action module for RabAI AutoClick.
+"""API client action module for RabAI AutoClick.
 
-Provides REST API client operations:
-- ApiGetAction: Perform GET request
-- ApiPostAction: Perform POST request
-- ApiPutAction: Perform PUT request
-- ApiPatchAction: Perform PATCH request
-- ApiDeleteAction: Perform DELETE request
-- ApiHeadAction: Perform HEAD request
-- ApiOptionsAction: Perform OPTIONS request
-- ApiUploadAction: Upload file via multipart
-- ApiDownloadAction: Download file from URL
-- ApiHealthAction: Health check endpoint
+Provides API operations:
+- RestApiCallAction: Generic REST API calls
+- GraphQLQueryAction: GraphQL queries
+- OAuthTokenAction: OAuth token management
+- ApiPaginationAction: Paginate through API results
+- ApiRateLimitAction: Handle rate limiting
+- WebhookTriggerAction: Trigger webhooks
 """
 
+import hashlib
+import hmac
 import json
-import base64
-import os
-from typing import Any, Dict, List, Optional, Union
-from urllib.parse import urlparse
+import time
+import urllib.request
+import urllib.parse
+import urllib.error
+from typing import Any, Dict, List, Optional
 
 import sys
 import os
+
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class ApiGetAction(BaseAction):
-    """Perform GET request."""
-    action_type = "api_get"
-    display_name = "API GET请求"
-    description = "发送HTTP GET请求"
-    version = "1.0"
+class RestApiCallAction(BaseAction):
+    """Generic REST API call."""
+    action_type = "rest_api_call"
+    display_name = "REST API调用"
+    description = "通用REST API调用"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute GET.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, headers, params, output_var, timeout.
-
-        Returns:
-            ActionResult with response.
-        """
-        url = params.get('url', '')
-        headers = params.get('headers', {})
-        query_params = params.get('params', {})
-        output_var = params.get('output_var', 'api_response')
-        timeout = params.get('timeout', 30)
-        auth = params.get('auth', '')
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            import urllib.request
-            import urllib.parse
+            url = params.get("url", "")
+            method = params.get("method", "GET").upper()
+            headers = params.get("headers", {})
+            body = params.get("body", None)
+            auth = params.get("auth", None)
+            timeout = params.get("timeout", 30)
 
-            resolved_url = context.resolve_value(url)
-            resolved_headers = context.resolve_value(headers) if headers else {}
-            resolved_params = context.resolve_value(query_params) if query_params else {}
-            resolved_timeout = context.resolve_value(timeout)
-            resolved_auth = context.resolve_value(auth) if auth else ''
+            if not url:
+                return ActionResult(success=False, message="url is required")
 
-            # Build URL with query params
-            if resolved_params:
-                encoded = urllib.parse.urlencode(resolved_params)
-                resolved_url = f"{resolved_url}{'&' if '?' in resolved_url else '?'}{encoded}"
+            if auth:
+                auth_type = auth.get("type", "bearer")
+                if auth_type == "bearer":
+                    headers["Authorization"] = f"Bearer {auth.get('token', '')}"
+                elif auth_type == "basic":
+                    import base64
+                    credentials = f"{auth.get('username', '')}:{auth.get('password', '')}"
+                    encoded = base64.b64encode(credentials.encode()).decode()
+                    headers["Authorization"] = f"Basic {encoded}"
+                elif auth_type == "api_key":
+                    key_name = auth.get("key_name", "X-API-Key")
+                    headers[key_name] = auth.get("key", "")
 
-            request = urllib.request.Request(resolved_url, method='GET')
+            req = urllib.request.Request(url, method=method)
 
-            for k, v in resolved_headers.items():
-                request.add_header(k, str(v))
+            for key, value in headers.items():
+                if key.lower() not in ("content-length", "content-type") or method != "GET":
+                    req.add_header(key, value)
 
-            if resolved_auth:
-                auth_bytes = resolved_auth.encode('utf-8')
-                encoded_auth = base64.b64encode(auth_bytes).decode('ascii')
-                request.add_header('Authorization', f'Basic {encoded_auth}')
+            if body:
+                if isinstance(body, dict):
+                    body = json.dumps(body).encode("utf-8")
+                    req.add_header("Content-Type", "application/json")
+                elif isinstance(body, str):
+                    body = body.encode("utf-8")
+                req.data = body
 
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                body = resp.read().decode('utf-8')
-                status = resp.status
-                resp_headers = dict(resp.headers)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    content = response.read()
+                    content_type = response.headers.get("Content-Type", "")
 
-                # Try to parse as JSON
+                    if "application/json" in content_type:
+                        data = json.loads(content.decode("utf-8"))
+                    else:
+                        data = content.decode("utf-8", errors="replace")
+
+                    return ActionResult(
+                        success=True,
+                        message=f"{method} request successful",
+                        data={"status_code": response.status, "content": data}
+                    )
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
                 try:
-                    data = json.loads(body)
-                except (json.JSONDecodeError, ValueError):
-                    data = body
+                    error_data = json.loads(body)
+                except:
+                    error_data = body
+                return ActionResult(
+                    success=False,
+                    message=f"HTTP {e.code}: {e.reason}",
+                    data={"status_code": e.code, "body": error_data}
+                )
+            except Exception as e:
+                return ActionResult(success=False, message=f"Request failed: {str(e)}")
 
-                result = {
-                    'status': status,
-                    'body': data,
-                    'headers': resp_headers
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+
+
+class GraphQLQueryAction(BaseAction):
+    """Execute GraphQL queries."""
+    action_type = "graphql_query"
+    display_name = "GraphQL查询"
+    description = "执行GraphQL查询"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            endpoint = params.get("endpoint", "")
+            query = params.get("query", "")
+            variables = params.get("variables", None)
+            headers = params.get("headers", {})
+            operation_name = params.get("operation_name", None)
+            timeout = params.get("timeout", 30)
+
+            if not endpoint or not query:
+                return ActionResult(success=False, message="endpoint and query are required")
+
+            headers["Content-Type"] = "application/json"
+
+            payload = {"query": query}
+            if variables:
+                payload["variables"] = variables
+            if operation_name:
+                payload["operationName"] = operation_name
+
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(endpoint, data=body, method="POST")
+            for key, value in headers.items():
+                req.add_header(key, value)
+
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    content = json.loads(response.read().decode("utf-8"))
+
+                    if "errors" in content:
+                        return ActionResult(
+                            success=False,
+                            message=f"GraphQL errors: {content['errors']}",
+                            data={"errors": content["errors"]}
+                        )
+
+                    return ActionResult(
+                        success=True,
+                        message="GraphQL query successful",
+                        data={"data": content.get("data")}
+                    )
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                return ActionResult(success=False, message=f"HTTP {e.code}: {e.reason}", data={"body": body})
+            except Exception as e:
+                return ActionResult(success=False, message=f"Query failed: {str(e)}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+
+
+class OAuthTokenAction(BaseAction):
+    """OAuth token management."""
+    action_type = "oauth_token"
+    display_name = "OAuth令牌"
+    description = "OAuth令牌管理"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            action_type = params.get("action", "get")
+            token_url = params.get("token_url", "")
+            client_id = params.get("client_id", "")
+            client_secret = params.get("client_secret", "")
+            grant_type = params.get("grant_type", "client_credentials")
+            refresh_token = params.get("refresh_token", "")
+            scope = params.get("scope", "")
+
+            if action_type == "get":
+                if not token_url or not client_id:
+                    return ActionResult(success=False, message="token_url and client_id required")
+
+                data = {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": grant_type
                 }
 
-                context.set(output_var, result)
+                if grant_type == "refresh_token" and refresh_token:
+                    data["refresh_token"] = refresh_token
+                elif scope:
+                    data["scope"] = scope
 
-                return ActionResult(
-                    success=status < 400,
-                    message=f"GET {resolved_url} -> {status}",
-                    data={'status': status, 'output_var': output_var}
-                )
+                body = urllib.parse.urlencode(data).encode("utf-8")
+                req = urllib.request.Request(token_url, data=body, method="POST")
+                req.add_header("Content-Type", "application/x-www-form-urlencoded")
+
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        content = json.loads(response.read().decode("utf-8"))
+
+                        return ActionResult(
+                            success=True,
+                            message="Token obtained",
+                            data={
+                                "access_token": content.get("access_token"),
+                                "refresh_token": content.get("refresh_token"),
+                                "expires_in": content.get("expires_in"),
+                                "token_type": content.get("token_type", "Bearer")
+                            }
+                        )
+                except urllib.error.HTTPError as e:
+                    return ActionResult(success=False, message=f"Token error: {e.code}")
+                except Exception as e:
+                    return ActionResult(success=False, message=f"Token failed: {str(e)}")
+
+            elif action_type == "refresh":
+                if not token_url or not refresh_token:
+                    return ActionResult(success=False, message="token_url and refresh_token required")
+
+                data = {
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret
+                }
+
+                body = urllib.parse.urlencode(data).encode("utf-8")
+                req = urllib.request.Request(token_url, data=body, method="POST")
+                req.add_header("Content-Type", "application/x-www-form-urlencoded")
+
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        content = json.loads(response.read().decode("utf-8"))
+                        return ActionResult(
+                            success=True,
+                            message="Token refreshed",
+                            data={"access_token": content.get("access_token")}
+                        )
+                except Exception as e:
+                    return ActionResult(success=False, message=f"Refresh failed: {str(e)}")
+
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action_type}")
+
         except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+
+
+class ApiPaginationAction(BaseAction):
+    """Paginate through API results."""
+    action_type = "api_pagination"
+    display_name = "API分页"
+    description = "分页获取API结果"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            base_url = params.get("url", "")
+            method = params.get("method", "GET")
+            params_list = params.get("params", [])
+            page_param = params.get("page_param", "page")
+            limit_param = params.get("limit_param", "limit")
+            max_pages = params.get("max_pages", 10)
+            total_field = params.get("total_field", "total")
+            data_field = params.get("data_field", "data")
+            headers = params.get("headers", {})
+
+            if not base_url:
+                return ActionResult(success=False, message="url is required")
+
+            all_results = []
+            page = 1
+            total = None
+
+            while page <= max_pages:
+                url = base_url
+                if method == "GET":
+                    separator = "?" if "?" not in base_url else "&"
+                    url = f"{base_url}{separator}{page_param}={page}&{limit_param}={params_list.get(limit_param, 100)}"
+
+                req = urllib.request.Request(url, method=method)
+                for key, value in headers.items():
+                    req.add_header(key, value)
+
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        content = json.loads(response.read().decode("utf-8"))
+
+                        if isinstance(content, dict):
+                            if data_field and data_field in content:
+                                items = content[data_field]
+                            else:
+                                items = [v for v in content.values() if isinstance(v, list)]
+                                items = items[0] if items else []
+
+                            if total is None and total_field in content:
+                                total = content[total_field]
+
+                            all_results.extend(items if isinstance(items, list) else [items])
+                        elif isinstance(content, list):
+                            all_results.extend(content)
+
+                    if total and len(all_results) >= total:
+                        break
+
+                    page += 1
+
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        break
+                    return ActionResult(success=False, message=f"HTTP {e.code}")
+                except Exception as e:
+                    return ActionResult(success=False, message=f"Pagination error: {str(e)}")
+
             return ActionResult(
-                success=False,
-                message=f"GET请求失败: {str(e)}"
+                success=True,
+                message=f"Fetched {len(all_results)} results across {page} pages",
+                data={"results": all_results, "total_fetched": len(all_results), "pages_fetched": page}
             )
 
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'headers': {}, 'params': {}, 'output_var': 'api_response',
-            'timeout': 30, 'auth': ''
-        }
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
 
-class ApiPostAction(BaseAction):
-    """Perform POST request."""
-    action_type = "api_post"
-    display_name = "API POST请求"
-    description = "发送HTTP POST请求"
-    version = "1.0"
+class ApiRateLimitAction(BaseAction):
+    """Handle API rate limiting."""
+    action_type = "api_rate_limit"
+    display_name = "API限流处理"
+    description = "处理API速率限制"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute POST.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, body, headers, content_type, output_var.
-
-        Returns:
-            ActionResult with response.
-        """
-        url = params.get('url', '')
-        body = params.get('body', '')
-        headers = params.get('headers', {})
-        content_type = params.get('content_type', 'application/json')
-        output_var = params.get('output_var', 'api_response')
-        timeout = params.get('timeout', 30)
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            import urllib.request
+            action_type = params.get("action", "check")
+            requests_per_window = params.get("requests_per_window", 60)
+            window_seconds = params.get("window_seconds", 60)
 
-            resolved_url = context.resolve_value(url)
-            resolved_body = context.resolve_value(body) if body else ''
-            resolved_headers = context.resolve_value(headers) if headers else {}
-            resolved_ct = context.resolve_value(content_type)
-            resolved_timeout = context.resolve_value(timeout)
+            if action_type == "check":
+                current_time = time.time()
+                window_key = int(current_time / window_seconds)
 
-            # Encode body
-            if resolved_ct == 'application/json':
-                if isinstance(resolved_body, dict):
-                    encoded_body = json.dumps(resolved_body).encode('utf-8')
+                request_counts = getattr(self, "_rate_limit_counts", {})
+
+                current_count = request_counts.get(window_key, 0)
+
+                if current_count >= requests_per_window:
+                    retry_after = window_seconds - (current_time % window_seconds)
+                    return ActionResult(
+                        success=False,
+                        message=f"Rate limit exceeded",
+                        data={
+                            "allowed": False,
+                            "current_count": current_count,
+                            "limit": requests_per_window,
+                            "retry_after": retry_after
+                        }
+                    )
                 else:
-                    encoded_body = json.dumps({'data': resolved_body}).encode('utf-8')
+                    request_counts[window_key] = current_count + 1
+                    self._rate_limit_counts = request_counts
+                    return ActionResult(
+                        success=True,
+                        message="Request allowed",
+                        data={
+                            "allowed": True,
+                            "current_count": current_count + 1,
+                            "remaining": requests_per_window - current_count - 1
+                        }
+                    )
+
+            elif action_type == "wait":
+                wait_time = params.get("wait_time", 1)
+                time.sleep(wait_time)
+                return ActionResult(success=True, message=f"Waited {wait_time}s")
+
+            elif action_type == "reset":
+                self._rate_limit_counts = {}
+                return ActionResult(success=True, message="Rate limit reset")
+
             else:
-                encoded_body = str(resolved_body).encode('utf-8')
+                return ActionResult(success=False, message=f"Unknown action: {action_type}")
 
-            request = urllib.request.Request(
-                resolved_url,
-                data=encoded_body,
-                method='POST'
-            )
-            request.add_header('Content-Type', resolved_ct)
-
-            for k, v in resolved_headers.items():
-                request.add_header(k, str(v))
-
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                response_body = resp.read().decode('utf-8')
-                status = resp.status
-
-                try:
-                    data = json.loads(response_body)
-                except (json.JSONDecodeError, ValueError):
-                    data = response_body
-
-                result = {'status': status, 'body': data}
-                context.set(output_var, result)
-
-                return ActionResult(
-                    success=status < 400,
-                    message=f"POST {resolved_url} -> {status}",
-                    data={'status': status, 'output_var': output_var}
-                )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"POST请求失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'body': '', 'headers': {}, 'content_type': 'application/json',
-            'output_var': 'api_response', 'timeout': 30
-        }
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
 
-class ApiPutAction(BaseAction):
-    """Perform PUT request."""
-    action_type = "api_put"
-    display_name = "API PUT请求"
-    description = "发送HTTP PUT请求"
-    version = "1.0"
+class WebhookTriggerAction(BaseAction):
+    """Trigger webhooks."""
+    action_type = "webhook_trigger"
+    display_name = "触发Webhook"
+    description = "触发Webhook"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute PUT.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, body, headers, output_var.
-
-        Returns:
-            ActionResult with response.
-        """
-        url = params.get('url', '')
-        body = params.get('body', '')
-        headers = params.get('headers', {})
-        output_var = params.get('output_var', 'api_response')
-        timeout = params.get('timeout', 30)
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            import urllib.request
-
-            resolved_url = context.resolve_value(url)
-            resolved_body = context.resolve_value(body) if body else ''
-            resolved_headers = context.resolve_value(headers) if headers else {}
-            resolved_timeout = context.resolve_value(timeout)
-
-            if isinstance(resolved_body, dict):
-                encoded_body = json.dumps(resolved_body).encode('utf-8')
-            else:
-                encoded_body = str(resolved_body).encode('utf-8')
-
-            request = urllib.request.Request(
-                resolved_url,
-                data=encoded_body,
-                method='PUT'
-            )
-            request.add_header('Content-Type', 'application/json')
-
-            for k, v in resolved_headers.items():
-                request.add_header(k, str(v))
-
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                response_body = resp.read().decode('utf-8')
-                status = resp.status
-
-                try:
-                    data = json.loads(response_body)
-                except (json.JSONDecodeError, ValueError):
-                    data = response_body
-
-                result = {'status': status, 'body': data}
-                context.set(output_var, result)
-
-                return ActionResult(
-                    success=status < 400,
-                    message=f"PUT {resolved_url} -> {status}",
-                    data={'status': status, 'output_var': output_var}
-                )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"PUT请求失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'body': '', 'headers': {}, 'output_var': 'api_response', 'timeout': 30}
-
-
-class ApiPatchAction(BaseAction):
-    """Perform PATCH request."""
-    action_type = "api_patch"
-    display_name = "API PATCH请求"
-    description = "发送HTTP PATCH请求"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute PATCH.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, body, headers, output_var.
-
-        Returns:
-            ActionResult with response.
-        """
-        url = params.get('url', '')
-        body = params.get('body', '')
-        headers = params.get('headers', {})
-        output_var = params.get('output_var', 'api_response')
-        timeout = params.get('timeout', 30)
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            import urllib.request
-
-            resolved_url = context.resolve_value(url)
-            resolved_body = context.resolve_value(body) if body else ''
-            resolved_headers = context.resolve_value(headers) if headers else {}
-            resolved_timeout = context.resolve_value(timeout)
-
-            if isinstance(resolved_body, dict):
-                encoded_body = json.dumps(resolved_body).encode('utf-8')
-            else:
-                encoded_body = str(resolved_body).encode('utf-8')
-
-            request = urllib.request.Request(
-                resolved_url,
-                data=encoded_body,
-                method='PATCH'
-            )
-            request.add_header('Content-Type', 'application/json')
-
-            for k, v in resolved_headers.items():
-                request.add_header(k, str(v))
-
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                response_body = resp.read().decode('utf-8')
-                status = resp.status
-
-                try:
-                    data = json.loads(response_body)
-                except (json.JSONDecodeError, ValueError):
-                    data = response_body
-
-                result = {'status': status, 'body': data}
-                context.set(output_var, result)
-
-                return ActionResult(
-                    success=status < 400,
-                    message=f"PATCH {resolved_url} -> {status}",
-                    data={'status': status, 'output_var': output_var}
-                )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"PATCH请求失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'body': '', 'headers': {}, 'output_var': 'api_response', 'timeout': 30}
-
-
-class ApiDeleteAction(BaseAction):
-    """Perform DELETE request."""
-    action_type = "api_delete"
-    display_name = "API DELETE请求"
-    description = "发送HTTP DELETE请求"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute DELETE.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, headers, output_var.
-
-        Returns:
-            ActionResult with response.
-        """
-        url = params.get('url', '')
-        headers = params.get('headers', {})
-        output_var = params.get('output_var', 'api_response')
-        timeout = params.get('timeout', 30)
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            import urllib.request
-
-            resolved_url = context.resolve_value(url)
-            resolved_headers = context.resolve_value(headers) if headers else {}
-            resolved_timeout = context.resolve_value(timeout)
-
-            request = urllib.request.Request(resolved_url, method='DELETE')
-
-            for k, v in resolved_headers.items():
-                request.add_header(k, str(v))
-
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                response_body = resp.read().decode('utf-8')
-                status = resp.status
-
-                try:
-                    data = json.loads(response_body)
-                except (json.JSONDecodeError, ValueError):
-                    data = response_body
-
-                result = {'status': status, 'body': data}
-                context.set(output_var, result)
-
-                return ActionResult(
-                    success=status < 400,
-                    message=f"DELETE {resolved_url} -> {status}",
-                    data={'status': status, 'output_var': output_var}
-                )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"DELETE请求失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'headers': {}, 'output_var': 'api_response', 'timeout': 30}
-
-
-class ApiHeadAction(BaseAction):
-    """Perform HEAD request."""
-    action_type = "api_head"
-    display_name = "API HEAD请求"
-    description = "发送HTTP HEAD请求"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute HEAD.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, headers, output_var.
-
-        Returns:
-            ActionResult with headers.
-        """
-        url = params.get('url', '')
-        headers = params.get('headers', {})
-        output_var = params.get('output_var', 'api_response')
-        timeout = params.get('timeout', 30)
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            import urllib.request
-
-            resolved_url = context.resolve_value(url)
-            resolved_headers = context.resolve_value(headers) if headers else {}
-            resolved_timeout = context.resolve_value(timeout)
-
-            request = urllib.request.Request(resolved_url, method='HEAD')
-
-            for k, v in resolved_headers.items():
-                request.add_header(k, str(v))
-
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                status = resp.status
-                resp_headers = dict(resp.headers)
-
-                result = {'status': status, 'headers': resp_headers}
-                context.set(output_var, result)
-
-                return ActionResult(
-                    success=status < 400,
-                    message=f"HEAD {resolved_url} -> {status}",
-                    data={'status': status, 'headers': resp_headers, 'output_var': output_var}
-                )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"HEAD请求失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'headers': {}, 'output_var': 'api_response', 'timeout': 30}
-
-
-class ApiUploadAction(BaseAction):
-    """Upload file via multipart POST."""
-    action_type = "api_upload"
-    display_name = "API文件上传"
-    description = "通过multipart表单上传文件"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute upload.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, file_path, field_name, extra_fields, output_var.
-
-        Returns:
-            ActionResult with response.
-        """
-        url = params.get('url', '')
-        file_path = params.get('file_path', '')
-        field_name = params.get('field_name', 'file')
-        extra_fields = params.get('extra_fields', {})
-        output_var = params.get('output_var', 'api_response')
-        timeout = params.get('timeout', 60)
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(file_path, str, 'file_path')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            import urllib.request
-            import uuid
-
-            resolved_url = context.resolve_value(url)
-            resolved_path = context.resolve_value(file_path)
-            resolved_field = context.resolve_value(field_name)
-            resolved_extras = context.resolve_value(extra_fields) if extra_fields else {}
-            resolved_timeout = context.resolve_value(timeout)
-
-            if not os.path.exists(resolved_path):
+            url = params.get("url", "")
+            method = params.get("method", "POST").upper()
+            payload = params.get("payload", {})
+            headers = params.get("headers", {})
+            secret = params.get("secret", "")
+
+            if not url:
+                return ActionResult(success=False, message="url is required")
+
+            body = json.dumps(payload).encode("utf-8")
+
+            if secret:
+                import base64
+                import hmac
+                signature = hmac.new(secret.encode(), body, hashlib.sha256).digest()
+                headers["X-Signature-256"] = "sha256=" + base64.b64encode(signature).decode()
+
+            req = urllib.request.Request(url, data=body, method=method)
+            for key, value in headers.items():
+                req.add_header(key, value)
+
+            try:
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    content = response.read().decode("utf-8", errors="replace")
+                    return ActionResult(
+                        success=True,
+                        message="Webhook triggered",
+                        data={"status_code": response.status, "response": content}
+                    )
+            except urllib.error.HTTPError as e:
                 return ActionResult(
                     success=False,
-                    message=f"文件不存在: {resolved_path}"
+                    message=f"Webhook failed: {e.code}",
+                    data={"status_code": e.code}
                 )
+            except Exception as e:
+                return ActionResult(success=False, message=f"Webhook error: {str(e)}")
 
-            # Build multipart form data
-            boundary = uuid.uuid4().hex
-            body = b''
-
-            # Add extra fields
-            for k, v in resolved_extras.items():
-                body += f'--{boundary}\r\n'.encode('utf-8')
-                body += f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode('utf-8')
-                body += f'{v}\r\n'.encode('utf-8')
-
-            # Add file
-            filename = os.path.basename(resolved_path)
-            with open(resolved_path, 'rb') as f:
-                file_data = f.read()
-
-            body += f'--{boundary}\r\n'.encode('utf-8')
-            body += f'Content-Disposition: form-data; name="{resolved_field}"; filename="{filename}"\r\n'.encode('utf-8')
-            body += b'Content-Type: application/octet-stream\r\n\r\n'
-            body += file_data
-            body += b'\r\n'
-            body += f'--{boundary}--\r\n'.encode('utf-8')
-
-            request = urllib.request.Request(
-                resolved_url,
-                data=body,
-                method='POST'
-            )
-            request.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
-
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                response_body = resp.read().decode('utf-8')
-                status = resp.status
-
-                try:
-                    data = json.loads(response_body)
-                except (json.JSONDecodeError, ValueError):
-                    data = response_body
-
-                result = {'status': status, 'body': data}
-                context.set(output_var, result)
-
-                return ActionResult(
-                    success=status < 400,
-                    message=f"上传 {filename} -> {status}",
-                    data={'status': status, 'output_var': output_var}
-                )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"上传失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url', 'file_path']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'field_name': 'file', 'extra_fields': {}, 'output_var': 'api_response', 'timeout': 60}
-
-
-class ApiDownloadAction(BaseAction):
-    """Download file from URL."""
-    action_type = "api_download"
-    display_name = "API文件下载"
-    description = "从URL下载文件"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute download.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, output_path, output_var.
-
-        Returns:
-            ActionResult with file path.
-        """
-        url = params.get('url', '')
-        output_path = params.get('output_path', '')
-        output_var = params.get('output_var', 'download_path')
-        timeout = params.get('timeout', 60)
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            import urllib.request
-
-            resolved_url = context.resolve_value(url)
-            resolved_output = context.resolve_value(output_path) if output_path else os.path.basename(urlparse(resolved_url).path)
-            resolved_timeout = context.resolve_value(timeout)
-
-            if not resolved_output or resolved_output == '/':
-                return ActionResult(
-                    success=False,
-                    message="无法确定输出路径"
-                )
-
-            request = urllib.request.Request(resolved_url, method='GET')
-
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                data = resp.read()
-
-                with open(resolved_output, 'wb') as f:
-                    f.write(data)
-
-                context.set(output_var, resolved_output)
-
-                return ActionResult(
-                    success=True,
-                    message=f"已下载: {resolved_output} ({len(data)} bytes)",
-                    data={'path': resolved_output, 'size': len(data), 'output_var': output_var}
-                )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"下载失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_path': '', 'output_var': 'download_path', 'timeout': 60}
-
-
-class ApiHealthAction(BaseAction):
-    """Health check endpoint."""
-    action_type = "api_health"
-    display_name = "API健康检查"
-    description = "检查API端点健康状态"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute health check.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, expected_status, output_var.
-
-        Returns:
-            ActionResult with health status.
-        """
-        url = params.get('url', '')
-        expected_status = params.get('expected_status', 200)
-        output_var = params.get('output_var', 'health_status')
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            import urllib.request
-
-            resolved_url = context.resolve_value(url)
-            resolved_expected = context.resolve_value(expected_status)
-
-            request = urllib.request.Request(resolved_url, method='GET')
-
-            with urllib.request.urlopen(request, timeout=10) as resp:
-                status = resp.status
-                healthy = status == resolved_expected
-
-                result = {
-                    'healthy': healthy,
-                    'status': status,
-                    'expected': resolved_expected,
-                    'url': resolved_url
-                }
-
-                context.set(output_var, result)
-
-                return ActionResult(
-                    success=healthy,
-                    message=f"健康检查 {'通过' if healthy else '失败'}: {status}",
-                    data=result
-                )
-        except Exception as e:
-            result = {
-                'healthy': False,
-                'error': str(e),
-                'url': resolved_url if 'resolved_url' in dir() else url
-            }
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=False,
-                message=f"健康检查失败: {str(e)}",
-                data=result
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'expected_status': 200, 'output_var': 'health_status'}
+            return ActionResult(success=False, message=f"Error: {str(e)}")

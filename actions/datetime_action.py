@@ -1,795 +1,448 @@
-"""datetime action extensions for rabai_autoclick.
+"""Time series data processing action module for RabAI AutoClick.
 
-Provides utilities for datetime manipulation, parsing,
-formatting, and timezone handling.
+Provides time series operations:
+- TimeSeriesParseAction: Parse time series data
+- TimeSeriesResampleAction: Resample time series
+- TimeSeriesSmoothingAction: Smooth time series
+- TimeSeriesDetectAnomaliesAction: Detect anomalies
+- TimeSeriesForecastAction: Simple forecasting
+- RollingWindowAction: Rolling window calculations
 """
 
-from __future__ import annotations
+import statistics
+import math
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
-import calendar
-from datetime import (
-    date,
-    datetime,
-    time,
-    timedelta,
-    timezone,
-    tzinfo,
-)
-from typing import Any, Callable
+import sys
+import os
 
-__all__ = [
-    "now",
-    "utcnow",
-    "today",
-    "timestamp",
-    "from_timestamp",
-    "parse_date",
-    "parse_time",
-    "format_date",
-    "format_time",
-    "format_datetime",
-    "format_relative",
-    "add_days",
-    "add_hours",
-    "add_minutes",
-    "add_seconds",
-    "date_range",
-    "datetime_range",
-    "is_weekend",
-    "is_weekday",
-    "day_of_week",
-    "week_number",
-    "days_between",
-    "hours_between",
-    "minutes_between",
-    "seconds_between",
-    "start_of_day",
-    "end_of_day",
-    "start_of_week",
-    "end_of_week",
-    "start_of_month",
-    "end_of_month",
-    "start_of_year",
-    "end_of_year",
-    "is_same_day",
-    "is_same_week",
-    "is_same_month",
-    "is_same_year",
-    "to_utc",
-    "from_utc",
-    "to_timezone",
-    "timezone_offset",
-    "is_dst",
-    "DateTimeRange",
-    "TimeSlot",
-    "FuzzyDateParser",
-]
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-def now(tz: tzinfo | None = None) -> datetime:
-    """Get current datetime.
+class TimeSeriesParseAction(BaseAction):
+    """Parse time series data from various formats."""
+    action_type = "timeseries_parse"
+    display_name = "时间序列解析"
+    description = "解析时间序列数据"
 
-    Args:
-        tz: Optional timezone.
-
-    Returns:
-        Current datetime.
-    """
-    if tz:
-        return datetime.now(tz)
-    return datetime.now()
-
-
-def utcnow() -> datetime:
-    """Get current UTC datetime.
-
-    Returns:
-        Current UTC datetime.
-    """
-    return datetime.utcnow()
-
-
-def today() -> date:
-    """Get today's date.
-
-    Returns:
-        Today's date.
-    """
-    return date.today()
-
-
-def timestamp(dt: datetime | None = None) -> float:
-    """Get Unix timestamp.
-
-    Args:
-        dt: Datetime (now if None).
-
-    Returns:
-        Unix timestamp.
-    """
-    if dt is None:
-        dt = datetime.now()
-    return dt.timestamp()
-
-
-def from_timestamp(ts: float, tz: tzinfo | None = None) -> datetime:
-    """Create datetime from timestamp.
-
-    Args:
-        ts: Unix timestamp.
-        tz: Optional timezone.
-
-    Returns:
-        Datetime object.
-    """
-    dt = datetime.fromtimestamp(ts)
-    if tz:
-        dt = dt.astimezone(tz)
-    return dt
-
-
-def parse_date(date_str: str, fmt: str | None = None) -> date:
-    """Parse date string.
-
-    Args:
-        date_str: Date string.
-        fmt: Format string (tries multiple if None).
-
-    Returns:
-        Date object.
-
-    Raises:
-        ValueError: If parsing fails.
-    """
-    if fmt:
-        return datetime.strptime(date_str, fmt).date()
-
-    formats = [
-        "%Y-%m-%d",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%Y/%m/%d",
-        "%d-%m-%Y",
-        "%m-%d-%Y",
-        "%B %d, %Y",
-        "%b %d, %Y",
-    ]
-
-    for fmt in formats:
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            return datetime.strptime(date_str, fmt).date()
-        except ValueError:
-            continue
+            data = params.get("data", [])
+            time_column = params.get("time_column", "timestamp")
+            value_column = params.get("value_column", "value")
+            format_str = params.get("format", "%Y-%m-%d %H:%M:%S")
+            timezone = params.get("timezone", "UTC")
 
-    raise ValueError(f"Cannot parse date: {date_str}")
+            if not data:
+                return ActionResult(success=False, message="data list is required")
+
+            parsed = []
+            for record in data:
+                if not isinstance(record, dict):
+                    continue
+
+                ts_val = record.get(time_column)
+                val_val = record.get(value_column)
+
+                if ts_val is None:
+                    continue
+
+                if isinstance(ts_val, (int, float)):
+                    if ts_val > 1e12:
+                        ts = datetime.fromtimestamp(ts_val / 1000)
+                    else:
+                        ts = datetime.fromtimestamp(ts_val)
+                elif isinstance(ts_val, str):
+                    try:
+                        ts = datetime.strptime(ts_val, format_str)
+                    except ValueError:
+                        try:
+                            ts = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+                        except:
+                            continue
+                else:
+                    continue
+
+                try:
+                    value = float(val_val)
+                except (TypeError, ValueError):
+                    value = 0.0
+
+                parsed.append({"timestamp": ts, "value": value, "original": record})
+
+            parsed.sort(key=lambda x: x["timestamp"])
+
+            return ActionResult(
+                success=True,
+                message=f"Parsed {len(parsed)} time series points",
+                data={"timeseries": parsed, "count": len(parsed), "start": str(parsed[0]["timestamp"]) if parsed else None}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Parse error: {str(e)}")
 
 
-def parse_time(time_str: str, fmt: str | None = None) -> time:
-    """Parse time string.
+class TimeSeriesResampleAction(BaseAction):
+    """Resample time series data."""
+    action_type = "timeseries_resample"
+    display_name = "时间序列重采样"
+    description = "重采样时间序列数据"
 
-    Args:
-        time_str: Time string.
-        fmt: Format string.
-
-    Returns:
-        Time object.
-
-    Raises:
-        ValueError: If parsing fails.
-    """
-    if fmt:
-        return datetime.strptime(time_str, fmt).time()
-
-    formats = [
-        "%H:%M:%S",
-        "%H:%M",
-        "%I:%M:%S %p",
-        "%I:%M %p",
-    ]
-
-    for fmt in formats:
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            return datetime.strptime(time_str, fmt).time()
-        except ValueError:
-            continue
-
-    raise ValueError(f"Cannot parse time: {time_str}")
-
-
-def format_date(dt: date | datetime, fmt: str = "%Y-%m-%d") -> str:
-    """Format date as string.
-
-    Args:
-        dt: Date or datetime.
-        fmt: Format string.
-
-    Returns:
-        Formatted string.
-    """
-    return dt.strftime(fmt)
-
-
-def format_time(t: time, fmt: str = "%H:%M:%S") -> str:
-    """Format time as string.
-
-    Args:
-        t: Time object.
-        fmt: Format string.
-
-    Returns:
-        Formatted string.
-    """
-    return t.strftime(fmt)
-
-
-def format_datetime(dt: datetime, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
-    """Format datetime as string.
-
-    Args:
-        dt: Datetime object.
-        fmt: Format string.
-
-    Returns:
-        Formatted string.
-    """
-    return dt.strftime(fmt)
-
-
-def format_relative(dt: datetime | None = None) -> str:
-    """Format datetime as relative string.
-
-    Args:
-        dt: Datetime (now if None).
-
-    Returns:
-        Relative string like "2 hours ago".
-    """
-    from datetime import datetime
-
-    if dt is None:
-        dt = datetime.now()
-
-    now_dt = datetime.now()
-    delta = now_dt - dt
-
-    if delta.total_seconds() < 0:
-        return "in the future"
-
-    seconds = int(delta.total_seconds())
-
-    if seconds < 60:
-        return f"{seconds} seconds ago"
-    if seconds < 3600:
-        return f"{seconds // 60} minutes ago"
-    if seconds < 86400:
-        return f"{seconds // 3600} hours ago"
-    if seconds < 604800:
-        return f"{seconds // 86400} days ago"
-    if seconds < 2592000:
-        return f"{seconds // 604800} weeks ago"
-    if seconds < 31536000:
-        return f"{seconds // 2592000} months ago"
-    return f"{seconds // 31536000} years ago"
-
-
-def add_days(dt: datetime, days: int) -> datetime:
-    """Add days to datetime.
-
-    Args:
-        dt: Starting datetime.
-        days: Days to add (can be negative).
-
-    Returns:
-        New datetime.
-    """
-    return dt + timedelta(days=days)
-
-
-def add_hours(dt: datetime, hours: int) -> datetime:
-    """Add hours to datetime.
-
-    Args:
-        dt: Starting datetime.
-        hours: Hours to add.
-
-    Returns:
-        New datetime.
-    """
-    return dt + timedelta(hours=hours)
-
-
-def add_minutes(dt: datetime, minutes: int) -> datetime:
-    """Add minutes to datetime.
-
-    Args:
-        dt: Starting datetime.
-        minutes: Minutes to add.
-
-    Returns:
-        New datetime.
-    """
-    return dt + timedelta(minutes=minutes)
-
-
-def add_seconds(dt: datetime, seconds: int) -> datetime:
-    """Add seconds to datetime.
-
-    Args:
-        dt: Starting datetime.
-        seconds: Seconds to add.
-
-    Returns:
-        New datetime.
-    """
-    return dt + timedelta(seconds=seconds)
-
-
-def date_range(
-    start: date,
-    end: date,
-    step: timedelta = timedelta(days=1),
-) -> list[date]:
-    """Generate date range.
-
-    Args:
-        start: Start date.
-        end: End date (inclusive).
-        step: Step between dates.
-
-    Returns:
-        List of dates.
-    """
-    dates = []
-    current = start
-    while current <= end:
-        dates.append(current)
-        current += step
-    return dates
-
-
-def datetime_range(
-    start: datetime,
-    end: datetime,
-    step: timedelta = timedelta(hours=1),
-) -> list[datetime]:
-    """Generate datetime range.
-
-    Args:
-        start: Start datetime.
-        end: End datetime.
-        step: Step between datetimes.
-
-    Returns:
-        List of datetimes.
-    """
-    datetimes = []
-    current = start
-    while current <= end:
-        datetimes.append(current)
-        current += step
-    return datetimes
-
-
-def is_weekend(d: date | datetime) -> bool:
-    """Check if date is weekend.
-
-    Args:
-        d: Date to check.
-
-    Returns:
-        True if Saturday or Sunday.
-    """
-    return d.weekday() in (5, 6)
-
-
-def is_weekday(d: date | datetime) -> bool:
-    """Check if date is weekday.
-
-    Args:
-        d: Date to check.
-
-    Returns:
-        True if Monday-Friday.
-    """
-    return not is_weekend(d)
-
-
-def day_of_week(d: date | datetime) -> str:
-    """Get day of week name.
-
-    Args:
-        d: Date to check.
-
-    Returns:
-        Day name (Monday, etc).
-    """
-    return d.strftime("%A")
-
-
-def week_number(d: date | datetime) -> int:
-    """Get ISO week number.
-
-    Args:
-        d: Date to check.
-
-    Returns:
-        Week number (1-53).
-    """
-    return d.isocalendar()[1]
-
-
-def days_between(start: date | datetime, end: date | datetime) -> int:
-    """Get days between two dates.
-
-    Args:
-        start: Start date.
-        end: End date.
-
-    Returns:
-        Number of days (always positive).
-    """
-    return abs((end.date() if isinstance(end, datetime) else end) -
-               (start.date() if isinstance(start, datetime) else start)).days
-
-
-def hours_between(start: datetime, end: datetime) -> float:
-    """Get hours between two datetimes.
-
-    Args:
-        start: Start datetime.
-        end: End datetime.
-
-    Returns:
-        Number of hours.
-    """
-    return abs((end - start).total_seconds()) / 3600
-
-
-def minutes_between(start: datetime, end: datetime) -> float:
-    """Get minutes between two datetimes.
-
-    Args:
-        start: Start datetime.
-        end: End datetime.
-
-    Returns:
-        Number of minutes.
-    """
-    return abs((end - start).total_seconds()) / 60
-
-
-def seconds_between(start: datetime, end: datetime) -> float:
-    """Get seconds between two datetimes.
-
-    Args:
-        start: Start datetime.
-        end: End datetime.
-
-    Returns:
-        Number of seconds.
-    """
-    return abs((end - start).total_seconds())
-
-
-def start_of_day(d: date | datetime) -> datetime:
-    """Get start of day (00:00:00).
-
-    Args:
-        d: Date or datetime.
-
-    Returns:
-        Datetime at start of day.
-    """
-    dt = d if isinstance(d, datetime) else datetime.combine(d, time())
-    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def end_of_day(d: date | datetime) -> datetime:
-    """Get end of day (23:59:59.999999).
-
-    Args:
-        d: Date or datetime.
-
-    Returns:
-        Datetime at end of day.
-    """
-    dt = d if isinstance(d, datetime) else datetime.combine(d, time())
-    return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-
-
-def start_of_week(d: date | datetime, week_start: int = 0) -> datetime:
-    """Get start of week.
-
-    Args:
-        d: Date or datetime.
-        week_start: Week start day (0=Monday).
-
-    Returns:
-        Datetime at start of week.
-    """
-    dt = start_of_day(d)
-    days_since_week_start = (dt.weekday() - week_start) % 7
-    return dt - timedelta(days=days_since_week_start)
-
-
-def end_of_week(d: date | datetime, week_start: int = 0) -> datetime:
-    """Get end of week.
-
-    Args:
-        d: Date or datetime.
-        week_start: Week start day.
-
-    Returns:
-        Datetime at end of week.
-    """
-    start = start_of_week(d, week_start)
-    return start + timedelta(days=6, hours=23, minutes=59, seconds=59)
-
-
-def start_of_month(d: date | datetime) -> datetime:
-    """Get start of month.
-
-    Args:
-        d: Date or datetime.
-
-    Returns:
-        Datetime at start of month.
-    """
-    dt = start_of_day(d)
-    return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-
-def end_of_month(d: date | datetime) -> datetime:
-    """Get end of month.
-
-    Args:
-        d: Date or datetime.
-
-    Returns:
-        Datetime at end of month.
-    """
-    dt = start_of_day(d)
-    last_day = calendar.monthrange(d.year, d.month)[1]
-    return dt.replace(day=last_day, hour=23, minute=59, second=59)
-
-
-def start_of_year(d: date | datetime) -> datetime:
-    """Get start of year.
-
-    Args:
-        d: Date or datetime.
-
-    Returns:
-        Datetime at start of year.
-    """
-    return start_of_day(d).replace(month=1, day=1)
-
-
-def end_of_year(d: date | datetime) -> datetime:
-    """Get end of year.
-
-    Args:
-        d: Date or datetime.
-
-    Returns:
-        Datetime at end of year.
-    """
-    return start_of_day(d).replace(month=12, day=31, hour=23, minute=59, second=59)
-
-
-def is_same_day(a: date | datetime, b: date | datetime) -> bool:
-    """Check if two dates are the same day.
-
-    Args:
-        a: First date.
-        b: Second date.
-
-    Returns:
-        True if same day.
-    """
-    a_date = a.date() if isinstance(a, datetime) else a
-    b_date = b.date() if isinstance(b, datetime) else b
-    return a_date == b_date
-
-
-def is_same_week(a: date | datetime, b: date | datetime) -> bool:
-    """Check if two dates are in same week.
-
-    Args:
-        a: First date.
-        b: Second date.
-
-    Returns:
-        True if same week.
-    """
-    return a.isocalendar()[:2] == b.isocalendar()[:2]
-
-
-def is_same_month(a: date | datetime, b: date | datetime) -> bool:
-    """Check if two dates are in same month.
-
-    Args:
-        a: First date.
-        b: Second date.
-
-    Returns:
-        True if same month.
-    """
-    return a.year == b.year and a.month == b.month
-
-
-def is_same_year(a: date | datetime, b: date | datetime) -> bool:
-    """Check if two dates are in same year.
-
-    Args:
-        a: First date.
-        b: Second date.
-
-    Returns:
-        True if same year.
-    """
-    return a.year == b.year
-
-
-def to_utc(dt: datetime) -> datetime:
-    """Convert datetime to UTC.
-
-    Args:
-        dt: Datetime to convert.
-
-    Returns:
-        UTC datetime.
-    """
-    return dt.astimezone(timezone.utc)
-
-
-def from_utc(dt_str: str) -> datetime:
-    """Parse UTC datetime string.
-
-    Args:
-        dt_str: UTC datetime string.
-
-    Returns:
-        Datetime object.
-    """
-    return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-
-
-def to_timezone(dt: datetime, tz: tzinfo) -> datetime:
-    """Convert datetime to timezone.
-
-    Args:
-        dt: Datetime to convert.
-        tz: Target timezone.
-
-    Returns:
-        Converted datetime.
-    """
-    return dt.astimezone(tz)
-
-
-def timezone_offset(tz: tzinfo) -> int:
-    """Get timezone offset in hours.
-
-    Args:
-        tz: Timezone.
-
-    Returns:
-        Offset in hours.
-    """
-    now_dt = datetime.now(tz)
-    offset = now_dt.utcoffset()
-    if offset is None:
-        return 0
-    return int(offset.total_seconds() / 3600)
-
-
-def is_dst(dt: datetime) -> bool:
-    """Check if datetime is in DST.
-
-    Args:
-        dt: Datetime to check.
-
-    Returns:
-        True if in DST.
-    """
-    return bool(dt.dst())
-
-
-class DateTimeRange:
-    """Range of datetime with iteration."""
-
-    def __init__(
-        self,
-        start: datetime,
-        end: datetime,
-        step: timedelta = timedelta(hours=1),
-    ) -> None:
-        self.start = start
-        self.end = end
-        self.step = step
-
-    def __iter__(self) -> Iterator[datetime]:
-        current = self.start
-        while current <= self.end:
-            yield current
-            current += self.step
-
-    def __contains__(self, dt: datetime) -> bool:
-        return self.start <= dt <= self.end
-
-    def __len__(self) -> int:
-        delta = self.end - self.start
-        return int(delta.total_seconds() / self.step.total_seconds()) + 1
-
-    def split(self, count: int) -> list[DateTimeRange]:
-        """Split range into count equal parts.
-
-        Args:
-            count: Number of parts.
-
-        Returns:
-            List of datetime ranges.
-        """
-        total = self.end - self.start
-        part_size = total / count
-        ranges = []
-        for i in range(count):
-            part_start = self.start + part_size * i
-            part_end = self.start + part_size * (i + 1) - self.step
-            if i == count - 1:
-                part_end = self.end
-            ranges.append(DateTimeRange(part_start, part_end, self.step))
-        return ranges
-
-
-class TimeSlot:
-    """A time slot with start and end."""
-
-    def __init__(self, start: datetime, end: datetime) -> None:
-        self.start = start
-        self.end = end
-
-    def __repr__(self) -> str:
-        return f"TimeSlot({self.start} - {self.end})"
-
-    def __contains__(self, dt: datetime) -> bool:
-        return self.start <= dt <= self.end
-
-    def duration(self) -> timedelta:
-        """Get duration of slot."""
-        return self.end - self.start
-
-    def overlaps(self, other: TimeSlot) -> bool:
-        """Check if overlaps with another slot."""
-        return self.start < other.end and self.end > other.start
-
-
-class FuzzyDateParser:
-    """Parse natural language date expressions."""
-
-    RELATIVE_PATTERNS = {
-        r"yesterday": lambda: today() - timedelta(days=1),
-        r"today": lambda: today(),
-        r"tomorrow": lambda: today() + timedelta(days=1),
-        r"next week": lambda: today() + timedelta(weeks=1),
-        r"last week": lambda: today() - timedelta(weeks=1),
-        r"next month": lambda: today() + timedelta(days=30),
-        r"last month": lambda: today() - timedelta(days=30),
-    }
-
-    @classmethod
-    def parse(cls, text: str) -> date | None:
-        """Parse fuzzy date string.
-
-        Args:
-            text: Date string like "yesterday", "next week".
-
-        Returns:
-            Date or None if cannot parse.
-        """
-        text = text.lower().strip()
-        for pattern, func in cls.RELATIVE_PATTERNS.items():
-            if pattern in text:
-                return func()
-        return None
+            timeseries = params.get("timeseries", [])
+            interval = params.get("interval", "1H")
+            agg_method = params.get("agg_method", "mean")
+
+            if not timeseries:
+                return ActionResult(success=False, message="timeseries data required")
+
+            interval_map = {
+                "1s": 1, "5s": 5, "10s": 10, "30s": 30,
+                "1m": 60, "5m": 300, "10m": 600, "30m": 1800,
+                "1H": 3600, "2H": 7200, "6H": 21600, "12H": 43200,
+                "1D": 86400, "1W": 604800
+            }
+
+            if interval not in interval_map:
+                return ActionResult(success=False, message=f"Unknown interval: {interval}")
+
+            interval_seconds = interval_map[interval]
+
+            buckets = {}
+            for point in timeseries:
+                ts = point.get("timestamp")
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts)
+                if not isinstance(ts, datetime):
+                    continue
+
+                ts_ts = int(ts.timestamp())
+                bucket_key = (ts_ts // interval_seconds) * interval_seconds
+                bucket_time = datetime.fromtimestamp(bucket_key)
+
+                if bucket_time not in buckets:
+                    buckets[bucket_time] = []
+                buckets[bucket_time].append(point.get("value", 0))
+
+            agg_methods = {
+                "mean": lambda vals: sum(vals) / len(vals) if vals else 0,
+                "sum": lambda vals: sum(vals) if vals else 0,
+                "min": lambda vals: min(vals) if vals else 0,
+                "max": lambda vals: max(vals) if vals else 0,
+                "count": lambda vals: len(vals),
+                "first": lambda vals: vals[0] if vals else 0,
+                "last": lambda vals: vals[-1] if vals else 0
+            }
+
+            agg_fn = agg_methods.get(agg_method, agg_methods["mean"])
+
+            resampled = []
+            for bucket_time in sorted(buckets.keys()):
+                resampled.append({
+                    "timestamp": bucket_time,
+                    "value": agg_fn(buckets[bucket_time])
+                })
+
+            return ActionResult(
+                success=True,
+                message=f"Resampled to {len(resampled)} points",
+                data={"timeseries": resampled, "count": len(resampled), "interval": interval}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Resample error: {str(e)}")
+
+
+class TimeSeriesSmoothingAction(BaseAction):
+    """Smooth time series data."""
+    action_type = "timeseries_smooth"
+    display_name = "时间序列平滑"
+    description = "平滑时间序列数据"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            timeseries = params.get("timeseries", [])
+            method = params.get("method", "moving_average")
+            window_size = params.get("window_size", 5)
+
+            if not timeseries:
+                return ActionResult(success=False, message="timeseries data required")
+
+            values = [p.get("value", 0) for p in timeseries]
+            smoothed = []
+
+            if method == "moving_average":
+                for i in range(len(values)):
+                    start = max(0, i - window_size // 2)
+                    end = min(len(values), i + window_size // 2 + 1)
+                    window = values[start:end]
+                    smoothed.append(sum(window) / len(window))
+
+            elif method == "exponential":
+                alpha = params.get("alpha", 0.3)
+                smoothed = [values[0]] if values else []
+                for i in range(1, len(values)):
+                    smoothed.append(alpha * values[i] + (1 - alpha) * smoothed[-1])
+
+            elif method == "savitzky_golay":
+                if window_size % 2 == 0:
+                    window_size += 1
+                if len(values) < window_size:
+                    window_size = len(values) if len(values) % 2 == 1 else len(values) - 1
+
+                if window_size >= 3:
+                    half = window_size // 2
+                    for i in range(len(values)):
+                        start = max(0, i - half)
+                        end = min(len(values), i + half + 1)
+                        window = values[start:end]
+
+                        if len(window) >= 3:
+                            n = len(window)
+                            x = list(range(n))
+                            x_mean = sum(x) / n
+                            xy = [xi * yi for xi, yi in zip(x, window)]
+                            slope = (sum(xy) - n * x_mean * sum(window) / n) / (sum(xi**2 for xi in x) - n * x_mean**2)
+                            intercept = sum(window) / n - slope * x_mean
+                            smoothed.append(intercept + slope * half)
+                        else:
+                            smoothed.append(sum(window) / len(window))
+                else:
+                    smoothed = values[:]
+
+            else:
+                return ActionResult(success=False, message=f"Unknown method: {method}")
+
+            result = []
+            for i, point in enumerate(timeseries):
+                result.append({
+                    "timestamp": point.get("timestamp"),
+                    "value": smoothed[i],
+                    "original": point.get("value")
+                })
+
+            return ActionResult(
+                success=True,
+                message=f"Smoothed {len(result)} points using {method}",
+                data={"timeseries": result, "method": method}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Smooth error: {str(e)}")
+
+
+class TimeSeriesDetectAnomaliesAction(BaseAction):
+    """Detect anomalies in time series."""
+    action_type = "timeseries_anomalies"
+    display_name = "时间序列异常检测"
+    description = "检测时间序列异常"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            timeseries = params.get("timeseries", [])
+            method = params.get("method", "zscore")
+            threshold = params.get("threshold", 3.0)
+            window_size = params.get("window_size", 20)
+
+            if not timeseries:
+                return ActionResult(success=False, message="timeseries data required")
+
+            values = [p.get("value", 0) for p in timeseries]
+            anomalies = []
+
+            if method == "zscore":
+                mean = sum(values) / len(values)
+                variance = sum((v - mean) ** 2 for v in values) / len(values)
+                stdev = math.sqrt(variance) if variance > 0 else 1
+
+                for i, point in enumerate(timeseries):
+                    zscore = abs(values[i] - mean) / stdev if stdev > 0 else 0
+                    if zscore > threshold:
+                        anomalies.append({
+                            "index": i,
+                            "timestamp": point.get("timestamp"),
+                            "value": values[i],
+                            "zscore": zscore
+                        })
+
+            elif method == "iqr":
+                sorted_values = sorted(values)
+                n = len(sorted_values)
+                q1 = sorted_values[n // 4]
+                q3 = sorted_values[3 * n // 4]
+                iqr = q3 - q1
+                lower = q1 - threshold * iqr
+                upper = q3 + threshold * iqr
+
+                for i, point in enumerate(timeseries):
+                    if values[i] < lower or values[i] > upper:
+                        anomalies.append({
+                            "index": i,
+                            "timestamp": point.get("timestamp"),
+                            "value": values[i],
+                            "bounds": (lower, upper)
+                        })
+
+            elif method == "rolling":
+                for i in range(len(values)):
+                    start = max(0, i - window_size)
+                    end = min(len(values), i + window_size // 2 + 1)
+                    if i < window_size // 2 or i >= len(values) - window_size // 2:
+                        continue
+
+                    window = values[start:i] + values[i+1:end]
+                    if window:
+                        w_mean = sum(window) / len(window)
+                        w_var = sum((v - w_mean) ** 2 for v in window) / len(window)
+                        w_stdev = math.sqrt(w_var) if w_var > 0 else 1
+                        zscore = abs(values[i] - w_mean) / w_stdev if w_stdev > 0 else 0
+
+                        if zscore > threshold:
+                            anomalies.append({
+                                "index": i,
+                                "timestamp": timeseries[i].get("timestamp"),
+                                "value": values[i],
+                                "zscore": zscore
+                            })
+
+            return ActionResult(
+                success=True,
+                message=f"Detected {len(anomalies)} anomalies",
+                data={"anomalies": anomalies, "count": len(anomalies), "method": method}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Anomaly detection error: {str(e)}")
+
+
+class TimeSeriesForecastAction(BaseAction):
+    """Simple time series forecasting."""
+    action_type = "timeseries_forecast"
+    display_name = "时间序列预测"
+    description = "简单时间序列预测"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            timeseries = params.get("timeseries", [])
+            method = params.get("method", "linear")
+            steps = params.get("steps", 10)
+            window_size = params.get("window_size", 5)
+
+            if not timeseries:
+                return ActionResult(success=False, message="timeseries data required")
+
+            values = [p.get("value", 0) for p in timeseries]
+            last_ts = timeseries[-1].get("timestamp")
+
+            if isinstance(last_ts, str):
+                last_ts = datetime.fromisoformat(last_ts)
+
+            forecasts = []
+
+            if method == "linear":
+                n = len(values)
+                if n >= 2:
+                    x = list(range(n))
+                    x_mean = sum(x) / n
+                    y_mean = sum(values) / n
+                    xy = [xi * yi for xi, yi in zip(x, values)]
+                    slope = (sum(xy) - n * x_mean * y_mean) / (sum(xi**2 for xi in x) - n * x_mean**2)
+                    intercept = y_mean - slope * x_mean
+
+                    for i in range(steps):
+                        next_x = n + i
+                        next_val = slope * next_x + intercept
+                        forecasts.append({"forecast": next_val})
+
+            elif method == "moving_average":
+                for i in range(steps):
+                    start = max(0, len(values) - window_size)
+                    window = values[start:]
+                    next_val = sum(window) / len(window)
+                    forecasts.append({"forecast": next_val})
+
+            elif method == "exponential_smoothing":
+                alpha = params.get("alpha", 0.3)
+                smoothed = [values[0]]
+                for i in range(1, len(values)):
+                    smoothed.append(alpha * values[i] + (1 - alpha) * smoothed[-1])
+
+                last_smoothed = smoothed[-1]
+                trend = (smoothed[-1] - smoothed[-2]) / 1 if len(smoothed) > 1 else 0
+
+                for i in range(steps):
+                    next_val = last_smoothed + (i + 1) * trend
+                    forecasts.append({"forecast": next_val})
+
+            elif method == "naive":
+                last_val = values[-1]
+                for _ in range(steps):
+                    forecasts.append({"forecast": last_val})
+
+            return ActionResult(
+                success=True,
+                message=f"Generated {len(forecasts)} forecasts",
+                data={"forecasts": forecasts, "method": method, "steps": steps}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Forecast error: {str(e)}")
+
+
+class RollingWindowAction(BaseAction):
+    """Rolling window calculations."""
+    action_type = "rolling_window"
+    display_name = "滚动窗口"
+    description = "滚动窗口计算"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            timeseries = params.get("timeseries", [])
+            window_size = params.get("window_size", 5)
+            operations = params.get("operations", ["mean"])
+
+            if not timeseries:
+                return ActionResult(success=False, message="timeseries data required")
+
+            values = [p.get("value", 0) for p in timeseries]
+            results = []
+
+            for i in range(len(values)):
+                start = max(0, i - window_size + 1)
+                window = values[start:i+1]
+
+                result = {"timestamp": timeseries[i].get("timestamp"), "original": values[i]}
+
+                for op in operations:
+                    if op == "mean":
+                        result["mean"] = sum(window) / len(window)
+                    elif op == "sum":
+                        result["sum"] = sum(window)
+                    elif op == "min":
+                        result["min"] = min(window)
+                    elif op == "max":
+                        result["max"] = max(window)
+                    elif op == "std":
+                        if len(window) > 1:
+                            mean = sum(window) / len(window)
+                            variance = sum((v - mean) ** 2 for v in window) / len(window)
+                            result["std"] = math.sqrt(variance)
+                        else:
+                            result["std"] = 0
+                    elif op == "count":
+                        result["count"] = len(window)
+
+                results.append(result)
+
+            return ActionResult(
+                success=True,
+                message=f"Applied rolling window ({window_size}) to {len(results)} points",
+                data={"results": results, "window_size": window_size, "operations": operations}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Rolling window error: {str(e)}")
