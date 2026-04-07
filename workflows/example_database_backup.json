@@ -1,0 +1,98 @@
+{
+  "name": "Database Backup Automation Workflow",
+  "description": "Automate database backup operations",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "db_host": "localhost",
+    "db_name": "production_db",
+    "backup_path": "./backups",
+    "compression": true,
+    "tables_to_backup": 5
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open terminal"
+    },
+    {
+      "id": 2,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for terminal"
+    },
+    {
+      "id": 3,
+      "type": "type_text",
+      "text": "PGPASSWORD=secret psql -h {{db_host}} -U postgres -d {{db_name}} -c \"SELECT 1\"",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Test database connection"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for connection test"
+    },
+    {
+      "id": 5,
+      "type": "screenshot",
+      "save_path": "./screenshots/db_connection_test.png",
+      "pre_delay": 0.5,
+      "comment": "Capture connection result"
+    },
+    {
+      "id": 6,
+      "type": "click",
+      "x": 100,
+      "y": 150,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click terminal again"
+    },
+    {
+      "id": 7,
+      "type": "type_text",
+      "text": "pg_dump -h {{db_host}} -U postgres {{db_name}} > {{backup_path}}/backup.sql",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Run database backup"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": 5.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for backup to complete"
+    },
+    {
+      "id": 9,
+      "type": "screenshot",
+      "save_path": "./screenshots/db_backup_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture backup result"
+    },
+    {
+      "id": 10,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
