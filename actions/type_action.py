@@ -1,15 +1,16 @@
-"""Type2 action module for RabAI AutoClick.
+"""Type action module for RabAI AutoClick.
 
-Provides additional type operations:
-- TypeCheckIntAction: Check if integer
-- TypeCheckFloatAction: Check if float
-- TypeCheckStringAction: Check if string
-- TypeCheckListAction: Check if list
-- TypeCheckDictAction: Check if dict
-- TypeConvertAction: Type conversion
+Provides type checking/conversion operations:
+- TypeCheckAction: Check value type
+- TypeToIntAction: Convert to int
+- TypeToFloatAction: Convert to float
+- TypeToStringAction: Convert to string
+- TypeToBoolAction: Convert to bool
+- TypeToListAction: Convert to list
+- TypeToDictAction: Convert to dict
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import sys
 import os
@@ -18,266 +19,72 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class TypeCheckIntAction(BaseAction):
-    """Check if integer."""
-    action_type = "type_check_int"
-    display_name = "检查整数"
-    description = "检查值是否为整数"
+class TypeCheckAction(BaseAction):
+    """Check value type."""
+    action_type = "type_check"
+    display_name = "类型检查"
+    description = "检查值类型"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute check int.
+        """Execute check.
 
         Args:
             context: Execution context.
-            params: Dict with value, output_var.
+            params: Dict with value, expected_type, output_var.
 
         Returns:
             ActionResult with check result.
         """
         value = params.get('value', None)
-        output_var = params.get('output_var', 'is_int_result')
+        expected_type = params.get('expected_type', 'string')
+        output_var = params.get('output_var', 'type_check_result')
 
         try:
             resolved_value = context.resolve_value(value)
+            resolved_type = context.resolve_value(expected_type)
 
-            result = isinstance(resolved_value, int) and not isinstance(resolved_value, bool)
-            context.set(output_var, result)
+            type_map = {
+                'string': str, 'str': str,
+                'int': int, 'integer': int,
+                'float': float, 'number': float,
+                'bool': bool, 'boolean': bool,
+                'list': list, 'array': list,
+                'dict': dict, 'dictionary': dict,
+                'tuple': tuple,
+                'set': set,
+            }
 
-            return ActionResult(
-                success=True,
-                message=f"整数检查: {'是' if result else '否'}",
-                data={
-                    'value': resolved_value,
-                    'is_int': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"检查整数失败: {str(e)}"
-            )
+            expected = type_map.get(resolved_type.lower(), str)
+            is_match = isinstance(resolved_value, expected)
 
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'is_int_result'}
-
-
-class TypeCheckFloatAction(BaseAction):
-    """Check if float."""
-    action_type = "type_check_float"
-    display_name = "检查浮点数"
-    description = "检查值是否为浮点数"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute check float.
-
-        Args:
-            context: Execution context.
-            params: Dict with value, output_var.
-
-        Returns:
-            ActionResult with check result.
-        """
-        value = params.get('value', None)
-        output_var = params.get('output_var', 'is_float_result')
-
-        try:
-            resolved_value = context.resolve_value(value)
-
-            result = isinstance(resolved_value, float)
-            context.set(output_var, result)
+            context.set(output_var, is_match)
 
             return ActionResult(
                 success=True,
-                message=f"浮点数检查: {'是' if result else '否'}",
-                data={
-                    'value': resolved_value,
-                    'is_float': result,
-                    'output_var': output_var
-                }
+                message=f"类型检查: {'匹配' if is_match else '不匹配'} (期望 {resolved_type}, 实际 {type(resolved_value).__name__})",
+                data={'match': is_match, 'expected': resolved_type, 'actual': type(resolved_value).__name__, 'output_var': output_var}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"检查浮点数失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"类型检查失败: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['value']
+        return ['value', 'expected_type']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'is_float_result'}
+        return {'output_var': 'type_check_result'}
 
 
-class TypeCheckStringAction(BaseAction):
-    """Check if string."""
-    action_type = "type_check_string"
-    display_name = "检查字符串"
-    description = "检查值是否为字符串"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute check string.
-
-        Args:
-            context: Execution context.
-            params: Dict with value, output_var.
-
-        Returns:
-            ActionResult with check result.
-        """
-        value = params.get('value', None)
-        output_var = params.get('output_var', 'is_string_result')
-
-        try:
-            resolved_value = context.resolve_value(value)
-
-            result = isinstance(resolved_value, str)
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"字符串检查: {'是' if result else '否'}",
-                data={
-                    'value': resolved_value,
-                    'is_string': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"检查字符串失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'is_string_result'}
-
-
-class TypeCheckListAction(BaseAction):
-    """Check if list."""
-    action_type = "type_check_list"
-    display_name = "检查列表"
-    description = "检查值是否为列表"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute check list.
-
-        Args:
-            context: Execution context.
-            params: Dict with value, output_var.
-
-        Returns:
-            ActionResult with check result.
-        """
-        value = params.get('value', None)
-        output_var = params.get('output_var', 'is_list_result')
-
-        try:
-            resolved_value = context.resolve_value(value)
-
-            result = isinstance(resolved_value, list)
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"列表检查: {'是' if result else '否'}",
-                data={
-                    'value': resolved_value,
-                    'is_list': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"检查列表失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'is_list_result'}
-
-
-class TypeCheckDictAction(BaseAction):
-    """Check if dict."""
-    action_type = "type_check_dict"
-    display_name = "检查字典"
-    description = "检查值是否为字典"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute check dict.
-
-        Args:
-            context: Execution context.
-            params: Dict with value, output_var.
-
-        Returns:
-            ActionResult with check result.
-        """
-        value = params.get('value', None)
-        output_var = params.get('output_var', 'is_dict_result')
-
-        try:
-            resolved_value = context.resolve_value(value)
-
-            result = isinstance(resolved_value, dict)
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"字典检查: {'是' if result else '否'}",
-                data={
-                    'value': resolved_value,
-                    'is_dict': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"检查字典失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'is_dict_result'}
-
-
-class TypeConvertAction(BaseAction):
-    """Type conversion."""
-    action_type = "type_convert"
-    display_name = "类型转换"
-    description = "转换值的类型"
+class TypeToIntAction(BaseAction):
+    """Convert to int."""
+    action_type = "type_to_int"
+    display_name = "转整数"
+    description = "转换为整数"
+    version = "1.0"
 
     def execute(
         self,
@@ -288,62 +95,288 @@ class TypeConvertAction(BaseAction):
 
         Args:
             context: Execution context.
-            params: Dict with value, target_type, output_var.
+            params: Dict with value, default, output_var.
 
         Returns:
-            ActionResult with converted value.
+            ActionResult with int value.
         """
-        value = params.get('value', None)
-        target_type = params.get('target_type', 'str')
-        output_var = params.get('output_var', 'converted_value')
-
-        valid, msg = self.validate_type(target_type, str, 'target_type')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        value = params.get('value', 0)
+        default = params.get('default', 0)
+        output_var = params.get('output_var', 'int_value')
 
         try:
             resolved_value = context.resolve_value(value)
-            resolved_type = context.resolve_value(target_type)
+            resolved_default = context.resolve_value(default)
 
-            if resolved_type == 'int':
+            try:
                 result = int(resolved_value)
-            elif resolved_type == 'float':
-                result = float(resolved_value)
-            elif resolved_type == 'str':
-                result = str(resolved_value)
-            elif resolved_type == 'bool':
-                result = bool(resolved_value)
-            elif resolved_type == 'list':
-                result = list(resolved_value) if isinstance(resolved_value, (list, tuple, set)) else [resolved_value]
-            elif resolved_type == 'dict':
-                result = dict(resolved_value) if isinstance(resolved_value, dict) else {}
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"不支持的目标类型: {resolved_type}"
-                )
+            except (ValueError, TypeError):
+                try:
+                    result = int(float(resolved_value))
+                except:
+                    result = resolved_default
 
             context.set(output_var, result)
 
             return ActionResult(
                 success=True,
-                message=f"类型转换: {type(resolved_value).__name__} -> {resolved_type}",
-                data={
-                    'original_value': resolved_value,
-                    'original_type': type(resolved_value).__name__,
-                    'target_type': resolved_type,
-                    'result': result,
-                    'output_var': output_var
-                }
+                message=f"转换整数: {result}",
+                data={'value': result, 'output_var': output_var}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"类型转换失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"转整数失败: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['value', 'target_type']
+        return ['value']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'converted_value'}
+        return {'default': 0, 'output_var': 'int_value'}
+
+
+class TypeToFloatAction(BaseAction):
+    """Convert to float."""
+    action_type = "type_to_float"
+    display_name = "转浮点数"
+    description = "转换为浮点数"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute convert.
+
+        Args:
+            context: Execution context.
+            params: Dict with value, default, output_var.
+
+        Returns:
+            ActionResult with float value.
+        """
+        value = params.get('value', 0.0)
+        default = params.get('default', 0.0)
+        output_var = params.get('output_var', 'float_value')
+
+        try:
+            resolved_value = context.resolve_value(value)
+            resolved_default = context.resolve_value(default)
+
+            try:
+                result = float(resolved_value)
+            except (ValueError, TypeError):
+                result = resolved_default
+
+            context.set(output_var, result)
+
+            return ActionResult(
+                success=True,
+                message=f"转换浮点数: {result}",
+                data={'value': result, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"转浮点数失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'default': 0.0, 'output_var': 'float_value'}
+
+
+class TypeToStringAction(BaseAction):
+    """Convert to string."""
+    action_type = "type_to_string"
+    display_name = "转字符串"
+    description = "转换为字符串"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute convert.
+
+        Args:
+            context: Execution context.
+            params: Dict with value, output_var.
+
+        Returns:
+            ActionResult with string value.
+        """
+        value = params.get('value', '')
+        output_var = params.get('output_var', 'string_value')
+
+        try:
+            resolved_value = context.resolve_value(value)
+            result = str(resolved_value)
+
+            context.set(output_var, result)
+
+            return ActionResult(
+                success=True,
+                message=f"转换字符串: {result[:50]}...",
+                data={'value': result, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"转字符串失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'string_value'}
+
+
+class TypeToBoolAction(BaseAction):
+    """Convert to bool."""
+    action_type = "type_to_bool"
+    display_name = "转布尔值"
+    description = "转换为布尔值"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute convert.
+
+        Args:
+            context: Execution context.
+            params: Dict with value, output_var.
+
+        Returns:
+            ActionResult with bool value.
+        """
+        value = params.get('value', False)
+        output_var = params.get('output_var', 'bool_value')
+
+        try:
+            resolved_value = context.resolve_value(value)
+            result = bool(resolved_value)
+
+            context.set(output_var, result)
+
+            return ActionResult(
+                success=True,
+                message=f"转换布尔值: {result}",
+                data={'value': result, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"转布尔值失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'bool_value'}
+
+
+class TypeToListAction(BaseAction):
+    """Convert to list."""
+    action_type = "type_to_list"
+    display_name = "转列表"
+    description = "转换为列表"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute convert.
+
+        Args:
+            context: Execution context.
+            params: Dict with value, output_var.
+
+        Returns:
+            ActionResult with list value.
+        """
+        value = params.get('value', [])
+        output_var = params.get('output_var', 'list_value')
+
+        try:
+            resolved_value = context.resolve_value(value)
+
+            if isinstance(resolved_value, list):
+                result = resolved_value
+            elif isinstance(resolved_value, (tuple, set)):
+                result = list(resolved_value)
+            elif isinstance(resolved_value, str):
+                result = [resolved_value]
+            elif isinstance(resolved_value, dict):
+                result = list(resolved_value.items())
+            else:
+                result = [resolved_value]
+
+            context.set(output_var, result)
+
+            return ActionResult(
+                success=True,
+                message=f"转换列表: {len(result)} 个元素",
+                data={'value': result, 'count': len(result), 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"转列表失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'list_value'}
+
+
+class TypeToDictAction(BaseAction):
+    """Convert to dict."""
+    action_type = "type_to_dict"
+    display_name = "转字典"
+    description = "转换为字典"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute convert.
+
+        Args:
+            context: Execution context.
+            params: Dict with value, output_var.
+
+        Returns:
+            ActionResult with dict value.
+        """
+        value = params.get('value', {})
+        output_var = params.get('output_var', 'dict_value')
+
+        try:
+            resolved_value = context.resolve_value(value)
+
+            if isinstance(resolved_value, dict):
+                result = resolved_value
+            elif isinstance(resolved_value, list):
+                result = {f'key_{i}': v for i, v in enumerate(resolved_value)}
+            elif hasattr(resolved_value, '__dict__'):
+                result = vars(resolved_value)
+            else:
+                result = {'value': resolved_value}
+
+            context.set(output_var, result)
+
+            return ActionResult(
+                success=True,
+                message=f"转换字典: {len(result)} 个键",
+                data={'value': result, 'count': len(result), 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"转字典失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'dict_value'}
