@@ -1,0 +1,117 @@
+{
+  "name": "Network Interface Status Workflow",
+  "description": "Automate network interface status verification",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "interfaces_to_check": 8,
+    "current_interface": 0,
+    "up_count": 0,
+    "down_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "interface_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize interface counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open network control panel"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for panel"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "interface_loop",
+      "count": "{{interfaces_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start interface check loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click interface"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for status"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/interface_{{interface_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture interface screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "interface_counter",
+      "value": "{{interface_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment interface counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{interface_counter < interfaces_to_check}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more interfaces"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next interface"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/network_interface_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
