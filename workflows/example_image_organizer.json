@@ -1,0 +1,169 @@
+{
+  "name": "Image Organizer Workflow",
+  "description": "Automatically organize images by date and type",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "source_folder": "./downloads/images",
+    "dest_base": "./organized",
+    "images_processed": 0,
+    "total_images": 100
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize image counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open source folder"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.5,
+      "comment": "Wait for folder to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "organize_loop",
+      "count": "{{total_images}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start image organization loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 150,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click on image"
+    },
+    {
+      "id": 6,
+      "type": "key_press",
+      "keys": ["ctrl", "i"],
+      "pre_delay": 0.2,
+      "comment": "Open image info"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for info dialog"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/image_info_{{counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture image info"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "key": "escape",
+      "pre_delay": 0.2,
+      "comment": "Close info dialog"
+    },
+    {
+      "id": 10,
+      "type": "key_press",
+      "keys": ["ctrl", "c"],
+      "pre_delay": 0.2,
+      "comment": "Copy image"
+    },
+    {
+      "id": 11,
+      "type": "click",
+      "x": 600,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to destination"
+    },
+    {
+      "id": 12,
+      "type": "key_press",
+      "keys": ["ctrl", "v"],
+      "pre_delay": 0.5,
+      "comment": "Paste image"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for paste"
+    },
+    {
+      "id": 14,
+      "type": "set_variable",
+      "name": "counter",
+      "value": "{{counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment counter"
+    },
+    {
+      "id": 15,
+      "type": "key_press",
+      "key": "down",
+      "pre_delay": 0.2,
+      "comment": "Move to next image in list"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{counter < total_images}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more images"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue organizing"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/organization_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

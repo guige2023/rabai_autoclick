@@ -1,0 +1,208 @@
+{
+  "name": "Excel Data Entry Automation",
+  "description": "Automate data entry into Excel spreadsheets",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "excel_path": "./data.xlsx",
+    "row_count": 50,
+    "current_row": 1,
+    "data_columns": ["Name", "Email", "Phone", "Address"]
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open Excel application"
+    },
+    {
+      "id": 2,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for Excel to load"
+    },
+    {
+      "id": 3,
+      "type": "click_image",
+      "template": "./templates/open_file.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click open file"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for dialog"
+    },
+    {
+      "id": 5,
+      "type": "type_text",
+      "text": "{{excel_path}}",
+      "enter_after": true,
+      "pre_delay": 0.5,
+      "comment": "Enter file path"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for file to open"
+    },
+    {
+      "id": 7,
+      "type": "set_variable",
+      "name": "row",
+      "value": 1,
+      "value_type": "int",
+      "pre_delay": 0.2,
+      "comment": "Initialize row counter"
+    },
+    {
+      "id": 8,
+      "type": "loop",
+      "loop_id": "data_entry_loop",
+      "count": "{{row_count}}",
+      "loop_start": 9,
+      "pre_delay": 0.3,
+      "comment": "Start data entry loop"
+    },
+    {
+      "id": 9,
+      "type": "click",
+      "x": 100,
+      "y": 150,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.2,
+      "comment": "Click on row"
+    },
+    {
+      "id": 10,
+      "type": "key_press",
+      "key": "enter",
+      "pre_delay": 0.1,
+      "comment": "Confirm cell selection"
+    },
+    {
+      "id": 11,
+      "type": "type_text",
+      "text": "Sample Name {{row}}",
+      "enter_after": false,
+      "pre_delay": 0.1,
+      "comment": "Enter name"
+    },
+    {
+      "id": 12,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.1,
+      "comment": "Move to next column"
+    },
+    {
+      "id": 13,
+      "type": "type_text",
+      "text": "user{{row}}@example.com",
+      "enter_after": false,
+      "pre_delay": 0.1,
+      "comment": "Enter email"
+    },
+    {
+      "id": 14,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.1,
+      "comment": "Move to next column"
+    },
+    {
+      "id": 15,
+      "type": "type_text",
+      "text": "555-{{row}}",
+      "enter_after": false,
+      "pre_delay": 0.1,
+      "comment": "Enter phone"
+    },
+    {
+      "id": 16,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.1,
+      "comment": "Move to next column"
+    },
+    {
+      "id": 17,
+      "type": "type_text",
+      "text": "{{row}} Main Street",
+      "enter_after": false,
+      "pre_delay": 0.1,
+      "comment": "Enter address"
+    },
+    {
+      "id": 18,
+      "type": "key_press",
+      "key": "down",
+      "pre_delay": 0.2,
+      "comment": "Move to next row"
+    },
+    {
+      "id": 19,
+      "type": "set_variable",
+      "name": "row",
+      "value": "{{row + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.1,
+      "comment": "Increment row counter"
+    },
+    {
+      "id": 20,
+      "type": "condition",
+      "condition": "{{row <= row_count}}",
+      "true_next": 21,
+      "false_next": 22,
+      "pre_delay": 0.1,
+      "comment": "Check if more rows"
+    },
+    {
+      "id": 21,
+      "type": "goto",
+      "step_id": 8,
+      "pre_delay": 0.1,
+      "comment": "Continue to next row"
+    },
+    {
+      "id": 22,
+      "type": "click_image",
+      "template": "./templates/save_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Save workbook"
+    },
+    {
+      "id": 23,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for save"
+    },
+    {
+      "id": 24,
+      "type": "screenshot",
+      "save_path": "./screenshots/excel_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture final state"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
