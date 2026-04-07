@@ -11,6 +11,8 @@ from .performance import (
     widget_cache,
     lazy_property,
     BatchOperation,
+    RateLimiter,
+    throttle_calls,
 )
 
 __all__ = [
@@ -40,4 +42,6 @@ __all__ = [
     'widget_cache',
     'lazy_property',
     'BatchOperation',
+    'RateLimiter',
+    'throttle_calls',
 ]
