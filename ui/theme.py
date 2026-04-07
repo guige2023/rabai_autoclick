@@ -436,7 +436,7 @@ class ThemeManager(QObject):
                 QListWidget::item:hover {{ background-color: {c['bg_hover']}; }}
                 QListWidget::item:selected {{ background-color: {c['selection']}; }}
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
-                QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
+                QMenuBar::item:selected {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
                 QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QMenu::item:selected {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
                 QStatusBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
@@ -663,7 +663,7 @@ class ThemeManager(QObject):
                 QListWidget::item:hover {{ background-color: {c['bg_hover']}; }}
                 QListWidget::item:selected {{ background-color: {c['selection']}; }}
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
-                QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
+                QMenuBar::item:selected {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
                 QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QMenu::item:selected {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
                 QStatusBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
