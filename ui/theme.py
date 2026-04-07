@@ -428,7 +428,7 @@ class ThemeManager(QObject):
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
                 QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
-                QMenu::item:selected {{ background-color: {c['bg_hover']}; }}
+                QMenu::item:selected {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
                 QStatusBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QProgressBar {{ border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; text-align: center; }}
                 QProgressBar::chunk {{ background-color: {c['primary']}; border-radius: 3px; }}
@@ -635,7 +635,7 @@ class ThemeManager(QObject):
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
                 QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
-                QMenu::item:selected {{ background-color: {c['bg_hover']}; }}
+                QMenu::item:selected {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
                 QStatusBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QProgressBar {{ border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; text-align: center; }}
                 QProgressBar::chunk {{ background-color: {c['primary']}; border-radius: 3px; }}
