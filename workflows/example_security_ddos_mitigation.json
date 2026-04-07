@@ -1,0 +1,117 @@
+{
+  "name": "Security DDoS Mitigation Workflow",
+  "description": "Automate DDoS attack mitigation",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "ddos_attacks_to_mitigate": 50,
+    "current_attack": 0,
+    "mitigated_attacks": 0,
+    "ongoing_attacks": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "attack_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize attack counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open DDoS mitigation platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "ddos_mitigation_loop",
+      "count": "{{ddos_attacks_to_mitigate}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start DDoS mitigation loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select DDoS attack"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for mitigation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/ddos_mitigation_{{attack_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture DDoS screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "attack_counter",
+      "value": "{{attack_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment attack counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{attack_counter < ddos_attacks_to_mitigate}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more attacks"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next attack"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_ddos_mitigation_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
