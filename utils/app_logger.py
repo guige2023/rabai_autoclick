@@ -226,10 +226,10 @@ class AppLogger:
     
     def export_to_file(self, filepath: str) -> bool:
         """Export log entries to a JSON file.
-        
+
         Args:
             filepath: Path to write the JSON file.
-            
+
         Returns:
             True if exported successfully, False otherwise.
         """
@@ -241,6 +241,77 @@ class AppLogger:
         except Exception:
             return False
 
+    def export_to_text(self, filepath: str) -> bool:
+        """Export log entries to a text file.
+
+        Args:
+            filepath: Path to write the text file.
+
+        Returns:
+            True if exported successfully, False otherwise.
+        """
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                for entry in self._entries:
+                    f.write(
+                        f"{entry.timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} | "
+                        f"{entry.level:8s} | {entry.module:20s} | {entry.message}\n"
+                    )
+            return True
+        except Exception:
+            return False
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get log statistics.
+
+        Returns:
+            Dictionary with counts per log level.
+        """
+        stats = {'DEBUG': 0, 'INFO': 0, 'SUCCESS': 0, 'WARNING': 0, 'ERROR': 0, 'CRITICAL': 0}
+        for entry in self._entries:
+            if entry.level in stats:
+                stats[entry.level] += 1
+        return stats
+
+    def search(self, keyword: str) -> List[LogEntry]:
+        """Search log entries by keyword.
+
+        Args:
+            keyword: Keyword to search for in messages.
+
+        Returns:
+            List of matching LogEntry objects.
+        """
+        keyword_lower = keyword.lower()
+        return [
+            e for e in self._entries
+            if keyword_lower in e.message.lower()
+        ]
+
+    def get_recent_errors(self, count: int = 10) -> List[LogEntry]:
+        """Get recent error entries.
+
+        Args:
+            count: Maximum number of errors to return.
+
+        Returns:
+            List of recent error LogEntry objects.
+        """
+        errors = [e for e in self._entries if e.level in ('ERROR', 'CRITICAL')]
+        return errors[-count:]
+
 
 # Global singleton instance
 app_logger: AppLogger = AppLogger()
+
+
+def get_logger(name: str = 'RabAI_AutoClick') -> logging.Logger:
+    """Get a standard logger with the given name.
+
+    Args:
+        name: Logger name.
+
+    Returns:
+        Configured logger instance.
+    """
+    return logging.getLogger(name)
