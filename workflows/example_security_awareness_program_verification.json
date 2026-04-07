@@ -1,0 +1,117 @@
+{
+  "name": "Security Awareness Program Verification Workflow",
+  "description": "Automate security awareness program effectiveness",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "awareness_areas_to_verify": 28,
+    "current_area": 0,
+    "effective_count": 0,
+    "ineffective_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "area_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize area counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open awareness program portal"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for portal"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "awareness_verification_loop",
+      "count": "{{awareness_areas_to_verify}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start awareness verification loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select awareness area"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for effectiveness check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/awareness_verify_{{area_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture verification screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "area_counter",
+      "value": "{{area_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment area counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{area_counter < awareness_areas_to_verify}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more areas"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next area"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_awareness_program_verification_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
