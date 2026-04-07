@@ -1,0 +1,117 @@
+{
+  "name": "SAML Configuration Audit Workflow",
+  "description": "Automate SAML federation configuration verification",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "saml_relying_parties_to_check": 40,
+    "current_party": 0,
+    "secure_configurations": 0,
+    "misconfigured_parties": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "saml_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize SAML counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open SAML identity provider"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for provider"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "saml_audit_loop",
+      "count": "{{saml_relying_parties_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start SAML audit loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select relying party"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for configuration check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/saml_audit_{{saml_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture SAML screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "saml_counter",
+      "value": "{{saml_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment SAML counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{saml_counter < saml_relying_parties_to_check}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more parties"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next party"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/saml_configuration_audit_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
