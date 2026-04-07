@@ -1,0 +1,117 @@
+{
+  "name": "Fitness Member Tracking Workflow",
+  "description": "Automate fitness member tracking",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "members_to_track": 55,
+    "current_member": 0,
+    "tracked_members": 0,
+    "renewals_due": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "member_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize member counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open member tracking system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "member_tracking_loop",
+      "count": "{{members_to_track}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start member tracking loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select member for tracking"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for tracking update"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/member_tracking_{{member_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture tracking screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "member_counter",
+      "value": "{{member_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment member counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{member_counter < members_to_track}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more members"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next member"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/fitness_member_tracking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
