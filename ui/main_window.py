@@ -475,70 +475,83 @@ class ActionConfigWidget(QWidget):
 class StepListWidget(QWidget):
     step_selected = pyqtSignal(int)
     step_moved = pyqtSignal(int, int)
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
-    
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.list_widget = QListWidget()
         self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
         self.list_widget.currentRowChanged.connect(self.step_selected.emit)
         layout.addWidget(self.list_widget)
-        
+
         btn_layout = QHBoxLayout()
-        
+
         self.add_btn = QPushButton("添加步骤")
         self.remove_btn = QPushButton("删除")
         self.up_btn = QPushButton("↑")
         self.down_btn = QPushButton("↓")
-        
+
         self.up_btn.setMaximumWidth(40)
         self.down_btn.setMaximumWidth(40)
-        
+
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.remove_btn)
         btn_layout.addWidget(self.up_btn)
         btn_layout.addWidget(self.down_btn)
-        
+
         layout.addLayout(btn_layout)
-    
+
     def _show_context_menu(self, position):
         item = self.list_widget.itemAt(position)
         if item:
             menu = QMenu()
             duplicate_action = menu.addAction("复制此步骤")
             delete_action = menu.addAction("删除此步骤")
-            
+
             action = menu.exec_(self.list_widget.mapToGlobal(position))
             if action == duplicate_action:
                 data = item.data(Qt.UserRole)
                 self.add_step(data['id'] + 1000, data['type'], item.text().split('] ')[1] if '] ' in item.text() else data['type'])
             elif action == delete_action:
                 self.remove_step(self.list_widget.row(item))
-    
+
     def add_step(self, step_id: int, action_type: str, display_name: str):
         item = QListWidgetItem(f"[{step_id}] {display_name}")
         item.setData(Qt.UserRole, {'id': step_id, 'type': action_type})
         self.list_widget.addItem(item)
-    
+
+    def add_steps_batch(self, steps: list):
+        """Add multiple steps with batch updates for performance.
+
+        Args:
+            steps: List of tuples (step_id, action_type, display_name).
+        """
+        with batch_updates(self.list_widget):
+            for step_id, action_type, display_name in steps:
+                item = QListWidgetItem(f"[{step_id}] {display_name}")
+                item.setData(Qt.UserRole, {'id': step_id, 'type': action_type})
+                self.list_widget.addItem(item)
+
     def get_current_index(self) -> int:
         return self.list_widget.currentRow()
-    
+
     def set_current_index(self, index: int):
         self.list_widget.setCurrentRow(index)
-    
+
     def remove_step(self, index: int):
         self.list_widget.takeItem(index)
-    
+
     def clear(self):
-        self.list_widget.clear()
-    
+        with batch_updates(self.list_widget):
+            self.list_widget.clear()
+
     def get_step_count(self) -> int:
         return self.list_widget.count()
 
