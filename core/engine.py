@@ -79,6 +79,9 @@ class FlowEngine:
         self._stop_requested: bool = False
         self._loop_counters: Dict[str, int] = {}
 
+        # Thread safety lock for state flags
+        self._state_lock: threading.RLock = threading.RLock()
+
         # Callbacks
         self._on_step_start: Optional[Callable[[Dict], None]] = None
         self._on_step_end: Optional[Callable[[Dict, ActionResult], None]] = None
@@ -176,43 +179,56 @@ class FlowEngine:
     
     def run(self) -> bool:
         """Execute the loaded workflow synchronously.
-        
+
         Returns:
             True if workflow completed normally, False if stopped.
         """
-        if self._is_running:
-            return False
-        
-        self._is_running = True
-        self._stop_requested = False
-        self._is_paused = False
-        self._current_step_index = 0
+        with self._state_lock:
+            if self._is_running:
+                return False
+            self._is_running = True
+            self._stop_requested = False
+            self._is_paused = False
+            self._current_step_index = 0
         
         steps: List[Dict[str, Any]] = self._workflow.get('steps', [])
         
         if not steps:
-            self._is_running = False
+            with self._state_lock:
+                self._is_running = False
             return False
-        
+
         # Build step index map for quick lookup
         step_map: Dict[str, int] = {step['id']: i for i, step in enumerate(steps)}
         current_step: Optional[Dict[str, Any]] = steps[0]
-        
-        while current_step is not None and not self._stop_requested:
-            # Wait while paused
-            while self._is_paused and not self._stop_requested:
+
+        while current_step is not None:
+            # Check stop request
+            with self._state_lock:
+                if self._stop_requested:
+                    break
+                paused = self._is_paused
+
+            # Wait while paused (brief lock acquisitions to allow stop/pause changes)
+            while paused:
                 time.sleep(0.1)
-            
-            if self._stop_requested:
-                break
-            
-            result: ActionResult = self._execute_step(current_step)
-            
+                with self._state_lock:
+                    if self._stop_requested:
+                        paused = False
+                    else:
+                        paused = self._is_paused
+
+            with self._state_lock:
+                if self._stop_requested:
+                    break
+
+            result = self._execute_step(current_step)
+
             if not result.success:
                 if self._on_error:
                     self._on_error(current_step, result.message)
                 break
-            
+
             # Determine next step
             if result.next_step_id is not None:
                 if result.next_step_id in step_map:
@@ -226,12 +242,15 @@ class FlowEngine:
                     current_step = steps[next_index]
                 else:
                     current_step = None
-        
-        self._is_running = False
+
+        with self._state_lock:
+            self._is_running = False
+            stopped = self._stop_requested
+
         if self._on_workflow_end:
-            self._on_workflow_end(not self._stop_requested)
-        
-        return not self._stop_requested
+            self._on_workflow_end(not stopped)
+
+        return not stopped
     
     def run_async(
         self, 
@@ -320,32 +339,37 @@ class FlowEngine:
     
     def stop(self) -> None:
         """Stop the currently running workflow."""
-        self._stop_requested = True
-        self._is_paused = False
-    
+        with self._state_lock:
+            self._stop_requested = True
+            self._is_paused = False
+
     def pause(self) -> None:
         """Pause the currently running workflow."""
-        self._is_paused = True
-    
+        with self._state_lock:
+            self._is_paused = True
+
     def resume(self) -> None:
         """Resume a paused workflow."""
-        self._is_paused = False
-    
+        with self._state_lock:
+            self._is_paused = False
+
     def is_running(self) -> bool:
         """Check if workflow is currently running.
-        
+
         Returns:
             True if running, False otherwise.
         """
-        return self._is_running
-    
+        with self._state_lock:
+            return self._is_running
+
     def is_paused(self) -> bool:
         """Check if workflow is currently paused.
-        
+
         Returns:
             True if paused, False otherwise.
         """
-        return self._is_paused
+        with self._state_lock:
+            return self._is_paused
     
     def get_current_step_index(self) -> int:
         """Get the index of the current step.
