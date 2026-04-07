@@ -197,9 +197,10 @@ class MiniToolbar(QWidget):
         """
         if is_running:
             self.run_btn.setText("⏳ 运行中")
-            self.run_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #FF9800;
+            colors = ThemeColors.DARK
+            self.run_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {colors['warning']};
                     color: white;
                     border: none;
                     border-radius: 4px;
@@ -207,12 +208,12 @@ class MiniToolbar(QWidget):
                     font-size: 12px;
                     min-width: 60px;
                     animation: pulse 1s infinite;
-                }
-                @keyframes pulse {
-                    0% { opacity: 1.0; }
-                    50% { opacity: 0.7; }
-                    100% { opacity: 1.0; }
-                }
+                }}
+                @keyframes pulse {{
+                    0% {{ opacity: 1.0; }}
+                    50% {{ opacity: 0.7; }}
+                    100% {{ opacity: 1.0; }}
+                }}
             """)
         else:
             self.run_btn.setText("▶ 运行")
