@@ -280,9 +280,10 @@ class TestFallback:
 
     def test_error_property(self) -> None:
         """Test error property."""
-        with Fallback(default=42) as fallback:
+        fb = Fallback(default=42)
+        with fb:
             raise ValueError("bad")
-        assert isinstance(fallback.error, ValueError)
+        assert isinstance(fb.error, ValueError)
 
     def test_does_not_catch_other(self) -> None:
         """Test not catching other errors."""
@@ -328,10 +329,12 @@ class TestFormatError:
 
     def test_format_with_traceback(self) -> None:
         """Test formatting with traceback."""
-        error = ValueError("test error")
-        result = format_error(error, include_traceback=True)
-        assert "ValueError" in result
-        assert "Traceback" in result
+        try:
+            raise ValueError("test error")
+        except ValueError as error:
+            result = format_error(error, include_traceback=True)
+            assert "ValueError" in result
+            assert "Traceback" in result
 
 
 if __name__ == "__main__":
