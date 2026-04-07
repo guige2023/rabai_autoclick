@@ -1,181 +1,328 @@
-"""Factory utilities for RabAI AutoClick.
+"""
+Factory Pattern Implementation
 
-Provides:
-- Factory registry
-- Factory builder
-- Abstract factory pattern
+Provides various factory patterns: simple, factory method, abstract factory,
+and dynamic factory registration.
 """
 
 from __future__ import annotations
 
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Generic,
-    Optional,
-    TypeVar,
-)
-
+import copy
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
+TProduct = TypeVar("TProduct")
 
 
-class FactoryRegistry(Generic[T]):
-    """Registry for factories.
+class FactoryError(Exception):
+    """Base exception for factory errors."""
+    pass
 
-    Example:
-        registry = FactoryRegistry[Connection]()
 
-        @registry.register("mysql")
-        def mysql_factory() -> Connection:
-            return MySQLConnection()
+class ProductNotFoundError(FactoryError):
+    """Raised when a requested product is not registered."""
+    pass
 
-        @registry.register("postgres")
-        def postgres_factory() -> Connection:
-            return PostgresConnection()
 
-        conn = registry.create("mysql")
+class ProductRegistrationError(FactoryError):
+    """Raised when product registration fails."""
+    pass
+
+
+@dataclass
+class ProductSpec(Generic[T]):
+    """
+    Specification for a product type.
+
+    Type Parameters:
+        T: The product type.
+    """
+    product_id: str
+    name: str
+    description: str = ""
+    factory_func: Callable[..., T] | None = None
+    product_class: type[T] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def create(self, *args: Any, **kwargs: Any) -> T:
+        """Create a product instance."""
+        if self.factory_func is not None:
+            return self.factory_func(*args, **kwargs)
+        if self.product_class is not None:
+            return self.product_class(*args, **kwargs)
+        raise ProductRegistrationError(f"No factory method available for '{self.product_id}'")
+
+
+class ProductFactory(ABC, Generic[TProduct]):
+    """
+    Abstract base class for product factories.
+
+    Type Parameters:
+        TProduct: The type of product this factory creates.
     """
 
-    def __init__(self) -> None:
-        self._factories: Dict[str, Callable[[], T]] = {}
-        self._default: Optional[str] = None
+    @abstractmethod
+    def create(self, product_id: str, *args: Any, **kwargs: Any) -> TProduct:
+        """Create a product by ID."""
+        pass
+
+    @abstractmethod
+    def register(self, product_id: str, spec: ProductSpec[TProduct]) -> None:
+        """Register a product specification."""
+        pass
+
+    @abstractmethod
+    def unregister(self, product_id: str) -> bool:
+        """Unregister a product specification."""
+        pass
+
+    @abstractmethod
+    def list_products(self) -> list[str]:
+        """List all registered product IDs."""
+        pass
+
+    @abstractmethod
+    def has_product(self, product_id: str) -> bool:
+        """Check if a product is registered."""
+        pass
+
+
+class SimpleFactory(ProductFactory[T]):
+    """
+    Simple factory with direct registration.
+    """
+
+    def __init__(self):
+        self._products: dict[str, ProductSpec[T]] = {}
 
     def register(
         self,
-        name: str,
-    ) -> Callable[[Callable[[], T]], Callable[[], T]]:
-        """Decorator to register a factory.
+        product_id: str,
+        spec: ProductSpec[T] | None = None,
+        *,
+        factory_func: Callable[..., T] | None = None,
+        product_class: type[T] | None = None,
+        name: str = "",
+        description: str = "",
+    ) -> None:
+        """Register a product."""
+        if product_id in self._products:
+            raise ProductRegistrationError(f"Product '{product_id}' already registered")
 
-        Args:
-            name: Factory name.
+        if spec is None:
+            spec = ProductSpec(
+                product_id=product_id,
+                name=name or product_id,
+                description=description,
+                factory_func=factory_func,
+                product_class=product_class,
+            )
 
-        Returns:
-            Decorator function.
-        """
-        def decorator(factory: Callable[[], T]) -> Callable[[], T]:
-            self._factories[name] = factory
-            return factory
-        return decorator
+        self._products[product_id] = spec
 
-    def add(self, name: str, factory: Callable[[], T]) -> None:
-        """Add a factory.
+    def register_class(self, product_id: str, cls: type[T], **kwargs: Any) -> None:
+        """Register a product class."""
+        self.register(
+            product_id,
+            ProductSpec(
+                product_id=product_id,
+                name=kwargs.pop("name", cls.__name__),
+                description=kwargs.pop("description", ""),
+                product_class=cls,
+                metadata=kwargs,
+            ),
+        )
 
-        Args:
-            name: Factory name.
-            factory: Factory function.
-        """
-        self._factories[name] = factory
+    def unregister(self, product_id: str) -> bool:
+        """Unregister a product."""
+        if product_id in self._products:
+            del self._products[product_id]
+            return True
+        return False
 
-    def set_default(self, name: str) -> None:
-        """Set default factory name."""
-        self._default = name
+    def create(self, product_id: str, *args: Any, **kwargs: Any) -> T:
+        """Create a product instance."""
+        if product_id not in self._products:
+            raise ProductNotFoundError(
+                f"Product '{product_id}' not found. Available: {self.list_products()}"
+            )
 
-    def create(self, name: Optional[str] = None, **kwargs: Any) -> T:
-        """Create instance using named factory.
+        spec = self._products[product_id]
+        return spec.create(*args, **kwargs)
 
-        Args:
-            name: Factory name. Uses default if None.
-            **kwargs: Arguments to pass to factory.
+    def get_spec(self, product_id: str) -> ProductSpec[T] | None:
+        """Get a product specification."""
+        return self._products.get(product_id)
 
-        Returns:
-            Created instance.
-        """
-        if name is None:
-            name = self._default
-        if name is None:
-            raise ValueError("No factory name specified and no default set")
+    def list_products(self) -> list[str]:
+        """List all registered product IDs."""
+        return list(self._products.keys())
 
-        if name not in self._factories:
-            raise KeyError(f"Factory not found: {name}")
+    def has_product(self, product_id: str) -> bool:
+        """Check if a product is registered."""
+        return product_id in self._products
 
-        return self._factories[name]()
+    def create_all(self) -> dict[str, T]:
+        """Create instances of all registered products."""
+        return {pid: self.create(pid) for pid in self._products}
 
-    def has(self, name: str) -> bool:
-        """Check if factory exists."""
-        return name in self._factories
 
-    def names(self) -> list[str]:
-        """Get list of registered factory names."""
+class DynamicFactory(ProductFactory[T]):
+    """
+    Dynamic factory with decorator-based registration.
+    """
+
+    def __init__(self):
+        self._products: dict[str, ProductSpec[T]] = {}
+        self._aliases: dict[str, str] = {}
+
+    def register(
+        self,
+        product_id: str,
+        spec: ProductSpec[T] | None = None,
+        *,
+        factory_func: Callable[..., T] | None = None,
+        product_class: type[T] | None = None,
+        name: str = "",
+        description: str = "",
+    ) -> None:
+        """Register a product."""
+        if spec is None:
+            spec = ProductSpec(
+                product_id=product_id,
+                name=name or product_id,
+                description=description,
+                factory_func=factory_func,
+                product_class=product_class,
+            )
+        self._products[product_id] = spec
+
+    def register_alias(self, alias: str, product_id: str) -> None:
+        """Register an alias for a product."""
+        if product_id not in self._products:
+            raise ProductNotFoundError(f"Cannot alias to unregistered product '{product_id}'")
+        self._aliases[alias] = product_id
+
+    def create(self, product_id: str, *args: Any, **kwargs: Any) -> T:
+        """Create a product instance."""
+        resolved_id = self._aliases.get(product_id, product_id)
+
+        if resolved_id not in self._products:
+            raise ProductNotFoundError(
+                f"Product '{product_id}' not found. Available: {self.list_products()}"
+            )
+
+        spec = self._products[resolved_id]
+        return spec.create(*args, **kwargs)
+
+    def unregister(self, product_id: str) -> bool:
+        """Unregister a product and its aliases."""
+        if product_id in self._products:
+            del self._products[product_id]
+            # Remove aliases pointing to this product
+            self._aliases = {k: v for k, v in self._aliases.items() if v != product_id}
+            return True
+        return False
+
+    def list_products(self) -> list[str]:
+        """List all registered product IDs including aliases."""
+        return list(set(self._products.keys()) | set(self._aliases.keys()))
+
+    def has_product(self, product_id: str) -> bool:
+        """Check if a product or alias is registered."""
+        return product_id in self._products or product_id in self._aliases
+
+    def get_product_id(self, identifier: str) -> str | None:
+        """Resolve an identifier to its product ID."""
+        if identifier in self._products:
+            return identifier
+        return self._aliases.get(identifier)
+
+
+def register(product_id: str, factory: DynamicFactory[T]) -> Callable[[type[T]], type[T]]:
+    """
+    Decorator to register a product class with a dynamic factory.
+
+    Usage:
+        factory = DynamicFactory()
+
+        @register("my_product", factory)
+        class MyProduct:
+            pass
+    """
+    def decorator(cls: type[T]) -> type[T]:
+        factory.register(product_id, ProductSpec(
+            product_id=product_id,
+            name=cls.__name__,
+            description=cls.__doc__ or "",
+            product_class=cls,
+        ))
+        return cls
+    return decorator
+
+
+class AbstractFactory(ABC, Generic[T]):
+    """
+    Abstract factory interface for creating families of related products.
+    """
+
+    @abstractmethod
+    def create_product_a(self) -> T:
+        """Create product family A."""
+        pass
+
+    @abstractmethod
+    def create_product_b(self) -> T:
+        """Create product family B."""
+        pass
+
+
+@dataclass
+class FactoryMetadata:
+    """Metadata for a factory."""
+    name: str
+    description: str = ""
+    version: str = "1.0.0"
+    author: str = ""
+    tags: list[str] = field(default_factory=list)
+
+
+class FactoryRegistry:
+    """
+    Global registry for factories with metadata.
+    """
+
+    _instance: FactoryRegistry | None = None
+
+    def __new__(cls) -> FactoryRegistry:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._factories = {}
+            cls._instance._metadata = {}
+        return cls._instance
+
+    def register(
+        self,
+        namespace: str,
+        factory: ProductFactory,
+        metadata: FactoryMetadata | None = None,
+    ) -> None:
+        """Register a factory with a namespace."""
+        self._factories[namespace] = factory
+        if metadata:
+            self._metadata[namespace] = metadata
+
+    def get(self, namespace: str) -> ProductFactory | None:
+        """Get a factory by namespace."""
+        return self._factories.get(namespace)
+
+    def list_namespaces(self) -> list[str]:
+        """List all registered namespaces."""
         return list(self._factories.keys())
 
-
-class FactoryBuilder(Generic[T]):
-    """Builder for creating objects with fluent API.
-
-    Example:
-        builder = FactoryBuilder[Config]()
-
-        config = (
-            builder
-            .option("host", "localhost")
-            .option("port", 5432)
-            .option("debug", True)
-            .build()
-        )
-    """
-
-    def __init__(self, factory: Callable[[Dict[str, Any]], T]) -> None:
-        self._factory = factory
-        self._options: Dict[str, Any] = {}
-
-    def option(self, key: str, value: Any) -> FactoryBuilder[T]:
-        """Set an option.
-
-        Args:
-            key: Option name.
-            value: Option value.
-
-        Returns:
-            Self for chaining.
-        """
-        self._options[key] = value
-        return self
-
-    def options(self, **kwargs: Any) -> FactoryBuilder[T]:
-        """Set multiple options.
-
-        Args:
-            **kwargs: Options to set.
-
-        Returns:
-            Self for chaining.
-        """
-        self._options.update(kwargs)
-        return self
-
-    def build(self) -> T:
-        """Build the object.
-
-        Returns:
-            Created object.
-        """
-        return self._factory(self._options)
-
-
-def simple_factory(
-    base_class: type[T],
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """Decorator to create a simple factory.
-
-    Args:
-        base_class: Base class to register with.
-
-    Returns:
-        Decorator function.
-    """
-    registry: Dict[str, type[T]] = {}
-
-    def decorator(cls: type[T]) -> type[T]:
-        name = cls.__name__
-        registry[name] = cls
-
-        def factory(*args, **kwargs) -> T:
-            return cls(*args, **kwargs)
-
-        factory.class_name = name  # type: ignore
-        factory.registry = registry  # type: ignore
-        return cls
-
-    return decorator
+    def get_metadata(self, namespace: str) -> FactoryMetadata | None:
+        """Get metadata for a namespace."""
+        return self._metadata.get(namespace)
