@@ -1,14 +1,14 @@
 """Sort action module for RabAI AutoClick.
 
 Provides sorting operations:
-- SortListAction: Sort list
-- SortReverseAction: Reverse list
-- SortUniqueAction: Get unique sorted list
-- SortByKeyAction: Sort by key function
-- SortBubbleAction: Bubble sort
+- SortNumbersAction: Sort numbers
+- SortStringsAction: Sort strings
+- SortDictByKeyAction: Sort dict by key
+- SortDictByValueAction: Sort dict by value
+- SortReverseAction: Reverse order
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import sys
 import os
@@ -17,11 +17,12 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class SortListAction(BaseAction):
-    """Sort list."""
-    action_type = "sort_list"
-    display_name = "排序列表"
-    description = "对列表排序"
+class SortNumbersAction(BaseAction):
+    """Sort numbers."""
+    action_type = "sort_numbers"
+    display_name = "数字排序"
+    description = "对数字排序"
+    version = "1.0"
 
     def execute(
         self,
@@ -32,60 +33,223 @@ class SortListAction(BaseAction):
 
         Args:
             context: Execution context.
-            params: Dict with list_var, reverse, output_var.
+            params: Dict with numbers, order, output_var.
 
         Returns:
-            ActionResult with sorted list.
+            ActionResult with sorted numbers.
         """
-        list_var = params.get('list_var', '')
-        reverse = params.get('reverse', False)
-        output_var = params.get('output_var', 'sorted_list')
+        numbers = params.get('numbers', [])
+        order = params.get('order', 'asc')
+        output_var = params.get('output_var', 'sorted_numbers')
 
-        valid, msg = self.validate_type(list_var, str, 'list_var')
+        valid, msg = self.validate_type(numbers, list, 'numbers')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
-            resolved_var = context.resolve_value(list_var)
-            resolved_reverse = bool(context.resolve_value(reverse))
+            resolved_nums = context.resolve_value(numbers)
+            resolved_order = context.resolve_value(order)
 
-            items = context.get(resolved_var)
-            if not isinstance(items, (list, tuple)):
-                return ActionResult(
-                    success=False,
-                    message=f"{resolved_var} 不是列表"
-                )
+            reverse = resolved_order == 'desc'
+            sorted_nums = sorted(resolved_nums, key=lambda x: float(x) if isinstance(x, (int, float, str)) else 0, reverse=reverse)
 
-            result = sorted(list(items), reverse=resolved_reverse)
-            context.set(output_var, result)
+            context.set(output_var, sorted_nums)
 
             return ActionResult(
                 success=True,
-                message=f"列表排序: {len(result)} 项",
-                data={
-                    'count': len(result),
-                    'reverse': resolved_reverse,
-                    'output_var': output_var
-                }
+                message=f"数字排序完成: {len(sorted_nums)} 个",
+                data={'sorted': sorted_nums, 'output_var': output_var}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"排序列表失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"数字排序失败: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['list_var']
+        return ['numbers', 'order']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'reverse': False, 'output_var': 'sorted_list'}
+        return {'output_var': 'sorted_numbers'}
+
+
+class SortStringsAction(BaseAction):
+    """Sort strings."""
+    action_type = "sort_strings"
+    display_name = "字符串排序"
+    description = "对字符串排序"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute sort.
+
+        Args:
+            context: Execution context.
+            params: Dict with strings, order, case_sensitive, output_var.
+
+        Returns:
+            ActionResult with sorted strings.
+        """
+        strings = params.get('strings', [])
+        order = params.get('order', 'asc')
+        case_sensitive = params.get('case_sensitive', False)
+        output_var = params.get('output_var', 'sorted_strings')
+
+        valid, msg = self.validate_type(strings, list, 'strings')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        try:
+            resolved_strs = context.resolve_value(strings)
+            resolved_order = context.resolve_value(order)
+            resolved_case = context.resolve_value(case_sensitive)
+
+            reverse = resolved_order == 'desc'
+
+            if resolved_case:
+                sorted_strs = sorted(resolved_strs, key=lambda x: str(x), reverse=reverse)
+            else:
+                sorted_strs = sorted(resolved_strs, key=lambda x: str(x).lower(), reverse=reverse)
+
+            context.set(output_var, sorted_strs)
+
+            return ActionResult(
+                success=True,
+                message=f"字符串排序完成: {len(sorted_strs)} 个",
+                data={'sorted': sorted_strs, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"字符串排序失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['strings', 'order']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'case_sensitive': False, 'output_var': 'sorted_strings'}
+
+
+class SortDictByKeyAction(BaseAction):
+    """Sort dict by key."""
+    action_type = "sort_dict_by_key"
+    display_name = "字典按键排序"
+    description = "按键排序字典"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute sort.
+
+        Args:
+            context: Execution context.
+            params: Dict with dictionary, order, output_var.
+
+        Returns:
+            ActionResult with sorted dict.
+        """
+        dictionary = params.get('dictionary', {})
+        order = params.get('order', 'asc')
+        output_var = params.get('output_var', 'sorted_dict')
+
+        valid, msg = self.validate_type(dictionary, dict, 'dictionary')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        try:
+            resolved_dict = context.resolve_value(dictionary)
+            resolved_order = context.resolve_value(order)
+
+            reverse = resolved_order == 'desc'
+            sorted_items = sorted(resolved_dict.items(), key=lambda x: str(x[0]).lower(), reverse=reverse)
+            sorted_dict = dict(sorted_items)
+
+            context.set(output_var, sorted_dict)
+
+            return ActionResult(
+                success=True,
+                message=f"字典按键排序完成: {len(sorted_dict)} 个键",
+                data={'sorted': sorted_dict, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"字典按键排序失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['dictionary', 'order']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'sorted_dict'}
+
+
+class SortDictByValueAction(BaseAction):
+    """Sort dict by value."""
+    action_type = "sort_dict_by_value"
+    display_name = "字典按值排序"
+    description = "按值排序字典"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute sort.
+
+        Args:
+            context: Execution context.
+            params: Dict with dictionary, order, output_var.
+
+        Returns:
+            ActionResult with sorted dict.
+        """
+        dictionary = params.get('dictionary', {})
+        order = params.get('order', 'asc')
+        output_var = params.get('output_var', 'sorted_dict')
+
+        valid, msg = self.validate_type(dictionary, dict, 'dictionary')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        try:
+            resolved_dict = context.resolve_value(dictionary)
+            resolved_order = context.resolve_value(order)
+
+            reverse = resolved_order == 'desc'
+
+            def sort_key(x):
+                v = x[1]
+                if isinstance(v, (int, float)):
+                    return v
+                return str(v).lower()
+
+            sorted_items = sorted(resolved_dict.items(), key=sort_key, reverse=reverse)
+            sorted_dict = dict(sorted_items)
+
+            context.set(output_var, sorted_dict)
+
+            return ActionResult(
+                success=True,
+                message=f"字典按值排序完成: {len(sorted_dict)} 个键",
+                data={'sorted': sorted_dict, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"字典按值排序失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['dictionary', 'order']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'sorted_dict'}
 
 
 class SortReverseAction(BaseAction):
-    """Reverse list."""
+    """Reverse order."""
     action_type = "sort_reverse"
-    display_name = "反转列表"
+    display_name = "反转顺序"
     description = "反转列表顺序"
+    version = "1.0"
 
     def execute(
         self,
@@ -96,243 +260,34 @@ class SortReverseAction(BaseAction):
 
         Args:
             context: Execution context.
-            params: Dict with list_var, output_var.
+            params: Dict with items, output_var.
 
         Returns:
             ActionResult with reversed list.
         """
-        list_var = params.get('list_var', '')
-        output_var = params.get('output_var', 'reversed_list')
+        items = params.get('items', [])
+        output_var = params.get('output_var', 'reversed_items')
 
-        valid, msg = self.validate_type(list_var, str, 'list_var')
+        valid, msg = self.validate_type(items, list, 'items')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
-            resolved_var = context.resolve_value(list_var)
+            resolved_items = context.resolve_value(items)
+            reversed_items = list(reversed(resolved_items))
 
-            items = context.get(resolved_var)
-            if not isinstance(items, (list, tuple)):
-                return ActionResult(
-                    success=False,
-                    message=f"{resolved_var} 不是列表"
-                )
-
-            result = list(items)[::-1]
-            context.set(output_var, result)
+            context.set(output_var, reversed_items)
 
             return ActionResult(
                 success=True,
-                message=f"列表反转: {len(result)} 项",
-                data={
-                    'count': len(result),
-                    'output_var': output_var
-                }
+                message=f"顺序反转完成: {len(reversed_items)} 个",
+                data={'reversed': reversed_items, 'output_var': output_var}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"反转列表失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"反转顺序失败: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['list_var']
+        return ['items']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'reversed_list'}
-
-
-class SortUniqueAction(BaseAction):
-    """Get unique sorted list."""
-    action_type = "sort_unique"
-    display_name = "去重排序"
-    description = "获取去重后的排序列表"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute unique.
-
-        Args:
-            context: Execution context.
-            params: Dict with list_var, output_var.
-
-        Returns:
-            ActionResult with unique sorted list.
-        """
-        list_var = params.get('list_var', '')
-        output_var = params.get('output_var', 'unique_list')
-
-        valid, msg = self.validate_type(list_var, str, 'list_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_var = context.resolve_value(list_var)
-
-            items = context.get(resolved_var)
-            if not isinstance(items, (list, tuple)):
-                return ActionResult(
-                    success=False,
-                    message=f"{resolved_var} 不是列表"
-                )
-
-            result = sorted(set(items))
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"去重排序: {len(result)} 项 (原 {len(items)} 项)",
-                data={
-                    'original_count': len(items),
-                    'unique_count': len(result),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"去重排序失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['list_var']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'unique_list'}
-
-
-class SortByKeyAction(BaseAction):
-    """Sort by key function."""
-    action_type = "sort_by_key"
-    display_name = "按键排序"
-    description = "根据键函数排序"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sort by key.
-
-        Args:
-            context: Execution context.
-            params: Dict with list_var, key_func, reverse, output_var.
-
-        Returns:
-            ActionResult with sorted list.
-        """
-        list_var = params.get('list_var', '')
-        key_func = params.get('key_func', 'lambda x: x')
-        reverse = params.get('reverse', False)
-        output_var = params.get('output_var', 'sorted_by_key')
-
-        valid, msg = self.validate_type(list_var, str, 'list_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_var = context.resolve_value(list_var)
-            resolved_key = context.resolve_value(key_func)
-            resolved_reverse = bool(context.resolve_value(reverse))
-
-            items = context.get(resolved_var)
-            if not isinstance(items, (list, tuple)):
-                return ActionResult(
-                    success=False,
-                    message=f"{resolved_var} 不是列表"
-                )
-
-            key_fn = context.safe_exec(f"return_value = {resolved_key}")
-            result = sorted(list(items), key=key_fn, reverse=resolved_reverse)
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"按键排序: {len(result)} 项",
-                data={
-                    'count': len(result),
-                    'key_func': resolved_key,
-                    'reverse': resolved_reverse,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"按键排序失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['list_var']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'key_func': 'lambda x: x', 'reverse': False, 'output_var': 'sorted_by_key'}
-
-
-class SortBubbleAction(BaseAction):
-    """Bubble sort."""
-    action_type = "sort_bubble"
-    display_name = "冒泡排序"
-    description = "使用冒泡排序算法排序"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute bubble sort.
-
-        Args:
-            context: Execution context.
-            params: Dict with list_var, output_var.
-
-        Returns:
-            ActionResult with sorted list.
-        """
-        list_var = params.get('list_var', '')
-        output_var = params.get('output_var', 'bubble_sorted')
-
-        valid, msg = self.validate_type(list_var, str, 'list_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_var = context.resolve_value(list_var)
-
-            items = list(context.get(resolved_var))
-            if not isinstance(items, list):
-                return ActionResult(
-                    success=False,
-                    message=f"{resolved_var} 不是列表"
-                )
-
-            n = len(items)
-            for i in range(n):
-                for j in range(0, n - i - 1):
-                    if items[j] > items[j + 1]:
-                        items[j], items[j + 1] = items[j + 1], items[j]
-
-            context.set(output_var, items)
-
-            return ActionResult(
-                success=True,
-                message=f"冒泡排序完成: {len(items)} 项",
-                data={
-                    'count': len(items),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"冒泡排序失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['list_var']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'bubble_sorted'}
+        return {'output_var': 'reversed_items'}
