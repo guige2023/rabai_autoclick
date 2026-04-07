@@ -130,35 +130,36 @@ PARAM_EXAMPLES = {
 
 class ActionConfigWidget(QWidget):
     config_changed = pyqtSignal()
-    
+
     def __init__(self, action_info: dict, parent=None):
         super().__init__(parent)
         self.action_info = action_info
         self.widgets = {}
+        self._colors = theme_manager.colors
         self._init_ui()
-    
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(5)
-        
+
         required_params = self.action_info.get('required_params', [])
         optional_params = self.action_info.get('optional_params', {})
-        
+
         if required_params:
             required_group = QGroupBox("必填参数")
             required_layout = QFormLayout()
             required_layout.setSpacing(5)
-            
+
             for param in required_params:
                 widget = self._create_param_widget(param, None)
                 self.widgets[param] = widget
-                
+
                 row_widget = QWidget()
                 row_layout = QVBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(2)
                 row_layout.addWidget(widget)
-                
+
                 desc = PARAM_DESCRIPTIONS.get(param, '')
                 example = PARAM_EXAMPLES.get(param, '')
                 if desc or example:
@@ -166,30 +167,30 @@ class ActionConfigWidget(QWidget):
                     if example:
                         help_text += f"\n{example}"
                     help_label = QLabel(help_text)
-                    help_label.setStyleSheet("color: #666; font-size: 10px;")
+                    help_label.setStyleSheet(f"color: {self._colors['text_secondary']}; font-size: 10px;")
                     help_label.setWordWrap(True)
                     row_layout.addWidget(help_label)
-                
+
                 required_layout.addRow(f"{param}:", row_widget)
-            
+
             required_group.setLayout(required_layout)
             layout.addWidget(required_group)
-        
+
         if optional_params:
             optional_group = QGroupBox("可选参数")
             optional_layout = QFormLayout()
             optional_layout.setSpacing(5)
-            
+
             for param, default_value in optional_params.items():
                 widget = self._create_param_widget(param, default_value)
                 self.widgets[param] = widget
-                
+
                 row_widget = QWidget()
                 row_layout = QVBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(2)
                 row_layout.addWidget(widget)
-                
+
                 desc = PARAM_DESCRIPTIONS.get(param, '')
                 example = PARAM_EXAMPLES.get(param, '')
                 if desc or example:
@@ -197,38 +198,38 @@ class ActionConfigWidget(QWidget):
                     if example:
                         help_text += f"\n{example}"
                     help_label = QLabel(help_text)
-                    help_label.setStyleSheet("color: #666; font-size: 10px;")
+                    help_label.setStyleSheet(f"color: {self._colors['text_secondary']}; font-size: 10px;")
                     help_label.setWordWrap(True)
                     row_layout.addWidget(help_label)
-                
+
                 optional_layout.addRow(f"{param}:", row_widget)
-            
+
             optional_group.setLayout(optional_layout)
             layout.addWidget(optional_group)
-        
+
         common_group = QGroupBox("通用设置")
         common_layout = QFormLayout()
         common_layout.setSpacing(5)
-        
+
         self.pre_delay = QDoubleSpinBox()
         self.pre_delay.setRange(0, 60)
         self.pre_delay.setValue(0)
         self.pre_delay.setSingleStep(0.1)
         common_layout.addRow("前置延时(秒):", self.pre_delay)
-        
+
         self.post_delay = QDoubleSpinBox()
         self.post_delay.setRange(0, 60)
         self.post_delay.setValue(0)
         self.post_delay.setSingleStep(0.1)
         common_layout.addRow("后置延时(秒):", self.post_delay)
-        
+
         self.output_var = QLineEdit()
         self.output_var.setPlaceholderText("可选，保存结果的变量名")
         common_layout.addRow("输出变量:", self.output_var)
-        
+
         common_group.setLayout(common_layout)
         layout.addWidget(common_group)
-        
+
         layout.addStretch()
     
     def _create_param_widget(self, param: str, default_value: Any) -> QWidget:
