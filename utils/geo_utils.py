@@ -1,15 +1,25 @@
 """
-Geographic utilities for coordinate calculations, distance, and geocoding.
+Geographic utilities for coordinate calculations and spatial operations.
+
+Provides:
+- Distance calculations (Haversine, Vincenty)
+- Bearing/azimuth calculations
+- Coordinate transformations
+- Bounding box operations
+- Geohash encoding/decoding
 """
 
+from __future__ import annotations
+
 import math
-from typing import Tuple, Optional, List
 from dataclasses import dataclass
+from typing import Iterator
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Coordinate:
-    """Immutable geographic coordinate with validation."""
+    """Represents a geographic coordinate."""
+
     latitude: float
     longitude: float
 
@@ -19,295 +29,345 @@ class Coordinate:
         if not -180 <= self.longitude <= 180:
             raise ValueError(f"Longitude must be in [-180, 180], got {self.longitude}")
 
-    def to_tuple(self) -> Tuple[float, float]:
-        return (self.latitude, self.longitude)
 
-    def distance_to(self, other: "Coordinate", unit: str = "km") -> float:
-        """Calculate distance to another coordinate."""
-        return haversine_distance(self, other, unit)
+EARTH_RADIUS_KM = 6371.0
+EARTH_RADIUS_MILES = 3958.8
+EARTH_RADIUS_METERS = 6371000.0
 
 
 def haversine_distance(
-    coord1: Coordinate,
-    coord2: Coordinate,
-    unit: str = "km"
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+    unit: str = "km",
 ) -> float:
     """
-    Calculate the great-circle distance between two points using Haversine formula.
+    Calculate great-circle distance between two points using Haversine formula.
 
     Args:
-        coord1: First coordinate
-        coord2: Second coordinate
-        unit: Unit of measurement - "km", "m", "mi", "ft", "nm" (nautical miles)
+        lat1: Latitude of point 1 (degrees)
+        lon1: Longitude of point 1 (degrees)
+        lat2: Latitude of point 2 (degrees)
+        lon2: Longitude of point 2 (degrees)
+        unit: Output unit - 'km', 'miles', or 'meters'
+
+    Returns:
+        Distance in the specified unit
+
+    Example:
+        >>> haversine_distance(40.7128, -74.0060, 34.0522, -118.2437, "km")
+        3935.75
+    """
+    radii = {"km": EARTH_RADIUS_KM, "miles": EARTH_RADIUS_MILES, "meters": EARTH_RADIUS_METERS}
+    if unit not in radii:
+        raise ValueError(f"Unit must be one of {list(radii.keys())}, got {unit}")
+
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lon = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_lat / 2) ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lon / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+
+    return radii[unit] * c
+
+
+def vincenty_distance(lat1: float, lon1: float, lat2: float, lon2: float, unit: str = "km") -> float:
+    """
+    Calculate distance using Vincenty formula (more accurate than Haversine for long distances).
+
+    Args:
+        lat1: Latitude of point 1 (degrees)
+        lon1: Longitude of point 1 (degrees)
+        lat2: Latitude of point 2 (degrees)
+        lon2: Longitude of point 2 (degrees)
+        unit: Output unit - 'km', 'miles', or 'meters'
 
     Returns:
         Distance in the specified unit
     """
-    R = {
-        "km": 6371.0,
-        "m": 6371000.0,
-        "mi": 3958.8,
-        "ft": 3958.8 * 5280,
-        "nm": 3440.0,
-    }.get(unit, 6371.0)
+    radii = {"km": EARTH_RADIUS_KM, "miles": EARTH_RADIUS_MILES, "meters": EARTH_RADIUS_METERS}
+    if unit not in radii:
+        raise ValueError(f"Unit must be one of {list(radii.keys())}, got {unit}")
 
-    lat1, lon1 = math.radians(coord1.latitude), math.radians(coord1.longitude)
-    lat2, lon2 = math.radians(coord2.latitude), math.radians(coord2.longitude)
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    lon1_rad = math.radians(lon1)
+    lon2_rad = math.radians(lon2)
 
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
+    a = 6378137.0
+    f = 1 / 298.257223563
+    b = a * (1 - f)
 
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    p1_lat = lat1_rad
+    p1_lon = lon1_rad
+    p2_lat = lat2_rad
+    p2_lon = lon2_rad
 
-    return R * c
+    L = p2_lon - p1_lon
+    U1 = math.atan((1 - f) * math.tan(p1_lat))
+    U2 = math.atan((1 - f) * math.tan(p2_lat))
+    sin_U1 = math.sin(U1)
+    cos_U1 = math.cos(U1)
+    sin_U2 = math.sin(U2)
+    cos_U2 = math.cos(U2)
+
+    lam = L
+    for _ in range(1000):
+        sin_lam = math.sin(lam)
+        cos_lam = math.cos(lam)
+        sin_sigma = math.sqrt((cos_U2 * sin_lam) ** 2 + (cos_U1 * sin_U2 - sin_U1 * cos_U2 * cos_lam) ** 2)
+        if abs(sin_sigma) < 1e-12:
+            return 0.0
+        cos_sigma = sin_U1 * sin_U2 + cos_U1 * cos_U2 * cos_lam
+        sigma = math.atan2(sin_sigma, cos_sigma)
+        sin_alpha = cos_U1 * cos_U2 * sin_lam / sin_sigma
+        cos_sq_alpha = 1 - sin_alpha**2
+        if abs(cos_sq_alpha) > 1e-12:
+            cos_2sigma_m = cos_sigma - 2 * sin_U1 * sin_U2 / cos_sq_alpha
+        else:
+            cos_2sigma_m = 0.0
+        C = f / 16 * cos_sq_alpha * (4 + f * (4 - 3 * cos_sq_alpha))
+        lam_next = L + (1 - C) * f * sin_alpha * (sigma + C * sin_sigma * (cos_2sigma_m + C * cos_sigma * (-1 + 2 * cos_2sigma_m**2)))
+        if abs(lam_next - lam) < 1e-12:
+            break
+        lam = lam_next
+
+    u_sq = cos_sq_alpha * (a**2 - b**2) / b**2
+    A = 1 + u_sq / 16384 * (4096 + u_sq * (-768 + u_sq * (320 - 175 * u_sq)))
+    B = u_sq / 1024 * (256 + u_sq * (-128 + u_sq * (74 - 47 * u_sq)))
+    delta_sigma = B * sin_sigma * (cos_2sigma_m + B / 4 * (cos_sigma * (-1 + 2 * cos_2sigma_m**2) - B / 6 * cos_2sigma_m * (-3 + 4 * sin_sigma**2) * (-3 + 4 * cos_2sigma_m**2)))
+
+    return b * A * (sigma - delta_sigma)
 
 
-def calculate_bearing(
-    coord1: Coordinate,
-    coord2: Coordinate
-) -> float:
+def calculate_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
-    Calculate the initial bearing (forward azimuth) from coord1 to coord2.
+    Calculate initial bearing (azimuth) from point 1 to point 2.
 
     Args:
-        coord1: Starting coordinate
-        coord2: Ending coordinate
+        lat1: Latitude of point 1 (degrees)
+        lon1: Longitude of point 1 (degrees)
+        lat2: Latitude of point 2 (degrees)
+        lon2: Longitude of point 2 (degrees)
 
     Returns:
         Bearing in degrees [0, 360)
-    """
-    lat1 = math.radians(coord1.latitude)
-    lat2 = math.radians(coord2.latitude)
-    dlon = math.radians(coord2.longitude - coord1.longitude)
 
-    x = math.sin(dlon) * math.cos(lat2)
-    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    Example:
+        >>> calculate_bearing(0, 0, 45, 90)
+        54.13
+    """
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lon = math.radians(lon2 - lon1)
+
+    x = math.sin(delta_lon) * math.cos(lat2_rad)
+    y = math.cos(lat1_rad) * math.sin(lat2_rad) - math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(delta_lon)
 
     bearing = math.atan2(x, y)
-    return (math.degrees(bearing) + 360) % 360
+    bearing_deg = math.degrees(bearing)
+
+    return (bearing_deg + 360) % 360
 
 
-def destination_point(
-    coord: Coordinate,
-    bearing: float,
-    distance: float,
-    unit: str = "km"
-) -> Coordinate:
+def destination_point(lat: float, lon: float, bearing: float, distance: float, unit: str = "km") -> tuple[float, float]:
     """
-    Calculate destination point given start, bearing, and distance.
+    Calculate destination point given start point, bearing and distance.
 
     Args:
-        coord: Starting coordinate
+        lat: Starting latitude (degrees)
+        lon: Starting longitude (degrees)
         bearing: Bearing in degrees
         distance: Distance to travel
-        unit: Unit of distance - "km", "m", "mi"
+        unit: Distance unit - 'km', 'miles', or 'meters'
+
+    Returns:
+        Tuple of (latitude, longitude) of destination
+
+    Example:
+        >>> destination_point(0, 0, 45, 100, "km")
+        (0.899, 0.899)
     """
-    R = {"km": 6371.0, "m": 6371000.0, "mi": 3958.8}.get(unit, 6371.0)
+    radii = {"km": EARTH_RADIUS_KM, "miles": EARTH_RADIUS_MILES, "meters": EARTH_RADIUS_METERS}
+    if unit not in radii:
+        raise ValueError(f"Unit must be one of {list(radii.keys())}, got {unit}")
 
-    lat1 = math.radians(coord.latitude)
-    lon1 = math.radians(coord.longitude)
+    R = radii[unit]
     bearing_rad = math.radians(bearing)
-    angular_dist = distance / R
+    lat_rad = math.radians(lat)
+    lon_rad = math.radians(lon)
 
-    lat2 = math.asin(
-        math.sin(lat1) * math.cos(angular_dist) +
-        math.cos(lat1) * math.sin(angular_dist) * math.cos(bearing_rad)
-    )
+    lat2 = math.asin(math.sin(lat_rad) * math.cos(distance / R) + math.cos(lat_rad) * math.sin(distance / R) * math.cos(bearing_rad))
+    lon2 = lon_rad + math.atan2(math.sin(bearing_rad) * math.sin(distance / R) * math.cos(lat_rad), math.cos(distance / R) - math.sin(lat_rad) * math.sin(lat2))
 
-    lon2 = lon1 + math.atan2(
-        math.sin(bearing_rad) * math.sin(angular_dist) * math.cos(lat1),
-        math.cos(angular_dist) - math.sin(lat1) * math.sin(lat2)
-    )
+    return (math.degrees(lat2), math.degrees(lon2))
 
-    return Coordinate(
-        latitude=math.degrees(lat2),
-        longitude=math.degrees(lon2) % 360
-    )
+
+def midpoint(lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[float, float]:
+    """
+    Calculate the midpoint between two geographic points.
+
+    Args:
+        lat1, lon1: First point coordinates (degrees)
+        lat2, lon2: Second point coordinates (degrees)
+
+    Returns:
+        Tuple of (latitude, longitude) of midpoint
+    """
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    lon1_rad = math.radians(lon1)
+    delta_lon = math.radians(lon2 - lon1)
+
+    bx = math.cos(lat2_rad) * math.cos(delta_lon)
+    by = math.cos(lat2_rad) * math.sin(delta_lon)
+
+    lat_mid = math.atan2(math.sin(lat1_rad) + math.sin(lat2_rad), math.sqrt((math.cos(lat1_rad) + bx) ** 2 + by**2))
+    lon_mid = lon1_rad + math.atan2(by, math.cos(lat1_rad) + bx)
+
+    return (math.degrees(lat_mid), math.degrees(lon_mid))
+
+
+def bounding_box(lat: float, lon: float, radius_km: float) -> tuple[float, float, float, float]:
+    """
+    Calculate bounding box around a point.
+
+    Args:
+        lat: Center latitude (degrees)
+        lon: Center longitude (degrees)
+        radius_km: Radius in kilometers
+
+    Returns:
+        (min_lat, min_lon, max_lat, max_lon)
+    """
+    lat_rad = math.radians(lat)
+    lon_rad = math.radians(lon)
+    delta_lat = math.degrees(radius_km / EARTH_RADIUS_KM)
+    delta_lon = math.degrees(radius_km / (EARTH_RADIUS_KM * math.cos(lat_rad)))
+
+    return (lat - delta_lat, lon - delta_lon, lat + delta_lat, lon + delta_lon)
 
 
 def is_within_radius(
-    center: Coordinate,
-    point: Coordinate,
-    radius_km: float
-) -> bool:
-    """Check if a point is within a radius of a center point."""
-    return center.distance_to(point, "km") <= radius_km
-
-
-def midpoint(
-    coord1: Coordinate,
-    coord2: Coordinate
-) -> Coordinate:
-    """Calculate the midpoint between two coordinates."""
-    lat1 = math.radians(coord1.latitude)
-    lat2 = math.radians(coord2.latitude)
-    lon1 = math.radians(coord1.longitude)
-    dlon = math.radians(coord2.longitude - coord1.longitude)
-
-    bx = math.cos(lat2) * math.cos(dlon)
-    by = math.cos(lat2) * math.sin(dlon)
-
-    lat3 = math.atan2(
-        math.sin(lat1) + math.sin(lat2),
-        math.sqrt((math.cos(lat1) + bx) ** 2 + by ** 2)
-    )
-    lon3 = lon1 + math.atan2(by, math.cos(lat1) + bx)
-
-    return Coordinate(
-        latitude=math.degrees(lat3),
-        longitude=math.degrees(lon3)
-    )
-
-
-def bounding_box(
-    coord: Coordinate,
+    center_lat: float,
+    center_lon: float,
+    point_lat: float,
+    point_lon: float,
     radius_km: float,
-    points: int = 8
-) -> List[Coordinate]:
+) -> bool:
+    """Check if a point is within a given radius of a center point."""
+    return haversine_distance(center_lat, center_lon, point_lat, point_lon, "km") <= radius_km
+
+
+def geohash_encode(lat: float, lon: float, precision: int = 9) -> str:
     """
-    Generate bounding box coordinates around a center point.
+    Encode a coordinate to a geohash string.
 
     Args:
-        coord: Center coordinate
-        radius_km: Radius in kilometers
-        points: Number of points to generate
-    """
-    bearings = [360 / points * i for i in range(points)]
-    return [destination_point(coord, b, radius_km, "km") for b in bearings]
-
-
-def parse_coordinate(text: str) -> Optional[Coordinate]:
-    """
-    Parse a coordinate string in various formats.
-
-    Supported formats:
-        - "40.7128,-74.0060" (decimal degrees)
-        - "40.7128, -74.0060"
-        - "40°42'46.08\"N, 74°0'21.6\"W"
-        - "40.7128N, 74.0060W"
-
-    Args:
-        text: Coordinate string
+        lat: Latitude (-90 to 90)
+        lon: Longitude (-180 to 180)
+        precision: Number of characters in hash (1-12)
 
     Returns:
-        Coordinate or None if parsing fails
+        Geohash string
+
+    Example:
+        >>> geohash_encode(40.7128, -74.0060, 8)
+        'dr5regw3'
     """
-    import re
-    text = text.strip()
+    if not 1 <= precision <= 12:
+        raise ValueError("Precision must be between 1 and 12")
 
-    # Decimal degrees: "40.7128,-74.0060"
-    match = re.match(r'^(-?\d+\.?\d*)[°]?\s*[,/]\s*(-?\d+\.?\d*)[°]?', text)
-    if match:
-        try:
-            return Coordinate(
-                latitude=float(match.group(1)),
-                longitude=float(match.group(2))
-            )
-        except ValueError:
-            pass
-
-    return None
-
-
-def format_coordinate(
-    coord: Coordinate,
-    format_type: str = "decimal",
-    precision: int = 6
-) -> str:
-    """
-    Format a coordinate as a string.
-
-    Args:
-        coord: Coordinate to format
-        format_type: "decimal", "dms" (degrees/minutes/seconds), "geohash"
-        precision: Decimal precision for decimal format
-
-    Returns:
-        Formatted coordinate string
-    """
-    if format_type == "decimal":
-        return f"{coord.latitude:.{precision}f}, {coord.longitude:.{precision}f}"
-    elif format_type == "dms":
-        return (
-            f"{abs(coord.latitude):.0f}°{abs((coord.latitude % 1) * 60):.0f}'"
-            f"{abs((coord.latitude * 60) % 1 * 60):.2f}\" "
-            f"{'S' if coord.latitude < 0 else 'N'}, "
-            f"{abs(coord.longitude):.0f}°{abs((coord.longitude % 1) * 60):.0f}'"
-            f"{abs((coord.longitude * 60) % 1 * 60):.2f}\" "
-            f"{'W' if coord.longitude < 0 else 'E'}"
-        )
-    elif format_type == "geohash":
-        return _encode_geohash(coord.latitude, coord.longitude, precision)
-    return str(coord)
-
-
-def _encode_geohash(lat: float, lon: float, precision: int = 9) -> str:
-    """Encode lat/lon to geohash string."""
-    BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
     lat_range, lon_range = (-90.0, 90.0), (-180.0, 180.0)
-    hash_bits, index = 0, 0
-    geohash = []
+    geohash_base32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+    result = []
 
-    while len(geohash) < precision:
-        hash_bits += 1
-        if hash_bits % 2 == 1:
+    bits = 0
+    bit_count = 0
+    is_lon = True
+    combined = 0
+
+    while len(result) < precision:
+        if is_lon:
             mid = (lon_range[0] + lon_range[1]) / 2
             if lon >= mid:
-                index = index * 2 + 1
+                combined = combined * 2 + 1
                 lon_range = (mid, lon_range[1])
             else:
-                index = index * 2
+                combined = combined * 2
                 lon_range = (lon_range[0], mid)
         else:
             mid = (lat_range[0] + lat_range[1]) / 2
             if lat >= mid:
-                index = index * 2 + 1
+                combined = combined * 2 + 1
                 lat_range = (mid, lat_range[1])
             else:
-                index = index * 2
+                combined = combined * 2
                 lat_range = (lat_range[0], mid)
 
-        if hash_bits % 5 == 0:
-            geohash.append(BASE32[index])
-            index = 0
+        bits += 1
+        is_lon = not is_lon
 
-    return "".join(geohash)
+        if bits == 5:
+            result.append(geohash_base32[combined])
+            bits = 0
+            combined = 0
+
+    return "".join(result)
 
 
-def grid_cells_in_bbox(
-    min_lat: float,
-    min_lon: float,
-    max_lat: float,
-    max_lon: float,
-    cell_size_km: float = 1.0
-) -> List[Tuple[Coordinate, Coordinate]]:
+def geohash_decode(geohash: str) -> tuple[float, float]:
     """
-    Generate a grid of cells within a bounding box.
+    Decode a geohash string to a coordinate (center of bounding box).
+
+    Args:
+        geohash: Geohash string
+
+    Returns:
+        Tuple of (latitude, longitude)
+
+    Example:
+        >>> geohash_decode("dr5regw3")
+        (40.7127..., -74.006...)
+    """
+    geohash_base32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+    lat_range, lon_range = (-90.0, 90.0), (-180.0, 180.0)
+    is_lon = False
+
+    for char in geohash.lower():
+        idx = geohash_base32.index(char)
+        for i in range(4, -1, -1):
+            bit = (idx >> i) & 1
+            if is_lon:
+                mid = (lon_range[0] + lon_range[1]) / 2
+                lon_range = (mid if bit else lon_range[0], lon_range[1] if bit else mid)
+            else:
+                mid = (lat_range[0] + lat_range[1]) / 2
+                lat_range = (mid if bit else lat_range[0], lat_range[1] if bit else mid)
+            is_lon = not is_lon
+
+    return ((lat_range[0] + lat_range[1]) / 2, (lon_range[0] + lon_range[1]) / 2)
+
+
+def coordinates_from_box(min_lat: float, min_lon: float, max_lat: float, max_lon: float, step: float) -> Iterator[tuple[float, float]]:
+    """
+    Generate coordinates within a bounding box at regular intervals.
 
     Args:
         min_lat, min_lon: Southwest corner
         max_lat, max_lon: Northeast corner
-        cell_size_km: Size of each grid cell in km
+        step: Step size in degrees
 
-    Returns:
-        List of (sw_corner, ne_corner) tuples
+    Yields:
+        Tuples of (latitude, longitude)
     """
-    lat_step = cell_size_km / 111.0
-    lon_step = lat_step / math.cos(math.radians((min_lat + max_lat) / 2))
-
-    cells = []
     lat = min_lat
-    while lat < max_lat:
-        next_lat = min(lat + lat_step, max_lat)
+    while lat <= max_lat:
         lon = min_lon
-        while lon < max_lon:
-            next_lon = min(lon + lon_step, max_lon)
-            cells.append((
-                Coordinate(latitude=lat, longitude=lon),
-                Coordinate(latitude=next_lat, longitude=next_lon)
-            ))
-            lon = next_lon
-        lat = next_lat
-
-    return cells
+        while lon <= max_lon:
+            yield (lat, lon)
+            lon += step
+        lat += step
