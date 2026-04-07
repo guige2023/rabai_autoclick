@@ -412,7 +412,7 @@ class ThemeManager(QObject):
                 QTabWidget::pane {{ border: 1px solid {c['border']}; background-color: {c['bg_widget']}; }}
                 QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; border-top-left-radius: 4px; border-top-right-radius: 4px; }}
                 QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
-                QTabBar::tab:hover {{ background-color: {c['bg_hover']}; }}
+                QTabBar::tab:hover {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
                 QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: background-color 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['primary_hover']}; cursor: pointinghand; }}
                 QPushButton:pressed {{ background-color: {c['primary_active']}; }}
@@ -619,7 +619,7 @@ class ThemeManager(QObject):
                 QTabWidget::pane {{ border: 1px solid {c['border']}; background-color: {c['bg_widget']}; }}
                 QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; border-top-left-radius: 4px; border-top-right-radius: 4px; }}
                 QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
-                QTabBar::tab:hover {{ background-color: {c['bg_hover']}; }}
+                QTabBar::tab:hover {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
                 QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: all 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['primary_hover']}; cursor: pointinghand; }}
                 QPushButton:pressed {{ background-color: {c['primary_active']}; }}
