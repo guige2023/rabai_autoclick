@@ -1,0 +1,124 @@
+{
+  "name": "CRM Data Update Workflow",
+  "description": "Automate CRM data updates and contact management",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "contacts_to_update": 20,
+    "current_contact": 0,
+    "update_field": "status",
+    "update_value": "contacted"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "contact_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize contact counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open CRM system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for CRM"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "contact_loop",
+      "count": "{{contacts_to_update}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start contact loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 150,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on contact"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for contact details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/contact_{{contact_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture contact screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "contact_counter",
+      "value": "{{contact_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment contact counter"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "key": "down",
+      "pre_delay": 0.2,
+      "comment": "Move to next contact"
+    },
+    {
+      "id": 10,
+      "type": "condition",
+      "condition": "{{contact_counter < contacts_to_update}}",
+      "true_next": 11,
+      "false_next": 12,
+      "pre_delay": 0.1,
+      "comment": "Check if more contacts"
+    },
+    {
+      "id": 11,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next contact"
+    },
+    {
+      "id": 12,
+      "type": "screenshot",
+      "save_path": "./screenshots/crm_update_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
