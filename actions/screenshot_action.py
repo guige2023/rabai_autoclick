@@ -1,286 +1,309 @@
-"""Screenshot capture and analysis action.
+"""
+Screenshot Capture Action Module.
 
-This module provides screenshot capture capabilities including
-full screen, region capture, and image analysis for automation.
+Provides screenshot capture, region selection, annotation, and comparison
+for browser and desktop automation workflows.
 
 Example:
+    >>> from screenshot_action import ScreenshotAction
     >>> action = ScreenshotAction()
-    >>> result = action.execute(mode="full")
+    >>> path = action.capture_screen(region=(0, 0, 1920, 1080))
+    >>> action.annotate(path, text="Error at step 3", color="red")
 """
-
 from __future__ import annotations
 
-import base64
-import io
+import hashlib
+import os
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
+
+
+@dataclass
+class ScreenRegion:
+    """Region of a screen defined by coordinates."""
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def to_tuple(self) -> tuple[int, int, int, int]:
+        return (self.x, self.y, self.width, self.height)
 
 
 @dataclass
 class ScreenshotResult:
-    """Result from screenshot capture."""
-    success: bool
-    path: Optional[str] = None
-    image_data: Optional[str] = None
-    size: Optional[tuple[int, int]] = None
+    """Result of a screenshot capture operation."""
+    path: str
+    width: int
+    height: int
+    size_bytes: int
+    duration_ms: float
     error: Optional[str] = None
 
 
 class ScreenshotAction:
-    """Screenshot capture and analysis action.
+    """Capture and annotate screenshots using native macOS tools."""
 
-    Provides multiple screenshot modes including full screen,
-    region capture, window capture, and basic image analysis.
+    def __init__(self, output_dir: str = "/tmp/screenshots"):
+        self.output_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
 
-    Example:
-        >>> action = ScreenshotAction()
-        >>> result = action.execute(mode="region", region=(0, 0, 800, 600))
-    """
-
-    def __init__(self) -> None:
-        """Initialize screenshot action."""
-        self._last_screenshot: Optional[Any] = None
-
-    def execute(
+    def capture_screen(
         self,
-        mode: str = "full",
-        region: Optional[tuple[int, int, int, int]] = None,
-        path: Optional[str] = None,
-        encoding: str = "png",
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Execute screenshot capture.
+        region: Optional[ScreenRegion] = None,
+        output_name: Optional[str] = None,
+        include_cursor: bool = True,
+    ) -> ScreenshotResult:
+        """
+        Capture full screen or region.
 
         Args:
-            mode: Capture mode ('full', 'region', 'window').
-            region: Region tuple (x, y, width, height).
-            path: Optional save path.
-            encoding: Image encoding ('png', 'jpg').
-            **kwargs: Additional parameters.
+            region: Optional ScreenRegion to capture
+            output_name: Custom filename (default: timestamp-based)
+            include_cursor: Include cursor in capture (macOS only)
 
         Returns:
-            Screenshot result dictionary.
-
-        Raises:
-            ValueError: If mode is invalid.
+            ScreenshotResult with path and metadata
         """
-        try:
-            from PIL import Image, ImageGrab
-        except ImportError:
-            return {
-                "success": False,
-                "error": "Pillow not installed. Run: pip install pillow",
-            }
+        start = time.monotonic()
+        if output_name is None:
+            ts = int(time.time() * 1000)
+            output_name = f"screenshot_{ts}.png"
 
-        mode = mode.lower()
-        result: dict[str, Any] = {"mode": mode, "success": True}
+        path = os.path.join(self.output_dir, output_name)
 
-        try:
-            if mode == "full":
-                img = ImageGrab.grab()
-            elif mode == "region":
-                if not region:
-                    raise ValueError("region required for 'region' mode")
-                img = ImageGrab.grab(bbox=region)
-                result["region"] = region
-            elif mode == "window":
-                title = kwargs.get("title")
-                img = self._capture_window(title)
-            else:
-                raise ValueError(f"Unknown mode: {mode}")
+        if sys.platform == "darwin":
+            result = self._capture_macos(path, region, include_cursor)
+        elif sys.platform == "win32":
+            result = self._capture_windows(path, region)
+        else:
+            result = self._capture_linux(path, region)
 
-            self._last_screenshot = img
-            result["size"] = img.size
-
-            # Save if path provided
-            if path:
-                img.save(path, format=encoding.upper())
-                result["path"] = path
-
-            # Encode to base64
-            buffer = io.BytesIO()
-            img.save(buffer, format=encoding.upper())
-            img_bytes = buffer.getvalue()
-            result["image_data"] = base64.b64encode(img_bytes).decode()
-            result["size_bytes"] = len(img_bytes)
-
-        except Exception as e:
-            result["success"] = False
-            result["error"] = str(e)
-
+        result.duration_ms = (time.monotonic() - start) * 1000
         return result
 
-    def _capture_window(self, title: Optional[str] = None) -> Any:
-        """Capture specific window by title.
-
-        Args:
-            title: Window title (partial match).
-
-        Returns:
-            PIL Image of window.
-        """
+    def _capture_macos(
+        self,
+        path: str,
+        region: Optional[ScreenRegion],
+        include_cursor: bool,
+    ) -> ScreenshotResult:
         try:
-            import pyscreeze
-        except ImportError:
-            import pyscreeze as _ps
-            pyscreeze = _ps
+            cmd = ["/usr/sbin/screencapture"]
+            if not include_cursor:
+                cmd.append("-C")
+            if region:
+                x, y, w, h = region.to_tuple()
+                cmd.extend(["-x", "-R", f"{x},{y},{w},{h}"])
+            cmd.extend(["-x", path])
 
-        if title:
-            # Try to locate window by title
-            windows = self._find_windows(title)
-            if windows:
-                bbox = windows[0]
-                from PIL import ImageGrab
-                return ImageGrab.grab(bbox=bbox)
+            subprocess.run(cmd, check=True, capture_output=True)
 
-        # Fallback to full screen
-        from PIL import ImageGrab
-        return ImageGrab.grab()
+            size = os.path.getsize(path)
+            width, height = self._get_image_size(path)
+            return ScreenshotResult(path=path, width=width, height=height, size_bytes=size, duration_ms=0)
+        except subprocess.CalledProcessError as e:
+            return ScreenshotResult(path=path, width=0, height=0, size_bytes=0, duration_ms=0, error=str(e.stderr))
 
-    def _find_windows(self, title: str) -> list[tuple[int, int, int, int]]:
-        """Find windows matching title.
-
-        Args:
-            title: Window title to search for.
-
-        Returns:
-            List of window bounding boxes.
-        """
+    def _capture_windows(self, path: str, region: Optional[ScreenRegion]) -> ScreenshotResult:
         try:
-            import pywintypes
-            import win32gui
-            import win32con
-        except ImportError:
-            return []
+            import mss
+            with mss.mss() as sct:
+                if region:
+                    monitor = {"left": region.x, "top": region.y, "width": region.width, "height": region.height}
+                else:
+                    monitor = sct.monitors[0]
+                img = sct.grab(monitor)
+                mss.tools.to_png(img.rgb, img.size, output=path)
+                size = os.path.getsize(path)
+                return ScreenshotResult(path=path, width=monitor["width"], height=monitor["height"], size_bytes=size, duration_ms=0)
+        except Exception as e:
+            return ScreenshotResult(path=path, width=0, height=0, size_bytes=0, duration_ms=0, error=str(e))
 
-        windows = []
-
-        def callback(hwnd, _):
-            if win32gui.IsWindowVisible(hwnd):
-                window_title = win32gui.GetWindowText(hwnd)
-                if title.lower() in window_title.lower():
-                    rect = win32gui.GetWindowRect(hwnd)
-                    windows.append(rect)
-            return True
-
+    def _capture_linux(self, path: str, region: Optional[ScreenRegion]) -> ScreenshotResult:
         try:
-            win32gui.EnumWindows(callback, None)
+            cmd = ["scrot"]
+            if region:
+                cmd.extend(["-a", f"{region.x},{region.y},{region.width},{region.height}"])
+            cmd.append(path)
+            subprocess.run(cmd, check=True, capture_output=True)
+            size = os.path.getsize(path)
+            width, height = self._get_image_size(path)
+            return ScreenshotResult(path=path, width=width, height=height, size_bytes=size, duration_ms=0)
+        except Exception as e:
+            return ScreenshotResult(path=path, width=0, height=0, size_bytes=0, duration_ms=0, error=str(e))
+
+    def _get_image_size(self, path: str) -> tuple[int, int]:
+        try:
+            import struct
+            with open(path, "rb") as f:
+                header = f.read(24)
+                if header[1:4] == b"PNG":
+                    w = struct.unpack(">I", header[16:20])[0]
+                    h = struct.unpack(">I", header[20:24])[0]
+                    return w, h
         except Exception:
             pass
+        return 0, 0
 
-        return windows
-
-    def analyze_image(
+    def capture_and_compare(
         self,
-        image_path: Optional[str] = None,
-        data: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Analyze screenshot for colors, brightness, etc.
-
-        Args:
-            image_path: Path to image file.
-            data: Base64 encoded image data.
+        region: Optional[ScreenRegion] = None,
+        baseline_path: Optional[str] = None,
+        threshold: float = 0.01,
+    ) -> tuple[ScreenshotResult, bool, float]:
+        """
+        Capture and compare with baseline image.
 
         Returns:
-            Analysis result dictionary.
+            Tuple of (ScreenshotResult, is_match, diff_percentage)
         """
-        from PIL import Image
-        import io
+        result = self.capture_screen(region=region)
+        if result.error:
+            return result, False, 100.0
 
-        result: dict[str, Any] = {"success": True}
+        if baseline_path and os.path.exists(baseline_path):
+            diff = self._image_diff(result.path, baseline_path)
+            is_match = diff <= threshold
+            return result, is_match, diff
 
+        return result, True, 0.0
+
+    def _image_diff(self, img1: str, img2: str) -> float:
         try:
-            if data:
-                img_data = base64.b64decode(data)
-                img = Image.open(io.BytesIO(img_data))
-            elif image_path:
-                img = Image.open(image_path)
-            else:
-                raise ValueError("image_path or data required")
+            import numpy as np
+            try:
+                from PIL import Image
+            except ImportError:
+                return 100.0
 
-            # Convert to RGB if necessary
-            if img.mode != "RGB":
-                img = img.convert("RGB")
+            im1 = Image.open(img1).convert("RGB")
+            im2 = Image.open(img2).convert("RGB")
 
-            result["size"] = img.size
-            result["mode"] = img.mode
+            if im1.size != im2.size:
+                im2 = im2.resize(im1.size)
 
-            # Sample colors
-            pixels = list(img.getdata())
-            if pixels:
-                avg_color = tuple(
-                    sum(c[i] for c in pixels) // len(pixels)
-                    for i in range(3)
-                )
-                result["average_color"] = avg_color
+            arr1 = np.array(im1)
+            arr2 = np.array(im2)
 
-                # Find most common color
-                from collections import Counter
-                counter = Counter(pixels)
-                result["most_common_color"] = counter.most_common(1)[0][0]
+            diff = np.abs(arr1.astype(float) - arr2.astype(float)).mean()
+            max_diff = 255.0
+            return (diff / max_diff) * 100
+        except Exception:
+            return 100.0
 
-            # Calculate brightness
-            if pixels:
-                brightness = sum(
-                    0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
-                    for c in pixels
-                ) / len(pixels)
-                result["average_brightness"] = brightness
-
-        except Exception as e:
-            result["success"] = False
-            result["error"] = str(e)
-
-        return result
-
-    def compare_screenshots(
+    def annotate(
         self,
-        image1: str,
-        image2: str,
-        threshold: float = 0.95,
-    ) -> dict[str, Any]:
-        """Compare two screenshots for differences.
+        image_path: str,
+        text: Optional[str] = None,
+        boxes: Optional[list[dict]] = None,
+        color: str = "red",
+        output_path: Optional[str] = None,
+    ) -> str:
+        """
+        Annotate screenshot with text and/or bounding boxes.
 
         Args:
-            image1: First image path.
-            image2: Second image path.
-            threshold: Similarity threshold (0-1).
+            image_path: Path to input image
+            text: Optional text to overlay
+            boxes: Optional list of {"x", "y", "width", "height", "label"}
+            color: Annotation color (red, blue, green, yellow)
+            output_path: Output path (default: overwrite input)
 
         Returns:
-            Comparison result dictionary.
+            Path to annotated image
         """
-        from PIL import Image
-        import math
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            return image_path
 
-        result: dict[str, Any] = {"success": True}
+        output = output_path or image_path
+        color_map = {"red": (255, 0, 0), "blue": (0, 0, 255), "green": (0, 255, 0), "yellow": (255, 255, 0)}
+        rgb = color_map.get(color, (255, 0, 0))
+
+        img = Image.open(image_path)
+        draw = ImageDraw.Draw(img)
 
         try:
-            img1 = Image.open(image1).convert("RGB")
-            img2 = Image.open(image2).convert("RGB")
+            font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
+        except Exception:
+            font = ImageFont.load_default()
 
-            if img1.size != img2.size:
-                result["match"] = False
-                result["reason"] = "Different sizes"
-                return result
+        if text:
+            text_pos = (10, 10)
+            draw.rectangle([text_pos, (text_pos[0] + 400, text_pos[1] + 40)], fill=(0, 0, 0, 180))
+            draw.text(text_pos, text, fill=rgb, font=font)
 
-            # Calculate pixel difference
-            pixels1 = list(img1.getdata())
-            pixels2 = list(img2.getdata())
+        if boxes:
+            for box in boxes:
+                x = box.get("x", 0)
+                y = box.get("y", 0)
+                w = box.get("width", 100)
+                h = box.get("height", 100)
+                draw.rectangle([x, y, x + w, y + h], outline=rgb, width=3)
+                if "label" in box:
+                    draw.rectangle([x, y - 30, x + 200, y], fill=rgb)
+                    draw.text((x + 5, y - 28), box["label"], fill=(255, 255, 255), font=font)
 
-            diff_count = 0
-            for p1, p2 in zip(pixels1, pixels2):
-                if p1 != p2:
-                    diff_count += 1
+        img.save(output)
+        return output
 
-            similarity = 1 - (diff_count / len(pixels1))
-            result["similarity"] = similarity
-            result["match"] = similarity >= threshold
-            result["diff_pixels"] = diff_count
-            result["diff_percent"] = (diff_count / len(pixels1)) * 100
+    def thumbnail(
+        self,
+        image_path: str,
+        max_width: int = 200,
+        max_height: int = 200,
+        output_path: Optional[str] = None,
+    ) -> str:
+        """Generate thumbnail of an image."""
+        try:
+            from PIL import Image
+        except ImportError:
+            return image_path
 
-        except Exception as e:
-            result["success"] = False
-            result["error"] = str(e)
+        output = output_path or image_path
+        img = Image.open(image_path)
+        img.thumbnail((max_width, max_height), Image.LANCZOS)
+        img.save(output)
+        return output
 
-        return result
+    def capture_sequence(
+        self,
+        count: int,
+        interval: float = 0.5,
+        region: Optional[ScreenRegion] = None,
+        prefix: str = "seq",
+    ) -> list[ScreenshotResult]:
+        """
+        Capture a sequence of screenshots.
+
+        Args:
+            count: Number of screenshots
+            interval: Seconds between captures
+            region: Optional region to capture
+            prefix: Filename prefix
+
+        Returns:
+            List of ScreenshotResult
+        """
+        results: list[ScreenshotResult] = []
+        for i in range(count):
+            ts = int(time.time() * 1000)
+            name = f"{prefix}_{i:03d}_{ts}.png"
+            result = self.capture_screen(region=region, output_name=name)
+            results.append(result)
+            if i < count - 1:
+                time.sleep(interval)
+        return results
+
+
+if __name__ == "__main__":
+    action = ScreenshotAction()
+    result = action.capture_screen()
+    print(f"Captured: {result.path}")
+    if result.error:
+        print(f"Error: {result.error}")

@@ -1,390 +1,445 @@
-"""Data transformation action for processing and converting data formats.
+"""
+Data Processing and Transformation Action Module.
 
-This module provides data transformation capabilities including
-JSON/YAML manipulation, CSV processing, and data type conversions.
+Provides data cleaning, normalization, deduplication, aggregation,
+schema validation, and format conversion utilities.
 
 Example:
-    >>> action = DataTransformAction()
-    >>> result = action.execute(operation="flatten", data={"a": {"b": 1}})
+    >>> from data_transform_action import DataTransformer, TransformConfig
+    >>> transformer = DataTransformer()
+    >>> cleaned = transformer.clean_records(records, remove_nulls=True)
+    >>> normalized = transformer.normalize_fields(cleaned, {"name": "title_case"})
 """
-
 from __future__ import annotations
 
-import csv
-import io
+import re
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlencode, urlparse
+from datetime import datetime
+from typing import Any, Callable, Optional, TypeVar, Generic
+
+
+T = TypeVar("T")
 
 
 @dataclass
-class TransformResult:
-    """Result from a data transformation."""
-    success: bool = True
-    data: Any = None
-    error: Optional[str] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+class TransformConfig:
+    """Configuration for data transformation operations."""
+    remove_nulls: bool = False
+    trim_strings: bool = True
+    lowercase_keys: bool = True
+    dedupe: bool = False
+    dedupe_key: Optional[str] = None
+    sort_by: Optional[str] = None
+    reverse_sort: bool = False
 
 
-class DataTransformAction:
-    """Data transformation and format conversion action.
+@dataclass
+class ProcessingStats:
+    """Statistics from a transformation operation."""
+    input_count: int = 0
+    output_count: int = 0
+    nulls_removed: int = 0
+    duplicates_removed: int = 0
+    errors: list[str] = field(default_factory=list)
 
-    Supports JSON, YAML, CSV, URL encoding, and custom transformations.
 
-    Example:
-        >>> action = DataTransformAction()
-        >>> result = action.execute(
-        ...     operation="csv_to_json",
-        ...     data="a,b\\nc,d"
-        ... )
-    """
+class DataTransformer:
+    """Transform and clean structured data records."""
 
-    def __init__(self) -> None:
-        """Initialize data transformer."""
-        self._cache: dict[str, Any] = {}
+    def __init__(self):
+        self._stats = ProcessingStats()
 
-    def execute(
+    def clean_records(
         self,
-        operation: str,
-        data: Any,
-        format: Optional[str] = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Execute data transformation.
+        records: list[dict[str, Any]],
+        config: Optional[TransformConfig] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Clean a list of records with configurable rules.
 
         Args:
-            operation: Transformation operation name.
-            data: Input data to transform.
-            format: Target or source format.
-            **kwargs: Additional operation parameters.
+            records: Input list of dictionaries
+            config: TransformConfig with cleaning options
 
         Returns:
-            Transformation result dictionary.
-
-        Raises:
-            ValueError: If operation is unknown or data is invalid.
+            Cleaned list of dictionaries
         """
-        op = operation.lower()
-        result: dict[str, Any] = {"operation": op, "success": True}
+        config = config or TransformConfig()
+        self._stats = ProcessingStats(input_count=len(records))
 
-        if op == "flatten":
-            result["data"] = self._flatten_dict(data)
+        result: list[dict[str, Any]] = []
 
-        elif op == "unflatten":
-            result["data"] = self._unflatten_dict(data)
+        for record in records:
+            try:
+                cleaned = self._clean_record(record, config)
+                if cleaned is None:
+                    continue
+                if config.remove_nulls and self._is_all_null(cleaned):
+                    continue
+                result.append(cleaned)
+            except Exception as e:
+                self._stats.errors.append(f"Record error: {e}")
 
-        elif op == "json_to_csv":
-            result["data"] = self._json_to_csv(data)
-            result["format"] = "csv"
-
-        elif op == "csv_to_json":
-            delimiter = kwargs.get("delimiter", ",")
-            result["data"] = self._csv_to_json(data, delimiter)
-            result["format"] = "json"
-
-        elif op == "normalize":
-            result["data"] = self._normalize_data(data)
-
-        elif op == "deduplicate":
-            result["data"] = self._deduplicate_list(data)
-            result["removed"] = len(data) - len(result["data"]) if isinstance(data, list) else 0
-
-        elif op == "group_by":
-            key = kwargs.get("key")
-            if not key:
-                raise ValueError("key required for 'group_by'")
-            result["data"] = self._group_by(data, key)
-
-        elif op == "merge":
-            other = kwargs.get("other", [])
-            result["data"] = self._merge_data(data, other)
-
-        elif op == "sort":
-            key = kwargs.get("key")
-            reverse = kwargs.get("reverse", False)
-            result["data"] = self._sort_data(data, key, reverse)
-
-        elif op == "filter":
-            predicate = kwargs.get("predicate")
-            if not predicate:
-                raise ValueError("predicate required for 'filter'")
-            result["data"] = self._filter_data(data, predicate)
-
-        elif op == "map":
-            func = kwargs.get("func")
-            if not func:
-                raise ValueError("func required for 'map'")
-            result["data"] = self._map_data(data, func)
-
-        elif op == "url_encode":
-            result["data"] = self._url_encode(data)
-            result["format"] = "url"
-
-        elif op == "url_decode":
-            result["data"] = self._url_decode(data)
-
-        elif op == "base64_encode":
-            result["data"] = self._base64_encode(data)
-
-        elif op == "base64_decode":
-            result["data"] = self._base64_decode(data)
-
-        elif op == "parse_json":
-            result["data"] = json.loads(data) if isinstance(data, str) else data
-
-        elif op == "to_json":
-            indent = kwargs.get("indent", 2)
-            result["data"] = json.dumps(data, indent=indent, ensure_ascii=False)
-
-        else:
-            raise ValueError(f"Unknown operation: {operation}")
-
+        self._stats.output_count = len(result)
+        self._stats.nulls_removed = self._stats.input_count - self._stats.output_count
         return result
 
-    def _flatten_dict(self, d: dict, parent_key: str = "", sep: str = ".") -> dict:
-        """Flatten nested dictionary.
-
-        Args:
-            d: Dictionary to flatten.
-            parent_key: Parent key prefix.
-            sep: Separator for keys.
-
-        Returns:
-            Flattened dictionary.
-        """
-        items: list[tuple[str, Any]] = []
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            if isinstance(v, dict):
-                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+    def _clean_record(self, record: dict[str, Any], config: TransformConfig) -> Optional[dict[str, Any]]:
+        if record is None:
+            return None
+        cleaned: dict[str, Any] = {}
+        for key, value in record.items():
+            new_key = key
+            if config.lowercase_keys:
+                new_key = key.lower().strip()
+            if value is None:
+                if not config.remove_nulls:
+                    cleaned[new_key] = None
+            elif isinstance(value, str) and config.trim_strings:
+                value = value.strip()
+                if not value:
+                    value = None
+                    if config.remove_nulls:
+                        continue
+                cleaned[new_key] = value
             else:
-                items.append((new_key, v))
-        return dict(items)
+                cleaned[new_key] = value
+        return cleaned
 
-    def _unflatten_dict(self, d: dict, sep: str = ".") -> dict:
-        """Unflatten dictionary to nested structure.
+    def _is_all_null(self, record: dict[str, Any]) -> bool:
+        return all(v is None for v in record.values())
+
+    def deduplicate(
+        self,
+        records: list[dict[str, Any]],
+        key: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Remove duplicate records.
 
         Args:
-            d: Flattened dictionary.
-            sep: Key separator.
+            records: Input records
+            key: Field name to use for dedup comparison (None = entire record)
 
         Returns:
-            Nested dictionary.
+            Deduplicated records
         """
-        result: dict = {}
-        for key, value in d.items():
-            parts = key.split(sep)
+        seen: set[str] = set()
+        result: list[dict[str, Any]] = []
+        for record in records:
+            if key:
+                val = json.dumps(record.get(key), sort_keys=True, default=str)
+            else:
+                val = json.dumps(record, sort_keys=True, default=str)
+            if val not in seen:
+                seen.add(val)
+                result.append(record)
+        self._stats.duplicates_removed = len(records) - len(result)
+        return result
+
+    def normalize_fields(
+        self,
+        records: list[dict[str, Any]],
+        field_rules: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """
+        Normalize specific fields using named transformations.
+
+        Args:
+            records: Input records
+            field_rules: Map of field name to normalization type
+                         (lower, upper, title_case, strip, int, float, bool)
+
+        Returns:
+            Records with normalized fields
+        """
+        result: list[dict[str, Any]] = []
+        for record in records:
+            new_record = dict(record)
+            for field_name, rule in field_rules.items():
+                if field_name not in new_record:
+                    continue
+                value = new_record[field_name]
+                new_record[field_name] = self._apply_normalization(value, rule)
+            result.append(new_record)
+        return result
+
+    def _apply_normalization(self, value: Any, rule: str) -> Any:
+        if value is None:
+            return None
+        rule = rule.lower().strip()
+        if rule == "lower":
+            return str(value).lower().strip()
+        elif rule == "upper":
+            return str(value).upper().strip()
+        elif rule == "title_case":
+            return str(value).title().strip()
+        elif rule == "strip":
+            return str(value).strip()
+        elif rule == "int":
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return value
+        elif rule == "float":
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return value
+        elif rule == "bool":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ("true", "1", "yes", "on")
+            return bool(value)
+        elif rule == "slug":
+            return self._to_slug(str(value))
+        elif rule == "email":
+            return self._normalize_email(str(value))
+        elif rule == "phone":
+            return self._normalize_phone(str(value))
+        return value
+
+    def _to_slug(self, text: str) -> str:
+        text = text.lower().strip()
+        text = re.sub(r"[^\w\s-]", "", text)
+        text = re.sub(r"[_\s]+", "-", text)
+        return text.strip("-")
+
+    def _normalize_email(self, email: str) -> str:
+        email = email.lower().strip()
+        return email if "@" in email else ""
+
+    def _normalize_phone(self, phone: str) -> str:
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) == 10:
+            return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+        elif len(digits) == 11 and digits[0] == "1":
+            return f"+1 ({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
+        return phone
+
+    def aggregate(
+        self,
+        records: list[dict[str, Any]],
+        group_by: str,
+        agg_field: str,
+        agg_func: str = "sum",
+    ) -> list[dict[str, Any]]:
+        """
+        Aggregate records by grouping field.
+
+        Args:
+            records: Input records
+            group_by: Field to group by
+            agg_field: Field to aggregate
+            agg_func: Aggregation function (sum, count, avg, min, max, list)
+
+        Returns:
+            Aggregated records
+        """
+        groups: dict[str, list[Any]] = {}
+        for record in records:
+            key = str(record.get(group_by, ""))
+            val = record.get(agg_field)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(val)
+
+        result: list[dict[str, Any]] = []
+        for key, values in groups.items():
+            non_null = [v for v in values if v is not None]
+            if not non_null:
+                continue
+            if agg_func == "sum":
+                agg_val = sum(non_null)
+            elif agg_func == "count":
+                agg_val = len(non_null)
+            elif agg_func == "avg":
+                agg_val = sum(non_null) / len(non_null) if non_null else 0
+            elif agg_func == "min":
+                agg_val = min(non_null)
+            elif agg_func == "max":
+                agg_val = max(non_null)
+            elif agg_func == "list":
+                agg_val = non_null
+            else:
+                agg_val = non_null
+            result.append({group_by: key, agg_field: agg_val})
+        return result
+
+    def pivot(
+        self,
+        records: list[dict[str, Any]],
+        index: str,
+        columns: str,
+        values: str,
+        agg_func: str = "first",
+    ) -> list[dict[str, Any]]:
+        """Pivot records from long to wide format."""
+        pivot: dict[str, dict[str, Any]] = {}
+        for record in records:
+            idx_val = str(record.get(index, ""))
+            col_val = str(record.get(columns, ""))
+            val = record.get(values)
+            if idx_val not in pivot:
+                pivot[idx_val] = {index: idx_val}
+            if agg_func == "first":
+                pivot[idx_val][col_val] = val
+            elif agg_func == "count":
+                pivot[idx_val][col_val] = pivot[idx_val].get(col_val, 0) + 1
+            elif agg_func == "sum" and val is not None:
+                pivot[idx_val][col_val] = (pivot[idx_val].get(col_val, 0)) + val
+        return list(pivot.values())
+
+    def join_records(
+        self,
+        left: list[dict[str, Any]],
+        right: list[dict[str, Any]],
+        left_key: str,
+        right_key: str,
+        join_type: str = "inner",
+    ) -> list[dict[str, Any]]:
+        """
+        Join two record sets on keys (like SQL join).
+
+        Args:
+            left: Left records
+            right: Right records
+            left_key: Key field in left records
+            right_key: Key field in right records
+            join_type: inner, left, right, full, cross
+
+        Returns:
+            Joined records
+        """
+        if join_type == "cross":
+            return [{**l, **r} for l in left for r in right]
+
+        right_index: dict[str, list[dict[str, Any]]] = {}
+        for r in right:
+            k = str(r.get(right_key, ""))
+            if k not in right_index:
+                right_index[k] = []
+            right_index[k].append(r)
+
+        result: list[dict[str, Any]] = []
+        matched_right: set[int] = set()
+
+        for i, l in enumerate(left):
+            k = str(l.get(left_key, ""))
+            if k in right_index:
+                for r in right_index[k]:
+                    result.append({**l, **r})
+                    matched_right.add(id(r))
+            elif join_type in ("left", "full"):
+                result.append({**l})
+
+        if join_type in ("right", "full"):
+            for r in right:
+                if id(r) not in matched_right:
+                    result.append({r})
+
+        return result
+
+    def flatten_record(self, record: dict[str, Any], separator: str = ".") -> dict[str, Any]:
+        """Flatten nested records to dot-notation keys."""
+        result: dict[str, Any] = {}
+
+        def _flatten(obj: Any, prefix: str = "") -> None:
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    new_key = f"{prefix}{separator}{k}" if prefix else k
+                    _flatten(v, new_key)
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    _flatten(item, f"{prefix}[{i}]")
+            else:
+                result[prefix] = obj
+
+        _flatten(record)
+        return result
+
+    def unflatten_record(self, flat: dict[str, Any], separator: str = ".") -> dict[str, Any]:
+        """Unflatten dot-notation keys back to nested structure."""
+        result: dict[str, Any] = {}
+        for key, value in flat.items():
+            parts = re.split(r"[.\[\]]+", key)
+            parts = [p for p in parts if p]
             current = result
-            for part in parts[:-1]:
-                if part not in current:
-                    current[part] = {}
-                current = current[part]
-            current[parts[-1]] = value
+            for i, part in enumerate(parts[:-1]):
+                if part.isdigit():
+                    idx = int(part)
+                    if i == 0:
+                        current = result
+                    while len(current) <= idx:
+                        current.append({})
+                    if isinstance(current, list):
+                        current = current[idx]
+                    else:
+                        current = current.setdefault(idx, {})
+                else:
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+            last = parts[-1]
+            if last.isdigit():
+                idx = int(last)
+                while len(current) <= idx:
+                    current.append(None)
+                current[idx] = value
+            else:
+                current[last] = value
         return result
 
-    def _json_to_csv(self, data: Any) -> str:
-        """Convert JSON data to CSV format.
-
-        Args:
-            data: JSON data (list of dicts).
+    def validate_schema(
+        self,
+        records: list[dict[str, Any]],
+        required_fields: list[str],
+        field_types: Optional[dict[str, type]] = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        """
+        Validate records against a schema.
 
         Returns:
-            CSV string.
+            Tuple of (valid_records, errors)
         """
-        if isinstance(data, str):
-            data = json.loads(data)
-        if not isinstance(data, list):
-            data = [data]
+        valid: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
 
-        if not data:
-            return ""
+        for i, record in enumerate(records):
+            record_errors: list[str] = []
+            for field in required_fields:
+                if field not in record or record[field] is None:
+                    record_errors.append(f"Missing required field: {field}")
+            if field_types:
+                for field, expected_type in field_types.items():
+                    if field in record and record[field] is not None:
+                        if not isinstance(record[field], expected_type):
+                            record_errors.append(
+                                f"Field '{field}' has type {type(record[field]).__name__}, "
+                                f"expected {expected_type.__name__}"
+                            )
+            if record_errors:
+                errors.append({"index": str(i), "errors": "; ".join(record_errors)})
+            else:
+                valid.append(record)
+        return valid, errors
 
-        output = io.StringIO()
-        fieldnames = list(data[0].keys()) if isinstance(data[0], dict) else []
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(data)
-        return output.getvalue()
+    def get_stats(self) -> ProcessingStats:
+        """Return processing statistics from last operation."""
+        return self._stats
 
-    def _csv_to_json(self, data: str, delimiter: str = ",") -> list[dict]:
-        """Convert CSV to JSON array.
 
-        Args:
-            data: CSV string.
-            delimiter: Column delimiter.
-
-        Returns:
-            List of dictionaries.
-        """
-        reader = csv.DictReader(io.StringIO(data), delimiter=delimiter)
-        return list(reader)
-
-    def _normalize_data(self, data: Any) -> Any:
-        """Normalize data (trim strings, standardize types).
-
-        Args:
-            data: Data to normalize.
-
-        Returns:
-            Normalized data.
-        """
-        if isinstance(data, str):
-            return data.strip()
-        elif isinstance(data, dict):
-            return {k: self._normalize_data(v) for k, v in data.items()}
-        elif isinstance(data, list):
-            return [self._normalize_data(item) for item in data]
-        else:
-            return data
-
-    def _deduplicate_list(self, data: list, key: Optional[str] = None) -> list:
-        """Remove duplicates from list.
-
-        Args:
-            data: List to deduplicate.
-            key: Optional key function for comparison.
-
-        Returns:
-            Deduplicated list.
-        """
-        if not key:
-            seen = set()
-            result = []
-            for item in data:
-                if item not in seen:
-                    seen.add(item)
-                    result.append(item)
-            return result
-        else:
-            seen = set()
-            result = []
-            for item in data:
-                k = key(item) if callable(key) else item.get(key) if isinstance(item, dict) else None
-                if k not in seen:
-                    seen.add(k)
-                    result.append(item)
-            return result
-
-    def _group_by(self, data: list, key: str) -> dict[str, list]:
-        """Group list items by key.
-
-        Args:
-            data: List to group.
-            key: Key to group by.
-
-        Returns:
-            Dictionary of grouped items.
-        """
-        result: dict[str, list] = {}
-        for item in data:
-            k = item.get(key) if isinstance(item, dict) else getattr(item, key, None)
-            k_str = str(k) if k is not None else "None"
-            if k_str not in result:
-                result[k_str] = []
-            result[k_str].append(item)
-        return result
-
-    def _merge_data(self, data: Any, other: Any) -> Any:
-        """Merge two data structures.
-
-        Args:
-            data: First data structure.
-            other: Second data structure.
-
-        Returns:
-            Merged result.
-        """
-        if isinstance(data, dict) and isinstance(other, dict):
-            result = dict(data)
-            result.update(other)
-            return result
-        elif isinstance(data, list) and isinstance(other, list):
-            return data + other
-        else:
-            return data
-
-    def _sort_data(self, data: list, key: Optional[str] = None, reverse: bool = False) -> list:
-        """Sort list data.
-
-        Args:
-            data: List to sort.
-            key: Optional sort key.
-            reverse: Sort in descending order.
-
-        Returns:
-            Sorted list.
-        """
-        if key:
-            return sorted(data, key=lambda x: x.get(key) if isinstance(x, dict) else getattr(x, key, None), reverse=reverse)
-        return sorted(data, reverse=reverse)
-
-    def _filter_data(self, data: list, predicate: Callable[[Any], bool]) -> list:
-        """Filter list with predicate function.
-
-        Args:
-            data: List to filter.
-            predicate: Filter function.
-
-        Returns:
-            Filtered list.
-        """
-        return [item for item in data if predicate(item)]
-
-    def _map_data(self, data: list, func: Callable[[Any], Any]) -> list:
-        """Map list with transformation function.
-
-        Args:
-            data: List to transform.
-            func: Transform function.
-
-        Returns:
-            Transformed list.
-        """
-        return [func(item) for item in data]
-
-    def _url_encode(self, data: dict) -> str:
-        """Encode dictionary to URL query string.
-
-        Args:
-            data: Dictionary to encode.
-
-        Returns:
-            URL-encoded string.
-        """
-        return urlencode(data)
-
-    def _url_decode(self, data: str) -> dict:
-        """Decode URL query string to dictionary.
-
-        Args:
-            data: URL query string.
-
-        Returns:
-            Decoded dictionary.
-        """
-        return dict(parse_qs(urlparse(data).query))
-
-    def _base64_encode(self, data: str) -> str:
-        """Base64 encode string.
-
-        Args:
-            data: String to encode.
-
-        Returns:
-            Base64 encoded string.
-        """
-        import base64
-        return base64.b64encode(data.encode()).decode()
-
-    def _base64_decode(self, data: str) -> str:
-        """Base64 decode string.
-
-        Args:
-            data: Base64 string to decode.
-
-        Returns:
-            Decoded string.
-        """
-        import base64
-        return base64.b64decode(data.encode()).decode()
+if __name__ == "__main__":
+    transformer = DataTransformer()
+    records = [
+        {"name": "  Alice  ", "age": 30, "score": 85},
+        {"name": "  bob  ", "age": 25, "score": 90},
+        {"name": "  Alice  ", "age": 30, "score": 85},
+        {"name": "  carol", "age": None, "score": 70},
+    ]
+    config = TransformConfig(remove_nulls=True, lowercase_keys=True)
+    cleaned = transformer.clean_records(records, config)
+    print(f"Cleaned: {len(cleaned)} records")
+    print(json.dumps(cleaned, indent=2))
