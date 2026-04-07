@@ -36,7 +36,7 @@ class PythonHighlighter(QSyntaxHighlighter):
     and builtin functions with distinct colors that adapt to theme.
     """
 
-    # Theme-aware default colors (will be updated on theme change)
+    # Theme-aware color palettes
     LIGHT_COLORS = {
         'keyword': '#0000FF',
         'string': '#008000',
@@ -57,7 +57,7 @@ class PythonHighlighter(QSyntaxHighlighter):
         'self': '#569CD6',
     }
 
-    # Class-level keywords and builtins lists
+    # Class-level keywords and builtins
     KEYWORDS = [
         'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
         'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
@@ -99,7 +99,7 @@ class PythonHighlighter(QSyntaxHighlighter):
         string_format.setForeground(QColor(colors['string']))
         self.formats['string'] = string_format
 
-        # Comment highlighting (gray)
+        # Comment highlighting (gray, italic)
         comment_format = QTextCharFormat()
         comment_format.setForeground(QColor(colors['comment']))
         comment_format.setFontItalic(True)
@@ -135,23 +135,21 @@ class PythonHighlighter(QSyntaxHighlighter):
         if self._is_dark_theme != is_dark:
             self._is_dark_theme = is_dark
             self._rebuild_formats()
-            # Re-highlight entire document
             if self.document():
                 self.rehighlight()
     
     def highlightBlock(self, text: str) -> None:
         """Apply syntax highlighting to a block of text.
-        
+
         Args:
             text: Line of text to highlight.
         """
+        # Highlight decorators first (before processing other elements)
+        if 'decorator' in self.formats:
+            self._highlight_decorators(text, self.formats['decorator'])
+
         for name, value in self.formats.items():
-            if name == 'keyword':
-                fmt, words = value
-                for word in words:
-                    for pos in self._find_word(text, word):
-                        self.setFormat(pos, len(word), fmt)
-            elif name == 'builtin':
+            if name in ('keyword', 'builtin'):
                 fmt, words = value
                 for word in words:
                     for pos in self._find_word(text, word):
@@ -164,6 +162,16 @@ class PythonHighlighter(QSyntaxHighlighter):
                     self.setFormat(pos, len(text) - pos, value)
             elif name == 'number':
                 self._highlight_numbers(text, value)
+
+    def _highlight_decorators(self, text: str, fmt: QTextCharFormat) -> None:
+        """Highlight Python decorators.
+
+        Args:
+            text: Line of text to process.
+            fmt: QTextCharFormat for decorators.
+        """
+        for match in re.finditer(r'@\w+', text):
+            self.setFormat(match.start(), match.end() - match.start(), fmt)
     
     def _find_word(self, text: str, word: str) -> List[int]:
         """Find all occurrences of a word in text.
