@@ -1,0 +1,117 @@
+{
+  "name": "Authentication Strength Audit Workflow",
+  "description": "Automate authentication mechanism strength review",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "auth_methods_to_audit": 42,
+    "current_method": 0,
+    "strong_auth_methods": 0,
+    "weak_auth_methods": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "auth_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize auth counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open authentication management"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for management"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "auth_audit_loop",
+      "count": "{{auth_methods_to_audit}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start auth audit loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select auth method"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for strength check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/auth_audit_{{auth_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture auth screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "auth_counter",
+      "value": "{{auth_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment auth counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{auth_counter < auth_methods_to_audit}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more methods"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next method"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/authentication_strength_audit_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
