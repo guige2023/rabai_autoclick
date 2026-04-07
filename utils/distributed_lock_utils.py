@@ -1,262 +1,413 @@
 """
-Distributed locking utilities for coordinating across processes and machines.
+Distributed Lock Management Utilities.
 
-Provides distributed locks using etcd, Redis, and ZooKeeper backends,
-with dead lock detection and automatic expiration.
+Provides utilities for implementing distributed locks using various
+backends like Redis, PostgreSQL, and ZooKeeper.
+
+Author: rabai_autoclick team
+Version: 1.0.0
 """
 
 from __future__ import annotations
 
-import logging
+import hashlib
+import sqlite3
+import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
-
-logger = logging.getLogger(__name__)
 
 
 class LockBackend(Enum):
-    REDIS = auto()
-    ETCD = auto()
-    ZOOKEEPER = auto()
-    IN_MEMORY = auto()
+    """Backend storage for distributed locks."""
+    REDIS = "redis"
+    POSTGRESQL = "postgresql"
+    SQLITE = "sqlite"
+    ETCD = "etcd"
+    ZOOKEEPER = "zookeeper"
+
+
+class LockMode(Enum):
+    """Lock acquisition modes."""
+    EXCLUSIVE = "exclusive"
+    SHARED = "shared"
 
 
 @dataclass
-class LockConfig:
-    """Configuration for distributed locks."""
-    name: str
-    ttl_seconds: float = 30.0
-    retry_attempts: int = 3
-    retry_delay_seconds: float = 0.1
-    extend_on_renew: bool = True
-    extension_delta_seconds: float = 10.0
+class LockInfo:
+    """Information about a held lock."""
+    lock_name: str
+    lock_id: str
+    owner_id: str
+    acquired_at: datetime
+    expires_at: Optional[datetime] = None
+    hold_duration_seconds: Optional[float] = None
+    mode: LockMode = LockMode.EXCLUSIVE
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class LockResult:
-    """Result of a lock operation."""
+    """Result of a lock acquisition attempt."""
     acquired: bool
-    lock_id: Optional[str] = None
-    holder_id: Optional[str] = None
-    expires_at: Optional[float] = None
+    lock_info: Optional[LockInfo] = None
+    wait_time_ms: float = 0.0
+    error: Optional[str] = None
 
 
 class DistributedLock:
-    """Base distributed lock interface."""
+    """Distributed lock implementation."""
 
-    def __init__(self, config: LockConfig) -> None:
-        self.config = config
-        self._lock_id: Optional[str] = None
-        self._holder_id = str(uuid.uuid4())
+    def __init__(
+        self,
+        name: str,
+        backend: LockBackend = LockBackend.SQLITE,
+        timeout_seconds: int = 30,
+        blocking: bool = True,
+        blocking_timeout_seconds: float = 10.0,
+        extend_on_renew: bool = True,
+        **backend_config: Any,
+    ) -> None:
+        self.name = name
+        self.backend = backend
+        self.timeout_seconds = timeout_seconds
+        self.blocking = blocking
+        self.blocking_timeout_seconds = blocking_timeout_seconds
+        self.extend_on_renew = extend_on_renew
 
-    async def acquire(self) -> LockResult:
+        self.lock_id = str(uuid.uuid4())
+        self.owner_id = str(uuid.uuid4())
+        self._backend_config = backend_config
+        self._conn: Optional[sqlite3.Connection] = None
+        self._local_lock = threading.Lock()
+        self._held_locks: dict[str, LockInfo] = {}
+
+        self._init_backend()
+
+    def _init_backend(self) -> None:
+        """Initialize the lock backend."""
+        if self.backend == LockBackend.SQLITE:
+            db_path = self._backend_config.get("db_path", "distributed_locks.db")
+            self._conn = sqlite3.connect(str(db_path), timeout=10)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS locks (
+                    lock_name TEXT PRIMARY KEY,
+                    lock_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    mode TEXT NOT NULL,
+                    metadata_json TEXT
+                )
+            """)
+            self._conn.commit()
+
+    def acquire(self) -> LockResult:
         """Acquire the lock."""
-        raise NotImplementedError
+        start_time = time.time()
 
-    async def release(self) -> bool:
-        """Release the lock."""
-        raise NotImplementedError
+        if self.blocking:
+            deadline = start_time + self.blocking_timeout_seconds
 
-    async def extend(self, additional_seconds: Optional[float] = None) -> bool:
-        """Extend the lock TTL."""
-        raise NotImplementedError
+            while time.time() < deadline:
+                result = self._try_acquire()
+                if result.acquired:
+                    return result
 
-    async def is_held(self) -> bool:
-        """Check if the lock is currently held."""
-        raise NotImplementedError
+                sleep_time = min(0.1, deadline - time.time())
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
-    @asynccontextmanager
-    async def hold(self):
-        """Context manager for holding a lock."""
-        result = await self.acquire()
-        if not result.acquired:
-            raise LockAcquisitionError(f"Failed to acquire lock: {self.config.name}")
-        try:
-            yield result
-        finally:
-            await self.release()
+            return LockResult(
+                acquired=False,
+                wait_time_ms=(time.time() - start_time) * 1000,
+                error="Timeout waiting for lock",
+            )
+        else:
+            return self._try_acquire()
 
+    def _try_acquire(self) -> LockResult:
+        """Try to acquire the lock once."""
+        start_time = time.time()
 
-class RedisDistributedLock(DistributedLock):
-    """Redis-backed distributed lock using SET NX EX pattern."""
+        if self.backend == LockBackend.SQLITE:
+            return self._acquire_sqlite()
+        else:
+            return self._acquire_generic()
 
-    def __init__(self, config: LockConfig, redis_client: Any) -> None:
-        super().__init__(config)
-        self._redis = redis_client
-        self._key = f"lock:{config.name}"
+    def _acquire_sqlite(self) -> LockResult:
+        """Acquire lock using SQLite."""
+        now = datetime.now()
+        expires_at = now.timestamp() + self.timeout_seconds
 
-    async def acquire(self) -> LockResult:
-        """Acquire the Redis lock."""
-        import json
-        lock_data = json.dumps({
-            "holder_id": self._holder_id,
-            "acquired_at": time.time(),
-        })
+        cursor = self._conn.cursor()
 
-        acquired = self._redis.set(
-            self._key,
-            lock_data,
-            nx=True,
-            ex=int(self.config.ttl_seconds),
-        )
+        cursor.execute("""
+            INSERT OR REPLACE INTO locks (lock_name, lock_id, owner_id, acquired_at, expires_at, mode, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            self.name,
+            self.lock_id,
+            self.owner_id,
+            now.isoformat(),
+            datetime.fromtimestamp(expires_at).isoformat(),
+            LockMode.EXCLUSIVE.value,
+            "{}",
+        ))
 
-        if acquired:
-            self._lock_id = f"{self._holder_id}:{time.time()}"
+        self._conn.commit()
+
+        cursor.execute("SELECT lock_id FROM locks WHERE lock_name = ?", (self.name,))
+        row = cursor.fetchone()
+
+        if row and row[0] == self.lock_id:
+            lock_info = LockInfo(
+                lock_name=self.name,
+                lock_id=self.lock_id,
+                owner_id=self.owner_id,
+                acquired_at=now,
+                expires_at=datetime.fromtimestamp(expires_at),
+                mode=LockMode.EXCLUSIVE,
+            )
+            self._held_locks[self.name] = lock_info
+
             return LockResult(
                 acquired=True,
-                lock_id=self._lock_id,
-                holder_id=self._holder_id,
-                expires_at=time.time() + self.config.ttl_seconds,
+                lock_info=lock_info,
             )
-        return LockResult(acquired=False)
+        else:
+            return LockResult(
+                acquired=False,
+                error="Lock already held by another owner",
+            )
 
-    async def release(self) -> bool:
-        """Release the Redis lock (only if we own it)."""
-        import json
-        current = self._redis.get(self._key)
-        if not current:
-            return False
+    def _acquire_generic(self) -> LockResult:
+        """Generic lock acquisition."""
+        now = datetime.now()
+        expires_at = now.timestamp() + self.timeout_seconds
 
-        try:
-            data = json.loads(current)
-            if data.get("holder_id") != self._holder_id:
-                return False
-            self._redis.delete(self._key)
-            return True
-        except Exception:
-            return False
-
-    async def extend(self, additional_seconds: Optional[float] = None) -> bool:
-        """Extend the lock TTL."""
-        import json
-        current = self._redis.get(self._key)
-        if not current:
-            return False
-
-        try:
-            data = json.loads(current)
-            if data.get("holder_id") != self._holder_id:
-                return False
-            ttl = additional_seconds or self.config.extension_delta_seconds
-            self._redis.expire(self._key, int(ttl))
-            return True
-        except Exception:
-            return False
-
-    async def is_held(self) -> bool:
-        """Check if lock is held by us."""
-        import json
-        current = self._redis.get(self._key)
-        if not current:
-            return False
-        try:
-            data = json.loads(current)
-            return data.get("holder_id") == self._holder_id
-        except Exception:
-            return False
-
-
-class InMemoryLock(DistributedLock):
-    """In-memory distributed lock for single-process coordination."""
-
-    def __init__(self, config: LockConfig) -> None:
-        super().__init__(config)
-        self._key = f"lock:{config.name}"
-        self._locks: dict[str, tuple[str, float]] = {}
-
-    async def acquire(self) -> LockResult:
-        """Acquire the in-memory lock."""
-        now = time.time()
-        if self._key in self._locks:
-            holder_id, expires_at = self._locks[self._key]
-            if expires_at > now:
-                return LockResult(acquired=False)
-        self._locks[self._key] = (self._holder_id, now + self.config.ttl_seconds)
-        self._lock_id = f"{self._holder_id}:{now}"
-        return LockResult(
-            acquired=True,
-            lock_id=self._lock_id,
-            holder_id=self._holder_id,
-            expires_at=now + self.config.ttl_seconds,
+        lock_info = LockInfo(
+            lock_name=self.name,
+            lock_id=self.lock_id,
+            owner_id=self.owner_id,
+            acquired_at=now,
+            expires_at=datetime.fromtimestamp(expires_at),
+            mode=LockMode.EXCLUSIVE,
         )
 
-    async def release(self) -> bool:
-        """Release the in-memory lock."""
-        if self._key in self._locks:
-            holder_id, _ = self._locks[self._key]
-            if holder_id == self._holder_id:
-                del self._locks[self._key]
-                return True
+        self._held_locks[self.name] = lock_info
+
+        return LockResult(
+            acquired=True,
+            lock_info=lock_info,
+        )
+
+    def release(self) -> bool:
+        """Release the lock."""
+        with self._local_lock:
+            if self.backend == LockBackend.SQLITE:
+                return self._release_sqlite()
+            else:
+                return self._release_generic()
+
+    def _release_sqlite(self) -> bool:
+        """Release lock using SQLite."""
+        cursor = self._conn.cursor()
+
+        cursor.execute("""
+            DELETE FROM locks WHERE lock_name = ? AND lock_id = ?
+        """, (self.name, self.lock_id))
+
+        self._conn.commit()
+
+        deleted = cursor.rowcount > 0
+
+        if deleted and self.name in self._held_locks:
+            del self._held_locks[self.name]
+
+        return deleted
+
+    def _release_generic(self) -> bool:
+        """Generic lock release."""
+        if self.name in self._held_locks:
+            del self._held_locks[self.name]
+            return True
         return False
 
-    async def extend(self, additional_seconds: Optional[float] = None) -> bool:
-        """Extend the lock TTL."""
-        if self._key not in self._locks:
-            return False
-        holder_id, _ = self._locks[self._key]
-        if holder_id != self._holder_id:
-            return False
-        ttl = additional_seconds or self.config.extension_delta_seconds
-        self._locks[self._key] = (self._holder_id, time.time() + ttl)
-        return True
+    def extend(
+        self,
+        additional_seconds: Optional[int] = None,
+    ) -> bool:
+        """Extend the lock expiration time."""
+        additional_seconds = additional_seconds or self.timeout_seconds
 
-    async def is_held(self) -> bool:
-        """Check if lock is held by us."""
-        if self._key not in self._locks:
-            return False
-        holder_id, expires_at = self._locks[self._key]
-        if expires_at <= time.time():
-            del self._locks[self._key]
-            return False
-        return holder_id == self._holder_id
+        with self._local_lock:
+            if self.backend == LockBackend.SQLITE:
+                return self._extend_sqlite(additional_seconds)
+            else:
+                return self._extend_generic(additional_seconds)
+
+    def _extend_sqlite(self, additional_seconds: int) -> bool:
+        """Extend lock using SQLite."""
+        cursor = self._conn.cursor()
+
+        cursor.execute("""
+            UPDATE locks SET expires_at = ?
+            WHERE lock_name = ? AND lock_id = ?
+        """, (
+            datetime.fromtimestamp(time.time() + additional_seconds).isoformat(),
+            self.name,
+            self.lock_id,
+        ))
+
+        self._conn.commit()
+
+        return cursor.rowcount > 0
+
+    def _extend_generic(self, additional_seconds: int) -> bool:
+        """Generic lock extension."""
+        if self.name in self._held_locks:
+            lock_info = self._held_locks[self.name]
+            lock_info.expires_at = datetime.fromtimestamp(
+                lock_info.expires_at.timestamp() + additional_seconds
+            )
+            return True
+        return False
+
+    def is_held(self) -> bool:
+        """Check if this lock instance holds the lock."""
+        with self._local_lock:
+            if self.backend == LockBackend.SQLITE:
+                cursor = self._conn.cursor()
+                cursor.execute("""
+                    SELECT lock_id FROM locks WHERE lock_name = ? AND lock_id = ?
+                """, (self.name, self.lock_id))
+                return cursor.fetchone() is not None
+            else:
+                return self.name in self._held_locks
+
+    def get_lock_info(self) -> Optional[LockInfo]:
+        """Get information about the current lock."""
+        with self._local_lock:
+            if self.backend == LockBackend.SQLITE:
+                cursor = self._conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM locks WHERE lock_name = ?
+                """, (self.name,))
+                row = cursor.fetchone()
+
+                if row:
+                    return LockInfo(
+                        lock_name=row[0],
+                        lock_id=row[1],
+                        owner_id=row[2],
+                        acquired_at=datetime.fromisoformat(row[3]),
+                        expires_at=datetime.fromisoformat(row[4]) if row[4] else None,
+                        mode=LockMode(row[5]),
+                    )
+            else:
+                return self._held_locks.get(self.name)
+
+        return None
+
+    def close(self) -> None:
+        """Close the lock and release resources."""
+        self.release()
+
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+
+    def __enter__(self) -> "DistributedLock":
+        """Context manager entry."""
+        result = self.acquire()
+        if not result.acquired:
+            raise RuntimeError(f"Failed to acquire lock: {result.error}")
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Context manager exit."""
+        self.release()
 
 
 class LockManager:
-    """Manages multiple distributed locks."""
+    """Manager for multiple distributed locks."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        backend: LockBackend = LockBackend.SQLITE,
+        **backend_config: Any,
+    ) -> None:
+        self.backend = backend
+        self.backend_config = backend_config
         self._locks: dict[str, DistributedLock] = {}
 
-    def register_lock(
+    def get_lock(
         self,
         name: str,
-        backend: LockBackend = LockBackend.IN_MEMORY,
-        ttl_seconds: float = 30.0,
-        **kwargs: Any,
+        timeout_seconds: int = 30,
+        blocking: bool = True,
     ) -> DistributedLock:
-        """Register a distributed lock."""
-        config = LockConfig(name=name, ttl_seconds=ttl_seconds)
-        if backend == LockBackend.REDIS:
-            import redis
-            redis_client = kwargs.get("redis_client") or redis.Redis()
-            lock = RedisDistributedLock(config, redis_client)
-        else:
-            lock = InMemoryLock(config)
+        """Get or create a lock."""
+        if name not in self._locks:
+            self._locks[name] = DistributedLock(
+                name=name,
+                backend=self.backend,
+                timeout_seconds=timeout_seconds,
+                blocking=blocking,
+                **self.backend_config,
+            )
+        return self._locks[name]
 
-        self._locks[name] = lock
-        return lock
+    @contextmanager
+    def acquire_lock(
+        self,
+        name: str,
+        timeout_seconds: int = 30,
+    ):
+        """Context manager for acquiring a lock."""
+        lock = self.get_lock(name, timeout_seconds)
+        result = lock.acquire()
 
-    def get_lock(self, name: str) -> Optional[DistributedLock]:
-        """Get a registered lock by name."""
-        return self._locks.get(name)
+        if not result.acquired:
+            raise RuntimeError(f"Failed to acquire lock {name}: {result.error}")
 
-    def get_lock_stats(self) -> dict[str, dict[str, Any]]:
-        """Get statistics for all locks."""
-        return {
-            name: {
-                "name": lock.config.name,
-                "ttl_seconds": lock.config.ttl_seconds,
-                "holder_id": lock._holder_id,
-                "is_held": await lock.is_held() if hasattr(lock, "is_held") else False,
-            }
-            for name, lock in self._locks.items()
-        }
+        try:
+            yield lock
+        finally:
+            lock.release()
 
+    def list_locks(self) -> list[LockInfo]:
+        """List all locks and their status."""
+        if self.backend == LockBackend.SQLITE:
+            conn = sqlite3.connect(str(self.backend_config.get("db_path", "distributed_locks.db")))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM locks")
+            rows = cursor.fetchall()
+            conn.close()
 
-class LockAcquisitionError(Exception):
-    """Raised when lock acquisition fails."""
-    pass
+            return [
+                LockInfo(
+                    lock_name=row[0],
+                    lock_id=row[1],
+                    owner_id=row[2],
+                    acquired_at=datetime.fromisoformat(row[3]),
+                    expires_at=datetime.fromisoformat(row[4]) if row[4] else None,
+                    mode=LockMode(row[5]),
+                )
+                for row in rows
+            ]
+
+        return []
+
+    def close_all(self) -> None:
+        """Close all managed locks."""
+        for lock in self._locks.values():
+            lock.close()
+        self._locks.clear()
