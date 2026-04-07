@@ -2639,15 +2639,15 @@ class MainWindow(QMainWindow):
             self.next_step_id = 1
             app_logger.info("已清空所有步骤", "Editor")
             show_toast("已清空所有步骤", 'info')
-    
-    def _on_move_up(self):
+
+    def _on_move_up(self) -> None:
         index = self.step_list.get_current_index()
         if index > 0:
             item = self.step_list.list_widget.takeItem(index)
             self.step_list.list_widget.insertItem(index - 1, item)
             self.step_list.set_current_index(index - 1)
-    
-    def _on_move_down(self):
+
+    def _on_move_down(self) -> None:
         index = self.step_list.get_current_index()
         if index < self.step_list.get_step_count() - 1:
             item = self.step_list.list_widget.takeItem(index)
