@@ -1,0 +1,220 @@
+{
+  "name": "QA Testing Workflow",
+  "description": "Automated QA testing across multiple test scenarios",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "test_scenarios": ["login", "checkout", "search", "profile", "settings"],
+    "current_scenario": 0,
+    "tests_passed": 0,
+    "tests_failed": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "scenario_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize scenario index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "test_loop",
+      "count": 5,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start test scenario loop"
+    },
+    {
+      "id": 3,
+      "type": "condition",
+      "condition": "{{test_scenarios[scenario_index] == 'login'}}",
+      "true_next": 4,
+      "false_next": 6,
+      "pre_delay": 0.1,
+      "comment": "Check if login test"
+    },
+    {
+      "id": 4,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to login"
+    },
+    {
+      "id": 5,
+      "type": "goto",
+      "step_id": 17,
+      "pre_delay": 0.1,
+      "comment": "Skip to verification"
+    },
+    {
+      "id": 6,
+      "type": "condition",
+      "condition": "{{test_scenarios[scenario_index] == 'checkout'}}",
+      "true_next": 7,
+      "false_next": 9,
+      "pre_delay": 0.1,
+      "comment": "Check if checkout test"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 200,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to checkout"
+    },
+    {
+      "id": 8,
+      "type": "goto",
+      "step_id": 17,
+      "pre_delay": 0.1,
+      "comment": "Skip to verification"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{test_scenarios[scenario_index] == 'search'}}",
+      "true_next": 10,
+      "false_next": 12,
+      "pre_delay": 0.1,
+      "comment": "Check if search test"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 300,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to search"
+    },
+    {
+      "id": 11,
+      "type": "goto",
+      "step_id": 17,
+      "pre_delay": 0.1,
+      "comment": "Skip to verification"
+    },
+    {
+      "id": 12,
+      "type": "condition",
+      "condition": "{{test_scenarios[scenario_index] == 'profile'}}",
+      "true_next": 13,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if profile test"
+    },
+    {
+      "id": 13,
+      "type": "click",
+      "x": 400,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to profile"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 17,
+      "pre_delay": 0.1,
+      "comment": "Skip to verification"
+    },
+    {
+      "id": 15,
+      "type": "click",
+      "x": 500,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to settings"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for page"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for scenario to load"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/test_{{test_scenarios[scenario_index]}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture test screenshot"
+    },
+    {
+      "id": 19,
+      "type": "set_variable",
+      "name": "tests_passed",
+      "value": "{{tests_passed + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment passed tests"
+    },
+    {
+      "id": 20,
+      "type": "set_variable",
+      "name": "scenario_index",
+      "value": "{{scenario_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment scenario index"
+    },
+    {
+      "id": 21,
+      "type": "condition",
+      "condition": "{{scenario_index < 5}}",
+      "true_next": 22,
+      "false_next": 23,
+      "pre_delay": 0.1,
+      "comment": "Check if more scenarios"
+    },
+    {
+      "id": 22,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next scenario"
+    },
+    {
+      "id": 23,
+      "type": "screenshot",
+      "save_path": "./screenshots/qa_test_summary.png",
+      "pre_delay": 0.5,
+      "comment": "Capture test summary"
+    },
+    {
+      "id": 24,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": false,
+    "continue_on_error": true
+  }
+}
