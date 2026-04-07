@@ -766,14 +766,14 @@ class RecordingWidget(QWidget):
         else:
             show_error("录制失败", "无法启动录制")
 
-    def _on_stop(self):
+    def _on_stop(self) -> None:
         actions = self._recording_manager.stop_recording()
         self.record_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_label.setText(f"状态: 已录制 {len(actions)} 个操作")
         show_toast(f"录制完成，共 {len(actions)} 个操作", 'success')
 
-    def _on_clear(self):
+    def _on_clear(self) -> None:
         self._recording_manager.clear_actions()
         self.action_list.clear()
         self.status_label.setText("状态: 就绪")
