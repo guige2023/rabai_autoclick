@@ -140,7 +140,17 @@ class BaseTab(ttk.Frame):
 
 
 class PredictTab(BaseTab):
-    def setup_ui(self):
+    """
+    Predictive engine tab for action prediction and behavior analysis.
+    
+    Features:
+        - Record user actions for learning
+        - Predict next actions based on patterns
+        - Analyze user behavior statistics
+    """
+    
+    def setup_ui(self) -> None:
+        """Set up the tab's UI components."""
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -200,7 +210,13 @@ class PredictTab(BaseTab):
         self.predict_result = scrolledtext.ScrolledText(frame, height=10, state='disabled')
         self.predict_result.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _setup_analyze_tab(self, parent):
+    def _setup_analyze_tab(self, parent: Any) -> None:
+        """
+        Set up the behavior analysis subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="用户行为分析", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -209,7 +225,8 @@ class PredictTab(BaseTab):
         self.analyze_result = scrolledtext.ScrolledText(frame, height=15, state='disabled')
         self.analyze_result.pack(fill=tk.BOTH, expand=True, pady=10)
 
-    def _record_action(self):
+    def _record_action(self) -> None:
+        """Record a user action to the predictive engine."""
         def do_record():
             engine = create_predictive_engine(str(DATA_DIR))
             ctx = json.loads(self.context_var.get()) if self.context_var.get() != "{}" else {}
@@ -224,7 +241,13 @@ class PredictTab(BaseTab):
 
         self.run_async(do_record, lambda r: self.log(r))
 
-    def _predict_next(self):
+    def _predict_next(self) -> None:
+        """
+        Predict the next user action based on current context.
+        
+        Retrieves prediction from the predictive engine and displays
+        the results including confidence score and alternatives.
+        """
         def do_predict():
             engine = create_predictive_engine(str(DATA_DIR))
             ctx = {"active_app": self.app_var.get()} if self.app_var.get() else {}
@@ -245,7 +268,10 @@ class PredictTab(BaseTab):
 
         self.run_async(do_predict, show_result)
 
-    def _get_suggestion(self):
+    def _get_suggestion(self) -> None:
+        """
+        Get workflow creation suggestions based on recorded behavior.
+        """
         def do_suggest():
             engine = create_predictive_engine(str(DATA_DIR))
             return engine.suggest_workflow_creation()
@@ -261,7 +287,10 @@ class PredictTab(BaseTab):
 
         self.run_async(do_suggest, show_result)
 
-    def _analyze_behavior(self):
+    def _analyze_behavior(self) -> None:
+        """
+        Analyze and display user behavior statistics.
+        """
         def do_analyze():
             engine = create_predictive_engine(str(DATA_DIR))
             return engine.analyze_user_behavior()
