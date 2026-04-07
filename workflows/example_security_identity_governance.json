@@ -1,0 +1,117 @@
+{
+  "name": "Security Identity Governance Workflow",
+  "description": "Automate identity governance and administration",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "identities_to_govern": 54,
+    "current_identity": 0,
+    "governed_identities": 0,
+    "orphan_accounts": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "identity_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize identity counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open IGA platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "iga_loop",
+      "count": "{{identities_to_govern}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start identity governance loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select identity for review"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for governance check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/identity_governance_{{identity_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture identity screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "identity_counter",
+      "value": "{{identity_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment identity counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{identity_counter < identities_to_govern}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more identities"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next identity"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_identity_governance_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

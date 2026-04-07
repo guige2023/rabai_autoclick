@@ -1,0 +1,117 @@
+{
+  "name": "Security Security Benchmarking Workflow",
+  "description": "Automate security benchmarking against standards",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "benchmarks_to_evaluate": 50,
+    "current_benchmark": 0,
+    "completed_benchmarks": 0,
+    "gap_areas": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "benchmark_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize benchmark counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open benchmarking platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "benchmarking_loop",
+      "count": "{{benchmarks_to_evaluate}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start benchmarking loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select benchmark to evaluate"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for evaluation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/benchmarking_{{benchmark_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture benchmark screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "benchmark_counter",
+      "value": "{{benchmark_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment benchmark counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{benchmark_counter < benchmarks_to_evaluate}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more benchmarks"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next benchmark"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_security_benchmarking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
