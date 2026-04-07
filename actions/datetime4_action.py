@@ -1,319 +1,444 @@
-"""Datetime4 action module for RabAI AutoClick.
-
-Provides additional datetime operations:
-- DatetimeWeekdayAction: Get day of week
-- DatetimeWeekAction: Get week number
-- DatetimeQuarterAction: Get quarter
-- DatetimeIsWeekendAction: Check if weekend
-- DatetimeDaysInMonthAction: Get days in month
 """
+Datetime calculation and comparison actions.
+"""
+from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union
 
 
-class DatetimeWeekdayAction(BaseAction):
-    """Get day of week."""
-    action_type = "datetime4_weekday"
-    display_name = "星期几"
-    description = "获取日期是星期几"
+def compare_dates(
+    dt1: Union[datetime, str],
+    dt2: Union[datetime, str]
+) -> Dict[str, Any]:
+    """
+    Compare two dates and return detailed comparison.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute weekday.
+    Args:
+        dt1: First datetime.
+        dt2: Second datetime.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, output_var.
+    Returns:
+        Comparison results.
+    """
+    if isinstance(dt1, str):
+        dt1 = datetime.fromisoformat(dt1.replace('Z', '+00:00'))
+    if isinstance(dt2, str):
+        dt2 = datetime.fromisoformat(dt2.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with weekday.
-        """
-        datetime_str = params.get('datetime_str', None)
-        output_var = params.get('output_var', 'weekday_result')
+    diff = dt2 - dt1
 
-        try:
-            if datetime_str is None:
-                dt = datetime.now()
-            else:
-                resolved = context.resolve_value(datetime_str)
-                if isinstance(resolved, str):
-                    dt = datetime.fromisoformat(resolved)
-                elif isinstance(resolved, datetime):
-                    dt = resolved
-                else:
-                    dt = datetime.fromtimestamp(resolved)
-
-            weekdays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-            result = {
-                'number': dt.weekday(),
-                'name': weekdays[dt.weekday()],
-                'is_weekend': dt.weekday() >= 5
-            }
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"星期: {result['name']}",
-                data={
-                    'weekday': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取星期失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'datetime_str': None, 'output_var': 'weekday_result'}
+    return {
+        'dt1': dt1.isoformat(),
+        'dt2': dt2.isoformat(),
+        'dt1_before_dt2': dt1 < dt2,
+        'dt1_after_dt2': dt1 > dt2,
+        'equal': dt1 == dt2,
+        'difference_seconds': diff.total_seconds(),
+        'difference_days': diff.days,
+    }
 
 
-class DatetimeWeekAction(BaseAction):
-    """Get week number."""
-    action_type = "datetime4_week"
-    display_name = "第几周"
-    description = "获取日期是第几周"
+def is_same_day(
+    dt1: Union[datetime, str],
+    dt2: Union[datetime, str]
+) -> bool:
+    """
+    Check if two datetimes are on the same day.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute week.
+    Args:
+        dt1: First datetime.
+        dt2: Second datetime.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, output_var.
+    Returns:
+        True if same day.
+    """
+    if isinstance(dt1, str):
+        dt1 = datetime.fromisoformat(dt1.replace('Z', '+00:00'))
+    if isinstance(dt2, str):
+        dt2 = datetime.fromisoformat(dt2.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with week number.
-        """
-        datetime_str = params.get('datetime_str', None)
-        output_var = params.get('output_var', 'week_result')
-
-        try:
-            if datetime_str is None:
-                dt = datetime.now()
-            else:
-                resolved = context.resolve_value(datetime_str)
-                if isinstance(resolved, str):
-                    dt = datetime.fromisoformat(resolved)
-                elif isinstance(resolved, datetime):
-                    dt = resolved
-                else:
-                    dt = datetime.fromtimestamp(resolved)
-
-            week_num = dt.isocalendar()[1]
-            context.set(output_var, week_num)
-
-            return ActionResult(
-                success=True,
-                message=f"第{week_num}周",
-                data={
-                    'week': week_num,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取周数失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'datetime_str': None, 'output_var': 'week_result'}
+    return (dt1.year == dt2.year and
+            dt1.month == dt2.month and
+            dt1.day == dt2.day)
 
 
-class DatetimeQuarterAction(BaseAction):
-    """Get quarter."""
-    action_type = "datetime4_quarter"
-    display_name = "第几季度"
-    description = "获取日期是第几季度"
+def is_same_month(
+    dt1: Union[datetime, str],
+    dt2: Union[datetime, str]
+) -> bool:
+    """
+    Check if two datetimes are in the same month.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute quarter.
+    Args:
+        dt1: First datetime.
+        dt2: Second datetime.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, output_var.
+    Returns:
+        True if same month.
+    """
+    if isinstance(dt1, str):
+        dt1 = datetime.fromisoformat(dt1.replace('Z', '+00:00'))
+    if isinstance(dt2, str):
+        dt2 = datetime.fromisoformat(dt2.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with quarter.
-        """
-        datetime_str = params.get('datetime_str', None)
-        output_var = params.get('output_var', 'quarter_result')
-
-        try:
-            if datetime_str is None:
-                dt = datetime.now()
-            else:
-                resolved = context.resolve_value(datetime_str)
-                if isinstance(resolved, str):
-                    dt = datetime.fromisoformat(resolved)
-                elif isinstance(resolved, datetime):
-                    dt = resolved
-                else:
-                    dt = datetime.fromtimestamp(resolved)
-
-            quarter = (dt.month - 1) // 3 + 1
-            context.set(output_var, quarter)
-
-            return ActionResult(
-                success=True,
-                message=f"第{quarter}季度",
-                data={
-                    'quarter': quarter,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取季度失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'datetime_str': None, 'output_var': 'quarter_result'}
+    return dt1.year == dt2.year and dt1.month == dt2.month
 
 
-class DatetimeIsWeekendAction(BaseAction):
-    """Check if weekend."""
-    action_type = "datetime4_is_weekend"
-    display_name = "是否周末"
-    description = "检查日期是否是周末"
+def get_month_start_end(year: int, month: int) -> Dict[str, datetime]:
+    """
+    Get start and end of a month.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute is weekend.
+    Args:
+        year: Year.
+        month: Month (1-12).
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, output_var.
+    Returns:
+        Dictionary with 'start' and 'end' datetimes.
+    """
+    start = datetime(year, month, 1)
 
-        Returns:
-            ActionResult with check result.
-        """
-        datetime_str = params.get('datetime_str', None)
-        output_var = params.get('output_var', 'is_weekend_result')
+    if month == 12:
+        end = datetime(year + 1, 1, 1) - timedelta(seconds=1)
+    else:
+        end = datetime(year, month + 1, 1) - timedelta(seconds=1)
 
-        try:
-            if datetime_str is None:
-                dt = datetime.now()
-            else:
-                resolved = context.resolve_value(datetime_str)
-                if isinstance(resolved, str):
-                    dt = datetime.fromisoformat(resolved)
-                elif isinstance(resolved, datetime):
-                    dt = resolved
-                else:
-                    dt = datetime.fromtimestamp(resolved)
-
-            is_weekend = dt.weekday() >= 5
-            context.set(output_var, is_weekend)
-
-            return ActionResult(
-                success=True,
-                message=f"{'是周末' if is_weekend else '不是周末'}",
-                data={
-                    'is_weekend': is_weekend,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"检查周末失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'datetime_str': None, 'output_var': 'is_weekend_result'}
+    return {'start': start, 'end': end}
 
 
-class DatetimeDaysInMonthAction(BaseAction):
-    """Get days in month."""
-    action_type = "datetime4_days_in_month"
-    display_name = "月份天数"
-    description = "获取指定月份的天数"
+def get_week_start_end(
+    year: int,
+    week: int
+) -> Dict[str, datetime]:
+    """
+    Get start and end of an ISO week.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute days in month.
+    Args:
+        year: Year.
+        week: ISO week number.
 
-        Args:
-            context: Execution context.
-            params: Dict with year, month, output_var.
+    Returns:
+        Dictionary with 'start' and 'end' datetimes.
+    """
+    jan4 = datetime(year, 1, 4)
 
-        Returns:
-            ActionResult with days count.
-        """
-        year = params.get('year', None)
-        month = params.get('month', None)
-        output_var = params.get('output_var', 'days_result')
+    week1_start = jan4 - timedelta(days=jan4.weekday())
 
-        try:
-            if year is None or month is None:
-                dt = datetime.now()
-                y, m = dt.year, dt.month
-            else:
-                y = int(context.resolve_value(year))
-                m = int(context.resolve_value(month))
+    week_start = week1_start + timedelta(weeks=week - 1)
+    week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
-            import calendar
-            days = calendar.monthrange(y, m)[1]
-            context.set(output_var, days)
+    return {'start': week_start, 'end': week_end}
 
-            return ActionResult(
-                success=True,
-                message=f"{y}年{m}月有{days}天",
-                data={
-                    'year': y,
-                    'month': m,
-                    'days': days,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取月份天数失败: {str(e)}"
-            )
 
-    def get_required_params(self) -> List[str]:
-        return []
+def iterate_days(
+    start: Union[datetime, str],
+    end: Union[datetime, str],
+    step_days: int = 1
+) -> List[datetime]:
+    """
+    Iterate through days between start and end.
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'year': None, 'month': None, 'output_var': 'days_result'}
+    Args:
+        start: Start datetime.
+        end: End datetime.
+        step_days: Number of days between each iteration.
+
+    Returns:
+        List of datetimes.
+    """
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start.replace('Z', '+00:00'))
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end.replace('Z', '+00:00'))
+
+    days: List[datetime] = []
+    current = start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    while current <= end:
+        days.append(current)
+        current += timedelta(days=step_days)
+
+    return days
+
+
+def iterate_months(
+    start: Union[datetime, str],
+    end: Union[datetime, str]
+) -> List[Dict[str, Any]]:
+    """
+    Iterate through months between start and end.
+
+    Args:
+        start: Start datetime.
+        end: End datetime.
+
+    Returns:
+        List of month dictionaries.
+    """
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start.replace('Z', '+00:00'))
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end.replace('Z', '+00:00'))
+
+    months: List[Dict[str, Any]] = []
+    current = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    while current <= end:
+        month_start = current
+        if current.month == 12:
+            month_end = datetime(current.year + 1, 1, 1) - timedelta(seconds=1)
+        else:
+            month_end = datetime(current.year, current.month + 1, 1) - timedelta(seconds=1)
+
+        if month_end > end:
+            month_end = end
+
+        months.append({
+            'year': current.year,
+            'month': current.month,
+            'start': month_start,
+            'end': month_end,
+        })
+
+        if current.month == 12:
+            current = datetime(current.year + 1, 1, 1)
+        else:
+            current = datetime(current.year, current.month + 1, 1)
+
+    return months
+
+
+def get_next_business_day(dt: Union[datetime, str]) -> datetime:
+    """
+    Get the next business day after a date.
+
+    Args:
+        dt: Starting datetime.
+
+    Returns:
+        Next business day.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    current = dt + timedelta(days=1)
+
+    while current.weekday() >= 5:
+        current += timedelta(days=1)
+
+    return current
+
+
+def get_previous_business_day(dt: Union[datetime, str]) -> datetime:
+    """
+    Get the previous business day before a date.
+
+    Args:
+        dt: Starting datetime.
+
+    Returns:
+        Previous business day.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    current = dt - timedelta(days=1)
+
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+
+    return current
+
+
+def is_leap_year(year: int) -> bool:
+    """
+    Check if a year is a leap year.
+
+    Args:
+        year: Year to check.
+
+    Returns:
+        True if leap year.
+    """
+    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+
+
+def get_days_in_year(year: int) -> int:
+    """
+    Get number of days in a year.
+
+    Args:
+        year: Year.
+
+    Returns:
+        Number of days.
+    """
+    return 366 if is_leap_year(year) else 365
+
+
+def get_weekday_name(weekday: int) -> str:
+    """
+    Get name of weekday from number.
+
+    Args:
+        weekday: Weekday number (0=Mon, 6=Sun).
+
+    Returns:
+        Weekday name.
+    """
+    names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    return names[weekday % 7]
+
+
+def get_month_name(month: int) -> str:
+    """
+    Get name of month from number.
+
+    Args:
+        month: Month number (1-12).
+
+    Returns:
+        Month name.
+    """
+    names = [
+        '', 'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'
+    ]
+    return names[month % 12]
+
+
+def combine_date_and_time(
+    date: Union[datetime, str],
+    time_str: str
+) -> datetime:
+    """
+    Combine a date with a time string.
+
+    Args:
+        date: Date object or string.
+        time_str: Time string (e.g., '14:30' or '2:30 PM').
+
+    Returns:
+        Combined datetime.
+    """
+    if isinstance(date, str):
+        date = datetime.fromisoformat(date.replace('Z', '+00:00'))
+
+    import re
+
+    match = re.match(r'(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?', time_str.strip(), re.IGNORECASE)
+
+    if not match:
+        raise ValueError(f"Invalid time format: {time_str}")
+
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    second = int(match.group(3)) if match.group(3) else 0
+    meridiem = match.group(4)
+
+    if meridiem:
+        if meridiem.upper() == 'PM' and hour != 12:
+            hour += 12
+        elif meridiem.upper() == 'AM' and hour == 12:
+            hour = 0
+
+    return date.replace(hour=hour, minute=minute, second=second)
+
+
+def get_fiscal_quarter(dt: Union[datetime, str], fiscal_start_month: int = 1) -> int:
+    """
+    Get fiscal quarter for a date.
+
+    Args:
+        dt: Datetime object or ISO string.
+        fiscal_start_month: Month where fiscal year starts (1-12).
+
+    Returns:
+        Fiscal quarter (1-4).
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    month = dt.month
+
+    adjusted_month = month - fiscal_start_month + 1
+    if adjusted_month <= 0:
+        adjusted_month += 12
+
+    return (adjusted_month - 1) // 3 + 1
+
+
+def get_time_ago_dict(seconds_ago: int) -> Dict[str, int]:
+    """
+    Convert seconds to time units dict.
+
+    Args:
+        seconds_ago: Number of seconds ago.
+
+    Returns:
+        Dictionary with days, hours, minutes, seconds.
+    """
+    days = seconds_ago // 86400
+    seconds_ago %= 86400
+
+    hours = seconds_ago // 3600
+    seconds_ago %= 3600
+
+    minutes = seconds_ago // 60
+    seconds = seconds_ago % 60
+
+    return {
+        'days': days,
+        'hours': hours,
+        'minutes': minutes,
+        'seconds': seconds,
+    }
+
+
+def round_datetime(
+    dt: Union[datetime, str],
+    round_to: str = 'hour'
+) -> datetime:
+    """
+    Round datetime to nearest interval.
+
+    Args:
+        dt: Datetime object or ISO string.
+        round_to: What to round to ('second', 'minute', 'hour', 'day').
+
+    Returns:
+        Rounded datetime.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    if round_to == 'second':
+        return dt.replace(microsecond=0)
+
+    if round_to == 'minute':
+        return dt.replace(second=0, microsecond=0)
+
+    if round_to == 'hour':
+        return dt.replace(minute=0, second=0, microsecond=0)
+
+    if round_to == 'day':
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    return dt
+
+
+def floor_datetime(
+    dt: Union[datetime, str],
+    floor_to: str = 'hour'
+) -> datetime:
+    """
+    Floor datetime to nearest interval.
+
+    Args:
+        dt: Datetime object or ISO string.
+        floor_to: What to floor to ('minute', 'hour', 'day').
+
+    Returns:
+        Floored datetime.
+    """
+    return round_datetime(dt, floor_to)

@@ -1,352 +1,408 @@
-"""Datetime3 action module for RabAI AutoClick.
-
-Provides additional datetime operations:
-- DatetimeAddAction: Add time duration
-- DatetimeSubtractAction: Subtract time duration
-- DatetimeDiffAction: Calculate time difference
-- DatetimeNowUtcAction: Get current UTC time
-- DatetimeParseAction: Parse datetime string
 """
+Datetime parsing and formatting advanced actions.
+"""
+from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Any, Dict, List
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union
+import re
 
 
-class DatetimeAddAction(BaseAction):
-    """Add time duration."""
-    action_type = "datetime_add"
-    display_name = "日期加法"
-    description = "添加时间间隔到日期"
+def parse_flexible_date(date_string: str) -> Optional[datetime]:
+    """
+    Parse a date string with flexible format detection.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute datetime add.
+    Args:
+        date_string: Date string to parse.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, days, hours, minutes, seconds, output_var.
+    Returns:
+        Datetime object or None.
+    """
+    date_string = date_string.strip()
 
-        Returns:
-            ActionResult with new datetime.
-        """
-        datetime_str = params.get('datetime_str', '')
-        days = params.get('days', 0)
-        hours = params.get('hours', 0)
-        minutes = params.get('minutes', 0)
-        seconds = params.get('seconds', 0)
-        output_var = params.get('output_var', 'result_datetime')
+    now = datetime.now()
 
-        valid, msg = self.validate_type(datetime_str, str, 'datetime_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    relative_patterns = [
+        (r'^now$', lambda: now),
+        (r'^today$', lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)),
+        (r'^tomorrow$', lambda: (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)),
+        (r'^yesterday$', lambda: (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)),
+    ]
 
+    for pattern, parser in relative_patterns:
+        if re.match(pattern, date_string, re.IGNORECASE):
+            return parser()
+
+    offset_patterns = [
+        (r'^(\d+) days? ago$', lambda m: now - timedelta(days=int(m.group(1)))),
+        (r'^in (\d+) days?$', lambda m: now + timedelta(days=int(m.group(1)))),
+        (r'^(\d+) hours? ago$', lambda m: now - timedelta(hours=int(m.group(1)))),
+        (r'^in (\d+) hours?$', lambda m: now + timedelta(hours=int(m.group(1)))),
+        (r'^(\d+) minutes? ago$', lambda m: now - timedelta(minutes=int(m.group(1)))),
+        (r'^in (\d+) minutes?$', lambda m: now + timedelta(minutes=int(m.group(1)))),
+    ]
+
+    for pattern, parser in offset_patterns:
+        match = re.match(pattern, date_string, re.IGNORECASE)
+        if match:
+            return parser(match)
+
+    formats = [
+        '%Y-%m-%d',
+        '%Y/%m/%d',
+        '%d-%m-%Y',
+        '%d/%m/%Y',
+        '%m-%d-%Y',
+        '%m/%d/%Y',
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%d %H:%M',
+        '%Y/%m/%d %H:%M:%S',
+        '%Y/%m/%d %H:%M',
+        '%d %B %Y',
+        '%B %d, %Y',
+        '%d %b %Y',
+        '%b %d, %Y',
+    ]
+
+    for fmt in formats:
         try:
-            resolved_dt = context.resolve_value(datetime_str)
-            resolved_days = int(context.resolve_value(days))
-            resolved_hours = int(context.resolve_value(hours))
-            resolved_minutes = int(context.resolve_value(minutes))
-            resolved_seconds = int(context.resolve_value(seconds))
+            return datetime.strptime(date_string, fmt)
+        except ValueError:
+            continue
 
-            dt = datetime.fromisoformat(resolved_dt)
-            delta = timedelta(
-                days=resolved_days,
-                hours=resolved_hours,
-                minutes=resolved_minutes,
-                seconds=resolved_seconds
-            )
-
-            result = (dt + delta).isoformat()
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"日期加法: {result}",
-                data={
-                    'original': resolved_dt,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期加法失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime_str']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'days': 0, 'hours': 0, 'minutes': 0, 'seconds': 0, 'output_var': 'result_datetime'}
+    return None
 
 
-class DatetimeSubtractAction(BaseAction):
-    """Subtract time duration."""
-    action_type = "datetime_subtract"
-    display_name = "日期减法"
-    description = "从日期减去时间间隔"
+def format_iso(dt: Union[datetime, str]) -> str:
+    """
+    Format datetime as ISO 8601 string.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute datetime subtract.
+    Args:
+        dt: Datetime object or ISO string.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, days, hours, minutes, seconds, output_var.
+    Returns:
+        ISO formatted string.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with new datetime.
-        """
-        datetime_str = params.get('datetime_str', '')
-        days = params.get('days', 0)
-        hours = params.get('hours', 0)
-        minutes = params.get('minutes', 0)
-        seconds = params.get('seconds', 0)
-        output_var = params.get('output_var', 'result_datetime')
-
-        valid, msg = self.validate_type(datetime_str, str, 'datetime_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_dt = context.resolve_value(datetime_str)
-            resolved_days = int(context.resolve_value(days))
-            resolved_hours = int(context.resolve_value(hours))
-            resolved_minutes = int(context.resolve_value(minutes))
-            resolved_seconds = int(context.resolve_value(seconds))
-
-            dt = datetime.fromisoformat(resolved_dt)
-            delta = timedelta(
-                days=resolved_days,
-                hours=resolved_hours,
-                minutes=resolved_minutes,
-                seconds=resolved_seconds
-            )
-
-            result = (dt - delta).isoformat()
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"日期减法: {result}",
-                data={
-                    'original': resolved_dt,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期减法失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime_str']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'days': 0, 'hours': 0, 'minutes': 0, 'seconds': 0, 'output_var': 'result_datetime'}
+    return dt.isoformat()
 
 
-class DatetimeDiffAction(BaseAction):
-    """Calculate time difference."""
-    action_type = "datetime_diff"
-    display_name = "日期差"
-    description = "计算两个日期的差值"
+def format_relative(dt: Union[datetime, str]) -> str:
+    """
+    Format datetime as relative string (e.g., "2 hours ago").
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute datetime diff.
+    Args:
+        dt: Datetime object or ISO string.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime1, datetime2, output_var.
+    Returns:
+        Relative time string.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with difference.
-        """
-        datetime1 = params.get('datetime1', '')
-        datetime2 = params.get('datetime2', '')
-        output_var = params.get('output_var', 'datetime_diff')
+    now = datetime.now()
+    diff = now - dt
 
-        valid, msg = self.validate_type(datetime1, str, 'datetime1')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    if diff.total_seconds() < 0:
+        future = True
+        diff = -diff
+    else:
+        future = False
 
-        valid, msg = self.validate_type(datetime2, str, 'datetime2')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    seconds = diff.total_seconds()
 
-        try:
-            resolved_dt1 = context.resolve_value(datetime1)
-            resolved_dt2 = context.resolve_value(datetime2)
+    if seconds < 60:
+        return 'just now' if not future else 'in a moment'
 
-            dt1 = datetime.fromisoformat(resolved_dt1)
-            dt2 = datetime.fromisoformat(resolved_dt2)
+    minutes = seconds / 60
+    if minutes < 60:
+        return f'{int(minutes)} minute{"s" if int(minutes) != 1 else ""} {"ago" if not future else "from now"}'
 
-            diff = dt1 - dt2
+    hours = minutes / 60
+    if hours < 24:
+        return f'{int(hours)} hour{"s" if int(hours) != 1 else ""} {"ago" if not future else "from now"}'
 
-            result = {
-                'total_seconds': diff.total_seconds(),
-                'days': diff.days,
-                'seconds': diff.seconds,
-                'microseconds': diff.microseconds
-            }
+    days = hours / 24
+    if days < 30:
+        return f'{int(days)} day{"s" if int(days) != 1 else ""} {"ago" if not future else "from now"}'
 
-            context.set(output_var, result)
+    weeks = days / 7
+    if weeks < 4:
+        return f'{int(weeks)} week{"s" if int(weeks) != 1 else ""} {"ago" if not future else "from now"}'
 
-            return ActionResult(
-                success=True,
-                message=f"日期差: {diff.days} 天",
-                data={
-                    'datetime1': resolved_dt1,
-                    'datetime2': resolved_dt2,
-                    'diff': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期差计算失败: {str(e)}"
-            )
+    months = days / 30
+    if months < 12:
+        return f'{int(months)} month{"s" if int(months) != 1 else ""} {"ago" if not future else "from now"}'
 
-    def get_required_params(self) -> List[str]:
-        return ['datetime1', 'datetime2']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'datetime_diff'}
+    years = days / 365
+    return f'{int(years)} year{"s" if int(years) != 1 else ""} {"ago" if not future else "from now"}'
 
 
-class DatetimeNowUtcAction(BaseAction):
-    """Get current UTC time."""
-    action_type = "datetime_now_utc"
-    display_name = "获取UTC时间"
-    description = "获取当前UTC时间"
+def convert_timezone(
+    dt: Union[datetime, str],
+    from_tz: str,
+    to_tz: str
+) -> datetime:
+    """
+    Convert datetime between timezones.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute datetime now UTC.
+    Args:
+        dt: Datetime object or ISO string.
+        from_tz: Source timezone.
+        to_tz: Target timezone.
 
-        Args:
-            context: Execution context.
-            params: Dict with output_var.
+    Returns:
+        Converted datetime.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with UTC datetime.
-        """
-        output_var = params.get('output_var', 'utc_datetime')
+    try:
+        from dateutil import tz
+        from_tz_obj = tz.gettz(from_tz)
+        to_tz_obj = tz.gettz(to_tz)
 
-        try:
-            now = datetime.utcnow()
-            result = now.isoformat()
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=from_tz_obj)
 
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"UTC时间: {result}",
-                data={
-                    'datetime': result,
-                    'timestamp': now.timestamp(),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取UTC时间失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'utc_datetime'}
+        return dt.astimezone(to_tz_obj)
+    except ImportError:
+        return dt
 
 
-class DatetimeParseAction(BaseAction):
-    """Parse datetime string."""
-    action_type = "datetime_parse"
-    display_name = "解析日期"
-    description = "解析日期字符串"
+def get_timezone_offset(tz_name: str) -> float:
+    """
+    Get UTC offset for a timezone in hours.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute datetime parse.
+    Args:
+        tz_name: Timezone name.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, format_str, output_var.
+    Returns:
+        UTC offset in hours.
+    """
+    try:
+        from dateutil import tz
+        import datetime as dt_module
 
-        Returns:
-            ActionResult with parsed datetime.
-        """
-        datetime_str = params.get('datetime_str', '')
-        format_str = params.get('format_str', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'parsed_datetime')
+        tz_obj = tz.gettz(tz_name)
+        if tz_obj is None:
+            return 0.0
 
-        valid, msg = self.validate_type(datetime_str, str, 'datetime_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        now = dt_module.datetime.now()
+        return tz_obj.utcoffset(now).total_seconds() / 3600
+    except ImportError:
+        return 0.0
 
-        valid, msg = self.validate_type(format_str, str, 'format_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
 
-        try:
-            resolved_dt = context.resolve_value(datetime_str)
-            resolved_format = context.resolve_value(format_str)
+def is_valid_date_string(date_string: str) -> bool:
+    """
+    Check if a string is a valid date.
 
-            dt = datetime.strptime(resolved_dt, resolved_format)
-            result = dt.isoformat()
+    Args:
+        date_string: String to check.
 
-            context.set(output_var, result)
+    Returns:
+        True if valid date.
+    """
+    return parse_flexible_date(date_string) is not None
 
-            return ActionResult(
-                success=True,
-                message=f"日期解析: {result}",
-                data={
-                    'original': resolved_dt,
-                    'format': resolved_format,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except ValueError as e:
-            return ActionResult(
-                success=False,
-                message=f"日期格式错误: {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期解析失败: {str(e)}"
-            )
 
-    def get_required_params(self) -> List[str]:
-        return ['datetime_str', 'format_str']
+def get_business_days_between(
+    start: Union[datetime, str],
+    end: Union[datetime, str]
+) -> int:
+    """
+    Count business days between two dates.
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'parsed_datetime'}
+    Args:
+        start: Start date.
+        end: End date.
+
+    Returns:
+        Number of business days.
+    """
+    if isinstance(start, str):
+        start = parse_flexible_date(start) or datetime.now()
+    if isinstance(end, str):
+        end = parse_flexible_date(end) or datetime.now()
+
+    count = 0
+    current = start
+
+    while current <= end:
+        if current.weekday() < 5:
+            count += 1
+        current += timedelta(days=1)
+
+    return count
+
+
+def get_nth_weekday(
+    year: int,
+    month: int,
+    weekday: int,
+    n: int = 1
+) -> datetime:
+    """
+    Get the nth occurrence of a weekday in a month.
+
+    Args:
+        year: Year.
+        month: Month (1-12).
+        weekday: Weekday (0=Mon, 6=Sun).
+        n: Which occurrence (1=first, -1=last).
+
+    Returns:
+        Datetime of nth weekday.
+    """
+    if n == -1:
+        last_day = (datetime(year, month, 1) + timedelta(days=32)).replace(day=1)
+        current = last_day - timedelta(days=1)
+        while current.weekday() != weekday:
+            current -= timedelta(days=1)
+        return current
+
+    current = datetime(year, month, 1)
+    while current.weekday() != weekday:
+        current += timedelta(days=1)
+
+    for _ in range(n - 1):
+        current += timedelta(days=7)
+
+    return current
+
+
+def get_month_calendar(year: int, month: int) -> List[List[Optional[datetime]]]:
+    """
+    Get calendar grid for a month.
+
+    Args:
+        year: Year.
+        month: Month (1-12).
+
+    Returns:
+        List of weeks, each week is list of day datetimes or None.
+    """
+    first_day = datetime(year, month, 1)
+    last_day = (first_day + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+
+    calendar: List[List[Optional[datetime]]] = []
+
+    current = first_day - timedelta(days=first_day.weekday())
+
+    while current <= last_day or current.weekday() != 0:
+        week = []
+        for _ in range(7):
+            if first_day.month == current.month:
+                week.append(current)
+            else:
+                week.append(None)
+            current += timedelta(days=1)
+        calendar.append(week)
+
+        if current > last_day and current.weekday() == 0:
+            break
+
+    return calendar
+
+
+def parse_duration_string(duration: str) -> int:
+    """
+    Parse duration string to seconds.
+
+    Args:
+        duration: Duration string (e.g., "1h30m", "2 days").
+
+    Returns:
+        Duration in seconds.
+    """
+    duration = duration.lower().strip()
+
+    seconds = 0
+
+    patterns = [
+        (r'(\d+)s', 1),
+        (r'(\d+)sec', 1),
+        (r'(\d+)seconds?', 1),
+        (r'(\d+)m', 60),
+        (r'(\d+)min', 60),
+        (r'(\d+)minutes?', 60),
+        (r'(\d+)h', 3600),
+        (r'(\d+)hours?', 3600),
+        (r'(\d+)d', 86400),
+        (r'(\d+)days?', 86400),
+        (r'(\d+)w', 604800),
+        (r'(\d+)weeks?', 604800),
+    ]
+
+    for pattern, multiplier in patterns:
+        match = re.search(pattern, duration)
+        if match:
+            seconds += int(match.group(1)) * multiplier
+
+    return seconds
+
+
+def format_date_human(
+    dt: Union[datetime, str],
+    style: str = 'medium'
+) -> str:
+    """
+    Format date in human-readable style.
+
+    Args:
+        dt: Datetime object or ISO string.
+        style: Style ('short', 'medium', 'long').
+
+    Returns:
+        Formatted date string.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    if style == 'short':
+        return dt.strftime('%m/%d/%y')
+
+    if style == 'medium':
+        return dt.strftime('%b %d, %Y')
+
+    if style == 'long':
+        return dt.strftime('%B %d, %Y')
+
+    return dt.strftime('%Y-%m-%d')
+
+
+def get_age(birth_date: Union[datetime, str]) -> Dict[str, int]:
+    """
+    Calculate age from birth date.
+
+    Args:
+        birth_date: Birth date.
+
+    Returns:
+        Age in years, months, days.
+    """
+    if isinstance(birth_date, str):
+        birth_date = parse_flexible_date(birth_date) or datetime.now()
+
+    today = datetime.now()
+
+    years = today.year - birth_date.year
+    months = today.month - birth_date.month
+    days = today.day - birth_date.day
+
+    if days < 0:
+        months -= 1
+        days += 30
+
+    if months < 0:
+        years -= 1
+        months += 12
+
+    return {
+        'years': years,
+        'months': months,
+        'days': days,
+    }
