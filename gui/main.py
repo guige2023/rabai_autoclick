@@ -325,7 +325,7 @@ class PredictTab(BaseTab):
 
         ttk.Label(frame, text="执行结果:").grid(row=3, column=0, sticky=tk.W, pady=5)
         self.result_var = tk.StringVar(value="success")
-        ttk.Combobox(frame, textvariable=self.result_var, values=["success", "failure"], width=30).grid(row=3, column=1, sticky=tk.W, pady=5)
+        ttk.Combobox(frame, textvariable=self.result_var, values=[RESULT_SUCCESS, RESULT_FAILURE], width=30).grid(row=3, column=1, sticky=tk.W, pady=5)
 
         ttk.Label(frame, text="耗时 (秒):").grid(row=4, column=0, sticky=tk.W, pady=5)
         self.duration_var = tk.StringVar(value="0.0")
