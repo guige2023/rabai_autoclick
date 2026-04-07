@@ -1524,10 +1524,22 @@ class PipeTab(BaseTab):
             return
 
         def do_add():
+            """
+            Add a step to the selected pipeline chain.
+            
+            Returns:
+                The added step object, or None if chain not found.
+            """
             runner = create_pipeline_runner(str(DATA_DIR))
             return runner.add_step(chain_id, step_name, step_cmd)
 
-        def show_result(step):
+        def show_result(step: Any) -> None:
+            """
+            Handle the result of adding a step.
+            
+            Args:
+                step: The added step object, or None if failed.
+            """
             if step:
                 self.log(f"✅ 已添加步骤: {step.step_id}")
                 self.add_step_name_var.set("")
