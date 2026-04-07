@@ -117,19 +117,20 @@ class MiniToolbar(QWidget):
         styles = theme_manager.get_stylesheet("mini_toolbar")
         self.setStyleSheet(styles)
         # Menu needs its own dark stylesheet since it floats
-        self.menu.setStyleSheet("""
-            QMenu {
-                background-color: #3d3d3d;
+        dark_colors = ThemeColors.DARK
+        self.menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {dark_colors['bg_dark_widget']};
                 color: white;
-                border: 1px solid #555;
+                border: 1px solid {dark_colors['border_dark']};
                 border-radius: 4px;
-            }
-            QMenu::item {
+            }}
+            QMenu::item {{
                 padding: 8px 20px;
-            }
-            QMenu::item:selected {
-                background-color: #4d4d4d;
-            }
+            }}
+            QMenu::item:selected {{
+                background-color: {dark_colors['bg_dark_hover']};
+            }}
         """)
 
     def _create_separator(self) -> QFrame:
@@ -140,7 +141,8 @@ class MiniToolbar(QWidget):
         """
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet("background-color: #555;")
+        dark_colors = ThemeColors.DARK
+        sep.setStyleSheet(f"background-color: {dark_colors['border_dark']};")
         sep.setFixedWidth(1)
         return sep
 
