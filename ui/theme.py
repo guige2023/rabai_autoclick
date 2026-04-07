@@ -1,0 +1,400 @@
+"""Theme management for RabAI AutoClick UI.
+
+Provides centralized theme management with light/dark mode support
+and consistent styling across all UI components.
+"""
+
+from enum import Enum
+from typing import Dict, Optional
+
+from PyQt5.QtCore import QObject, pyqtSignal
+
+
+class ThemeType(Enum):
+    """Available theme types."""
+    LIGHT = "light"
+    DARK = "dark"
+
+
+class ThemeColors:
+    """Color palette for themes."""
+
+    # Light theme colors
+    LIGHT = {
+        # Primary colors
+        "primary": "#2196F3",
+        "primary_hover": "#1E88E5",
+        "primary_active": "#1976D2",
+        "success": "#4CAF50",
+        "success_hover": "#45a049",
+        "warning": "#FF9800",
+        "warning_hover": "#FB8C00",
+        "error": "#f44336",
+        "error_hover": "#da190b",
+
+        # Background colors
+        "bg_main": "#f5f5f5",
+        "bg_widget": "#ffffff",
+        "bg_toolbar": "#e0e0e0",
+        "bg_panel": "#fafafa",
+        "bg_hover": "#e8e8e8",
+        "bg_active": "#d8d8d8",
+
+        # Dark theme specific backgrounds
+        "bg_dark_main": "#2d2d2d",
+        "bg_dark_widget": "#3d3d3d",
+        "bg_dark_toolbar": "#252525",
+        "bg_dark_hover": "#4d4d4d",
+        "bg_dark_active": "#5d5d5d",
+
+        # Text colors
+        "text_primary": "#212121",
+        "text_secondary": "#757575",
+        "text_disabled": "#9e9e9e",
+        "text_on_primary": "#ffffff",
+
+        # Dark theme text
+        "text_dark_primary": "#ffffff",
+        "text_dark_secondary": "#d4d4d4",
+        "text_dark_disabled": "#888888",
+
+        # Border colors
+        "border": "#ddd",
+        "border_focus": "#2196F3",
+        "border_dark": "#555",
+
+        # Log colors
+        "log_debug": "#888888",
+        "log_info": "#4fc3f7",
+        "log_success": "#81c784",
+        "log_warning": "#ffb74d",
+        "log_error": "#e57373",
+        "log_critical": "#f44336",
+
+        # Status bar / dark widgets
+        "status_bar": "#1e1e1e",
+        "status_text": "#d4d4d4",
+    }
+
+    # Dark theme colors (same keys, different values)
+    DARK = {
+        # Primary colors - slightly brighter for dark mode
+        "primary": "#64B5F6",
+        "primary_hover": "#90CAF9",
+        "primary_active": "#42A5F5",
+        "success": "#81C784",
+        "success_hover": "#A5D6A7",
+        "warning": "#FFB74D",
+        "warning_hover": "#FFCC80",
+        "error": "#EF9A9A",
+        "error_hover": "#FFABAB",
+
+        # Background colors - dark
+        "bg_main": "#1e1e1e",
+        "bg_widget": "#2d2d2d",
+        "bg_toolbar": "#252525",
+        "bg_panel": "#333333",
+        "bg_hover": "#3d3d3d",
+        "bg_active": "#4d4d4d",
+
+        # Dark theme specific backgrounds (same as bg_* for dark)
+        "bg_dark_main": "#2d2d2d",
+        "bg_dark_widget": "#3d3d3d",
+        "bg_dark_toolbar": "#252525",
+        "bg_dark_hover": "#4d4d4d",
+        "bg_dark_active": "#5d5d5d",
+
+        # Text colors - inverted for dark mode
+        "text_primary": "#ffffff",
+        "text_secondary": "#d4d4d4",
+        "text_disabled": "#888888",
+        "text_on_primary": "#ffffff",
+
+        # Dark theme text
+        "text_dark_primary": "#ffffff",
+        "text_dark_secondary": "#d4d4d4",
+        "text_dark_disabled": "#888888",
+
+        # Border colors
+        "border": "#555555",
+        "border_focus": "#64B5F6",
+        "border_dark": "#555",
+
+        # Log colors - brighter for dark mode
+        "log_debug": "#888888",
+        "log_info": "#4fc3f7",
+        "log_success": "#81c784",
+        "log_warning": "#ffb74d",
+        "log_error": "#e57373",
+        "log_critical": "#f44336",
+
+        # Status bar / dark widgets
+        "status_bar": "#1e1e1e",
+        "status_text": "#d4d4d4",
+    }
+
+
+class ThemeManager(QObject):
+    """Centralized theme management singleton.
+
+    Manages theme switching and provides theme-aware styling
+    for all UI components.
+    """
+
+    _instance: Optional['ThemeManager'] = None
+    theme_changed = pyqtSignal(ThemeType)
+
+    def __new__(cls) -> 'ThemeManager':
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self) -> None:
+        if self._initialized:
+            return
+        self._initialized = True
+        self._current_theme: ThemeType = ThemeType.LIGHT
+        self._colors: Dict[str, str] = ThemeColors.LIGHT.copy()
+
+    @property
+    def theme(self) -> ThemeType:
+        """Get current theme type."""
+        return self._current_theme
+
+    @property
+    def colors(self) -> Dict[str, str]:
+        """Get current theme colors."""
+        return self._colors.copy()
+
+    def get_color(self, key: str) -> str:
+        """Get a specific color by key.
+
+        Args:
+            key: Color key name.
+
+        Returns:
+            Hex color string.
+        """
+        return self._colors.get(key, "#000000")
+
+    def set_theme(self, theme: ThemeType) -> None:
+        """Switch to a different theme.
+
+        Args:
+            theme: ThemeType to switch to.
+        """
+        if self._current_theme == theme:
+            return
+
+        self._current_theme = theme
+        if theme == ThemeType.DARK:
+            self._colors = ThemeColors.DARK.copy()
+        else:
+            self._colors = ThemeColors.LIGHT.copy()
+
+        self.theme_changed.emit(theme)
+
+    def toggle_theme(self) -> ThemeType:
+        """Toggle between light and dark themes.
+
+        Returns:
+            The new theme type after toggling.
+        """
+        new_theme = (
+            ThemeType.DARK
+            if self._current_theme == ThemeType.LIGHT
+            else ThemeType.LIGHT
+        )
+        self.set_theme(new_theme)
+        return new_theme
+
+    def get_stylesheet(self, component: str) -> str:
+        """Get themed stylesheet for a component.
+
+        Args:
+            component: Component name ('main_window', 'mini_toolbar', 'log', etc.)
+
+        Returns:
+            CSS stylesheet string.
+        """
+        if self._current_theme == ThemeType.DARK:
+            return self._get_dark_stylesheet(component)
+        return self._get_light_stylesheet(component)
+
+    def _get_light_stylesheet(self, component: str) -> str:
+        """Get light theme stylesheet.
+
+        Args:
+            component: Component name.
+
+        Returns:
+            CSS stylesheet string.
+        """
+        c = self._colors
+        stylesheets = {
+            "main_window": f"""
+                QMainWindow {{ background-color: {c['bg_main']}; }}
+                QTabWidget::pane {{ border: 1px solid {c['border']}; background-color: {c['bg_widget']}; }}
+                QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
+                QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
+                QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; }}
+                QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+                QPushButton:pressed {{ background-color: {c['primary_active']}; }}
+                QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
+                QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; }}
+                QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {c['border_focus']}; }}
+                QGroupBox {{ font-weight: bold; margin-top: 8px; padding-top: 8px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
+                QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
+                QLabel {{ color: {c['text_primary']}; }}
+                QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
+                QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
+                QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
+                QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QMenu::item:selected {{ background-color: {c['bg_hover']}; }}
+                QStatusBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
+                QProgressBar {{ border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; text-align: center; }}
+                QProgressBar::chunk {{ background-color: {c['primary']}; border-radius: 3px; }}
+            """,
+            "mini_toolbar": f"""
+                QWidget {{ background-color: {c['bg_dark_main']}; border-radius: 8px; }}
+                QPushButton {{ background-color: {c['bg_dark_hover']}; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; min-width: 60px; }}
+                QPushButton:hover {{ background-color: {c['bg_dark_active']}; }}
+                QPushButton:pressed {{ background-color: {c['bg_dark_hover']}; }}
+                QPushButton#run_btn {{ background-color: {c['success']}; }}
+                QPushButton#run_btn:hover {{ background-color: {c['success_hover']}; }}
+                QPushButton#stop_btn {{ background-color: {c['error']}; }}
+                QPushButton#stop_btn:hover {{ background-color: {c['error_hover']}; }}
+                QLabel {{ color: {c['text_dark_primary']}; font-size: 12px; padding: 0 8px; }}
+            """,
+            "log": f"""
+                QTextEdit {{
+                    background-color: {c['status_bar']};
+                    color: {c['status_text']};
+                    font-family: Consolas, 'Microsoft YaHei';
+                    font-size: 12px;
+                    border: none;
+                }}
+            """,
+            "message_success": f"""
+                QMessageBox {{ background-color: #f0f9eb; }}
+                QPushButton {{ background-color: {c['success']}; color: white; padding: 8px 20px; border: none; border-radius: 4px; }}
+                QPushButton:hover {{ background-color: {c['success_hover']}; }}
+            """,
+            "message_error": f"""
+                QMessageBox {{ background-color: #fef0f0; }}
+                QPushButton {{ background-color: {c['error']}; color: white; padding: 8px 20px; border: none; border-radius: 4px; }}
+                QPushButton:hover {{ background-color: {c['error_hover']}; }}
+            """,
+            "toast": f"""
+                QWidget {{ background-color: {c['primary']}; border-radius: 8px; }}
+                QLabel {{ color: white; font-size: 14px; }}
+            """,
+            "dialog": f"""
+                QDialog {{ background-color: {c['bg_widget']}; }}
+                QLabel {{ color: {c['text_primary']}; }}
+                QPushButton {{ padding: 6px 16px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; }}
+                QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+            """,
+        }
+        return stylesheets.get(component, "")
+
+    def _get_dark_stylesheet(self, component: str) -> str:
+        """Get dark theme stylesheet.
+
+        Args:
+            component: Component name.
+
+        Returns:
+            CSS stylesheet string.
+        """
+        c = self._colors
+        stylesheets = {
+            "main_window": f"""
+                QMainWindow {{ background-color: {c['bg_main']}; }}
+                QTabWidget::pane {{ border: 1px solid {c['border']}; background-color: {c['bg_widget']}; }}
+                QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
+                QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
+                QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; }}
+                QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+                QPushButton:pressed {{ background-color: {c['primary_active']}; }}
+                QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
+                QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; }}
+                QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {c['border_focus']}; }}
+                QGroupBox {{ font-weight: bold; margin-top: 8px; padding-top: 8px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
+                QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
+                QLabel {{ color: {c['text_primary']}; }}
+                QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
+                QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
+                QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
+                QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QMenu::item:selected {{ background-color: {c['bg_hover']}; }}
+                QStatusBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
+                QProgressBar {{ border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; text-align: center; }}
+                QProgressBar::chunk {{ background-color: {c['primary']}; border-radius: 3px; }}
+            """,
+            "mini_toolbar": f"""
+                QWidget {{ background-color: {c['bg_dark_main']}; border-radius: 8px; }}
+                QPushButton {{ background-color: {c['bg_dark_hover']}; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; min-width: 60px; }}
+                QPushButton:hover {{ background-color: {c['bg_dark_active']}; }}
+                QPushButton:pressed {{ background-color: {c['bg_dark_hover']}; }}
+                QPushButton#run_btn {{ background-color: {c['success']}; }}
+                QPushButton#run_btn:hover {{ background-color: {c['success_hover']}; }}
+                QPushButton#stop_btn {{ background-color: {c['error']}; }}
+                QPushButton#stop_btn:hover {{ background-color: {c['error_hover']}; }}
+                QLabel {{ color: {c['text_dark_primary']}; font-size: 12px; padding: 0 8px; }}
+            """,
+            "log": f"""
+                QTextEdit {{
+                    background-color: {c['status_bar']};
+                    color: {c['status_text']};
+                    font-family: Consolas, 'Microsoft YaHei';
+                    font-size: 12px;
+                    border: none;
+                }}
+            """,
+            "message_success": f"""
+                QMessageBox {{ background-color: {c['bg_widget']}; }}
+                QPushButton {{ background-color: {c['success']}; color: {c['text_on_primary']}; padding: 8px 20px; border: none; border-radius: 4px; }}
+                QPushButton:hover {{ background-color: {c['success_hover']}; }}
+            """,
+            "message_error": f"""
+                QMessageBox {{ background-color: {c['bg_widget']}; }}
+                QPushButton {{ background-color: {c['error']}; color: {c['text_on_primary']}; padding: 8px 20px; border: none; border-radius: 4px; }}
+                QPushButton:hover {{ background-color: {c['error_hover']}; }}
+            """,
+            "toast": f"""
+                QWidget {{ background-color: {c['primary']}; border-radius: 8px; }}
+                QLabel {{ color: white; font-size: 14px; }}
+            """,
+            "dialog": f"""
+                QDialog {{ background-color: {c['bg_widget']}; }}
+                QLabel {{ color: {c['text_primary']}; }}
+                QPushButton {{ padding: 6px 16px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; }}
+                QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+            """,
+        }
+        return stylesheets.get(component, "")
+
+    def get_log_colors(self) -> Dict[str, str]:
+        """Get log level colors for the current theme.
+
+        Returns:
+            Dict mapping log level names to color strings.
+        """
+        return {
+            "DEBUG": self._colors["log_debug"],
+            "INFO": self._colors["log_info"],
+            "SUCCESS": self._colors["log_success"],
+            "WARNING": self._colors["log_warning"],
+            "ERROR": self._colors["log_error"],
+            "CRITICAL": self._colors["log_critical"],
+        }
+
+
+# Global singleton instance
+theme_manager: ThemeManager = ThemeManager()

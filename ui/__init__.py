@@ -2,6 +2,7 @@ from .main_window import MainWindow, main
 from .hotkey_dialog import HotkeySettingsDialog, HotkeyEdit
 from .region_selector import RegionSelector, PositionSelector, select_region, select_position
 from .message import message_manager, show_error, show_success, show_warning, show_info, show_question, show_toast
+from .theme import theme_manager, ThemeManager, ThemeType
 
 __all__ = [
     'MainWindow',
@@ -19,4 +20,7 @@ __all__ = [
     'show_info',
     'show_question',
     'show_toast',
+    'theme_manager',
+    'ThemeManager',
+    'ThemeType',
 ]
