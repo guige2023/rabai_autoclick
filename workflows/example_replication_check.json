@@ -1,0 +1,117 @@
+{
+  "name": "Database Replication Check Workflow",
+  "description": "Automate database replication status verification",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "replicas_to_check": 6,
+    "current_replica": 0,
+    "synced_count": 0,
+    "lagging_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "replica_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize replica counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open replication dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "replication_loop",
+      "count": "{{replicas_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start replication check loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click replica"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for status"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/replication_{{replica_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture replication screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "replica_counter",
+      "value": "{{replica_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment replica counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{replica_counter < replicas_to_check}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more replicas"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next replica"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/replication_check_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
