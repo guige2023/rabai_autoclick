@@ -1,394 +1,341 @@
 """YAML action module for RabAI AutoClick.
 
-Provides YAML processing operations:
-- YamlParseAction: Parse YAML string/file
-- YamlDumpAction: Dump dictionary to YAML
-- YamlValidateAction: Validate YAML syntax
-- YamlMergeAction: Merge multiple YAML files
-- YamlFlattenAction: Flatten nested YAML
-- YamlCompactAction: Compact YAML (remove comments)
+Provides YAML operations:
+- YAMLParseAction: Parse YAML string or file
+- YAMLDumpAction: Convert dict to YAML string
+- YAMLReadAction: Read YAML file
+- YAMLWriteAction: Write dict to YAML file
+- YAMLValidateAction: Validate YAML syntax
+- YAMLGetAction: Get value by key path
+- YAMLSetAction: Set value by key path
 """
 
-import yaml
-import os
 from typing import Any, Dict, List, Optional, Union
-
-import sys
 import os
+import sys
+
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class YamlParseAction(BaseAction):
-    """Parse YAML string/file."""
+class YAMLParseAction(BaseAction):
+    """Parse YAML string into dict."""
     action_type = "yaml_parse"
-    display_name = "解析YAML"
-    description = "解析YAML字符串或文件"
-    version = "1.0"
+    display_name = "YAML解析"
+    description = "解析YAML字符串为字典"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute parse.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute YAML parse operation.
 
         Args:
             context: Execution context.
-            params: Dict with content, file_path, output_var.
+            params: Dict with yaml_content, output_var.
 
         Returns:
-            ActionResult with parsed YAML.
+            ActionResult with parsed YAML data.
         """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'yaml_parsed')
+        yaml_content = params.get('yaml_content', '')
+        output_var = params.get('output_var', 'yaml_data')
 
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not yaml_content:
+            return ActionResult(success=False, message="yaml_content is required")
 
         try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
+            import yaml as yaml_lib
+        except ImportError:
+            return ActionResult(success=False, message="PyYAML required: pip install pyyaml")
 
-            parsed = yaml.safe_load(resolved_content)
-            context.set(output_var, parsed)
+        try:
+            resolved_content = context.resolve_value(yaml_content)
 
-            return ActionResult(
-                success=True,
-                message=f"YAML已解析: {type(parsed).__name__}",
-                data={'parsed': parsed, 'output_var': output_var}
-            )
-        except yaml.YAMLError as e:
-            return ActionResult(
-                success=False,
-                message=f"YAML解析错误: {str(e)}"
-            )
+            data = yaml_lib.safe_load(resolved_content)
+            if data is None:
+                data = {}
+
+            context.set(output_var, data)
+            return ActionResult(success=True, data=data,
+                               message=f"Parsed YAML with {len(data) if isinstance(data, dict) else 'scalar'} top-level keys")
+
+        except yaml_lib.YAMLError as e:
+            return ActionResult(success=False, message=f"YAML parse error: {str(e)}")
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"YAML解析失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'yaml_parsed'}
+            return ActionResult(success=False, message=f"YAML error: {str(e)}")
 
 
-class YamlDumpAction(BaseAction):
-    """Dump dictionary to YAML."""
+class YAMLDumpAction(BaseAction):
+    """Convert dict to YAML string."""
     action_type = "yaml_dump"
-    display_name = "导出YAML"
-    description = "将字典导出为YAML"
-    version = "1.0"
+    display_name = "YAML输出"
+    description = "将字典转换为YAML字符串"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute dump.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute YAML dump operation.
 
         Args:
             context: Execution context.
-            params: Dict with data, output_var, output_file, default_flow_style.
+            params: Dict with data, default_flow_style, output_var.
 
         Returns:
             ActionResult with YAML string.
         """
         data = params.get('data', {})
-        output_var = params.get('output_var', 'yaml_output')
-        output_file = params.get('output_file', '')
         default_flow_style = params.get('default_flow_style', False)
+        output_var = params.get('output_var', 'yaml_string')
 
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        try:
+            import yaml as yaml_lib
+        except ImportError:
+            return ActionResult(success=False, message="PyYAML required: pip install pyyaml")
 
         try:
             resolved_data = context.resolve_value(data)
             resolved_flow = context.resolve_value(default_flow_style)
 
-            yaml_str = yaml.dump(
-                resolved_data,
-                default_flow_style=resolved_flow,
-                allow_unicode=True,
-                sort_keys=False
-            )
-
-            if output_file:
-                resolved_out = context.resolve_value(output_file)
-                with open(resolved_out, 'w', encoding='utf-8') as f:
-                    f.write(yaml_str)
+            yaml_str = yaml_lib.dump(resolved_data, default_flow_style=resolved_flow, allow_unicode=True, sort_keys=False)
 
             context.set(output_var, yaml_str)
+            return ActionResult(success=True, data=yaml_str,
+                               message=f"Dumped YAML: {len(yaml_str)} chars")
 
-            return ActionResult(
-                success=True,
-                message=f"YAML已导出 ({len(yaml_str)} 字符)",
-                data={'yaml': yaml_str, 'output_var': output_var}
-            )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"YAML导出失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'yaml_output', 'output_file': '', 'default_flow_style': False}
+            return ActionResult(success=False, message=f"YAML dump error: {str(e)}")
 
 
-class YamlValidateAction(BaseAction):
-    """Validate YAML syntax."""
-    action_type = "yaml_validate"
-    display_name = "验证YAML"
-    description = "验证YAML语法"
-    version = "1.0"
+class YAMLReadAction(BaseAction):
+    """Read YAML file."""
+    action_type = "yaml_read"
+    display_name = "YAML读取"
+    description = "读取YAML文件"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute validate.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute YAML read operation.
 
         Args:
             context: Execution context.
-            params: Dict with content, file_path, output_var.
+            params: Dict with file_path, output_var.
 
         Returns:
-            ActionResult with validation result.
+            ActionResult with YAML file data.
         """
-        content = params.get('content', '')
+        file_path = params.get('file_path', '')
+        output_var = params.get('output_var', 'yaml_data')
+
+        if not file_path:
+            return ActionResult(success=False, message="file_path is required")
+
+        try:
+            import yaml as yaml_lib
+        except ImportError:
+            return ActionResult(success=False, message="PyYAML required: pip install pyyaml")
+
+        try:
+            resolved_path = context.resolve_value(file_path)
+
+            with open(resolved_path, 'r', encoding='utf-8') as f:
+                data = yaml_lib.safe_load(f)
+
+            if data is None:
+                data = {}
+
+            context.set(output_var, data)
+            return ActionResult(success=True, data=data,
+                               message=f"Read YAML from {resolved_path}")
+
+        except FileNotFoundError:
+            return ActionResult(success=False, message=f"File not found: {resolved_path}")
+        except yaml_lib.YAMLError as e:
+            return ActionResult(success=False, message=f"YAML read error: {str(e)}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"YAML error: {str(e)}")
+
+
+class YAMLWriteAction(BaseAction):
+    """Write dict to YAML file."""
+    action_type = "yaml_write"
+    display_name = "YAML写入"
+    description = "将字典写入YAML文件"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute YAML write operation.
+
+        Args:
+            context: Execution context.
+            params: Dict with file_path, data, default_flow_style, output_var.
+
+        Returns:
+            ActionResult with write status.
+        """
+        file_path = params.get('file_path', '')
+        data = params.get('data', {})
+        default_flow_style = params.get('default_flow_style', False)
+        output_var = params.get('output_var', 'yaml_write_result')
+
+        if not file_path:
+            return ActionResult(success=False, message="file_path is required")
+
+        try:
+            import yaml as yaml_lib
+        except ImportError:
+            return ActionResult(success=False, message="PyYAML required: pip install pyyaml")
+
+        try:
+            resolved_path = context.resolve_value(file_path)
+            resolved_data = context.resolve_value(data)
+            resolved_flow = context.resolve_value(default_flow_style)
+
+            os.makedirs(os.path.dirname(resolved_path) or '.', exist_ok=True)
+
+            with open(resolved_path, 'w', encoding='utf-8') as f:
+                yaml_lib.dump(resolved_data, f, default_flow_style=resolved_flow, allow_unicode=True, sort_keys=False)
+
+            context.set(output_var, True)
+            return ActionResult(success=True, data=True,
+                               message=f"Wrote YAML to {resolved_path}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"YAML write error: {str(e)}")
+
+
+class YAMLValidateAction(BaseAction):
+    """Validate YAML syntax."""
+    action_type = "yaml_validate"
+    display_name = "YAML验证"
+    description = "验证YAML语法是否正确"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute YAML validate operation.
+
+        Args:
+            context: Execution context.
+            params: Dict with yaml_content or file_path, output_var.
+
+        Returns:
+            ActionResult with validation status.
+        """
+        yaml_content = params.get('yaml_content', '')
         file_path = params.get('file_path', '')
         output_var = params.get('output_var', 'yaml_valid')
 
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not yaml_content and not file_path:
+            return ActionResult(success=False, message="yaml_content or file_path required")
 
         try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
+            import yaml as yaml_lib
+        except ImportError:
+            return ActionResult(success=False, message="PyYAML required: pip install pyyaml")
 
-            yaml.safe_load(resolved_content)
+        try:
+            if file_path:
+                resolved_path = context.resolve_value(file_path)
+                with open(resolved_path, 'r', encoding='utf-8') as f:
+                    yaml_lib.safe_load(f)
+            else:
+                resolved_content = context.resolve_value(yaml_content)
+                yaml_lib.safe_load(resolved_content)
+
             context.set(output_var, True)
+            return ActionResult(success=True, data=True, message="YAML is valid")
 
-            return ActionResult(
-                success=True,
-                message="YAML语法有效",
-                data={'valid': True, 'output_var': output_var}
-            )
-        except yaml.YAMLError as e:
+        except yaml_lib.YAMLError as e:
             context.set(output_var, False)
-            return ActionResult(
-                success=False,
-                message=f"YAML无效: {str(e)}",
-                data={'valid': False, 'error': str(e), 'output_var': output_var}
-            )
+            return ActionResult(success=False, data=False,
+                               message=f"YAML invalid: {str(e)}")
+        except FileNotFoundError:
+            return ActionResult(success=False, message=f"File not found: {resolved_path}")
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"YAML验证失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'yaml_valid'}
+            return ActionResult(success=False, message=f"YAML validate error: {str(e)}")
 
 
-class YamlMergeAction(BaseAction):
-    """Merge multiple YAML files."""
-    action_type = "yaml_merge"
-    display_name = "合并YAML"
-    description = "合并多个YAML文件"
-    version = "1.0"
+class YAMLGetAction(BaseAction):
+    """Get value from YAML by key path."""
+    action_type = "yaml_get"
+    display_name = "YAML取值"
+    description = "按路径获取YAML中的值"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute merge.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute YAML get operation.
 
         Args:
             context: Execution context.
-            params: Dict with files, output_var.
+            params: Dict with data, key_path, default, output_var.
 
         Returns:
-            ActionResult with merged YAML.
+            ActionResult with value.
         """
-        files = params.get('files', [])
-        output_var = params.get('output_var', 'yaml_merged')
+        data = params.get('data', {})
+        key_path = params.get('key_path', '')
+        default = params.get('default', None)
+        output_var = params.get('output_var', 'yaml_value')
 
-        valid, msg = self.validate_type(files, list, 'files')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not key_path:
+            return ActionResult(success=False, message="key_path is required")
 
         try:
-            resolved_files = context.resolve_value(files)
+            resolved_data = context.resolve_value(data)
+            resolved_path = context.resolve_value(key_path)
 
-            merged = {}
-            for filepath in resolved_files:
-                if not os.path.exists(filepath):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {filepath}"
-                    )
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    data = yaml.safe_load(f)
-                    if data:
-                        merged.update(data)
-
-            yaml_str = yaml.dump(merged, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            context.set(output_var, merged)
-
-            return ActionResult(
-                success=True,
-                message=f"YAML已合并: {len(resolved_files)} 个文件",
-                data={'merged': merged, 'yaml': yaml_str, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"YAML合并失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['files']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'yaml_merged'}
-
-
-class YamlFlattenAction(BaseAction):
-    """Flatten nested YAML."""
-    action_type = "yaml_flatten"
-    display_name = "扁平化YAML"
-    description = "将嵌套YAML展平为扁平键"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute flatten.
-
-        Args:
-            context: Execution context.
-            params: Dict with content, file_path, separator, output_var.
-
-        Returns:
-            ActionResult with flattened dict.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        separator = params.get('separator', '.')
-        output_var = params.get('output_var', 'yaml_flat')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            resolved_sep = context.resolve_value(separator)
-
-            data = yaml.safe_load(resolved_content)
-
-            def flatten(d, parent_key=''):
-                items = []
-                if isinstance(d, dict):
-                    for k, v in d.items():
-                        new_key = f"{parent_key}{resolved_sep}{k}" if parent_key else k
-                        if isinstance(v, (dict, list)):
-                            items.extend(flatten(v, new_key).items())
-                        else:
-                            items.append((new_key, v))
-                elif isinstance(d, list):
-                    for i, v in enumerate(d):
-                        new_key = f"{parent_key}{resolved_sep}{i}"
-                        if isinstance(v, (dict, list)):
-                            items.extend(flatten(v, new_key).items())
-                        else:
-                            items.append((new_key, v))
+            keys = resolved_path.replace('/', '.').split('.')
+            value = resolved_data
+            for key in keys:
+                if isinstance(value, dict) and key in value:
+                    value = value[key]
                 else:
-                    items.append((parent_key, d))
-                return dict(items)
+                    value = default
+                    break
 
-            flattened = flatten(data)
-            context.set(output_var, flattened)
+            context.set(output_var, value)
+            return ActionResult(success=True, data=value,
+                               message=f"Got value for key path: {resolved_path}")
 
-            return ActionResult(
-                success=True,
-                message=f"YAML已扁平化: {len(flattened)} 个键",
-                data={'flat': flattened, 'count': len(flattened), 'output_var': output_var}
-            )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"YAML扁平化失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"YAML get error: {str(e)}")
 
-    def get_required_params(self) -> List[str]:
-        return []
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'separator': '.', 'output_var': 'yaml_flat'}
+class YAMLSetAction(BaseAction):
+    """Set value in YAML dict by key path."""
+    action_type = "yaml_set"
+    display_name = "YAML设值"
+    description = "按路径设置YAML字典中的值"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute YAML set operation.
+
+        Args:
+            context: Execution context.
+            params: Dict with data, key_path, value, output_var.
+
+        Returns:
+            ActionResult with updated data.
+        """
+        data = params.get('data', {})
+        key_path = params.get('key_path', '')
+        value = params.get('value', None)
+        output_var = params.get('output_var', 'yaml_data')
+
+        if not key_path:
+            return ActionResult(success=False, message="key_path is required")
+
+        try:
+            resolved_data = context.resolve_value(data)
+            resolved_path = context.resolve_value(key_path)
+            resolved_value = context.resolve_value(value)
+
+            if not isinstance(resolved_data, dict):
+                resolved_data = {}
+
+            keys = resolved_path.replace('/', '.').split('.')
+            current = resolved_data
+            for key in keys[:-1]:
+                if key not in current:
+                    current[key] = {}
+                current = current[key]
+
+            current[keys[-1]] = resolved_value
+
+            context.set(output_var, resolved_data)
+            return ActionResult(success=True, data=resolved_data,
+                               message=f"Set {resolved_path} = {resolved_value}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"YAML set error: {str(e)}")
