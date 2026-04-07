@@ -2578,8 +2578,8 @@ class MainWindow(QMainWindow):
             action_type = item.data(Qt.UserRole)
             if action_type in self.config_widgets:
                 self.config_stack.setCurrentWidget(self.config_widgets[action_type])
-    
-    def _on_add_step(self):
+
+    def _on_add_step(self) -> None:
         current_row = self.action_list.currentRow()
         if current_row < 0:
             show_warning("提示", "请先选择一个动作类型")
@@ -2607,21 +2607,21 @@ class MainWindow(QMainWindow):
         self.step_list.set_current_index(self.step_list.get_step_count() - 1)
         
         app_logger.info(f"添加步骤: {display_name}", "Editor")
-    
-    def _on_remove_step(self):
+
+    def _on_remove_step(self) -> None:
         index = self.step_list.get_current_index()
         if index >= 0:
             item = self.step_list.list_widget.item(index)
             data = item.data(Qt.UserRole)
             step_id = data['id']
-            
+
             if step_id in self.step_configs:
                 del self.step_configs[step_id]
-            
+
             self.step_list.remove_step(index)
             app_logger.info(f"删除步骤 [{step_id}]", "Editor")
-    
-    def _on_clear_steps(self):
+
+    def _on_clear_steps(self) -> None:
         if self.step_list.get_step_count() == 0:
             return
         
