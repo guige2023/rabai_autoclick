@@ -1,0 +1,148 @@
+{
+  "name": "Calendar Management Workflow",
+  "description": "Automate calendar management and appointment scheduling",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "appointments": 5,
+    "current_appointment": 0,
+    "event_title": "Team Meeting",
+    "event_duration": 60
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "appointment_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize appointment counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open calendar app"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.5,
+      "comment": "Wait for calendar"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "appointment_loop",
+      "count": "{{appointments}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start appointment loop"
+    },
+    {
+      "id": 5,
+      "type": "click_image",
+      "template": "./templates/new_event.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click new event button"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for event dialog"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 400,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click title field"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{event_title}} {{appointment_counter}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter event title"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to time field"
+    },
+    {
+      "id": 10,
+      "type": "type_text",
+      "text": "{{event_duration}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter duration"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/appointment_{{appointment_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture appointment screenshot"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "appointment_counter",
+      "value": "{{appointment_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment appointment counter"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{appointment_counter < appointments}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more appointments"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next appointment"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/calendar_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
