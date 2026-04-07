@@ -1,0 +1,116 @@
+{
+  "name": "会议准备自动化",
+  "description": "自动化会议准备工作流程",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "meeting_title": "项目进度会议",
+    "participants": "5",
+    "duration_minutes": 60,
+    "agenda_items": 3
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "打开日历应用"
+    },
+    {
+      "id": 2,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "等待日历加载"
+    },
+    {
+      "id": 3,
+      "type": "click_image",
+      "template": "./templates/new_event.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "点击新建事件按钮"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.3,
+      "comment": "等待对话框"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 400,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "点击标题输入框"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "{{meeting_title}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "输入会议标题"
+    },
+    {
+      "id": 7,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "移动到时间输入框"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{duration_minutes}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "输入会议时长"
+    },
+    {
+      "id": 9,
+      "type": "click",
+      "x": 300,
+      "y": 350,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "点击参与者输入框"
+    },
+    {
+      "id": 10,
+      "type": "type_text",
+      "text": "{{participants}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "输入参与者数量"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/meeting_prepared.png",
+      "pre_delay": 0.5,
+      "comment": "截图保存会议准备状态"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

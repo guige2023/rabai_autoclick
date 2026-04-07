@@ -1,0 +1,95 @@
+{
+  "name": "Backup Automation Workflow",
+  "description": "Automated file backup workflow",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "source_path": "./documents",
+    "backup_path": "./backup",
+    "compression": true,
+    "max_backups": 7
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "screenshot",
+      "save_path": "./screenshots/backup_start.png",
+      "pre_delay": 0.5,
+      "comment": "Capture backup start state"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open file manager"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for file manager"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.2,
+      "comment": "Select all items"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "keys": ["ctrl", "c"],
+      "pre_delay": 0.2,
+      "comment": "Copy selected items"
+    },
+    {
+      "id": 6,
+      "type": "click",
+      "x": 600,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to backup folder"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for navigation"
+    },
+    {
+      "id": 8,
+      "type": "key_press",
+      "keys": ["ctrl", "v"],
+      "pre_delay": 0.5,
+      "comment": "Paste items to backup"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for paste to complete"
+    },
+    {
+      "id": 10,
+      "type": "screenshot",
+      "save_path": "./screenshots/backup_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture backup complete state"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
