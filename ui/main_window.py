@@ -793,21 +793,21 @@ class RecordingWidget(QWidget):
 
         show_toast(f"优化完成：合并 {merged} 个，优化 {optimized} 个延时", 'success')
 
-    def _on_action_recorded(self, action_type: str, params: dict):
+    def _on_action_recorded(self, action_type: str, params: dict) -> None:
         self.action_list.addItem(f"{action_type}: {params}")
 
-    def _on_recording_started(self):
+    def _on_recording_started(self) -> None:
         self.action_list.clear()
 
-    def _on_recording_stopped(self, actions):
+    def _on_recording_stopped(self, actions: Any) -> None:
         pass
 
-    def _refresh_action_list(self):
+    def _refresh_action_list(self) -> None:
         with batch_updates(self.action_list):
             self.action_list.clear()
             for action in self._recording_manager.get_actions():
                 self.action_list.addItem(f"{action.action_type}: {action.params}")
-    
+
     def get_workflow(self) -> Dict[str, Any]:
         return self._recording_manager.to_workflow()
 
