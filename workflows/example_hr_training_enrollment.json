@@ -1,0 +1,117 @@
+{
+  "name": "HR Training Enrollment Workflow",
+  "description": "Automate training enrollment",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "enrollments_to_process": 52,
+    "current_enrollment": 0,
+    "processed_enrollments": 0,
+    "failed_enrollments": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "enrollment_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize enrollment counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open training enrollment system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "training_enrollment_loop",
+      "count": "{{enrollments_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start training enrollment loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select enrollment for processing"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for processing"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/training_enrollment_{{enrollment_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture enrollment screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "enrollment_counter",
+      "value": "{{enrollment_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment enrollment counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{enrollment_counter < enrollments_to_process}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more enrollments"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next enrollment"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/hr_training_enrollment_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
