@@ -1,0 +1,175 @@
+{
+  "name": "Nonprofit Donor Management Workflow",
+  "description": "Automate nonprofit donor management including gift processing and acknowledgment",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "donations_to_process": 45,
+    "current_donation": 0,
+    "processed_donations": 0,
+    "acknowledgment_sent": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "donation_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize donation counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open donor management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "donation_processing_loop",
+      "count": "{{donations_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start donation processing loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 160,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Open donation record"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for record"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/donation_{{donation_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture donation screenshot"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 340,
+      "y": 230,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Verify donation details"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for verification"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 460,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Post donation to ledger"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for posting"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 580,
+      "y": 370,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Generate acknowledgment letter"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for generation"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/acknowledgment_{{donation_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture acknowledgment"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "donation_counter",
+      "value": "{{donation_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment donation counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{donation_counter < donations_to_process}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more donations"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next donation"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/donor_management_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

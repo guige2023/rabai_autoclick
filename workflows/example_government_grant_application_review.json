@@ -1,0 +1,175 @@
+{
+  "name": "Government Grant Application Review Workflow",
+  "description": "Automate government grant application review including eligibility verification and scoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "applications_to_review": 40,
+    "current_application": 0,
+    "reviewed_applications": 0,
+    "eligible_applications": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "application_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize application counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open grant management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "review_loop",
+      "count": "{{applications_to_review}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start review loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 160,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Open grant application"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for application"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/grant_application_{{application_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture application screenshot"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 340,
+      "y": 230,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Verify eligibility criteria"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for verification"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 460,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Score application"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for scoring"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 580,
+      "y": 370,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Document review notes"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for documentation"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/review_complete_{{application_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture review confirmation"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "application_counter",
+      "value": "{{application_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment application counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{application_counter < applications_to_review}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more applications"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next application"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/grant_review_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

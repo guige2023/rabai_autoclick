@@ -1,0 +1,175 @@
+{
+  "name": "Automotive Dealer Inventory Management Workflow",
+  "description": "Automate automotive dealer inventory including vehicle tracking, pricing updates, and lot management",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "vehicles_to_manage": 40,
+    "current_vehicle": 0,
+    "managed_vehicles": 0,
+    "price_updates": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "vehicle_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize vehicle counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open DMS dealer system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for DMS to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "inventory_loop",
+      "count": "{{vehicles_to_manage}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start inventory loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 160,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Open vehicle inventory record"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for record"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/vehicle_{{vehicle_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture vehicle screenshot"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 340,
+      "y": 230,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Verify vehicle location"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for verification"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 460,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Update pricing if needed"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for pricing update"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 580,
+      "y": 370,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Sync with online listings"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for sync"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/inventory_updated_{{vehicle_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture update confirmation"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "vehicle_counter",
+      "value": "{{vehicle_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment vehicle counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{vehicle_counter < vehicles_to_manage}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more vehicles"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next vehicle"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/dealer_inventory_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
