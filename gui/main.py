@@ -1785,7 +1785,13 @@ class RecTab(BaseTab):
             
             return converter.add_action(rec_id, action_data)
 
-        def show_result(success):
+        def show_result(success: bool) -> None:
+            """
+            Handle the result of adding an action.
+            
+            Args:
+                success: Whether the action was added successfully.
+            """
             if success:
                 self.log(f"✅ 已添加动作")
             else:
