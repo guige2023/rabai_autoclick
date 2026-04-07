@@ -1603,19 +1603,20 @@ class DiagnosticsWidget(QWidget):
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        
+        colors = theme_manager.colors
+
         info_label = QLabel("🏥 工作流健康诊断 - 分析工作流执行状态和问题")
-        info_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #4CAF50;")
+        info_label.setStyleSheet(f"font-weight: bold; font-size: 13px; color: {colors['success']};")
         layout.addWidget(info_label)
-        
+
         self.workflow_list = QListWidget()
         self.workflow_list.setMaximumHeight(150)
         layout.addWidget(QLabel("选择工作流进行诊断:"))
         layout.addWidget(self.workflow_list)
-        
+
         self.result_text = QTextEdit()
         self.result_text.setReadOnly(True)
-        self.result_text.setStyleSheet("font-family: Consolas; background-color: #f5f5f5;")
+        self.result_text.setStyleSheet(f"font-family: Consolas; background-color: {colors['bg_widget']};")
         layout.addWidget(self.result_text)
         
         btn_layout = QHBoxLayout()
@@ -1712,9 +1713,10 @@ class ShareWidget(QWidget):
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        
+        colors = theme_manager.colors
+
         info_label = QLabel("🔗 工作流分享系统 - 导入导出和分享工作流")
-        info_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #FF9800;")
+        info_label.setStyleSheet(f"font-weight: bold; font-size: 13px; color: {colors['warning']};")
         layout.addWidget(info_label)
         
         export_group = QGroupBox("导出工作流")
