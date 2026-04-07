@@ -1,0 +1,148 @@
+{
+  "name": "HR Onboarding Workflow",
+  "description": "Automate employee onboarding process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "employee_name": "New Employee",
+    "department": "Engineering",
+    "onboarding_steps": ["create_account", "setup_email", "assign_training", "schedule_orientation"],
+    "current_step": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "step_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize step index"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open HR system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for HR system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "onboarding_loop",
+      "count": 4,
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start onboarding loop"
+    },
+    {
+      "id": 5,
+      "type": "click_image",
+      "template": "./templates/add_employee.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click add employee"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for form"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 300,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click name field"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{employee_name}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter employee name"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to next field"
+    },
+    {
+      "id": 10,
+      "type": "type_text",
+      "text": "{{department}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter department"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/onboarding_step_{{step_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture onboarding step"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "step_index",
+      "value": "{{step_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment step index"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{step_index < 4}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more steps"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next step"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/onboarding_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
