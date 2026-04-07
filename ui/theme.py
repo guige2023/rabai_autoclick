@@ -429,6 +429,14 @@ class ThemeManager(QObject):
                 QComboBox::down-arrow {{ image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid {c['text_secondary']}; margin-right: 8px; }}
                 QGroupBox {{ font-weight: bold; margin-top: 8px; padding-top: 8px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
                 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
+                QRadioButton {{ color: {c['text_primary']}; spacing: 8px; }}
+                QRadioButton::indicator {{ width: 16px; height: 16px; border: 1px solid {c['border']}; border-radius: 8px; background: {c['bg_widget']}; }}
+                QRadioButton::indicator:hover {{ border-color: {c['primary']}; }}
+                QRadioButton::indicator:checked {{ background: {c['primary']}; border-color: {c['primary']}; }}
+                QCheckBox {{ color: {c['text_primary']}; spacing: 8px; }}
+                QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {c['border']}; border-radius: 3px; background: {c['bg_widget']}; }}
+                QCheckBox::indicator:hover {{ border-color: {c['primary']}; }}
+                QCheckBox::indicator:checked {{ background: {c['primary']}; border-color: {c['primary']}; }}
                 QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
                 QHeaderView::section:hover {{ background-color: {c['bg_hover']}; }}
@@ -658,6 +666,14 @@ class ThemeManager(QObject):
                 QComboBox::down-arrow {{ image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid {c['text_secondary']}; margin-right: 8px; }}
                 QGroupBox {{ font-weight: bold; margin-top: 8px; padding-top: 8px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
                 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
+                QRadioButton {{ color: {c['text_primary']}; spacing: 8px; }}
+                QRadioButton::indicator {{ width: 16px; height: 16px; border: 1px solid {c['border']}; border-radius: 8px; background: {c['bg_widget']}; }}
+                QRadioButton::indicator:hover {{ border-color: {c['primary']}; }}
+                QRadioButton::indicator:checked {{ background: {c['primary']}; border-color: {c['primary']}; }}
+                QCheckBox {{ color: {c['text_primary']}; spacing: 8px; }}
+                QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {c['border']}; border-radius: 3px; background: {c['bg_widget']}; }}
+                QCheckBox::indicator:hover {{ border-color: {c['primary']}; }}
+                QCheckBox::indicator:checked {{ background: {c['primary']}; border-color: {c['primary']}; }}
                 QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
                 QHeaderView::section:hover {{ background-color: {c['bg_hover']}; }}
