@@ -1,251 +1,260 @@
-"""Pool utilities for RabAI AutoClick.
+"""
+Object Pool Pattern Implementation
 
-Provides:
-- Object pool
-- Connection pool
-- Worker pool
-- Pool statistics
+Manages a pool of reusable objects to avoid expensive allocation/deallocation.
 """
 
 from __future__ import annotations
 
-import asyncio
+import copy
 import threading
 import time
-from collections import deque
+import uuid
+from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import (
-    Any,
-    Callable,
-    Generic,
-    Iterator,
-    Optional,
-    TypeVar,
-)
-
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 
 
+class Poolable(ABC):
+    """
+    Interface for objects that can be pooled.
+    """
+
+    @abstractmethod
+    def reset(self) -> None:
+        """Reset the object to its initial state."""
+        pass
+
+    @abstractmethod
+    def validate(self) -> bool:
+        """Check if the object is still valid for use."""
+        pass
+
+
 @dataclass
-class PoolStats:
-    """Statistics for a pool."""
-
-    total_acquired: int = 0
-    total_released: int = 0
-    current_in_use: int = 0
-    total_created: int = 0
-    total_destroyed: int = 0
-    wait_time_total: float = 0.0
-    wait_count: int = 0
-
-    @property
-    def avg_wait_time(self) -> float:
-        if self.wait_count == 0:
-            return 0.0
-        return self.wait_time_total / self.wait_count
-
-
-class PooledObject(Generic[T]):
-    """Wrapper for pooled object with lifecycle tracking."""
-
-    def __init__(
-        self,
-        obj: T,
-        pool: ObjectPool[T],
-    ) -> None:
-        self._obj = obj
-        self._pool = pool
-        self._in_use = False
-        self._created_at = time.time()
-        self._last_used_at = self._created_at
-        self._use_count = 0
-
-    @property
-    def value(self) -> T:
-        return self._obj
-
-    def release(self) -> None:
-        self._pool.release(self)
-
-    def __enter__(self) -> T:
-        self._in_use = True
-        self._use_count += 1
-        self._last_used_at = time.time()
-        return self._obj
-
-    def __exit__(self, *args: Any) -> None:
-        self._in_use = False
-        self.release()
+class PoolMetrics:
+    """Metrics for pool operations."""
+    total_acquires: int = 0
+    total_releases: int = 0
+    pool_hits: int = 0
+    pool_misses: int = 0
+    invalidations: int = 0
+    peak_size: int = 0
+    current_size: int = 0
 
 
 class ObjectPool(Generic[T]):
-    """Generic object pool with min/max limits.
-
-    Example:
-        pool = ObjectPool(factory=lambda: MyConnection(), min_size=2, max_size=10)
-
-        with pool.acquire() as conn:
-            conn.query("SELECT 1")
-
-        pool.close()
+    """
+    Generic object pool with thread-safe operations.
     """
 
     def __init__(
         self,
         factory: Callable[[], T],
-        min_size: int = 0,
-        max_size: int = 10,
-        idle_timeout: Optional[float] = 60.0,
-        validator: Optional[Callable[[T], bool]] = None,
-    ) -> None:
+        initial_size: int = 0,
+        max_size: int | None = None,
+        validation_func: Callable[[T], bool] | None = None,
+        reset_func: Callable[[T], None] | None = None,
+    ):
         self._factory = factory
-        self._min_size = min_size
         self._max_size = max_size
-        self._idle_timeout = idle_timeout
-        self._validator = validator
+        self._validation_func = validation_func
+        self._reset_func = reset_func
 
-        self._pool: deque[PooledObject[T]] = deque()
-        self._in_use: set[PooledObject[T]] = set()
+        self._available: list[T] = []
+        self._in_use: set[T] = set()
         self._lock = threading.RLock()
-        self._stats = PoolStats()
-        self._closed = False
+        self._metrics = PoolMetrics()
 
-        self._initialize_pool()
+        # Pre-populate pool
+        for _ in range(initial_size):
+            self._available.append(factory())
 
-    def _initialize_pool(self) -> None:
-        for _ in range(self._min_size):
-            obj = self._factory()
-            pooled = PooledObject(obj, self)
-            self._pool.append(pooled)
-            self._stats.total_created += 1
+        self._metrics.peak_size = initial_size
+        self._metrics.current_size = initial_size
 
-    def acquire(self) -> PooledObject[T]:
-        """Acquire an object from the pool.
+    def acquire(self, timeout: float | None = None) -> T | None:
+        """
+        Acquire an object from the pool.
+
+        Args:
+            timeout: Maximum time to wait for an object.
 
         Returns:
-            PooledObject wrapper.
-
-        Raises:
-            RuntimeError: If pool is closed.
+            An object from the pool, or None if unavailable.
         """
-        if self._closed:
-            raise RuntimeError("Pool is closed")
+        start_time = time.time()
 
-        wait_start = time.time()
+        with self._lock:
+            self._metrics.total_acquires += 1
 
-        while True:
-            with self._lock:
-                while self._pool:
-                    pooled = self._pool.popleft()
+            # Try to get from available pool
+            while self._available:
+                obj = self._available.pop()
 
-                    if self._validator and not self._validator(pooled.value):
-                        self._stats.total_destroyed += 1
+                # Validate object
+                if self._validation_func and not self._validation_func(obj):
+                    self._metrics.invalidations += 1
+                    self._metrics.current_size -= 1
+                    continue
+
+                self._in_use.add(obj)
+                self._metrics.pool_hits += 1
+                return obj
+
+            # Pool is empty, try to create new if under max
+            if self._max_size is None or len(self._in_use) < self._max_size:
+                new_obj = self._factory()
+                self._in_use.add(new_obj)
+                self._metrics.current_size += 1
+                self._metrics.peak_size = max(self._metrics.peak_size, self._metrics.current_size)
+                self._metrics.pool_misses += 1
+                return new_obj
+
+            # At max capacity, wait for release
+            if timeout is None:
+                return None
+
+            # Wait loop
+            while time.time() - start_time < timeout:
+                time.sleep(0.01)
+                if self._available:
+                    obj = self._available.pop()
+                    if self._validation_func and not self._validation_func(obj):
+                        self._metrics.invalidations += 1
+                        self._metrics.current_size -= 1
                         continue
+                    self._in_use.add(obj)
+                    return obj
 
-                    self._in_use.add(pooled)
-                    self._stats.total_acquired += 1
-                    wait_time = time.time() - wait_start
-                    self._stats.wait_time_total += wait_time
-                    self._stats.wait_count += 1
-                    return pooled
+            return None
 
-                if len(self._in_use) < self._max_size:
-                    obj = self._factory()
-                    pooled = PooledObject(obj, self)
-                    self._in_use.add(pooled)
-                    self._stats.total_acquired += 1
-                    self._stats.total_created += 1
-                    wait_time = time.time() - wait_start
-                    self._stats.wait_time_total += wait_time
-                    self._stats.wait_count += 1
-                    return pooled
+    def release(self, obj: T) -> bool:
+        """
+        Return an object to the pool.
 
-            time.sleep(0.01)
+        Args:
+            obj: The object to return.
 
-    def release(self, pooled: PooledObject[T]) -> None:
-        """Release an object back to the pool."""
+        Returns:
+            True if the object was successfully released.
+        """
         with self._lock:
-            if pooled in self._in_use:
-                self._in_use.remove(pooled)
-                self._stats.total_released += 1
+            if obj not in self._in_use:
+                return False
 
-                if pooled._in_use:
-                    return
+            self._in_use.remove(obj)
 
-                self._pool.append(pooled)
+            # Reset the object before returning to pool
+            if self._reset_func:
+                self._reset_func(obj)
+            elif hasattr(obj, "reset"):
+                obj.reset()
 
-    def close(self) -> None:
-        """Close the pool and destroy all objects."""
+            self._available.append(obj)
+            self._metrics.total_releases += 1
+            return True
+
+    def prewarm(self, count: int) -> int:
+        """
+        Pre-create objects in the pool.
+
+        Args:
+            count: Number of objects to create.
+
+        Returns:
+            Number of objects actually created.
+        """
         with self._lock:
-            self._closed = True
-            while self._pool:
-                self._pool.pop()
+            created = 0
+            for _ in range(count):
+                if self._max_size is not None and self._metrics.current_size >= self._max_size:
+                    break
+                self._available.append(self._factory())
+                self._metrics.current_size += 1
+                created += 1
+
+            self._metrics.peak_size = max(self._metrics.peak_size, self._metrics.current_size)
+            return created
+
+    def clear(self) -> int:
+        """
+        Clear all objects from the pool.
+
+        Returns:
+            Number of objects cleared.
+        """
+        with self._lock:
+            count = self._metrics.current_size
+            self._available.clear()
             self._in_use.clear()
-
-    def resize(self, new_min: int, new_max: int) -> None:
-        """Resize the pool."""
-        with self._lock:
-            self._min_size = new_min
-            self._max_size = new_max
+            self._metrics.current_size = 0
+            return count
 
     @property
-    def stats(self) -> PoolStats:
-        return self._stats
+    def available_count(self) -> int:
+        """Get number of available objects."""
+        with self._lock:
+            return len(self._available)
 
-    def __len__(self) -> int:
-        return len(self._pool) + len(self._in_use)
+    @property
+    def in_use_count(self) -> int:
+        """Get number of objects currently in use."""
+        with self._lock:
+            return len(self._in_use)
+
+    @property
+    def total_count(self) -> int:
+        """Get total objects in pool."""
+        with self._lock:
+            return self._metrics.current_size
+
+    @property
+    def metrics(self) -> PoolMetrics:
+        """Get pool metrics."""
+        return copy.copy(self._metrics)
 
 
-class AsyncObjectPool(Generic[T]):
-    """Async object pool."""
+class PoolStats:
+    """Statistics for pool usage."""
 
-    def __init__(
-        self,
-        factory: Callable[[], T],
-        min_size: int = 0,
-        max_size: int = 10,
-        idle_timeout: Optional[float] = 60.0,
-    ) -> None:
-        self._factory = factory
-        self._min_size = min_size
-        self._max_size = max_size
-        self._idle_timeout = idle_timeout
-        self._pool: asyncio.Queue[T] = asyncio.Queue()
-        self._semaphore = asyncio.Semaphore(max_size)
-        self._in_use_count = 0
-        self._closed = False
+    def __init__(self, pool: ObjectPool):
+        self._pool = pool
 
-        asyncio.create_task(self._initialize())
+    @property
+    def utilization(self) -> float:
+        """Get pool utilization as a percentage."""
+        metrics = self._pool.metrics
+        if metrics.peak_size == 0:
+            return 0.0
+        return (metrics.peak_size - self._pool.available_count) / metrics.peak_size
 
-    async def _initialize(self) -> None:
-        for _ in range(self._min_size):
-            obj = self._factory()
-            await self._pool.put(obj)
+    @property
+    def hit_rate(self) -> float:
+        """Get pool hit rate."""
+        metrics = self._pool.metrics
+        total = metrics.pool_hits + metrics.pool_misses
+        return metrics.pool_hits / total if total > 0 else 0.0
 
-    async def acquire(self) -> T:
-        if self._closed:
-            raise RuntimeError("Pool is closed")
 
-        await self._semaphore.acquire()
-        try:
-            obj = await asyncio.wait_for(self._pool.get(), timeout=5.0)
-            self._in_use_count += 1
-            return obj
-        except asyncio.TimeoutError:
-            self._semaphore.release()
-            raise RuntimeError("Timeout acquiring from pool")
+def create_pool(
+    factory: Callable[[], T],
+    *,
+    min_size: int = 0,
+    max_size: int | None = None,
+) -> ObjectPool[T]:
+    """
+    Create a configured object pool.
 
-    async def release(self, obj: T) -> None:
-        self._in_use_count -= 1
-        if not self._closed:
-            await self._pool.put(obj)
-        self._semaphore.release()
+    Args:
+        factory: Function to create new objects.
+        min_size: Initial pool size.
+        max_size: Maximum pool size.
 
-    async def close(self) -> None:
-        self._closed = True
-        while not self._pool.empty():
-            try:
-                self._pool.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+    Returns:
+        Configured ObjectPool instance.
+    """
+    return ObjectPool(factory=factory, initial_size=min_size, max_size=max_size)

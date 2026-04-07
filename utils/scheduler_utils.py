@@ -1,327 +1,323 @@
-"""Scheduler utilities for RabAI AutoClick.
+"""
+Scheduler Utilities
 
-Provides:
-- Periodic task scheduler
-- Cron-like scheduling
-- Task queue with scheduling
-- Delayed execution
+Provides task scheduling with cron expressions, intervals,
+and priority queues for task execution.
 """
 
 from __future__ import annotations
 
-import asyncio
+import calendar
+import copy
+import heapq
+import threading
 import time
+from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Set,
-)
+from typing import Any, Generic, TypeVar
+from enum import Enum, auto
+
+T = TypeVar("T")
 
 
 class ScheduleType(Enum):
     """Type of schedule."""
-
-    ONCE = "once"
-    INTERVAL = "interval"
-    CRON = "cron"
+    ONCE = auto()
+    INTERVAL = auto()
+    CRON = auto()
+    FIXED_RATE = auto()
 
 
 @dataclass
 class ScheduledTask:
     """A task scheduled for execution."""
-
-    id: str
-    func: Callable[..., Any]
+    id: str = field(default_factory=lambda: f"task_{time.time():.6f}")
+    name: str = ""
+    func: Callable[..., Any] | None = None
     args: tuple = field(default_factory=tuple)
-    kwargs: dict = field(default_factory=dict)
+    kwargs: dict[str, Any] = field(default_factory=dict)
     schedule_type: ScheduleType = ScheduleType.ONCE
-    next_run: Optional[float] = None
-    interval: Optional[float] = None
+    next_run: float = 0.0  # Unix timestamp
+    interval: float = 0.0  # For interval/cron schedules
+    cron_expr: str = ""
     enabled: bool = True
-    max_runs: Optional[int] = None
-    run_count: int = 0
+    priority: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def should_run(self, now: float) -> bool:
-        if not self.enabled:
-            return False
-        if self.next_run is None:
-            return True
-        return now >= self.next_run
+    def __lt__(self, other: ScheduledTask) -> bool:
+        """Compare by next_run time for heap ordering."""
+        return self.next_run < other.next_run
 
-    def advance(self, now: float) -> None:
-        self.run_count += 1
-        if self.schedule_type == ScheduleType.INTERVAL and self.interval:
-            self.next_run = now + self.interval
-        elif self.schedule_type == ScheduleType.ONCE:
-            self.next_run = None
+    @property
+    def is_due(self) -> bool:
+        """Check if task is due for execution."""
+        return time.time() >= self.next_run
 
 
-class Scheduler:
-    """In-memory task scheduler.
-
-    Example:
-        scheduler = Scheduler()
-
-        def my_task():
-            print("Running!")
-
-        scheduler.add_interval(my_task, interval=5.0, task_id="my_task")
-        scheduler.start()
-
-        # Later...
-        scheduler.remove("my_task")
-        scheduler.stop()
+class Scheduler(ABC):
+    """
+    Abstract scheduler interface.
     """
 
-    def __init__(self) -> None:
-        self._tasks: Dict[str, ScheduledTask] = {}
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._stop_event = threading.Event()
+    @abstractmethod
+    def schedule(self, task: ScheduledTask) -> str:
+        """Schedule a task and return its ID."""
+        pass
 
-    def add_once(
-        self,
-        func: Callable[..., Any],
-        delay: float,
-        task_id: Optional[str] = None,
-        args: tuple = (),
-        kwargs: dict = None,
-    ) -> str:
-        """Schedule task to run once after delay.
+    @abstractmethod
+    def cancel(self, task_id: str) -> bool:
+        """Cancel a scheduled task."""
+        pass
+
+    @abstractmethod
+    def get_next_run(self) -> ScheduledTask | None:
+        """Get the next task to run."""
+        pass
+
+    @abstractmethod
+    def tick(self) -> list[ScheduledTask]:
+        """Get all tasks that are due and remove them from the schedule."""
+        pass
+
+
+class PriorityScheduler(Scheduler):
+    """
+    Scheduler using priority queue for task ordering.
+    """
+
+    def __init__(self):
+        self._tasks: list[ScheduledTask] = []
+        self._task_map: dict[str, ScheduledTask] = {}
+        self._lock = threading.RLock()
+
+    def schedule(self, task: ScheduledTask) -> str:
+        """Add a task to the schedule."""
+        with self._lock:
+            if task.id in self._task_map:
+                self.cancel(task.id)
+
+            heapq.heappush(self._tasks, task)
+            self._task_map[task.id] = task
+            return task.id
+
+    def cancel(self, task_id: str) -> bool:
+        """Cancel and remove a task."""
+        with self._lock:
+            if task_id not in self._task_map:
+                return False
+
+            task = self._task_map.pop(task_id)
+            self._tasks.remove(task)
+            heapq.heapify(self._tasks)
+            return True
+
+    def get_next_run(self) -> ScheduledTask | None:
+        """Get the task with earliest next_run."""
+        with self._lock:
+            if not self._tasks:
+                return None
+            return self._tasks[0]
+
+    def tick(self) -> list[ScheduledTask]:
+        """Get and remove all due tasks."""
+        with self._lock:
+            due = []
+            now = time.time()
+
+            while self._tasks and self._tasks[0].next_run <= now:
+                task = heapq.heappop(self._tasks)
+                if task.enabled:
+                    due.append(task)
+
+            return due
+
+    def get_task(self, task_id: str) -> ScheduledTask | None:
+        """Get a task by ID without removing it."""
+        with self._lock:
+            return self._task_map.get(task_id)
+
+    def list_tasks(self) -> list[ScheduledTask]:
+        """List all scheduled tasks."""
+        with self._lock:
+            return list(self._task_map.values())
+
+
+class IntervalCalculator:
+    """Calculate next run times for various schedule types."""
+
+    @staticmethod
+    def every(interval_seconds: float) -> float:
+        """Calculate next run for interval-based schedule."""
+        return time.time() + interval_seconds
+
+    @staticmethod
+    def cron_next(cron_expr: str) -> float:
+        """
+        Calculate next run for cron expression.
+
+        Simplified cron: "minute hour day month weekday"
 
         Args:
-            func: Function to execute.
-            delay: Delay in seconds.
-            task_id: Optional task identifier.
-            args: Positional arguments.
-            kwargs: Keyword arguments.
+            cron_expr: Cron expression (e.g., "30 14 * * 1-5" for 2:30 PM weekdays)
 
         Returns:
-            Task ID.
+            Unix timestamp of next run.
         """
-        task_id = task_id or f"task_{len(self._tasks)}"
-        task = ScheduledTask(
-            id=task_id,
-            func=func,
-            args=args,
-            kwargs=kwargs or {},
-            schedule_type=ScheduleType.ONCE,
-            next_run=time.time() + delay,
-        )
-        self._tasks[task_id] = task
-        return task_id
+        parts = cron_expr.split()
+        if len(parts) != 5:
+            raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-    def add_interval(
-        self,
-        func: Callable[..., Any],
-        interval: float,
-        task_id: Optional[str] = None,
-        args: tuple = (),
-        kwargs: dict = None,
-        max_runs: Optional[int] = None,
-    ) -> str:
-        """Schedule task to run at fixed interval.
+        minute_str, hour_str, day_str, month_str, weekday_str = parts
 
-        Args:
-            func: Function to execute.
-            interval: Interval in seconds.
-            task_id: Optional task identifier.
-            args: Positional arguments.
-            kwargs: Keyword arguments.
-            max_runs: Maximum number of runs (None for unlimited).
-
-        Returns:
-            Task ID.
-        """
-        task_id = task_id or f"task_{len(self._tasks)}"
-        task = ScheduledTask(
-            id=task_id,
-            func=func,
-            args=args,
-            kwargs=kwargs or {},
-            schedule_type=ScheduleType.INTERVAL,
-            interval=interval,
-            next_run=time.time() + interval,
-            max_runs=max_runs,
-        )
-        self._tasks[task_id] = task
-        return task_id
-
-    def add_daily(
-        self,
-        func: Callable[..., Any],
-        hour: int,
-        minute: int,
-        second: int = 0,
-        task_id: Optional[str] = None,
-        args: tuple = (),
-        kwargs: dict = None,
-    ) -> str:
-        """Schedule task to run daily at specific time.
-
-        Args:
-            func: Function to execute.
-            hour: Hour (0-23).
-            minute: Minute (0-59).
-            second: Second (0-59).
-            task_id: Optional task identifier.
-            args: Positional arguments.
-            kwargs: Keyword arguments.
-
-        Returns:
-            Task ID.
-        """
-        task_id = task_id or f"task_{len(self._tasks)}"
         now = datetime.now()
-        scheduled_time = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
-        if scheduled_time <= now:
-            scheduled_time += timedelta(days=1)
-        delay = (scheduled_time - now).total_seconds()
+        next_run = now.replace(second=0, microsecond=0)
 
-        task = ScheduledTask(
-            id=task_id,
-            func=func,
-            args=args,
-            kwargs=kwargs or {},
-            schedule_type=ScheduleType.ONCE,
-            next_run=time.time() + delay,
-        )
-        self._tasks[task_id] = task
-        return task_id
+        # Simple implementation - increment by minute and check
+        for _ in range(60 * 24 * 366):  # Max ~1 year ahead
+            next_run += timedelta(minutes=1)
 
-    def remove(self, task_id: str) -> bool:
-        """Remove a scheduled task.
+            if IntervalCalculator._matches(next_run.minute, minute_str) and \
+               IntervalCalculator._matches(next_run.hour, hour_str) and \
+               IntervalCalculator._matches(next_run.day, day_str) and \
+               IntervalCalculator._matches(next_run.month, month_str) and \
+               IntervalCalculator._matches(next_run.weekday() + 1, weekday_str):  # weekday() is 0-6, cron is 0-6
+                return next_run.timestamp()
+
+        raise ValueError(f"Could not find next run for cron: {cron_expr}")
+
+    @staticmethod
+    def _matches(value: int, pattern: str) -> bool:
+        """Check if a value matches a cron pattern component."""
+        if pattern == "*":
+            return True
+
+        if "," in pattern:
+            return str(value) in pattern.split(",")
+
+        if "/" in pattern:
+            base, step = pattern.split("/")
+            base = int(base) if base != "*" else 0
+            step = int(step)
+            return (value - base) % step == 0
+
+        if "-" in pattern:
+            start, end = pattern.split("-")
+            return int(start) <= value <= int(end)
+
+        return int(pattern) == value
+
+    @staticmethod
+    def daily_at(hour: int, minute: int = 0) -> float:
+        """Calculate next run for daily execution at specific time."""
+        now = datetime.now()
+        next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        if next_run <= now:
+            next_run += timedelta(days=1)
+
+        return next_run.timestamp()
+
+    @staticmethod
+    def weekly_on(weekday: int, hour: int = 0, minute: int = 0) -> float:
+        """
+        Calculate next run for weekly execution.
 
         Args:
-            task_id: Task ID to remove.
-
-        Returns:
-            True if task was removed.
+            weekday: Day of week (0=Monday, 6=Sunday)
+            hour: Hour of day (0-23)
+            minute: Minute of hour (0-59)
         """
-        if task_id in self._tasks:
-            del self._tasks[task_id]
-            return True
-        return False
+        now = datetime.now()
+        days_ahead = weekday - now.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
 
-    def pause(self, task_id: str) -> bool:
-        """Pause a scheduled task."""
-        if task_id in self._tasks:
-            self._tasks[task_id].enabled = False
-            return True
-        return False
+        next_run = now + timedelta(days=days_ahead)
+        next_run = next_run.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    def resume(self, task_id: str) -> bool:
-        """Resume a paused task."""
-        if task_id in self._tasks:
-            self._tasks[task_id].enabled = True
-            return True
-        return False
+        return next_run.timestamp()
+
+
+class SchedulerRunner:
+    """
+    Runs a scheduler in a background thread.
+    """
+
+    def __init__(self, scheduler: Scheduler, tick_interval: float = 1.0):
+        self._scheduler = scheduler
+        self._tick_interval = tick_interval
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._handlers: dict[str, Callable[[ScheduledTask], Any]] = {}
+        self._execution_stats: dict[str, dict[str, Any]] = {}
+
+    def add_handler(self, task_name: str, handler: Callable[[ScheduledTask], Any]) -> None:
+        """Register a handler for a task."""
+        self._handlers[task_name] = handler
 
     def start(self) -> None:
         """Start the scheduler in a background thread."""
         if self._running:
             return
+
         self._running = True
-        self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         """Stop the scheduler."""
         self._running = False
-        self._stop_event.set()
         if self._thread:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=5)
+            self._thread = None
 
     def _run_loop(self) -> None:
-        while not self._stop_event.is_set():
-            now = time.time()
-            for task_id, task in list(self._tasks.items()):
-                if task.should_run(now):
-                    try:
-                        task.func(*task.args, **task.kwargs)
-                    except Exception:
-                        pass
-                    task.advance(now)
-                    if task.max_runs and task.run_count >= task.max_runs:
-                        self.remove(task_id)
-                    elif task.schedule_type == ScheduleType.ONCE:
-                        self.remove(task_id)
-            self._stop_event.wait(0.1)
+        """Main scheduler loop."""
+        while self._running:
+            due_tasks = self._scheduler.tick()
 
-    def get_task(self, task_id: str) -> Optional[ScheduledTask]:
-        return self._tasks.get(task_id)
+            for task in due_tasks:
+                self._execute_task(task)
 
-    def list_tasks(self) -> List[ScheduledTask]:
-        return list(self._tasks.values())
+            time.sleep(self._tick_interval)
+
+    def _execute_task(self, task: ScheduledTask) -> None:
+        """Execute a scheduled task."""
+        start = time.time()
+        success = False
+        error: str | None = None
+
+        try:
+            handler = self._handlers.get(task.name) or task.func
+            if handler:
+                handler(*task.args, **task.kwargs)
+                success = True
+        except Exception as e:
+            error = str(e)
+
+        elapsed = (time.time() - start) * 1000
+
+        self._execution_stats[task.id] = {
+            "success": success,
+            "error": error,
+            "duration_ms": elapsed,
+            "timestamp": time.time(),
+        }
+
+        # Reschedule if recurring
+        if task.schedule_type == ScheduleType.INTERVAL and task.interval > 0:
+            task.next_run = time.time() + task.interval
+            self._scheduler.schedule(task)
+        elif task.schedule_type == ScheduleType.CRON and task.cron_expr:
+            try:
+                task.next_run = IntervalCalculator.cron_next(task.cron_expr)
+                self._scheduler.schedule(task)
+            except ValueError:
+                pass  # Invalid cron, don't reschedule
 
     @property
-    def task_count(self) -> int:
-        return len(self._tasks)
-
-
-class AsyncScheduler:
-    """Async task scheduler."""
-
-    def __init__(self) -> None:
-        self._tasks: Dict[str, ScheduledTask] = {}
-        self._running = False
-        self._handle: Optional[asyncio.Task] = None
-
-    async def add_interval(
-        self,
-        func: Callable[..., Any],
-        interval: float,
-        task_id: Optional[str] = None,
-        args: tuple = (),
-        kwargs: dict = None,
-    ) -> str:
-        task_id = task_id or f"task_{len(self._tasks)}"
-        task = ScheduledTask(
-            id=task_id,
-            func=func,
-            args=args,
-            kwargs=kwargs or {},
-            schedule_type=ScheduleType.INTERVAL,
-            interval=interval,
-            next_run=asyncio.get_event_loop().time() + interval,
-        )
-        self._tasks[task_id] = task
-        return task_id
-
-    async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        self._handle = asyncio.create_task(self._run_loop())
-
-    async def stop(self) -> None:
-        self._running = False
-        if self._handle:
-            self._handle.cancel()
-            try:
-                await self._handle
-            except asyncio.CancelledError:
-                pass
-
-    async def _run_loop(self) -> None:
-        while self._running:
-            now = asyncio.get_event_loop().time()
-            for task_id, task in list(self._tasks.items()):
-                if task.should_run(now):
-                    try:
-                        result = task.func(*task.args, **task.kwargs)
-                        if asyncio.iscoroutine(result):
-                            await result
-                    except Exception:
-                        pass
-                    task.advance(now)
-                    if task.schedule_type == ScheduleType.ONCE:
-                        self._tasks.pop(task_id, None)
-            await asyncio.sleep(0.1)
+    def execution_stats(self) -> dict[str, dict[str, Any]]:
+        """Get execution statistics."""
+        return copy.copy(self._execution_stats)
