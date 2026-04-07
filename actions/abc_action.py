@@ -1,307 +1,589 @@
-"""ABC action module for RabAI AutoClick.
+"""abc action extensions for rabai_autoclick.
 
-Provides abstract base class utilities:
-- IsAbstractAction: Check if class is abstract
-- GetAbstractMethodsAction: Get abstract methods
-- RegisterABCAction: Register virtual subclass
-- VerifyABCImplementationAction: Verify ABC implementation
-- AbstractMethodCheckAction: Check abstract method implementation
-- ABCPropertiesAction: Get ABC properties
-- GetMROAction: Get method resolution order
-- IsSubclassAction: Check subclass relationship
+Provides abstract base class utilities, mixins, and metaclasses
+for creating well-structured class hierarchies.
 """
 
-from typing import Any, Callable, Dict, List, Optional, Type, Union
-import sys
-import abc
+from __future__ import annotations
 
-_parent_dir = __import__('os').path.dirname(__import__('os').path.dirname(__import__('os').path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import inspect
+from abc import ABC, ABCMeta, abstractmethod
+from typing import Any, Callable, TypeVar, Generic
+
+__all__ = [
+    "abstractmethod",
+    "ABCMeta",
+    "ABC",
+    "AbstractBase",
+    "Interface",
+    "Mixin",
+    "Final",
+    "final",
+    "require_methods",
+    "check_implementation",
+    "validate_abstract",
+    "ProxyBase",
+    "WrapperBase",
+    "NullObject",
+    "NotImplementedMixin",
+    "ReprMixin",
+    "EqMixin",
+    "HashMixin",
+    "CopyMixin",
+    "RichMixin",
+    "AutoRegister",
+    "PluginBase",
+    "HookMixin",
+]
 
 
-class ABCIsAbstractAction(BaseAction):
-    """Check if class is abstract."""
-    action_type = "abc_is_abstract"
-    display_name = "是抽象类"
-    description = "检查类是否是抽象类"
+T = TypeVar("T")
+C = TypeVar("C", bound=type)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute is abstract check."""
-        class_path = params.get('class', None)
-        output_var = params.get('output_var', 'is_abstract_result')
 
+class AbstractBase(ABC):
+    """Base class for abstract hierarchies with common utilities."""
+
+    @classmethod
+    def subclasses(cls, recursive: bool = True) -> list[type]:
+        """Get all subclasses of this class.
+
+        Args:
+            recursive: Include nested subclasses.
+
+        Returns:
+            List of subclass types.
+        """
+        result = list(cls.__subclasses__())
+        if recursive:
+            for sub in result[:]:
+                result.extend(sub.subclasses(recursive=True))
+        return result
+
+    @classmethod
+    def is_abstract(cls) -> bool:
+        """Check if class has abstract methods.
+
+        Returns:
+            True if class has unimplemented abstract methods.
+        """
+        return bool(cls.__abstractmethods__)
+
+    @classmethod
+    def validate_instantiation(cls) -> None:
+        """Validate that class can be instantiated.
+
+        Raises:
+            TypeError: If class is abstract.
+        """
+        if cls.is_abstract():
+            unimpl = list(cls.__abstractmethods__)
+            raise TypeError(
+                f"Cannot instantiate abstract class {cls.__name__} "
+                f"with abstract methods: {', '.join(unimpl)}"
+            )
+
+
+def final(cls_or_method: C | Callable) -> C | Callable:
+    """Decorator to mark a class or method as final (cannot be overridden).
+
+    Args:
+        cls_or_method: Class or method to mark as final.
+
+    Returns:
+        Unmodified class or method (marker applied).
+    """
+    if inspect.isclass(cls_or_method):
+        cls_or_method.__final__ = True  # type: ignore
+        return cls_or_method
+    else:
+        func = cls_or_method
+        func.__final__ = True  # type: ignore
+        return func
+
+
+def require_methods(*method_names: str) -> Callable[[type], type]:
+    """Class decorator to require specific methods be implemented.
+
+    Args:
+        *method_names: Names of required methods.
+
+    Returns:
+        Class decorator.
+
+    Example:
+        @require_methods("process", "validate")
+        class Processor:
+            pass
+    """
+    def decorator(cls: type) -> type:
+        for name in method_names:
+            if not hasattr(cls, name):
+                raise TypeError(
+                    f"Class {cls.__name__} must implement method '{name}' "
+                    f"required by {getattr(cls, '__qualname__', cls)}"
+                )
+            if getattr(getattr(cls, name), "__isabstractmethod__", False):
+                continue
+            attr = getattr(cls, name, None)
+            if callable(attr) and getattr(attr, "__isabstractmethod__", False):
+                continue
+        cls.__required_methods__ = method_names  # type: ignore
+        return cls
+    return decorator
+
+
+def check_implementation(cls: type, interface: type) -> list[str]:
+    """Check if a class implements all methods of an interface.
+
+    Args:
+        cls: Class to check.
+        interface: Interface class with abstract methods.
+
+    Returns:
+        List of missing method names (empty if all implemented).
+    """
+    if not hasattr(interface, "__abstractmethods__"):
+        return []
+
+    missing = []
+    for method in interface.__abstractmethods__:
+        attr = getattr(cls, method, None)
+        if attr is None or getattr(attr, "__isabstractmethod__", False):
+            missing.append(method)
+    return missing
+
+
+def validate_abstract(obj: Any) -> None:
+    """Validate that an object is not abstract.
+
+    Args:
+        obj: Instance or class to validate.
+
+    Raises:
+        TypeError: If object is abstract.
+    """
+    if inspect.isclass(obj):
+        if obj.is_abstract():  # type: ignore
+            raise TypeError(f"Cannot use abstract class {obj.__name__}")
+    elif hasattr(obj, "is_abstract"):
+        if obj.is_abstract():  # type: ignore
+            raise TypeError(f"Cannot use abstract instance of {type(obj).__name__}")
+
+
+class Interface(ABC):
+    """Base class for interface definitions.
+
+    All methods are abstract by default.
+    Subclasses should not provide implementations.
+
+    Example:
+        class Drawable(Interface):
+            def draw(self, canvas): ...
+
+        class Shape(Drawable):
+            def draw(self, canvas):
+                ...
+    """
+
+    _instance_check_exempt_ = False
+
+
+class Mixin:
+    """Base class for mixins that require multiple inheritance.
+
+    Mixins add functionality to a class through multiple inheritance.
+    They should be designed to work with other mixins.
+
+    Example:
+        class SerializableMixin:
+            def to_json(self):
+                return json.dumps(self.__dict__)
+
+        class User(SerializableMixin, BaseModel):
+            pass
+    """
+
+    _mixin_priority_: int = 100
+
+    @classmethod
+    def get_mixin_priority(cls) -> int:
+        """Get priority for mixin ordering (lower = earlier).
+
+        Returns:
+            Priority value.
+        """
+        return getattr(cls, "_mixin_priority_", 100)
+
+
+class ProxyBase(Generic[T]):
+    """Base class for proxy objects that delegate to a wrapped object.
+
+    Subclasses override _get_target to provide the wrapped object.
+
+    Example:
+        class LazyProxy(ProxyBase[SomeClass]):
+            def _get_target(self):
+                return self._load_expensive_object()
+    """
+
+    _target: T | None = None
+
+    def _get_target(self) -> T:
+        """Get the wrapped target object.
+
+        Returns:
+            Wrapped target instance.
+        """
+        if self._target is None:
+            raise RuntimeError(f"{self.__class__.__name__}: target not set")
+        return self._target
+
+    def _set_target(self, target: T) -> None:
+        """Set the wrapped target object.
+
+        Args:
+            target: Object to wrap.
+        """
+        self._target = target
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get_target(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_target":
+            super().__setattr__(name, value)
+        else:
+            setattr(self._get_target(), name, value)
+
+
+class WrapperBase(Generic[T]):
+    """Base class for wrapper objects that add functionality.
+
+    Unlike ProxyBase, WrapperBase wraps an object passed in constructor.
+
+    Example:
+        class CachedResult(WrapperBase[Result]):
+            def __init__(self, result: Result):
+                super().__init__(result)
+                self._cache = None
+
+            @property
+            def value(self):
+                if self._cache is None:
+                    self._cache = expensive_computation()
+                return self._cache
+    """
+
+    def __init__(self, wrapped: T) -> None:
+        self._wrapped = wrapped
+
+    @property
+    def wrapped(self) -> T:
+        """Get the wrapped object.
+
+        Returns:
+            Wrapped instance.
+        """
+        return self._wrapped
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self._wrapped!r})"
+
+
+class NullObject:
+    """Base class for null/no-op implementations.
+
+    NullObjects respond to any method call with self or a sensible default,
+    allowing polymorphic code to work without null checks.
+
+    Example:
+        class NullLogger(NullObject):
+            def log(self, msg):
+                pass
+
+        logger = NullLogger()
+        logger.log("debug")  # does nothing
+    """
+
+    _null_response_: Any = None
+
+    def __getattr__(self, name: str) -> Any:
+        return self._null_method
+
+    def _null_method(self, *args: Any, **kwargs: Any) -> Any:
+        """Null method that does nothing and returns default."""
+        return self._null_response_
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__}()>"
+
+
+class NotImplementedMixin:
+    """Mixin that raises NotImplementedError for unexpected calls.
+
+    Useful for marking methods that must be called on a subclass
+    but shouldn't use the ABC machinery.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.{name} is not implemented"
+        )
+
+
+class ReprMixin:
+    """Mixin that provides a useful __repr__ based on init parameters."""
+
+    def __repr__(self) -> str:
         try:
-            if class_path is None:
-                return ActionResult(success=False, message="class is required")
-            
-            resolved_class = context.resolve_value(class_path) if isinstance(class_path, str) else class_path
-            
-            if isinstance(resolved_class, str):
-                resolved_class = eval(resolved_class, {"__builtins__": __builtins__, "abc": abc}, {})
-            
-            result = abc.ABC in resolved_class.__mro__ or any(getattr(resolved_class, '__abstractmethods__', []))
-            context.set_variable(output_var, result)
-            return ActionResult(success=True, message=f"is_abstract: {result}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"is_abstract failed: {e}")
-
-
-class ABCGetAbstractMethodsAction(BaseAction):
-    """Get abstract methods."""
-    action_type = "abc_get_abstract_methods"
-    display_name = "获取抽象方法"
-    description = "获取类的抽象方法列表"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute get abstract methods."""
-        class_path = params.get('class', None)
-        output_var = params.get('output_var', 'abstract_methods_result')
-
-        try:
-            if class_path is None:
-                return ActionResult(success=False, message="class is required")
-            
-            resolved_class = context.resolve_value(class_path) if isinstance(class_path, str) else class_path
-            
-            if isinstance(resolved_class, str):
-                resolved_class = eval(resolved_class, {"__builtins__": __builtins__, "abc": abc}, {})
-            
-            abstract_methods = list(getattr(resolved_class, '__abstractmethods__', []))
-            context.set_variable(output_var, abstract_methods)
-            return ActionResult(success=True, message=f"found {len(abstract_methods)} abstract methods")
-        except Exception as e:
-            return ActionResult(success=False, message=f"get_abstract_methods failed: {e}")
-
-
-class ABCRegisterAction(BaseAction):
-    """Register virtual subclass."""
-    action_type = "abc_register"
-    display_name = "注册子类"
-    description = "为抽象基类注册虚子类"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute register."""
-        abc_path = params.get('abc_class', None)
-        subclass = params.get('subclass', None)
-        output_var = params.get('output_var', 'register_result')
-
-        try:
-            if abc_path is None or subclass is None:
-                return ActionResult(success=False, message="abc_class and subclass are required")
-            
-            resolved_abc = context.resolve_value(abc_path) if isinstance(abc_path, str) else abc_path
-            resolved_subclass = context.resolve_value(subclass) if isinstance(subclass, str) else subclass
-            
-            if isinstance(resolved_abc, str):
-                resolved_abc = eval(resolved_abc, {"__builtins__": __builtins__, "abc": abc}, {})
-            if isinstance(resolved_subclass, str):
-                resolved_subclass = eval(resolved_subclass, {"__builtins__": __builtins__}, {})
-            
-            resolved_abc.register(resolved_subclass)
-            context.set_variable(output_var, {"registered": True, "subclass": str(resolved_subclass)})
-            return ActionResult(success=True, message=f"registered {resolved_subclass.__name__}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"register failed: {e}")
-
-
-class ABCVerifyImplementationAction(BaseAction):
-    """Verify ABC implementation."""
-    action_type = "abc_verify_implementation"
-    display_name = "验证实现"
-    description = "验证ABC实现完整性"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute verify implementation."""
-        class_path = params.get('class', None)
-        output_var = params.get('output_var', 'verify_result')
-
-        try:
-            if class_path is None:
-                return ActionResult(success=False, message="class is required")
-            
-            resolved_class = context.resolve_value(class_path) if isinstance(class_path, str) else class_path
-            
-            if isinstance(resolved_class, str):
-                resolved_class = eval(resolved_class, {"__builtins__": __builtins__, "abc": abc}, {})
-            
-            abstract_methods = set(getattr(resolved_class, '__abstractmethods__', []))
-            concrete_methods = set()
-            
-            for name in dir(resolved_class):
-                if name.startswith('_'):
+            sig = inspect.signature(self.__class__.__init__)
+            params = []
+            for name, param in sig.parameters.items():
+                if name == "self":
                     continue
-                attr = getattr(resolved_class, name, None)
-                if callable(attr) and not getattr(attr, '__isabstractmethod__', False):
-                    concrete_methods.add(name)
-            
-            unimplemented = abstract_methods - concrete_methods
-            is_fully_implemented = len(unimplemented) == 0
-            
-            context.set_variable(output_var, {
-                "fully_implemented": is_fully_implemented,
-                "abstract_methods": list(abstract_methods),
-                "unimplemented": list(unimplemented)
-            })
-            return ActionResult(success=True, message=f"verified: {'complete' if is_fully_implemented else 'incomplete'}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"verify failed: {e}")
+                value = getattr(self, name, getattr(param, "default", None))
+                params.append(f"{name}={value!r}")
+            return f"{self.__class__.__name__}({', '.join(params)})"
+        except (ValueError, TypeError):
+            return f"<{self.__class__.__name__}>"
 
 
-class ABCAbstractMethodCheckAction(BaseAction):
-    """Check abstract method implementation."""
-    action_type = "abc_method_check"
-    display_name = "检查抽象方法"
-    description = "检查具体类是否实现了抽象方法"
+class EqMixin:
+    """Mixin for classes with value-based equality."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute abstract method check."""
-        class_path = params.get('class', None)
-        method_name = params.get('method', None)
-        output_var = params.get('output_var', 'method_check_result')
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, self.__class__):
+            return False
+        return self._eq_attrs() == other._eq_attrs()
 
-        try:
-            if class_path is None or method_name is None:
-                return ActionResult(success=False, message="class and method are required")
-            
-            resolved_class = context.resolve_value(class_path) if isinstance(class_path, str) else class_path
-            resolved_method = context.resolve_value(method_name) if isinstance(method_name, str) else method_name
-            
-            if isinstance(resolved_class, str):
-                resolved_class = eval(resolved_class, {"__builtins__": __builtins__, "abc": abc}, {})
-            
-            abstract_methods = set(getattr(resolved_class, '__abstractmethods__', []))
-            has_method = hasattr(resolved_class, resolved_method)
-            is_abstract = resolved_method in abstract_methods
-            
-            context.set_variable(output_var, {
-                "is_abstract": is_abstract,
-                "has_implementation": has_method and not is_abstract,
-                "is_required": is_abstract
-            })
-            return ActionResult(success=True, message=f"method {resolved_method}: abstract={is_abstract}, implemented={has_method and not is_abstract}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"method_check failed: {e}")
+    def __ne__(self, other: Any) -> bool:
+        return not self.__eq__(other)
+
+    def _eq_attrs(self) -> tuple:
+        """Return tuple of attributes to compare for equality.
+
+        Returns:
+            Tuple of attribute values.
+        """
+        return tuple(getattr(self, name, None) for name in self._eq_keys())  # type: ignore
+
+    @classmethod
+    def _eq_keys(cls) -> tuple[str, ...]:
+        """Return attribute names to use for equality.
+
+        Returns:
+            Tuple of attribute names.
+        """
+        return ()
 
 
-class ABCPropertiesAction(BaseAction):
-    """Get ABC properties."""
-    action_type = "abc_properties"
-    display_name = "ABC属性"
-    description = "获取ABC的属性列表"
+class HashMixin:
+    """Mixin that provides __hash__ based on _eq_attrs."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute get properties."""
-        class_path = params.get('class', None)
-        output_var = params.get('output_var', 'abc_properties_result')
-
-        try:
-            if class_path is None:
-                return ActionResult(success=False, message="class is required")
-            
-            resolved_class = context.resolve_value(class_path) if isinstance(class_path, str) else class_path
-            
-            if isinstance(resolved_class, str):
-                resolved_class = eval(resolved_class, {"__builtins__": __builtins__, "abc": abc}, {})
-            
-            abstract_properties = []
-            for name in dir(resolved_class):
-                if name.startswith('_'):
-                    continue
-                attr = getattr(resolved_class, name, None)
-                if isinstance(attr, (property, abc.abstractproperty)) or getattr(attr, '__isabstractmethod__', False):
-                    abstract_properties.append(name)
-            
-            context.set_variable(output_var, abstract_properties)
-            return ActionResult(success=True, message=f"found {len(abstract_properties)} abstract properties")
-        except Exception as e:
-            return ActionResult(success=False, message=f"properties failed: {e}")
+    def __hash__(self) -> int:
+        return hash(self._eq_attrs())
 
 
-class ABCGetMROAction(BaseAction):
-    """Get method resolution order."""
-    action_type = "abc_get_mro"
-    display_name = "获取MRO"
-    description = "获取类的方法解析顺序"
+class CopyMixin:
+    """Mixin that provides copy functionality."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute get MRO."""
-        class_path = params.get('class', None)
-        output_var = params.get('output_var', 'mro_result')
+    def copy(self) -> Any:
+        """Create a shallow copy.
 
-        try:
-            if class_path is None:
-                return ActionResult(success=False, message="class is required")
-            
-            resolved_class = context.resolve_value(class_path) if isinstance(class_path, str) else class_path
-            
-            if isinstance(resolved_class, str):
-                resolved_class = eval(resolved_class, {"__builtins__": __builtins__, "abc": abc}, {})
-            
-            mro = [cls.__name__ for cls in resolved_class.__mro__]
-            context.set_variable(output_var, mro)
-            return ActionResult(success=True, message=f"MRO: {' -> '.join(mro)}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"get_mro failed: {e}")
+        Returns:
+            Copy of this instance.
+        """
+        cls = self.__class__
+        result = object.__new__(cls)
+        result.__dict__.update(self.__dict__)
+        return result
+
+    def deepcopy(self) -> Any:
+        """Create a deep copy.
+
+        Returns:
+            Deep copy of this instance.
+        """
+        import copy
+        return copy.deepcopy(self)
 
 
-class ABCIsSubclassAction(BaseAction):
-    """Check subclass relationship."""
-    action_type = "abc_is_subclass"
-    display_name = "检查子类"
-    description = "检查类之间的继承关系"
+class RichMixin:
+    """Mixin providing rich comparison operators.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute is subclass check."""
-        class1 = params.get('class1', None)
-        class2 = params.get('class2', None)
-        output_var = params.get('output_var', 'is_subclass_result')
+    Implement _compare_attrs to return (attr, multiplier) tuples
+    where multiplier is 1 for normal, -1 for reversed ordering.
+    """
 
-        try:
-            if class1 is None or class2 is None:
-                return ActionResult(success=False, message="class1 and class2 are required")
-            
-            resolved_class1 = context.resolve_value(class1) if isinstance(class1, str) else class1
-            resolved_class2 = context.resolve_value(class2) if isinstance(class2, str) else class2
-            
-            if isinstance(resolved_class1, str):
-                resolved_class1 = eval(resolved_class1, {"__builtins__": __builtins__, "abc": abc}, {})
-            if isinstance(resolved_class2, str):
-                resolved_class2 = eval(resolved_class2, {"__builtins__": __builtins__, "abc": abc}, {})
-            
-            result = issubclass(resolved_class1, resolved_class2)
-            context.set_variable(output_var, result)
-            return ActionResult(success=True, message=f"issubclass({resolved_class1.__name__}, {resolved_class2.__name__}): {result}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"is_subclass failed: {e}")
+    def _compare_attrs(self) -> list[tuple[str, int]]:
+        """Return list of (attr_name, direction) for comparisons.
+
+        Returns:
+            List of (attribute, direction) pairs.
+        """
+        return []
+
+    def __lt__(self, other: Any) -> bool:
+        return self._compare(other) < 0
+
+    def __le__(self, other: Any) -> bool:
+        return self._compare(other) <= 0
+
+    def __gt__(self, other: Any) -> bool:
+        return self._compare(other) > 0
+
+    def __ge__(self, other: Any) -> bool:
+        return self._compare(other) >= 0
+
+    def _compare(self, other: Any) -> int:
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        self_attrs = self._compare_attrs()
+        other_attrs = other._compare_attrs()
+        for (name, mult) in self_attrs:
+            a = getattr(self, name, None)
+            b = getattr(other, name, None)
+            if a < b:
+                return -1 * mult
+            if a > b:
+                return 1 * mult
+        return 0
 
 
-class ABCCreateAbstractAction(BaseAction):
-    """Create abstract base class."""
-    action_type = "abc_create"
-    display_name = "创建抽象类"
-    description = "创建新的抽象基类"
+class AutoRegister(ABC):
+    """Mixin that auto-registers subclasses in a registry.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute create abstract."""
-        name = params.get('name', 'MyAbstractBase')
-        methods_str = params.get('methods', '[]')
-        output_var = params.get('output_var', 'create_abc_result')
+    Subclasses are automatically added to the registry on creation.
 
-        try:
-            resolved_name = context.resolve_value(name) if isinstance(name, str) else name
-            resolved_methods = context.resolve_value(methods_str) if isinstance(methods_str, str) else methods_str
-            
-            if isinstance(resolved_methods, str):
-                resolved_methods = eval(resolved_methods, {"__builtins__": __builtins__, "abc": abc}, {})
-            
-            attrs = {'__abstractmethods__': set()}
-            for method in resolved_methods:
-                attrs[method] = abc.abstractmethod(lambda self: None)
-                attrs['__abstractmethods__'].add(method)
-            
-            AbstractClass = type(resolved_name, (abc.ABC,), attrs)
-            context.set_variable(output_var, AbstractClass)
-            return ActionResult(success=True, message=f"created abstract class: {resolved_name}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"create_abstract failed: {e}")
+    Example:
+        class Plugin(AutoRegister):
+            pass
+
+        @Plugin.register
+        class MyPlugin(Plugin):
+            pass
+    """
+
+    _registry_: dict[str, type] = {}
+    _registry_key_: str = "name"
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        key = getattr(cls, cls._registry_key_, None)
+        if key is not None:
+            cls._registry_[key] = cls
+
+    @classmethod
+    def get(cls, key: str) -> type | None:
+        """Get a registered class by key.
+
+        Args:
+            key: Registry key.
+
+        Returns:
+            Registered class or None.
+        """
+        return cls._registry_.get(key)
+
+    @classmethod
+    def registered(cls) -> list[type]:
+        """Get all registered classes.
+
+        Returns:
+            List of registered class types.
+        """
+        return list(cls._registry_.values())
+
+
+class PluginBase(AutoRegister):
+    """Base class for plugin systems.
+
+    Plugins register themselves using the @register class method decorator.
+
+    Example:
+        class MyPlugin(PluginBase):
+            _registry_key_ = "plugin_id"
+
+            def execute(self):
+                pass
+    """
+
+    @abstractmethod
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        """Execute the plugin functionality."""
+        ...
+
+    @classmethod
+    def register(cls, name: str | None = None) -> type:
+        """Class decorator to register a plugin.
+
+        Args:
+            name: Optional registry key override.
+
+        Returns:
+            Class decorator.
+        """
+        key = name or cls._registry_key_
+        if key != cls._registry_key_:
+            cls._registry_[name] = cls  # type: ignore
+        return cls
+
+
+class HookMixin:
+    """Mixin that supports hooks/callbacks at specific points.
+
+    Subclasses call self._run_hooks(hook_name, *args) to trigger hooks.
+
+    Example:
+        class EventEmitter(HookMixin):
+            def __init__(self):
+                self._hooks = {}
+                self.register_hook("complete", self.on_complete)
+
+            def complete(self):
+                return self._run_hooks("complete")
+    """
+
+    def __init__(self) -> None:
+        self._hooks: dict[str, list[Callable]] = {}
+
+    def register_hook(self, name: str, callback: Callable) -> None:
+        """Register a hook callback.
+
+        Args:
+            name: Hook name.
+            callback: Function to call when hook fires.
+        """
+        if name not in self._hooks:
+            self._hooks[name] = []
+        self._hooks[name].append(callback)
+
+    def unregister_hook(self, name: str, callback: Callable) -> None:
+        """Unregister a hook callback.
+
+        Args:
+            name: Hook name.
+            callback: Callback to remove.
+        """
+        if name in self._hooks:
+            self._hooks[name].remove(callback)
+
+    def _run_hooks(self, name: str, *args: Any, **kwargs: Any) -> list[Any]:
+        """Run all registered hooks for a name.
+
+        Args:
+            name: Hook name.
+            *args: Positional args to pass to hooks.
+            **kwargs: Keyword args to pass to hooks.
+
+        Returns:
+            List of hook return values.
+        """
+        results = []
+        for callback in self._hooks.get(name, []):
+            try:
+                results.append(callback(*args, **kwargs))
+            except Exception:
+                pass
+        return results
