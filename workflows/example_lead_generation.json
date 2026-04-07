@@ -1,0 +1,175 @@
+{
+  "name": "Lead Generation Workflow",
+  "description": "Automate lead generation from multiple sources",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "lead_sources": ["linkedin", "twitter", "website"],
+    "current_source": 0,
+    "leads_captured": 0,
+    "max_leads_per_source": 10
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "source_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize source index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "sources_loop",
+      "count": 3,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start sources loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "type_text",
+      "text": "https://{{lead_sources[source_index]}}.com/leads",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to leads page"
+    },
+    {
+      "id": 5,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for page load"
+    },
+    {
+      "id": 6,
+      "type": "set_variable",
+      "name": "lead_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 0.2,
+      "comment": "Initialize lead counter"
+    },
+    {
+      "id": 7,
+      "type": "loop",
+      "loop_id": "leads_loop",
+      "count": "{{max_leads_per_source}}",
+      "loop_start": 8,
+      "pre_delay": 0.3,
+      "comment": "Loop through leads"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on lead"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for lead details"
+    },
+    {
+      "id": 10,
+      "type": "screenshot",
+      "save_path": "./screenshots/lead_s{{source_index}}_l{{lead_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture lead screenshot"
+    },
+    {
+      "id": 11,
+      "type": "set_variable",
+      "name": "lead_counter",
+      "value": "{{lead_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment lead counter"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "leads_captured",
+      "value": "{{leads_captured + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment total leads"
+    },
+    {
+      "id": 13,
+      "type": "key_press",
+      "key": "escape",
+      "pre_delay": 0.3,
+      "comment": "Close lead details"
+    },
+    {
+      "id": 14,
+      "type": "key_press",
+      "key": "down",
+      "pre_delay": 0.2,
+      "comment": "Move to next lead"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "source_index",
+      "value": "{{source_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment source index"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{source_index < 3}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more sources"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next source"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/lead_generation_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
