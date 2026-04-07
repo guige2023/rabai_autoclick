@@ -1,0 +1,117 @@
+{
+  "name": "Security Smishing Detection Workflow",
+  "description": "Automate SMS phishing detection and analysis",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "sms_messages_to_analyze": 56,
+    "current_message": 0,
+    "analyzed_messages": 0,
+    "smishing_attempts": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "message_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize message counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open SMS security platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "smishing_detection_loop",
+      "count": "{{sms_messages_to_analyze}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start smishing detection loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select SMS message"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for message analysis"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/smishing_detection_{{message_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture smishing screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "message_counter",
+      "value": "{{message_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment message counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{message_counter < sms_messages_to_analyze}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more messages"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next message"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_smishing_detection_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
