@@ -149,7 +149,8 @@ class RegionSelector(QWidget):
             painter: QPainter to draw with.
         """
         colors = theme_manager.colors
-        painter.setPen(QColor(255, 255, 255))
+        text_color = QColor(colors['text_primary'])
+        painter.setPen(text_color)
         painter.setFont(QFont('Microsoft YaHei', 10))
 
         if self.mode == 'region':
@@ -162,7 +163,9 @@ class RegionSelector(QWidget):
         y = 30
 
         # Use semi-transparent dark background for readability
-        info_bg = QColor(33, 33, 33, 200)
+        bg_color = QColor(colors['bg_dark_widget'])
+        bg_color.setAlpha(200)
+        info_bg = bg_color
         painter.fillRect(
             x - 10, y - 5, text_rect.width() + 20,
             text_rect.height() + 10, info_bg
@@ -333,23 +336,28 @@ class PositionSelector(QWidget):
     
     def paintEvent(self, event) -> None:
         """Paint the widget with screenshot and position info.
-        
+
         Args:
             event: Paint event.
         """
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self._screenshot)
-        
-        painter.setPen(QColor(255, 255, 255))
+
+        colors = theme_manager.colors
+        text_color = QColor(colors['text_primary'])
+        painter.setPen(text_color)
         painter.setFont(QFont('Microsoft YaHei', 10))
-        
+
         info_text = "点击选择位置 | Esc取消"
         text_rect = painter.fontMetrics().boundingRect(info_text)
         x = (self.width() - text_rect.width()) // 2
         y = 30
+
+        bg_color = QColor(colors['bg_dark_widget'])
+        bg_color.setAlpha(200)
         painter.fillRect(
             x - 10, y - 5, text_rect.width() + 20,
-            text_rect.height() + 10, QColor(33, 33, 33, 200)
+            text_rect.height() + 10, bg_color
         )
         painter.drawText(x, y + text_rect.height() - 5, info_text)
 
@@ -357,7 +365,7 @@ class PositionSelector(QWidget):
         pos_text = f"位置: ({cursor_pos.x()}, {cursor_pos.y()})"
         painter.fillRect(
             cursor_pos.x() + 15, cursor_pos.y() - 20,
-            150, 25, QColor(33, 33, 33, 200)
+            150, 25, bg_color
         )
         painter.drawText(cursor_pos.x() + 20, cursor_pos.y() - 3, pos_text)
     
