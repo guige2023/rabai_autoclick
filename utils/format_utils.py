@@ -119,3 +119,39 @@ def dedent(text: str) -> str:
         return text
     min_indent = min(len(l) - len(l.lstrip()) for l in non_empty)
     return "\n".join(l[min_indent:] if min_indent > 0 else l for l in lines)
+
+
+
+def format_table(
+    rows: List[List[str]],
+    headers: Optional[List[str]] = None,
+    align: Optional[List[str]] = None,
+    padding: int = 1
+) -> str:
+    """Format data as ASCII table."""
+    all_rows = ([headers] if headers else []) + rows
+    if not all_rows:
+        return ""
+    col_widths = [max(len(str(row[i])) for row in all_rows) for i in range(len(all_rows[0]))]
+    if align is None:
+        align = ["l"] * len(col_widths)
+    def fmt_row(row, sep="|"):
+        cells = []
+        for i, (val, width) in enumerate(zip(row, col_widths)):
+            pad = " " * padding
+            if align[i] == "r":
+                cells.append(pad + val.rjust(width) + pad)
+            elif align[i] == "c":
+                cells.append(pad + val.center(width) + pad)
+            else:
+                cells.append(pad + val.ljust(width) + pad)
+        return sep + "".join(cells) + sep
+    lines = []
+    if headers:
+        lines.append(fmt_row(headers, "+"))
+        lines.append(fmt_row(headers, "+").replace("|", "-").replace("+", "-"))
+    for row in rows:
+        lines.append(fmt_row(row))
+    return "
+".join(lines)
+
