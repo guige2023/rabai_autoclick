@@ -1248,7 +1248,7 @@ class RecordingWidget(QWidget):
             info_label.setStyleSheet(f"color: {colors['primary']}; font-size: 11px;")
         else:
             info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤")
-            info_label.setStyleSheet("color: gray; font-size: 11px;")
+            info_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 11px;")
         layout.addWidget(info_label)
 
         btn_layout = QHBoxLayout()
