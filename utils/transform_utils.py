@@ -1,313 +1,171 @@
-"""
-Signal transformation utilities.
-
-Provides Fourier transform, Laplace transform, Z-transform,
-discrete cosine transform, and Walsh-Hadamard transform.
-"""
+"""Data transformation utilities: mapping, flattening, pivoting, and reshaping."""
 
 from __future__ import annotations
 
-import math
-from typing import Callable, Sequence
+import json
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any, Callable, Generator
+
+__all__ = [
+    "DataMapper",
+    "Flattener",
+    "Transformer",
+    "pivot",
+    "unpivot",
+    "group_by",
+]
 
 
-def next_power_of_2(n: int) -> int:
-    if n <= 0:
-        return 1
-    return 1 << (n - 1).bit_length()
+class DataMapper:
+    """Map fields from one structure to another using dot notation or path expressions."""
 
+    def __init__(self, mapping: dict[str, str] | None = None) -> None:
+        self._mapping = mapping or {}
 
-def fft(signal: list[complex]) -> list[complex]:
-    """Cooley-Tukey iterative FFT."""
-    n = len(signal)
-    if n == 1:
-        return list(signal)
-    if n & (n - 1):
-        padded = signal + [0.0j] * (next_power_of_2(n) - n)
-        result = fft(padded)
-        return result[:n]
-    n2 = n // 2
-    even = fft([signal[i] for i in range(0, n, 2)])
-    odd = fft([signal[i] for i in range(1, n, 2)])
-    result = [0.0j] * n
-    for k in range(n2):
-        twiddle = math.e ** (-2j * math.pi * k / n) * odd[k]
-        result[k] = even[k] + twiddle
-        result[k + n2] = even[k] - twiddle
-    return result
+    def add_mapping(self, source: str, target: str) -> None:
+        self._mapping[source] = target
 
-
-def ifft(spectrum: list[complex]) -> list[complex]:
-    """Inverse FFT."""
-    n = len(spectrum)
-    conjugated = [c.conjugate() for c in spectrum]
-    time_domain = fft(conjugated)
-    return [c.conjugate() / n for c in time_domain]
-
-
-def dft(signal: list[complex]) -> list[complex]:
-    """
-    Naive O(n^2) Discrete Fourier Transform.
-
-    For production use, prefer fft().
-    """
-    n = len(signal)
-    result: list[complex] = []
-    for k in range(n):
-        sum_val = 0.0j
-        for n_i, x in enumerate(signal):
-            angle = -2j * math.pi * k * n_i / n
-            sum_val += x * math.e ** angle
-        result.append(sum_val)
-    return result
-
-
-def idft(spectrum: list[complex]) -> list[complex]:
-    """Naive inverse DFT."""
-    n = len(spectrum)
-    result: list[complex] = []
-    for k in range(n):
-        sum_val = 0.0j
-        for n_i, X in enumerate(spectrum):
-            angle = 2j * math.pi * k * n_i / n
-            sum_val += X * math.e ** angle
-        result.append(sum_val / n)
-    return result
-
-
-def discrete_cosine_transform(signal: list[float]) -> list[float]:
-    """
-    DCT Type-II (used in JPEG, MP3).
-
-    Args:
-        signal: Input signal
-
-    Returns:
-        DCT coefficients.
-    """
-    n = len(signal)
-    result: list[float] = []
-    for k in range(n):
-        ck = 0.0
-        for i in range(n):
-            ck += signal[i] * math.cos(math.pi * k * (2 * i + 1) / (2 * n))
-        result.append(ck * (2 / n if k != 0 else 1 / n))
-    return result
-
-
-def inverse_dct(dct_coeffs: list[float]) -> list[float]:
-    """Inverse DCT Type-II."""
-    n = len(dct_coeffs)
-    result: list[float] = []
-    for i in range(n):
-        x_i = dct_coeffs[0] / 2
-        for k in range(1, n):
-            x_i += dct_coeffs[k] * math.cos(math.pi * k * (2 * i + 1) / (2 * n))
-        result.append(x_i)
-    return result
-
-
-def walsh_hadamard_transform(signal: list[float]) -> list[float]:
-    """
-    Walsh-Hadamard Transform (Hadamard ordered).
-
-    Useful for signal processing and quantum computing simulation.
-    """
-    n = len(signal)
-    if n & (n - 1):
-        padded = signal + [0.0] * (next_power_of_2(n) - n)
-        result = walsh_hadamard_transform(padded)
-        return result[:n]
-
-    # In-place Hadamard transform
-    h = list(signal)
-    step = 1
-    while step < n:
-        for i in range(0, n, step * 2):
-            for j in range(step):
-                u = h[i + j]
-                v = h[i + j + step]
-                h[i + j] = u + v
-                h[i + j + step] = u - v
-        step *= 2
-    return [x / n for x in h]
-
-
-def laplace_transform(
-    f: Callable[[float], float],
-    s: float,
-    method: str = "gauss_legendre",
-    n_points: int = 32,
-) -> float:
-    """
-    Numerical Laplace transform F(s) = ∫_0^∞ f(t) * e^{-st} dt.
-
-    Args:
-        f: Time-domain function
-        s: Laplace variable (complex allowed)
-        method: Integration method
-        n_points: Number of quadrature points
-
-    Returns:
-        Approximate F(s).
-    """
-    if method == "gauss_legendre":
-        # Gauss-Legendre quadrature on [0, 1]
-        # Use precomputed nodes and weights (order 8)
-        nodes = [0.019855070, 0.10166676, 0.23723379, 0.40828268, 0.59462447, 0.75884936, 0.8822128, 0.98255826]
-        weights = [0.05061427, 0.11119051, 0.15685332, 0.18134189, 0.15685332, 0.11119051, 0.05061427, 0.02783447]
-        # Scale to [0, infinity] using t = -ln(u) transformation
-        result = 0.0
-        for u, w in zip(nodes, weights):
-            t = -math.log(u + 1e-15)
-            result += w * f(t) * math.e ** (-s * t) / u
+    def map(self, data: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for src, tgt in self._mapping.items():
+            val = self._get_nested(data, src)
+            if val is not None:
+                self._set_nested(result, tgt, val)
         return result
-    return 0.0
+
+    def map_list(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [self.map(item) for item in items]
+
+    def _get_nested(self, data: dict[str, Any], path: str) -> Any:
+        parts = path.split(".")
+        current = data
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+            if current is None:
+                return None
+        return current
+
+    def _set_nested(self, data: dict[str, Any], path: str, value: Any) -> None:
+        parts = path.split(".")
+        current = data
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
 
 
-def z_transform(
-    signal: list[float],
-    z: complex,
-) -> complex:
-    """
-    Z-transform: X(z) = Σ x[n] * z^{-n}
+class Flattener:
+    """Flatten nested data structures into dot-notation keys."""
 
-    Args:
-        signal: Discrete-time signal
-        z: Z-domain value (complex)
+    def __init__(self, separator: str = ".") -> None:
+        self.separator = separator
 
-    Returns:
-        X(z) value.
-    """
-    result = 0.0j
-    for n, x in enumerate(signal):
-        result += x * (z ** -n)
-    return result
+    def flatten(self, data: Any, prefix: str = "") -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if isinstance(data, dict):
+            for key, value in data.items():
+                new_key = f"{prefix}{self.separator}{key}" if prefix else key
+                if isinstance(value, dict):
+                    result.update(self.flatten(value, new_key))
+                elif isinstance(value, list):
+                    for i, item in enumerate(value):
+                        result.update(self.flatten(item, f"{new_key}[{i}]"))
+                else:
+                    result[new_key] = item if (item := value) is not None else None
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                new_key = f"{prefix}[{i}]"
+                result.update(self.flatten(item, new_key))
+        else:
+            if prefix:
+                result[prefix] = data
+        return result
 
+    def unflatten(self, data: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in data.items():
+            self._set_path(result, key, value)
+        return result
 
-def short_time_fourier_transform(
-    signal: list[float],
-    window_size: int = 256,
-    hop_size: int = 128,
-) -> list[list[complex]]:
-    """
-    Short-Time Fourier Transform (STFT).
-
-    Args:
-        signal: Input signal
-        window_size: Analysis window size
-        hop_size: Hop between windows
-
-    Returns:
-        2D spectrogram (time frames x frequency bins).
-    """
-    n = len(signal)
-    frames: list[list[complex]] = []
-    for start in range(0, n - window_size, hop_size):
-        frame = signal[start:start + window_size]
-        # Apply Hann window
-        windowed = [frame[i] * 0.5 * (1 - math.cos(2 * math.pi * i / (window_size - 1))) for i in range(window_size)]
-        spectrum = fft([complex(x, 0) for x in windowed])
-        frames.append(spectrum[:window_size // 2])
-    return frames
+    def _set_path(self, data: dict[str, Any], path: str, value: Any) -> None:
+        parts = path.split(self.separator)
+        current = data
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
 
 
-def spectrogram(
-    signal: list[float],
-    sample_rate: float = 1.0,
-    window_size: int = 256,
-    hop_size: int = 128,
-) -> tuple[list[float], list[float], list[list[float]]]:
-    """
-    Compute spectrogram.
+class Transformer:
+    """General-purpose data transformation pipeline."""
 
-    Returns:
-        Tuple of (frequencies, time_bins, magnitude_spectrogram).
-    """
-    stft_result = short_time_fourier_transform(signal, window_size, hop_size)
-    freqs = [i * sample_rate / window_size for i in range(window_size // 2)]
-    times = [i * hop_size / sample_rate for i in range(len(stft_result))]
-    magnitudes = [[abs(v) for v in frame] for frame in stft_result]
-    return freqs, times, magnitudes
+    def __init__(self) -> None:
+        self._steps: list[Callable[[Any], Any]] = []
 
+    def add_step(self, fn: Callable[[Any], Any]) -> "Transformer":
+        self._steps.append(fn)
+        return self
 
-def convolution_theorem(
-    signal1: list[float],
-    signal2: list[float],
-) -> list[float]:
-    """
-    Fast convolution using FFT (O(n log n)).
+    def transform(self, data: Any) -> Any:
+        result = data
+        for step in self._steps:
+            result = step(result)
+        return result
 
-    Args:
-        signal1: First signal
-        signal2: Second signal
-
-    Returns:
-        Convolution result.
-    """
-    n = len(signal1) + len(signal2) - 1
-    n_fft = next_power_of_2(n)
-    f1 = fft([complex(x, 0) for x in signal1] + [0.0j] * (n_fft - len(signal1)))
-    f2 = fft([complex(x, 0) for x in signal2] + [0.0j] * (n_fft - len(signal2)))
-    product = [a * b for a, b in zip(f1, f2)]
-    result = ifft(product)
-    # Take real part (imaginary part should be near zero)
-    return [c.real for c in result[:n]]
+    def transform_many(self, items: list[Any]) -> list[Any]:
+        return [self.transform(item) for item in items]
 
 
-def chirp_z_transform(
-    signal: list[float],
-    omega_start: float,
-    omega_end: float,
-    num_points: int,
-) -> list[complex]:
-    """
-    Chirp Z-transform for arbitrary spiral contour evaluation.
-
-    Args:
-        signal: Input signal
-        omega_start: Start frequency (radians/sample)
-        omega_end: End frequency (radians/sample)
-        num_points: Number of output points
-
-    Returns:
-        Z-transform values along spiral.
-    """
-    n = len(signal)
-    result: list[complex] = []
-    for k in range(num_points):
-        theta = omega_start + (omega_end - omega_start) * k / (num_points - 1)
-        z = math.e ** (1j * theta)
-        val = z_transform(signal, z)
-        result.append(val)
-    return result
+def pivot(
+    data: list[dict[str, Any]],
+    row_key: str,
+    col_key: str,
+    value_key: str,
+    agg_fn: Callable[[list[Any]], Any] = sum,
+) -> dict[str, dict[str, Any]]:
+    """Pivot a list of dicts into a matrix."""
+    matrix: dict[str, dict[str, Any]] = defaultdict(dict)
+    for row in data:
+        row_val = row.get(row_key)
+        col_val = row.get(col_key)
+        val = row.get(value_key)
+        if row_val is not None and col_val is not None:
+            matrix[row_val][col_val] = val
+    return dict(matrix)
 
 
-def goertzel_algorithm(
-    signal: list[float],
-    target_freq: float,
-    sample_rate: float,
-) -> float:
-    """
-    Goertzel algorithm for single DFT bin (efficient for few frequencies).
+def unpivot(
+    matrix: dict[str, dict[str, Any]],
+    row_key_name: str,
+    col_key_name: str,
+    value_key_name: str,
+) -> list[dict[str, Any]]:
+    """Unpivot a matrix back into rows."""
+    rows: list[dict[str, Any]] = []
+    for row_key, cols in matrix.items():
+        for col_key, value in cols.items():
+            rows.append({
+                row_key_name: row_key,
+                col_key_name: col_key,
+                value_key_name: value,
+            })
+    return rows
 
-    Args:
-        signal: Input signal
-        target_freq: Frequency to detect (Hz)
-        sample_rate: Sample rate (Hz)
 
-    Returns:
-        Magnitude at target frequency.
-    """
-    k = int(0.5 + (len(signal) * target_freq) / sample_rate)
-    omega = 2 * math.pi * k / len(signal)
-    coeff = 2 * math.cos(omega)
-    s0 = 0.0
-    s1 = 0.0
-    s2 = 0.0
-    for sample in signal:
-        s0 = sample + coeff * s1 - s2
-        s2 = s1
-        s1 = s0
-    power = s1 * s1 + s2 * s2 - coeff * s1 * s2
-    return math.sqrt(power)
+def group_by(
+    items: list[dict[str, Any]],
+    key: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Group items by a key."""
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        key_val = item.get(key)
+        if key_val is not None:
+            groups[str(key_val)].append(item)
+    return dict(groups)

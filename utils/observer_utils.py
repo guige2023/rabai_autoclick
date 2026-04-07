@@ -1,375 +1,160 @@
-"""
-Observer Pattern & Pub/Sub Implementation
-
-Provides observer pattern with support for:
-- Subject-observer relationships
-- Pub/sub messaging
-- Event filtering and routing
-- Async observer support
-"""
+"""Observer pattern utilities: subject-observer, property change listeners, and signals."""
 
 from __future__ import annotations
 
-import asyncio
-import copy
-import time
-import uuid
-from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+import threading
+from collections import defaultdict
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar
+
+__all__ = [
+    "Observer",
+    "Subject",
+    "Signal",
+    "PropertyObserver",
+    "observable_property",
+]
+
 
 T = TypeVar("T")
 
 
-class EventPriority(Enum):
-    """Priority levels for event handling."""
-    LOW = auto()
-    NORMAL = auto()
-    HIGH = auto()
-    CRITICAL = auto()
-
-
 @dataclass
-class Event:
-    """Base event class."""
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    timestamp: float = field(default_factory=time.time)
-    topic: str = ""
-    data: Any = None
-    source: str = ""
-    priority: EventPriority = EventPriority.NORMAL
-
-    def __repr__(self) -> str:
-        return f"<Event {self.topic} [{self.priority.name}] @{self.timestamp:.2f}>"
-
-
-@dataclass
-class Subscription:
-    """Subscription details for an observer."""
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    topic: str = ""
-    callback: Callable[..., Any] | None = None
-    priority: EventPriority = EventPriority.NORMAL
-    filter_func: Callable[[Event], bool] | None = None
+class Observer(Generic[T]):
+    """Registered observer with callback."""
+    id: str
+    callback: Callable[[T], None]
+    filter: Callable[[T], bool] | None = None
     once: bool = False
-    active: bool = True
-
-    def matches(self, event: Event) -> bool:
-        """Check if this subscription matches an event."""
-        if not self.active:
-            return False
-        if self.topic and self.topic != event.topic and self.topic != "*":
-            return False
-        if self.filter_func and not self.filter_func(event):
-            return False
-        return True
+    priority: int = 0
 
 
-class Observer(ABC):
-    """Abstract observer interface."""
+class Subject(Generic[T]):
+    """Subject that notifies observers of events."""
 
-    @abstractmethod
-    def update(self, event: Event) -> None:
-        """Called when an observed event occurs."""
-        pass
+    def __init__(self) -> None:
+        self._observers: dict[str, list[Observer[T]]] = defaultdict(list)
+        self._lock = threading.RLock()
 
+    def observe(
+        self,
+        observer_id: str,
+        callback: Callable[[T], None],
+        filter_fn: Callable[[T], bool] | None = None,
+        once: bool = False,
+        priority: int = 0,
+    ) -> Observer[T]:
+        obs = Observer(
+            id=observer_id,
+            callback=callback,
+            filter=filter_fn,
+            once=once,
+            priority=priority,
+        )
+        with self._lock:
+            self._observers[observer_id].append(obs)
+            self._observers[observer_id].sort(key=lambda o: o.priority, reverse=True)
+        return obs
 
-class Subject:
-    """
-    Subject class that maintains a list of observers
-    and notifies them of state changes.
-    """
+    def unobserve(self, observer_id: str) -> None:
+        with self._lock:
+            self._observers.pop(observer_id, None)
 
-    def __init__(self):
-        self._observers: dict[str, Observer] = {}
-        self._subscriptions: dict[str, list[Subscription]] = {}
-        self._lock: asyncio.Lock | None = None
-        self._event_history: list[Event] = []
-        self._max_history: int = 100
-
-    def attach(self, observer: Observer, topic: str = "*") -> str:
-        """
-        Attach an observer to this subject.
-
-        Args:
-            observer: The observer to attach.
-            topic: The topic to subscribe to (default: all topics).
-
-        Returns:
-            The subscription ID.
-        """
-        subscription = Subscription(topic=topic, callback=None)
-        self._observers[subscription.id] = observer
-
-        if topic not in self._subscriptions:
-            self._subscriptions[topic] = []
-        self._subscriptions[topic].append(subscription)
-
-        return subscription.id
-
-    def detach(self, observer: Observer | str) -> bool:
-        """
-        Detach an observer from this subject.
-
-        Args:
-            observer: The observer or subscription ID to detach.
-
-        Returns:
-            True if detachment was successful.
-        """
-        if isinstance(observer, str):
-            # Detach by subscription ID
-            if observer in self._observers:
-                sub = self._observers[observer]
-                for topic_subs in self._subscriptions.values():
-                    if sub in topic_subs:
-                        topic_subs.remove(sub)
-                del self._observers[observer]
-                return True
-            return False
-
-        # Detach by observer instance
-        for obs_id, obs in list(self._observers.items()):
-            if obs is observer:
-                del self._observers[obs_id]
-                for topic_subs in self._subscriptions.values():
-                    if obs in [s for s in topic_subs]:
+    def notify(self, event: T) -> int:
+        delivered = 0
+        with self._lock:
+            for obs_id, observers in list(self._observers.items()):
+                to_remove: list[Observer[T]] = []
+                for obs in observers:
+                    if obs.filter and not obs.filter(event):
+                        continue
+                    try:
+                        obs.callback(event)
+                        delivered += 1
+                        if obs.once:
+                            to_remove.append(obs)
+                    except Exception:
                         pass
-                return True
-        return False
+                for obs in to_remove:
+                    observers.remove(obs)
+                if not observers:
+                    del self._observers[obs_id]
+        return delivered
 
-    def subscribe(
+
+class Signal:
+    """Signal/slot pattern for event emission."""
+
+    def __init__(self) -> None:
+        self._slots: list[Callable[..., None]] = []
+        self._lock = threading.Lock()
+
+    def connect(self, slot: Callable[..., None]) -> None:
+        with self._lock:
+            self._slots.append(slot)
+
+    def disconnect(self, slot: Callable[..., None]) -> None:
+        with self._lock:
+            if slot in self._slots:
+                self._slots.remove(slot)
+
+    def emit(self, *args: Any, **kwargs: Any) -> None:
+        with self._lock:
+            slots = list(self._slots)
+        for slot in slots:
+            try:
+                slot(*args, **kwargs)
+            except Exception:
+                pass
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.emit(*args, **kwargs)
+
+
+class PropertyObserver:
+    """Observer for property changes on an object."""
+
+    def __init__(self) -> None:
+        self._callbacks: dict[str, list[Callable[[Any, Any], None]]] = defaultdict(list)
+        self._values: dict[str, Any] = {}
+        self._lock = threading.Lock()
+
+    def watch(
         self,
-        topic: str,
-        callback: Callable[[Event], Any],
-        priority: EventPriority = EventPriority.NORMAL,
-        filter_func: Callable[[Event], bool] | None = None,
-        once: bool = False,
-    ) -> str:
-        """
-        Subscribe to events on a topic.
+        property_name: str,
+        callback: Callable[[Any, Any], None],
+    ) -> None:
+        self._callbacks[property_name].append(callback)
 
-        Args:
-            topic: The topic to subscribe to.
-            callback: Function to call when event occurs.
-            priority: Event priority level.
-            filter_func: Optional filter function.
-            once: If True, unsubscribe after first event.
-
-        Returns:
-            The subscription ID.
-        """
-        subscription = Subscription(
-            topic=topic,
-            callback=callback,
-            priority=priority,
-            filter_func=filter_func,
-            once=once,
-        )
-
-        if topic not in self._subscriptions:
-            self._subscriptions[topic] = []
-        self._subscriptions[topic].append(subscription)
-        self._observers[subscription.id] = subscription  # type: ignore
-
-        return subscription.id
-
-    def unsubscribe(self, subscription_id: str) -> bool:
-        """Unsubscribe by subscription ID."""
-        if subscription_id not in self._observers:
-            return False
-
-        sub = self._observers[subscription_id]
-        if isinstance(sub, Subscription):
-            for topic_subs in self._subscriptions.values():
-                if sub in topic_subs:
-                    topic_subs.remove(sub)
-        del self._observers[subscription_id]
-        return True
-
-    def notify(self, event: Event | None = None, topic: str = "", data: Any = None) -> None:
-        """
-        Notify all observers subscribed to the event topic.
-
-        Args:
-            event: The event to notify about.
-            topic: Alternative: notify by topic string.
-            data: Alternative: notify with data.
-        """
-        if event is None:
-            event = Event(topic=topic, data=data)
-
-        # Store in history
-        self._event_history.append(event)
-        if len(self._event_history) > self._max_history:
-            self._event_history.pop(0)
-
-        # Get matching subscriptions
-        subs = self._subscriptions.get(event.topic, [])
-        subs.extend(self._subscriptions.get("*", []))
-
-        # Sort by priority
-        subs = sorted(subs, key=lambda s: s.priority.value, reverse=True)
-
-        for sub in subs:
-            if sub.matches(event):
+    def set(self, property_name: str, new_value: Any) -> None:
+        old_value = self._values.get(property_name)
+        if old_value != new_value:
+            with self._lock:
+                self._values[property_name] = new_value
+            for cb in self._callbacks.get(property_name, []):
                 try:
-                    if sub.callback:
-                        sub.callback(event)
-                    else:
-                        # It's an observer
-                        obs = self._observers.get(sub.id)
-                        if isinstance(obs, Observer):
-                            obs.update(event)
+                    cb(old_value, new_value)
                 except Exception:
-                    pass  # Swallow observer exceptions
+                    pass
 
-                if sub.once:
-                    self.unsubscribe(sub.id)
-
-    def get_subscription(self, subscription_id: str) -> Subscription | None:
-        """Get a subscription by ID."""
-        obs = self._observers.get(subscription_id)
-        return obs if isinstance(obs, Subscription) else None
-
-    def get_event_history(self, topic: str | None = None, limit: int = 10) -> list[Event]:
-        """Get recent events, optionally filtered by topic."""
-        events = self._event_history
-        if topic:
-            events = [e for e in events if e.topic == topic]
-        return events[-limit:]
-
-    def clear_history(self) -> None:
-        """Clear event history."""
-        self._event_history.clear()
+    def get(self, property_name: str, default: Any = None) -> Any:
+        return self._values.get(property_name, default)
 
 
-class PubSub:
-    """
-    Pub/Sub message broker for decoupled communication.
-    """
+def observable_property(name: str | None = None):
+    """Decorator to make a property observable."""
+    def decorator(fn: Callable[[Any], T]) -> property:
+        prop_name = name or fn.__name__
 
-    def __init__(self, max_history: int = 1000):
-        self._subjects: dict[str, Subject] = {}
-        self._max_history = max_history
-        self._global_history: list[Event] = []
-        self._metrics: dict[str, int] = {}
+        class ObservableDescriptor:
+            def __get__(self, obj: Any, objtype: Any | None = None) -> T:
+                return fn(obj)
 
-    def get_or_create_subject(self, channel: str) -> Subject:
-        """Get or create a subject for a channel."""
-        if channel not in self._subjects:
-            self._subjects[channel] = Subject()
-        return self._subjects[channel]
+            def __set__(self, obj: Any, value: T) -> None:
+                if hasattr(obj, "_property_observer"):
+                    obj._property_observer.set(prop_name, value)
+                fn(obj)  # type: ignore
+                object.__setattr__(obj, f"_{prop_name}", value)
 
-    def publish(
-        self,
-        channel: str,
-        data: Any = None,
-        topic: str = "",
-        priority: EventPriority = EventPriority.NORMAL,
-    ) -> Event:
-        """
-        Publish an event to a channel.
-
-        Args:
-            channel: The channel to publish to.
-            data: Event data.
-            topic: Event topic within the channel.
-            priority: Event priority.
-
-        Returns:
-            The published event.
-        """
-        event = Event(
-            topic=topic or channel,
-            data=data,
-            source=channel,
-            priority=priority,
-        )
-
-        self.get_or_create_subject(channel).notify(event)
-        self._global_history.append(event)
-
-        if len(self._global_history) > self._max_history:
-            self._global_history.pop(0)
-
-        self._metrics[channel] = self._metrics.get(channel, 0) + 1
-
-        return event
-
-    def subscribe(
-        self,
-        channel: str,
-        callback: Callable[[Event], Any],
-        topic: str = "*",
-        priority: EventPriority = EventPriority.NORMAL,
-        filter_func: Callable[[Event], bool] | None = None,
-        once: bool = False,
-    ) -> str:
-        """
-        Subscribe to a channel.
-
-        Returns:
-            Subscription ID.
-        """
-        subject = self.get_or_create_subject(channel)
-        return subject.subscribe(
-            topic=topic,
-            callback=callback,
-            priority=priority,
-            filter_func=filter_func,
-            once=once,
-        )
-
-    def unsubscribe(self, channel: str, subscription_id: str) -> bool:
-        """Unsubscribe from a channel."""
-        subject = self._subjects.get(channel)
-        if subject:
-            return subject.unsubscribe(subscription_id)
-        return False
-
-    def get_channels(self) -> list[str]:
-        """List all channels."""
-        return list(self._subjects.keys())
-
-    def get_metrics(self) -> dict[str, int]:
-        """Get publication metrics by channel."""
-        return copy.copy(self._metrics)
-
-    def get_global_history(self, limit: int = 100) -> list[Event]:
-        """Get global event history."""
-        return self._global_history[-limit:]
-
-
-# Global default pub/sub instance
-_default_pubsub: PubSub | None = None
-
-
-def get_pubsub() -> PubSub:
-    """Get the default global pub/sub instance."""
-    global _default_pubsub
-    if _default_pubsub is None:
-        _default_pubsub = PubSub()
-    return _default_pubsub
-
-
-def publish(channel: str, data: Any = None, topic: str = "") -> Event:
-    """Publish to the default pub/sub instance."""
-    return get_pubsub().publish(channel=channel, data=data, topic=topic)
-
-
-def subscribe(
-    channel: str,
-    callback: Callable[[Event], Any],
-    topic: str = "*",
-    **kwargs: Any,
-) -> str:
-    """Subscribe on the default pub/sub instance."""
-    return get_pubsub().subscribe(channel=channel, callback=callback, topic=topic, **kwargs)
-
-
-def unsubscribe(channel: str, subscription_id: str) -> bool:
-    """Unsubscribe from the default pub/sub instance."""
-    return get_pubsub().unsubscribe(channel=channel, subscription_id=subscription_id)
+        return property(ObservableDescriptor())
+    return decorator

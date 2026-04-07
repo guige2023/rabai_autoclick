@@ -1,173 +1,219 @@
-"""
-Scheduler utilities for task scheduling and time management.
-
-Provides cron parsing, task scheduling, and priority queue
-utilities for job scheduling.
-"""
+"""Scheduler utilities: cron-like scheduling, task queues, and periodic jobs."""
 
 from __future__ import annotations
 
-import datetime
-import heapq
-from typing import Callable, NamedTuple
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable
+
+__all__ = [
+    "Schedule",
+    "Scheduler",
+    "PeriodicJob",
+    "CronSchedule",
+]
 
 
-class ScheduledTask(NamedTuple):
-    """A scheduled task."""
-    run_at: datetime.datetime
-    task_id: str
-    func: Callable
-    args: tuple = ()
-    kwargs: dict = None
+class ScheduleType(Enum):
+    INTERVAL = "interval"
+    CRON = "cron"
+    ONCE = "once"
+    DATETIME = "datetime"
+
+
+@dataclass
+class Schedule:
+    """Base schedule configuration."""
+    schedule_type: ScheduleType
+    interval_seconds: float | None = None
+    cron_expr: str | None = None
+    run_at: datetime | None = None
+
+
+@dataclass
+class PeriodicJob:
+    """A scheduled periodic job."""
+    id: str
+    name: str
+    fn: Callable[..., Any]
+    schedule: Schedule
+    args: tuple[Any, ...] = ()
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    max_instances: int = 1
+    last_run: datetime | None = None
+    next_run: datetime | None = None
+    run_count: int = 0
 
 
 class Scheduler:
-    """
-    In-memory task scheduler.
-
-    Example:
-        >>> scheduler = Scheduler()
-        >>> scheduler.schedule("task1", datetime.datetime.now(), lambda: print("hi"))
-        >>> scheduler.run_pending()
-    """
+    """Thread-safe task scheduler with interval, datetime, and cron support."""
 
     def __init__(self) -> None:
-        self._tasks: list[tuple[datetime.datetime, str, ScheduledTask]] = []
-        self._task_map: dict[str, ScheduledTask] = {}
+        self._jobs: dict[str, PeriodicJob] = {}
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
 
-    def schedule(
+    def add_interval(
         self,
-        task_id: str,
-        run_at: datetime.datetime,
-        func: Callable,
-        *args,
-        **kwargs,
-    ) -> None:
-        """Schedule a task to run at specific time."""
-        task = ScheduledTask(run_at, task_id, func, args, kwargs)
-        self._task_map[task_id] = task
-        heapq.heappush(self._tasks, (run_at, task_id, task))
+        job_id: str,
+        fn: Callable[..., Any],
+        interval_seconds: float,
+        name: str = "",
+        **kwargs: Any,
+    ) -> PeriodicJob:
+        schedule = Schedule(schedule_type=ScheduleType.INTERVAL, interval_seconds=interval_seconds)
+        job = PeriodicJob(
+            id=job_id,
+            name=name or job_id,
+            fn=fn,
+            schedule=schedule,
+            kwargs=kwargs,
+        )
+        with self._lock:
+            self._jobs[job_id] = job
+        return job
 
-    def cancel(self, task_id: str) -> bool:
-        """Cancel a scheduled task."""
-        if task_id in self._task_map:
-            del self._task_map[task_id]
-            self._tasks = [(dt, tid, t) for dt, tid, t in self._tasks if tid != task_id]
-            heapq.heapify(self._tasks)
-            return True
-        return False
+    def add_once(
+        self,
+        job_id: str,
+        fn: Callable[..., Any],
+        run_at: datetime,
+        name: str = "",
+        **kwargs: Any,
+    ) -> PeriodicJob:
+        schedule = Schedule(schedule_type=ScheduleType.DATETIME, run_at=run_at)
+        job = PeriodicJob(
+            id=job_id,
+            name=name or job_id,
+            fn=fn,
+            schedule=schedule,
+        )
+        with self._lock:
+            self._jobs[job_id] = job
+        return job
 
-    def run_pending(self) -> list:
-        """Run all tasks that are due. Returns list of task IDs run."""
-        now = datetime.datetime.now()
-        run = []
-        while self._tasks and self._tasks[0][0] <= now:
-            _, task_id, task = heapq.heappop(self._tasks)
-            if task_id in self._task_map:
-                try:
-                    task.func(*task.args, **(task.kwargs or {}))
-                    run.append(task_id)
-                except Exception as e:
-                    pass
-                finally:
-                    del self._task_map[task_id]
-        return run
+    def remove(self, job_id: str) -> bool:
+        with self._lock:
+            if job_id in self._jobs:
+                del self._jobs[job_id]
+                return True
+            return False
 
-    def next_run(self) -> datetime.datetime | None:
-        """Get datetime of next scheduled task."""
-        if self._tasks:
-            return self._tasks[0][0]
+    def get_next_run(self, job: PeriodicJob) -> datetime | None:
+        if job.schedule.schedule_type == ScheduleType.INTERVAL:
+            interval = job.schedule.interval_seconds or 60.0
+            return datetime.now() + timedelta(seconds=interval)
+        elif job.schedule.schedule_type == ScheduleType.DATETIME:
+            return job.schedule.run_at
         return None
 
-
-class CronField:
-    """Represents a cron field with support for *, ranges, and steps."""
-
-    def __init__(self, field: str, min_val: int, max_val: int) -> None:
-        self.min_val = min_val
-        self.max_val = max_val
-        self.values: set[int] = set()
-        self._parse(field)
-
-    def _parse(self, field: str) -> None:
-        if field == "*":
-            self.values = set(range(self.min_val, self.max_val + 1))
+    def start(self) -> None:
+        if self._running:
             return
-        for part in field.split(","):
-            if "/" in part:
-                base, step = part.split("/")
-                step = int(step)
-                if base == "*":
-                    rng = range(self.min_val, self.max_val + 1)
-                elif "-" in base:
-                    start, end = map(int, base.split("-"))
-                    rng = range(start, end + 1)
-                else:
-                    rng = range(int(base), self.max_val + 1)
-                self.values.update(rng[::step])
-            elif "-" in part:
-                start, end = map(int, part.split("-"))
-                self.values.update(range(start, end + 1))
-            else:
-                val = int(part)
-                if self.min_val <= val <= self.max_val:
-                    self.values.add(val)
+        self._running = True
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
 
-    def matches(self, value: int) -> bool:
-        return value in self.values
+    def stop(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+    def _run_loop(self) -> None:
+        while self._running:
+            now = datetime.now()
+            with self._lock:
+                for job in list(self._jobs.values()):
+                    if not job.enabled:
+                        continue
+                    next_run = self.get_next_run(job)
+                    if next_run and now >= next_run:
+                        self._execute_job(job)
+
+            time.sleep(0.5)
+
+    def _execute_job(self, job: PeriodicJob) -> None:
+        job.last_run = datetime.now()
+        job.run_count += 1
+        next_run = self.get_next_run(job)
+        if next_run:
+            job.next_run = next_run
+
+        try:
+            job.fn(*job.args, **job.kwargs)
+        except Exception:
+            pass
+
+    def list_jobs(self) -> list[PeriodicJob]:
+        with self._lock:
+            return list(self._jobs.values())
+
+    def enable(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.enabled = True
+                return True
+            return False
+
+    def disable(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.enabled = False
+                return True
+            return False
 
 
 class CronSchedule:
-    """
-    Simple cron expression parser.
+    """Simple cron expression parser (5-field: min hour day month weekday)."""
 
-    Format: minute hour day month weekday
-    Supports: * (any), n (exact), n-m (range), n/m (step), n,m (list)
-    """
-
-    def __init__(self, expression: str) -> None:
-        parts = expression.split()
+    @staticmethod
+    def parse(expr: str) -> dict[str, list[int]]:
+        parts = expr.split()
         if len(parts) != 5:
-            raise ValueError("Cron expression must have 5 fields")
-        self.minute = CronField(parts[0], 0, 59)
-        self.hour = CronField(parts[1], 0, 23)
-        self.day = CronField(parts[2], 1, 31)
-        self.month = CronField(parts[3], 1, 12)
-        self.weekday = CronField(parts[4], 0, 6)
+            raise ValueError(f"Invalid cron expr: {expr}")
+        fields = ["minute", "hour", "day", "month", "weekday"]
+        result = {}
+        for field_name, part in zip(fields, parts):
+            result[field_name] = CronSchedule._parse_field(part)
+        return result
 
-    def matches(self, dt: datetime.datetime) -> bool:
-        """Check if datetime matches the cron schedule."""
-        return (
-            self.minute.matches(dt.minute)
-            and self.hour.matches(dt.hour)
-            and self.day.matches(dt.day)
-            and self.month.matches(dt.month)
-            and self.weekday.matches(dt.weekday())
-        )
+    @staticmethod
+    def _parse_field(field_str: str) -> list[int]:
+        if field_str == "*":
+            return list(range(0 if field_str == "*" else 0, 60))
+        values = []
+        for segment in field_str.split(","):
+            if "-" in segment:
+                start, end = segment.split("-", 1)
+                values.extend(range(int(start), int(end) + 1))
+            elif "/" in segment:
+                base, step = segment.split("/", 1)
+                start = 0 if base == "*" else int(base)
+                for i in range(start, 60, int(step)):
+                    values.append(i)
+            else:
+                values.append(int(segment))
+        return sorted(set(values))
 
-    def next_run(self, after: datetime.datetime | None = None) -> datetime.datetime:
-        """Get next datetime matching this cron schedule."""
-        if after is None:
-            after = datetime.datetime.now()
-        dt = after.replace(second=0, microsecond=0) + datetime.timedelta(minutes=1)
-        for _ in range(366 * 24 * 60):
-            if self.matches(dt):
-                return dt
-            dt += datetime.timedelta(minutes=1)
-        raise ValueError("No matching date found")
-
-
-def priority_queue_merge(
-    *iterables,
-    key: Callable = lambda x: x,
-) -> Generator:
-    """Merge multiple sorted iterables using a priority queue."""
-    heaps = [(key(item), i, item) for i, item in enumerate(iterables[0])]
-    heapq.heapify(heaps)
-    while heaps:
-        val, src, item = heapq.heappop(heaps)
-        yield item
-    yield from iterables[1:]
-
-
-from typing import Generator
+    @staticmethod
+    def next_run(expr: str, after: datetime | None = None) -> datetime:
+        parsed = CronSchedule.parse(expr)
+        after = after or datetime.now()
+        minute_vals = parsed["minute"]
+        hour_vals = parsed["hour"]
+        candidates = []
+        for h in hour_vals:
+            for m in minute_vals:
+                if h > after.hour or (h == after.hour and m > after.minute):
+                    candidates.append(datetime(after.year, after.month, after.day, h, m))
+        if not candidates:
+            return after + timedelta(days=1)
+        return min(candidates)
