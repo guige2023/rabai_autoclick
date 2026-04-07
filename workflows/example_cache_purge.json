@@ -1,0 +1,117 @@
+{
+  "name": "Cache Purge Workflow",
+  "description": "Automate CDN and cache purging operations",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "cache_layers": 3,
+    "current_layer": 0,
+    "purged_count": 0,
+    "failed_purges": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "layer_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize layer counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open CDN dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "cache_loop",
+      "count": "{{cache_layers}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start cache purge loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click cache layer"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for purge"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/cache_{{layer_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture cache screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "layer_counter",
+      "value": "{{layer_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment layer counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{layer_counter < cache_layers}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more layers"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next layer"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/cache_purge_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
