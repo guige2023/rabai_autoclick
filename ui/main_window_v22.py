@@ -1307,7 +1307,7 @@ class RecordingWidget(QWidget):
         if self._use_mac_manager:
             self._recording_manager.recording_error.connect(self._on_recording_error)
     
-    def _on_record(self):
+    def _on_record(self) -> None:
         try:
             if not PYNPUT_AVAILABLE:
                 show_error("录制失败", "pynput模块未安装，请运行: pip install pynput")
@@ -1335,8 +1335,8 @@ class RecordingWidget(QWidget):
                 show_error("录制失败", "无法启动录制")
         except Exception as e:
             show_error("录制异常", f"启动录制时发生错误: {str(e)}")
-    
-    def _on_stop(self):
+
+    def _on_stop(self) -> None:
         actions = self._recording_manager.stop_recording()
         self.record_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -1347,13 +1347,13 @@ class RecordingWidget(QWidget):
             self._main_window.activateWindow()
         
         show_toast(f"录制完成，共 {len(actions)} 个操作", 'success')
-    
-    def _on_clear(self):
+
+    def _on_clear(self) -> None:
         self._recording_manager.clear_actions()
         self.action_list.clear()
         self.status_label.setText("状态: 就绪")
-    
-    def _on_optimize(self):
+
+    def _on_optimize(self) -> None:
         actions = self._recording_manager.get_actions()
         if not actions:
             show_warning("提示", "没有可优化的操作，请先录制")
