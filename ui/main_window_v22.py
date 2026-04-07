@@ -2126,18 +2126,20 @@ class MainWindow(QMainWindow):
     
     def _load_actions(self):
         action_info = self.engine.get_action_info()
-        
-        for action_type, info in action_info.items():
-            item = QListWidgetItem(f"{info['display_name']}")
-            item.setData(Qt.UserRole, action_type)
-            item.setToolTip(f"{info['description']}\n类型: {action_type}")
-            self.action_list.addItem(item)
-        
-        self.config_widgets = {}
-        for action_type, info in action_info.items():
-            widget = ActionConfigWidget(info)
-            self.config_widgets[action_type] = widget
-            self.config_stack.addWidget(widget)
+
+        with batch_updates(self.action_list):
+            for action_type, info in action_info.items():
+                item = QListWidgetItem(f"{info['display_name']}")
+                item.setData(Qt.UserRole, action_type)
+                item.setToolTip(f"{info['description']}\n类型: {action_type}")
+                self.action_list.addItem(item)
+
+        with batch_updates(self.config_stack):
+            self.config_widgets = {}
+            for action_type, info in action_info.items():
+                widget = ActionConfigWidget(info)
+                self.config_widgets[action_type] = widget
+                self.config_stack.addWidget(widget)
     
     def _setup_hotkeys(self):
         if self.hotkey_manager.is_available():
