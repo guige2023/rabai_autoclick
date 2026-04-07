@@ -1057,7 +1057,18 @@ class ShareTab(BaseTab):
 
 
 class PipeTab(BaseTab):
-    def setup_ui(self):
+    """
+    Pipeline tab for chaining multiple workflow steps together.
+    
+    Features:
+        - List existing pipeline chains
+        - Create new chains (linear/branch/parallel modes)
+        - Add steps to chains
+        - Execute pipeline chains
+    """
+    
+    def setup_ui(self) -> None:
+        """Set up the tab's UI components."""
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -1140,7 +1151,10 @@ class PipeTab(BaseTab):
         self.run_result = scrolledtext.ScrolledText(frame, height=12, state='disabled')
         self.run_result.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _list_chains(self):
+    def _list_chains(self) -> None:
+        """
+        List all pipeline chains in the tree view.
+        """
         def do_list():
             runner = create_pipeline_runner(str(DATA_DIR))
             return runner.list_chains()
@@ -1155,7 +1169,10 @@ class PipeTab(BaseTab):
 
         self.run_async(do_list, show_result)
 
-    def _create_chain(self):
+    def _create_chain(self) -> None:
+        """
+        Create a new pipeline chain with the specified name and mode.
+        """
         def do_create():
             runner = create_pipeline_runner(str(DATA_DIR))
             pipe_mode = PipeMode(self.pipe_mode_var.get())
@@ -1168,7 +1185,10 @@ class PipeTab(BaseTab):
 
         self.run_async(do_create, show_result)
 
-    def _add_step(self):
+    def _add_step(self) -> None:
+        """
+        Add a step to the selected pipeline chain.
+        """
         selected = self.pipe_tree.selection()
         if not selected:
             messagebox.showwarning("提示", "请先选择一个管道链")
@@ -1197,7 +1217,10 @@ class PipeTab(BaseTab):
 
         self.run_async(do_add, show_result)
 
-    def _run_chain(self):
+    def _run_chain(self) -> None:
+        """
+        Execute the specified pipeline chain with optional input data.
+        """
         chain_id = self.run_chain_var.get()
         if not chain_id:
             messagebox.showwarning("提示", "请输入管道链 ID")
