@@ -778,7 +778,7 @@ class RecordingWidget(QWidget):
         self.action_list.clear()
         self.status_label.setText("状态: 就绪")
 
-    def _on_optimize(self):
+    def _on_optimize(self) -> None:
         actions = self._recording_manager.get_actions()
         if not actions:
             show_warning("提示", "没有可优化的操作")
