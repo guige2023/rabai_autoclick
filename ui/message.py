@@ -12,6 +12,8 @@ from PyQt5.QtWidgets import (
     QApplication, QLabel, QMessageBox, QWidget
 )
 
+from ui.theme import theme_manager, ThemeType
+
 
 # Message level types
 MessageLevel = str  # Literal['info', 'success', 'warning', 'error']
@@ -19,24 +21,17 @@ MessageLevel = str  # Literal['info', 'success', 'warning', 'error']
 
 class ToastWidget(QWidget):
     """Floating toast notification widget."""
-    
+
     closed = pyqtSignal()
-    
-    # Color and icon mappings for different message levels
-    COLORS: Dict[str, str] = {
-        'info': '#2196F3',
-        'success': '#4CAF50',
-        'warning': '#FF9800',
-        'error': '#f44336'
-    }
-    
+
+    # Icon mappings for different message levels (colors come from theme)
     ICONS: Dict[str, str] = {
         'info': 'ℹ',
         'success': '✓',
         'warning': '⚠',
         'error': '✗'
     }
-    
+
     def __init__(
         self,
         message: str,
@@ -45,7 +40,7 @@ class ToastWidget(QWidget):
         parent: Optional[QWidget] = None
     ) -> None:
         """Initialize a toast notification.
-        
+
         Args:
             message: Text message to display.
             level: Message level ('info', 'success', 'warning', 'error').
@@ -54,31 +49,33 @@ class ToastWidget(QWidget):
         """
         super().__init__(parent)
         self._duration: int = duration
+        self._level: MessageLevel = level
         self._init_ui(message, level)
-        
+
         self.setWindowFlags(
             Qt.Window |
             Qt.FramelessWindowHint |
             Qt.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
-        
+
         # Auto-close after duration
         QTimer.singleShot(duration, self.close)
-    
+
     def _init_ui(self, message: str, level: MessageLevel) -> None:
         """Initialize the toast UI.
-        
+
         Args:
             message: Text message to display.
             level: Message level for styling.
         """
         layout = QHBoxLayout(self)
         layout.setContentsMargins(15, 10, 15, 10)
-        
-        color = self.COLORS.get(level, self.COLORS['info'])
+
+        # Use theme-aware colors
+        color = self._get_level_color(level)
         icon = self.ICONS.get(level, self.ICONS['info'])
-        
+
         self.setStyleSheet(f"""
             QWidget {{
                 background-color: {color};
@@ -89,17 +86,34 @@ class ToastWidget(QWidget):
                 font-size: 14px;
             }}
         """)
-        
+
         icon_label = QLabel(icon)
         icon_label.setFont(QFont('Segoe UI', 16))
         icon_label.setStyleSheet("color: white;")
         layout.addWidget(icon_label)
-        
+
         msg_label = QLabel(message)
         msg_label.setWordWrap(True)
         msg_label.setMaximumWidth(400)
         layout.addWidget(msg_label)
-    
+
+    def _get_level_color(self, level: MessageLevel) -> str:
+        """Get color for message level from theme manager.
+
+        Args:
+            level: Message level.
+
+        Returns:
+            Hex color string.
+        """
+        color_map = {
+            'info': theme_manager.get_color('primary'),
+            'success': theme_manager.get_color('success'),
+            'warning': theme_manager.get_color('warning'),
+            'error': theme_manager.get_color('error'),
+        }
+        return color_map.get(level, theme_manager.get_color('primary'))
+
     def show_at_corner(self) -> None:
         """Show the toast in the bottom-right corner of the screen."""
         screen = QApplication.primaryScreen()
@@ -165,8 +179,8 @@ class MessageManager:
         message: str,
         parent: Optional[QWidget] = None
     ) -> None:
-        """Show a success message box with green styling.
-        
+        """Show a success message box with themed styling.
+
         Args:
             title: Dialog title.
             message: Message text.
@@ -177,23 +191,24 @@ class MessageManager:
         msg_box.setIcon(QMessageBox.Information)
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
-        msg_box.setStyleSheet("""
-            QMessageBox {
-                background-color: #f0f9eb;
-            }
-            QPushButton {
-                background-color: #4CAF50;
+        colors = theme_manager.colors
+        msg_box.setStyleSheet(f"""
+            QMessageBox {{
+                background-color: {colors['bg_widget']};
+            }}
+            QPushButton {{
+                background-color: {colors['success']};
                 color: white;
                 padding: 8px 20px;
                 border: none;
                 border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {colors['success_hover']};
+            }}
         """)
         msg_box.exec_()
-    
+
     def warning(
         self,
         title: str,
@@ -201,7 +216,7 @@ class MessageManager:
         parent: Optional[QWidget] = None
     ) -> None:
         """Show a warning message box.
-        
+
         Args:
             title: Dialog title.
             message: Message text.
@@ -209,15 +224,15 @@ class MessageManager:
         """
         parent = parent or self._parent_widget
         QMessageBox.warning(parent, title, message)
-    
+
     def error(
         self,
         title: str,
         message: str,
         parent: Optional[QWidget] = None
     ) -> None:
-        """Show an error message box with red styling.
-        
+        """Show an error message box with themed styling.
+
         Args:
             title: Dialog title.
             message: Message text.
@@ -228,20 +243,21 @@ class MessageManager:
         msg_box.setIcon(QMessageBox.Critical)
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
-        msg_box.setStyleSheet("""
-            QMessageBox {
-                background-color: #fef0f0;
-            }
-            QPushButton {
-                background-color: #f44336;
+        colors = theme_manager.colors
+        msg_box.setStyleSheet(f"""
+            QMessageBox {{
+                background-color: {colors['bg_widget']};
+            }}
+            QPushButton {{
+                background-color: {colors['error']};
                 color: white;
                 padding: 8px 20px;
                 border: none;
                 border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #da190b;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {colors['error_hover']};
+            }}
         """)
         msg_box.exec_()
     
