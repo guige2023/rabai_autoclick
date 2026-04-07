@@ -1,0 +1,158 @@
+{
+  "name": "Invoice Processing Workflow",
+  "description": "Automate invoice data extraction and processing",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "invoices_to_process": 25,
+    "current_invoice": 0,
+    "total_amount": 0,
+    "approved_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "invoice_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize invoice counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open invoice processing system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "invoice_loop",
+      "count": "{{invoices_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start invoice loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on invoice"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for invoice details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/invoice_{{invoice_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture invoice screenshot"
+    },
+    {
+      "id": 8,
+      "type": "ocr",
+      "region": [200, 150, 500, 300],
+      "output_var": "invoice_amount",
+      "pre_delay": 0.3,
+      "comment": "Extract invoice amount"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{invoice_counter % 5 == 0}}",
+      "true_next": 10,
+      "false_next": 12,
+      "pre_delay": 0.1,
+      "comment": "Check if should approve"
+    },
+    {
+      "id": 10,
+      "type": "click_image",
+      "template": "./templates/approve_invoice.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click approve"
+    },
+    {
+      "id": 11,
+      "type": "goto",
+      "step_id": 15,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 12,
+      "type": "click_image",
+      "template": "./templates/reject_invoice.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click reject"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "invoice_counter",
+      "value": "{{invoice_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment invoice counter"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{invoice_counter < invoices_to_process}}",
+      "true_next": 15,
+      "false_next": 16,
+      "pre_delay": 0.1,
+      "comment": "Check if more invoices"
+    },
+    {
+      "id": 15,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next invoice"
+    },
+    {
+      "id": 16,
+      "type": "screenshot",
+      "save_path": "./screenshots/invoice_processing_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}
