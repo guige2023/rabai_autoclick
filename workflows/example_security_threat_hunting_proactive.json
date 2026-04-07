@@ -1,0 +1,117 @@
+{
+  "name": "Security Threat Hunting Proactive Workflow",
+  "description": "Automate proactive threat hunting operations",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "hunt_operations_to_run": 48,
+    "current_hunt": 0,
+    "completed_hunts": 0,
+    "threats_found": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "hunt_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize hunt counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open threat hunting platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "proactive_hunting_loop",
+      "count": "{{hunt_operations_to_run}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start proactive hunting loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Launch hunt operation"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for hunt completion"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/proactive_hunt_{{hunt_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture hunt screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "hunt_counter",
+      "value": "{{hunt_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment hunt counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{hunt_counter < hunt_operations_to_run}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more hunts"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next hunt"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_threat_hunting_proactive_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "name": "Security Incident Playbook Execution Workflow",
+  "description": "Automate incident response playbook execution",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "playbooks_to_execute": 50,
+    "current_playbook": 0,
+    "executed_playbooks": 0,
+    "failed_playbooks": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "playbook_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize playbook counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open incident response platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "playbook_execution_loop",
+      "count": "{{playbooks_to_execute}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start playbook execution loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select incident playbook"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for playbook execution"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/playbook_exec_{{playbook_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture playbook screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "playbook_counter",
+      "value": "{{playbook_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment playbook counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{playbook_counter < playbooks_to_execute}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more playbooks"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next playbook"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_incident_playbook_execution_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
