@@ -1055,7 +1055,7 @@ class ShareTab(BaseTab):
 
         ttk.Label(frame, text="分享类型:").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.link_type_var = tk.StringVar(value="public")
-        ttk.Combobox(frame, textvariable=self.link_type_var, values=["public", "private", "team"], width=30).grid(row=1, column=1, sticky=tk.W, pady=5)
+        ttk.Combobox(frame, textvariable=self.link_type_var, values=SHARE_TYPES, width=30).grid(row=1, column=1, sticky=tk.W, pady=5)
 
         ttk.Label(frame, text="过期天数 (可选):").grid(row=2, column=0, sticky=tk.W, pady=5)
         self.link_expires_var = tk.StringVar()
@@ -1393,7 +1393,7 @@ class PipeTab(BaseTab):
 
         ttk.Label(frame, text="管道模式:").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.pipe_mode_var = tk.StringVar(value="linear")
-        ttk.Combobox(frame, textvariable=self.pipe_mode_var, values=["linear", "branch", "parallel"], width=30).grid(row=1, column=1, sticky=tk.W, pady=5)
+        ttk.Combobox(frame, textvariable=self.pipe_mode_var, values=PIPE_MODES, width=30).grid(row=1, column=1, sticky=tk.W, pady=5)
 
         ttk.Label(frame, text="模式说明:").grid(row=2, column=0, sticky=tk.NW, pady=5)
         desc_text = "linear: 线性管道 (A | B | C)\nbranch: 分支管道 (A -> [B, C])\nparallel: 并行管道"
