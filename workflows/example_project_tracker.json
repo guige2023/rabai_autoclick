@@ -1,0 +1,151 @@
+{
+  "name": "Project Tracker Update Workflow",
+  "description": "Automate project tracker updates and status reporting",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "project_name": "Website Redesign",
+    "milestones": ["design", "development", "testing", "deployment"],
+    "current_milestone": 0,
+    "update_status": "in_progress"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "milestone_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize milestone index"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open project tracker"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tracker"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "milestone_loop",
+      "count": 4,
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start milestone loop"
+    },
+    {
+      "id": 5,
+      "type": "click_image",
+      "template": "./templates/edit_task.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click edit task"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for edit dialog"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 300,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click status field"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{update_status}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Update status"
+    },
+    {
+      "id": 9,
+      "type": "click",
+      "x": 300,
+      "y": 250,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click milestone field"
+    },
+    {
+      "id": 10,
+      "type": "type_text",
+      "text": "{{milestones[milestone_index]}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Set milestone"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/project_update_{{milestone_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture update screenshot"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "milestone_index",
+      "value": "{{milestone_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment milestone index"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{milestone_index < 4}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more milestones"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next milestone"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/project_tracking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
