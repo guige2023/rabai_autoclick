@@ -184,6 +184,7 @@ class StatsDialog(QDialog):
         step_layout = QVBoxLayout()
         
         self.step_table = QTableWidget()
+        self.step_table.setAlternatingRowColors(True)
         self.step_table.setColumnCount(5)
         self.step_table.setHorizontalHeaderLabels([
             "步骤类型", "执行次数", "平均耗时", "总耗时", "成功率"
@@ -204,6 +205,7 @@ class StatsDialog(QDialog):
         layout = QVBoxLayout(tab)
         
         self.step_perf_table = QTableWidget()
+        self.step_perf_table.setAlternatingRowColors(True)
         self.step_perf_table.setColumnCount(7)
         self.step_perf_table.setHorizontalHeaderLabels([
             "步骤类型", "执行次数", "平均耗时", "最小耗时",
@@ -234,6 +236,7 @@ class StatsDialog(QDialog):
         layout = QVBoxLayout(tab)
         
         self.history_table = QTableWidget()
+        self.history_table.setAlternatingRowColors(True)
         self.history_table.setColumnCount(6)
         self.history_table.setHorizontalHeaderLabels([
             "时间", "工作流", "循环次数", "总耗时", "平均循环耗时", "状态"

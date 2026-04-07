@@ -226,9 +226,6 @@ class AccentColors:
         "primary_hover": "#FFA726",
         "primary_active": "#E65100",
     }
-        "status_bar": "#1e1e1e",
-        "status_text": "#d4d4d4",
-    }
 
     # Dark theme colors (same keys, different values)
     DARK = {
@@ -426,7 +423,7 @@ class ThemeManager(QObject):
                 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
                 QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
-                QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; alternate-background-color: {c['bg_hover']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
@@ -629,7 +626,7 @@ class ThemeManager(QObject):
                 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
                 QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
-                QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; alternate-background-color: {c['bg_hover']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}

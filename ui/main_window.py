@@ -571,6 +571,7 @@ class VariablesWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.table = QTableWidget()
+        self.table.setAlternatingRowColors(True)
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["变量名", "值"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
