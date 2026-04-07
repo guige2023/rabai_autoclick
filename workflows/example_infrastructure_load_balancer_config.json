@@ -1,0 +1,117 @@
+{
+  "name": "Infrastructure Load Balancer Configuration Workflow",
+  "description": "Automate load balancer configuration",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "configs_to_apply": 43,
+    "current_config": 0,
+    "applied_configs": 0,
+    "failed_configs": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "config_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize config counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open load balancer management"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for management console"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "load_balancer_config_loop",
+      "count": "{{configs_to_apply}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start load balancer config loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select config for application"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for config application"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/load_balancer_config_{{config_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture config screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "config_counter",
+      "value": "{{config_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment config counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{config_counter < configs_to_apply}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more configs"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next config"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/infrastructure_load_balancer_config_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
