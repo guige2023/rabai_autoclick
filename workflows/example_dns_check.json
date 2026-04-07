@@ -1,0 +1,117 @@
+{
+  "name": "DNS Health Check Workflow",
+  "description": "Automate DNS server health verification",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "dns_servers": 5,
+    "current_server": 0,
+    "healthy_servers": 0,
+    "failed_checks": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "dns_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize DNS counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open DNS admin panel"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for panel"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "dns_loop",
+      "count": "{{dns_servers}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start DNS check loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click DNS server"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for response"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/dns_{{dns_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture DNS screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "dns_counter",
+      "value": "{{dns_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment DNS counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{dns_counter < dns_servers}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more servers"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next server"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/dns_health_check_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
