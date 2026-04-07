@@ -1,0 +1,117 @@
+{
+  "name": "Nonprofit Donor Management Workflow",
+  "description": "Automate nonprofit donor management",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "donors_to_manage": 53,
+    "current_donor": 0,
+    "managed_donors": 0,
+    "donations_received": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "donor_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize donor counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open donor management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "donor_management_loop",
+      "count": "{{donors_to_manage}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start donor management loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select donor for management"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for management action"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/donor_management_{{donor_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture management screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "donor_counter",
+      "value": "{{donor_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment donor counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{donor_counter < donors_to_manage}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more donors"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next donor"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/nonprofit_donor_management_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
