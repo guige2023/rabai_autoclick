@@ -1,23 +1,25 @@
-"""Random action module for RabAI AutoClick.
+"""Random generation action module for RabAI AutoClick.
 
-Provides random value generation operations:
-- RandomIntAction: Generate random integer
-- RandomFloatAction: Generate random float
+Provides random operations:
+- RandomIntAction: Random integer
+- RandomFloatAction: Random float
 - RandomChoiceAction: Random choice from list
-- RandomSampleAction: Random sample from list
-- RandomStringAction: Generate random string
-- RandomUuidAction: Generate random UUID (alias)
+- RandomSampleAction: Random sample
 - RandomShuffleAction: Shuffle list
+- RandomPasswordAction: Generate random password
+- RandomUuidAction: Generate UUID
 """
+
+from __future__ import annotations
 
 import random
 import string
-import uuid
-from typing import Any, Dict, List
-
 import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import uuid
+from typing import Any, Dict, List, Optional
+
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
@@ -29,48 +31,33 @@ class RandomIntAction(BaseAction):
     description = "生成随机整数"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute random int.
-
-        Args:
-            context: Execution context.
-            params: Dict with min_val, max_val, output_var.
-
-        Returns:
-            ActionResult with random int.
-        """
-        min_val = params.get('min_val', 0)
-        max_val = params.get('max_val', 100)
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute random int."""
+        min_val = params.get('min', 0)
+        max_val = params.get('max', 100)
+        seed = params.get('seed', None)
         output_var = params.get('output_var', 'random_int')
 
-        valid, msg = self.validate_type(min_val, int, 'min_val')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
         try:
-            resolved_min = context.resolve_value(min_val)
-            resolved_max = context.resolve_value(max_val)
+            if seed is not None:
+                resolved_seed = context.resolve_value(seed) if context else seed
+                random.seed(resolved_seed)
 
-            result = random.randint(resolved_min, resolved_max)
-            context.set(output_var, result)
+            resolved_min = context.resolve_value(min_val) if context else min_val
+            resolved_max = context.resolve_value(max_val) if context else max_val
 
-            return ActionResult(
-                success=True,
-                message=f"随机整数: {result}",
-                data={'value': result, 'range': [resolved_min, resolved_max], 'output_var': output_var}
-            )
+            result = random.randint(int(resolved_min), int(resolved_max))
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Random int: {result}", data={'result': result})
         except Exception as e:
-            return ActionResult(success=False, message=f"随机整数生成失败: {str(e)}")
+            return ActionResult(success=False, message=f"Random int error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['min_val', 'max_val']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'random_int'}
+        return {'min': 0, 'max': 100, 'seed': None, 'output_var': 'random_int'}
 
 
 class RandomFloatAction(BaseAction):
@@ -80,52 +67,33 @@ class RandomFloatAction(BaseAction):
     description = "生成随机浮点数"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute random float.
-
-        Args:
-            context: Execution context.
-            params: Dict with min_val, max_val, decimals, output_var.
-
-        Returns:
-            ActionResult with random float.
-        """
-        min_val = params.get('min_val', 0.0)
-        max_val = params.get('max_val', 1.0)
-        decimals = params.get('decimals', 2)
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute random float."""
+        min_val = params.get('min', 0.0)
+        max_val = params.get('max', 1.0)
+        seed = params.get('seed', None)
         output_var = params.get('output_var', 'random_float')
 
-        valid, msg = self.validate_type(min_val, (int, float), 'min_val')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
         try:
-            resolved_min = context.resolve_value(min_val)
-            resolved_max = context.resolve_value(max_val)
-            resolved_decimals = context.resolve_value(decimals)
+            if seed is not None:
+                resolved_seed = context.resolve_value(seed) if context else seed
+                random.seed(resolved_seed)
 
-            result = random.uniform(resolved_min, resolved_max)
-            result = round(result, resolved_decimals)
+            resolved_min = context.resolve_value(min_val) if context else min_val
+            resolved_max = context.resolve_value(max_val) if context else max_val
 
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"随机浮点数: {result}",
-                data={'value': result, 'range': [resolved_min, resolved_max], 'output_var': output_var}
-            )
+            result = random.uniform(float(resolved_min), float(resolved_max))
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Random float: {result}", data={'result': result})
         except Exception as e:
-            return ActionResult(success=False, message=f"随机浮点数生成失败: {str(e)}")
+            return ActionResult(success=False, message=f"Random float error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['min_val', 'max_val']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'decimals': 2, 'output_var': 'random_float'}
+        return {'min': 0.0, 'max': 1.0, 'seed': None, 'output_var': 'random_float'}
 
 
 class RandomChoiceAction(BaseAction):
@@ -135,214 +103,214 @@ class RandomChoiceAction(BaseAction):
     description = "从列表随机选择"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute random choice.
-
-        Args:
-            context: Execution context.
-            params: Dict with choices, output_var.
-
-        Returns:
-            ActionResult with random choice.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute random choice."""
         choices = params.get('choices', [])
+        count = params.get('count', 1)
+        seed = params.get('seed', None)
         output_var = params.get('output_var', 'random_choice')
 
-        valid, msg = self.validate_type(choices, list, 'choices')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not choices:
+            return ActionResult(success=False, message="choices is required")
 
         try:
-            resolved_choices = context.resolve_value(choices)
+            if seed is not None:
+                resolved_seed = context.resolve_value(seed) if context else seed
+                random.seed(resolved_seed)
 
-            if not resolved_choices:
-                return ActionResult(success=False, message="choices不能为空")
+            resolved = context.resolve_value(choices) if context else choices
+            resolved_count = context.resolve_value(count) if context else count
 
-            result = random.choice(resolved_choices)
-            context.set(output_var, result)
+            if resolved_count == 1:
+                result = random.choice(resolved)
+            else:
+                result = random.sample(resolved, min(int(resolved_count), len(resolved)))
 
-            return ActionResult(
-                success=True,
-                message=f"随机选择: {result}",
-                data={'value': result, 'choices': resolved_choices, 'output_var': output_var}
-            )
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Random choice: {result}", data={'result': result})
         except Exception as e:
-            return ActionResult(success=False, message=f"随机选择失败: {str(e)}")
+            return ActionResult(success=False, message=f"Random choice error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
         return ['choices']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'random_choice'}
+        return {'count': 1, 'seed': None, 'output_var': 'random_choice'}
 
 
 class RandomSampleAction(BaseAction):
     """Random sample from list."""
     action_type = "random_sample"
     display_name = "随机抽样"
-    description = "从列表随机抽样"
+    description = "随机抽样"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute random sample.
-
-        Args:
-            context: Execution context.
-            params: Dict with population, count, output_var.
-
-        Returns:
-            ActionResult with random sample.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute random sample."""
         population = params.get('population', [])
-        count = params.get('count', 1)
+        k = params.get('k', 1)
+        seed = params.get('seed', None)
         output_var = params.get('output_var', 'random_sample')
 
-        valid, msg = self.validate_type(population, list, 'population')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not population:
+            return ActionResult(success=False, message="population is required")
 
         try:
-            resolved_pop = context.resolve_value(population)
-            resolved_count = context.resolve_value(count)
+            if seed is not None:
+                resolved_seed = context.resolve_value(seed) if context else seed
+                random.seed(resolved_seed)
 
-            if not resolved_pop:
-                return ActionResult(success=False, message="population不能为空")
+            resolved_pop = context.resolve_value(population) if context else population
+            resolved_k = context.resolve_value(k) if context else k
 
-            count = min(resolved_count, len(resolved_pop))
-            result = random.sample(resolved_pop, count)
+            result = random.sample(list(resolved_pop), min(int(resolved_k), len(resolved_pop)))
 
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"随机抽样: {len(result)} 个",
-                data={'sample': result, 'count': len(result), 'output_var': output_var}
-            )
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Sampled {len(result)} items", data={'result': result})
         except Exception as e:
-            return ActionResult(success=False, message=f"随机抽样失败: {str(e)}")
+            return ActionResult(success=False, message=f"Random sample error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['population', 'count']
+        return ['population']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'random_sample'}
-
-
-class RandomStringAction(BaseAction):
-    """Generate random string."""
-    action_type = "random_string"
-    display_name = "随机字符串"
-    description = "生成随机字符串"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute random string.
-
-        Args:
-            context: Execution context.
-            params: Dict with length, charset, output_var.
-
-        Returns:
-            ActionResult with random string.
-        """
-        length = params.get('length', 16)
-        charset = params.get('charset', 'alphanumeric')
-        output_var = params.get('output_var', 'random_string')
-
-        valid, msg = self.validate_type(length, int, 'length')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_length = context.resolve_value(length)
-            resolved_charset = context.resolve_value(charset)
-
-            if resolved_charset == 'alphanumeric':
-                chars = string.ascii_letters + string.digits
-            elif resolved_charset == 'alpha':
-                chars = string.ascii_letters
-            elif resolved_charset == 'digits':
-                chars = string.digits
-            elif resolved_charset == 'ascii':
-                chars = string.ascii_letters + string.digits + string.punctuation
-            else:
-                chars = resolved_charset
-
-            result = ''.join(random.choice(chars) for _ in range(resolved_length))
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"随机字符串: {result[:8]}...",
-                data={'value': result, 'length': resolved_length, 'charset': resolved_charset, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"随机字符串生成失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['length']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'charset': 'alphanumeric', 'output_var': 'random_string'}
+        return {'k': 1, 'seed': None, 'output_var': 'random_sample'}
 
 
 class RandomShuffleAction(BaseAction):
     """Shuffle list."""
     action_type = "random_shuffle"
-    display_name = "随机洗牌"
+    display_name = "随机打乱"
     description = "随机打乱列表"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute shuffle.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, output_var.
-
-        Returns:
-            ActionResult with shuffled list.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute shuffle."""
         items = params.get('items', [])
-        output_var = params.get('output_var', 'shuffled_items')
+        seed = params.get('seed', None)
+        copy_list = params.get('copy', True)
+        output_var = params.get('output_var', 'shuffled_list')
 
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not items:
+            return ActionResult(success=False, message="items is required")
 
         try:
-            resolved_items = context.resolve_value(items)
-            shuffled = resolved_items.copy()
+            if seed is not None:
+                resolved_seed = context.resolve_value(seed) if context else seed
+                random.seed(resolved_seed)
+
+            resolved = context.resolve_value(items) if context else items
+
+            if copy_list:
+                import copy
+                shuffled = copy.copy(resolved)
+            else:
+                shuffled = list(resolved)
+
             random.shuffle(shuffled)
 
-            context.set(output_var, shuffled)
-
-            return ActionResult(
-                success=True,
-                message=f"列表已打乱: {len(shuffled)} 个元素",
-                data={'shuffled': shuffled, 'output_var': output_var}
-            )
+            if context:
+                context.set(output_var, shuffled)
+            return ActionResult(success=True, message=f"Shuffled {len(shuffled)} items", data={'result': shuffled})
         except Exception as e:
-            return ActionResult(success=False, message=f"随机洗牌失败: {str(e)}")
+            return ActionResult(success=False, message=f"Shuffle error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
         return ['items']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'shuffled_items'}
+        return {'seed': None, 'copy': True, 'output_var': 'shuffled_list'}
+
+
+class RandomPasswordAction(BaseAction):
+    """Generate random password."""
+    action_type = "random_password"
+    display_name = "随机密码"
+    description = "生成随机密码"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute password generation."""
+        length = params.get('length', 16)
+        include_uppercase = params.get('include_uppercase', True)
+        include_lowercase = params.get('include_lowercase', True)
+        include_digits = params.get('include_digits', True)
+        include_special = params.get('include_special', True)
+        output_var = params.get('output_var', 'random_password')
+
+        try:
+            resolved_len = context.resolve_value(length) if context else length
+
+            chars = ''
+            if include_lowercase:
+                chars += string.ascii_lowercase
+            if include_uppercase:
+                chars += string.ascii_uppercase
+            if include_digits:
+                chars += string.digits
+            if include_special:
+                chars += string.punctuation
+
+            if not chars:
+                chars = string.ascii_letters
+
+            result = ''.join(random.choice(chars) for _ in range(int(resolved_len)))
+
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Generated password ({len(result)} chars)", data={'password': result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Password error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return []
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            'length': 16, 'include_uppercase': True, 'include_lowercase': True,
+            'include_digits': True, 'include_special': True, 'output_var': 'random_password'
+        }
+
+
+class RandomUuidAction(BaseAction):
+    """Generate UUID."""
+    action_type = "random_uuid"
+    display_name = "随机UUID"
+    description = "生成随机UUID"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute UUID generation."""
+        version = params.get('version', 4)  # 1, 3, 4
+        namespace = params.get('namespace', None)
+        name = params.get('name', None)
+        output_var = params.get('output_var', 'random_uuid')
+
+        try:
+            resolved_version = context.resolve_value(version) if context else version
+
+            if int(resolved_version) == 1:
+                result = str(uuid.uuid1())
+            elif int(resolved_version) == 3:
+                ns = context.resolve_value(namespace) if context else namespace
+                nm = context.resolve_value(name) if context else name
+                if ns and nm:
+                    result = str(uuid.uuid3(uuid.UUID(ns), nm))
+                else:
+                    result = str(uuid.uuid3(uuid.NAMESPACE_DNS, str(name or 'default')))
+            else:
+                result = str(uuid.uuid4())
+
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"UUID: {result}", data={'uuid': result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"UUID error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return []
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'version': 4, 'namespace': None, 'name': None, 'output_var': 'random_uuid'}
