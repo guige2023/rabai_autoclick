@@ -683,50 +683,51 @@ class RecordingWidget(QWidget):
         self._recording_manager = RecordingManager()
         self._init_ui()
         self._connect_signals()
-    
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        
+
         info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤")
-        info_label.setStyleSheet("color: gray; font-size: 11px;")
+        colors = theme_manager.colors
+        info_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 11px;")
         layout.addWidget(info_label)
-        
+
         btn_layout = QHBoxLayout()
-        
+
         self.record_btn = QPushButton("🔴 开始录制")
-        self.record_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
+        self.record_btn.setStyleSheet(f"background-color: {colors['error']}; color: white; font-weight: bold;")
         self.stop_btn = QPushButton("⏹ 停止录制")
         self.stop_btn.setEnabled(False)
         self.clear_btn = QPushButton("清空")
         self.optimize_btn = QPushButton("优化")
-        
+
         btn_layout.addWidget(self.record_btn)
         btn_layout.addWidget(self.stop_btn)
         btn_layout.addWidget(self.clear_btn)
         btn_layout.addWidget(self.optimize_btn)
         layout.addLayout(btn_layout)
-        
+
         self.action_list = QListWidget()
         layout.addWidget(self.action_list)
-        
+
         self.status_label = QLabel("状态: 就绪")
         layout.addWidget(self.status_label)
-        
+
         if not PYNPUT_AVAILABLE:
             self.record_btn.setEnabled(False)
             self.status_label.setText("状态: pynput未安装，录屏功能不可用")
-            self.status_label.setStyleSheet("color: red;")
-    
+            self.status_label.setStyleSheet(f"color: {colors['error']};")
+
     def _connect_signals(self):
         self.record_btn.clicked.connect(self._on_record)
         self.stop_btn.clicked.connect(self._on_stop)
         self.clear_btn.clicked.connect(self._on_clear)
         self.optimize_btn.clicked.connect(self._on_optimize)
-        
+
         self._recording_manager.action_recorded.connect(self._on_action_recorded)
         self._recording_manager.recording_started.connect(self._on_recording_started)
         self._recording_manager.recording_stopped.connect(self._on_recording_stopped)
-    
+
     def _on_record(self):
         if self._recording_manager.start_recording():
             self.record_btn.setEnabled(False)
@@ -735,47 +736,48 @@ class RecordingWidget(QWidget):
             show_toast("开始录制操作", 'info')
         else:
             show_error("录制失败", "无法启动录制")
-    
+
     def _on_stop(self):
         actions = self._recording_manager.stop_recording()
         self.record_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_label.setText(f"状态: 已录制 {len(actions)} 个操作")
         show_toast(f"录制完成，共 {len(actions)} 个操作", 'success')
-    
+
     def _on_clear(self):
         self._recording_manager.clear_actions()
         self.action_list.clear()
         self.status_label.setText("状态: 就绪")
-    
+
     def _on_optimize(self):
         actions = self._recording_manager.get_actions()
         if not actions:
             show_warning("提示", "没有可优化的操作")
             return
-        
+
         editor = RecordingEditor(actions)
         merged = editor.merge_consecutive_types()
         optimized = editor.optimize_delays()
-        
+
         self._recording_manager._actions = editor.get_actions()
         self._refresh_action_list()
-        
+
         show_toast(f"优化完成：合并 {merged} 个，优化 {optimized} 个延时", 'success')
-    
+
     def _on_action_recorded(self, action_type: str, params: dict):
         self.action_list.addItem(f"{action_type}: {params}")
-    
+
     def _on_recording_started(self):
         self.action_list.clear()
-    
+
     def _on_recording_stopped(self, actions):
         pass
-    
+
     def _refresh_action_list(self):
-        self.action_list.clear()
-        for action in self._recording_manager.get_actions():
-            self.action_list.addItem(f"{action.action_type}: {action.params}")
+        with batch_updates(self.action_list):
+            self.action_list.clear()
+            for action in self._recording_manager.get_actions():
+                self.action_list.addItem(f"{action.action_type}: {action.params}")
     
     def get_workflow(self) -> Dict[str, Any]:
         return self._recording_manager.to_workflow()
