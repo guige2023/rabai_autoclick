@@ -1,296 +1,265 @@
-"""Math operations action module for RabAI AutoClick.
+"""Math utilities action for mathematical operations.
 
-Provides math operations:
-- MathBasicAction: Basic arithmetic
-- MathAdvancedAction: Advanced math functions
-- MathStatisticsAction: Statistical functions
-- MathTrigonometryAction: Trigonometric functions
-- MathRandomAction: Random number generation
+This module provides mathematical operations including
+arithmetic, trigonometry, statistics, and random number generation.
+
+Example:
+    >>> action = MathAction()
+    >>> result = action.execute(operation="add", a=5, b=3)
 """
+
+from __future__ import annotations
 
 import math
 import random
-import statistics
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from dataclasses import dataclass
+from typing import Any, Optional
 
 
-class MathBasicAction(BaseAction):
-    """Basic arithmetic."""
-    action_type = "math_basic"
-    display_name = "基础数学"
-    description = "基础数学运算"
+class MathAction:
+    """Mathematical operations action.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "add")
-            a = params.get("a", 0)
-            b = params.get("b", 0)
-            values = params.get("values", [])
+    Provides arithmetic, trigonometry, statistics,
+    and random number generation.
 
-            if values:
-                nums = [float(v) for v in values if v is not None]
-            else:
-                nums = [float(a), float(b)]
+    Example:
+        >>> action = MathAction()
+        >>> result = action.execute(
+        ...     operation="sqrt",
+        ...     value=16
+        ... )
+    """
 
-            if operation == "add":
-                result = sum(nums)
-            elif operation == "subtract":
-                if len(nums) >= 2:
-                    result = nums[0] - sum(nums[1:])
-                else:
-                    result = nums[0]
-            elif operation == "multiply":
-                result = 1
-                for n in nums:
-                    result *= n
-            elif operation == "divide":
-                if nums[1] == 0:
-                    return ActionResult(success=False, message="Division by zero")
-                result = nums[0] / nums[1]
-            elif operation == "modulo":
-                result = nums[0] % nums[1]
-            elif operation == "power":
-                result = nums[0] ** nums[1]
-            elif operation == "sqrt":
-                result = math.sqrt(nums[0])
-            elif operation == "abs":
-                result = abs(nums[0])
-            elif operation == "floor":
-                result = math.floor(nums[0])
-            elif operation == "ceil":
-                result = math.ceil(nums[0])
-            elif operation == "round":
-                decimals = params.get("decimals", 0)
-                result = round(nums[0], decimals)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+    def __init__(self) -> None:
+        """Initialize math action."""
+        pass
 
-            return ActionResult(success=True, message=f"{operation} = {result}", data={"result": result})
+    def execute(
+        self,
+        operation: str,
+        a: Any = None,
+        b: Any = None,
+        value: Any = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute math operation.
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Math error: {str(e)}")
+        Args:
+            operation: Operation (add, sqrt, sin, etc.).
+            a: First operand.
+            b: Second operand.
+            value: Single value.
+            **kwargs: Additional parameters.
 
+        Returns:
+            Operation result dictionary.
 
-class MathAdvancedAction(BaseAction):
-    """Advanced math functions."""
-    action_type = "math_advanced"
-    display_name = "高等数学"
-    description = "高等数学函数"
+        Raises:
+            ValueError: If operation is invalid.
+        """
+        op = operation.lower()
+        result: dict[str, Any] = {"operation": op, "success": True}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "")
-            value = params.get("value", 0)
-            values = params.get("values", [])
+        # Arithmetic
+        if op == "add":
+            if a is None or b is None:
+                raise ValueError("a and b required")
+            result["value"] = a + b
 
-            if values:
-                nums = [float(v) for v in values]
-            else:
-                nums = [float(value)]
+        elif op == "subtract":
+            if a is None or b is None:
+                raise ValueError("a and b required")
+            result["value"] = a - b
 
-            if operation == "log":
-                base = params.get("base", math.e)
-                if len(nums) >= 2:
-                    result = math.log(nums[1], nums[0])
-                else:
-                    result = math.log(nums[0], base)
-            elif operation == "log10":
-                result = math.log10(nums[0])
-            elif operation == "log2":
-                result = math.log2(nums[0])
-            elif operation == "exp":
-                result = math.exp(nums[0])
-            elif operation == "factorial":
-                result = math.factorial(int(nums[0]))
-            elif operation == "gcd":
-                if len(nums) >= 2:
-                    result = math.gcd(int(nums[0]), int(nums[1]))
-                else:
-                    result = nums[0]
-            elif operation == "lcm":
-                if len(nums) >= 2:
-                    result = abs(nums[0] * nums[1]) // math.gcd(int(nums[0]), int(nums[1]))
-                else:
-                    result = nums[0]
-            elif operation == "degrees":
-                result = math.degrees(nums[0])
-            elif operation == "radians":
-                result = math.radians(nums[0])
-            elif operation == "hypot":
-                result = math.hypot(*nums)
-            elif operation == "isfinite":
-                result = math.isfinite(nums[0])
-            elif operation == "isinf":
-                result = math.isinf(nums[0])
-            elif operation == "isnan":
-                result = math.isnan(nums[0])
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+        elif op == "multiply":
+            if a is None or b is None:
+                raise ValueError("a and b required")
+            result["value"] = a * b
 
-            return ActionResult(success=True, message=f"{operation} = {result}", data={"result": result})
+        elif op == "divide":
+            if a is None or b is None:
+                raise ValueError("a and b required")
+            if b == 0:
+                return {"success": False, "error": "Division by zero"}
+            result["value"] = a / b
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Advanced math error: {str(e)}")
+        elif op == "modulo":
+            if a is None or b is None:
+                raise ValueError("a and b required")
+            result["value"] = a % b
 
+        elif op == "power":
+            if a is None or b is None:
+                raise ValueError("a and b required")
+            result["value"] = a ** b
 
-class MathStatisticsAction(BaseAction):
-    """Statistical functions."""
-    action_type = "math_statistics"
-    display_name = "统计函数"
-    description = "统计函数"
+        elif op == "floor":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.floor(value)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "mean")
-            values = params.get("values", [])
+        elif op == "ceil":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.ceil(value)
 
+        elif op == "round":
+            if value is None:
+                raise ValueError("value required")
+            digits = kwargs.get("digits", 0)
+            result["value"] = round(value, digits)
+
+        # Trigonometry
+        elif op == "sin":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.sin(math.radians(value))
+
+        elif op == "cos":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.cos(math.radians(value))
+
+        elif op == "tan":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.tan(math.radians(value))
+
+        elif op == "asin":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.degrees(math.asin(value))
+
+        elif op == "acos":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.degrees(math.acos(value))
+
+        elif op == "atan":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.degrees(math.atan(value))
+
+        # Powers and roots
+        elif op == "sqrt":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.sqrt(value)
+
+        elif op == "log":
+            if value is None:
+                raise ValueError("value required")
+            base = kwargs.get("base", math.e)
+            result["value"] = math.log(value, base)
+
+        elif op == "log10":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.log10(value)
+
+        elif op == "exp":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.exp(value)
+
+        # Constants
+        elif op == "pi":
+            result["value"] = math.pi
+
+        elif op == "e":
+            result["value"] = math.e
+
+        # Statistics
+        elif op == "sum":
+            values = kwargs.get("values", [])
             if not values:
-                return ActionResult(success=False, message="No values provided")
+                raise ValueError("values required")
+            result["value"] = sum(values)
 
-            nums = [float(v) for v in values]
+        elif op == "avg" or op == "mean":
+            values = kwargs.get("values", [])
+            if not values:
+                raise ValueError("values required")
+            result["value"] = sum(values) / len(values)
 
-            if operation == "mean":
-                result = statistics.mean(nums)
-            elif operation == "median":
-                result = statistics.median(nums)
-            elif operation == "mode":
-                result = statistics.mode(nums)
-            elif operation == "stdev":
-                result = statistics.stdev(nums)
-            elif operation == "variance":
-                result = statistics.variance(nums)
-            elif operation == "pvariance":
-                result = statistics.pvariance(nums)
-            elif operation == "sum":
-                result = sum(nums)
-            elif operation == "min":
-                result = min(nums)
-            elif operation == "max":
-                result = max(nums)
-            elif operation == "count":
-                result = len(nums)
-            elif operation == "median_low":
-                result = statistics.median_low(nums)
-            elif operation == "median_high":
-                result = statistics.median_high(nums)
-            elif operation == "quantiles":
-                n = params.get("n", 4)
-                result = statistics.quantiles(nums, n=n)
+        elif op == "median":
+            values = kwargs.get("values", [])
+            if not values:
+                raise ValueError("values required")
+            sorted_vals = sorted(values)
+            n = len(sorted_vals)
+            if n % 2 == 0:
+                result["value"] = (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
             else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+                result["value"] = sorted_vals[n // 2]
 
-            return ActionResult(success=True, message=f"{operation} = {result}", data={"result": result, "count": len(nums)})
+        elif op == "min":
+            values = kwargs.get("values", [])
+            if not values:
+                raise ValueError("values required")
+            result["value"] = min(values)
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Statistics error: {str(e)}")
+        elif op == "max":
+            values = kwargs.get("values", [])
+            if not values:
+                raise ValueError("values required")
+            result["value"] = max(values)
 
+        elif op == "stddev":
+            values = kwargs.get("values", [])
+            if not values:
+                raise ValueError("values required")
+            mean = sum(values) / len(values)
+            variance = sum((x - mean) ** 2 for x in values) / len(values)
+            result["value"] = math.sqrt(variance)
 
-class MathTrigonometryAction(BaseAction):
-    """Trigonometric functions."""
-    action_type = "math_trig"
-    display_name = "三角函数"
-    description = "三角函数运算"
+        # Random
+        elif op == "random":
+            start = kwargs.get("start", 0)
+            end = kwargs.get("end", 1)
+            result["value"] = random.uniform(start, end)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "sin")
-            value = params.get("value", 0)
-            degrees = params.get("degrees", False)
+        elif op == "randint":
+            start = kwargs.get("start", 0)
+            end = kwargs.get("end", 100)
+            result["value"] = random.randint(start, end)
 
-            angle = float(value)
-            if degrees:
-                angle = math.radians(angle)
+        elif op == "choice":
+            choices = kwargs.get("choices", [])
+            if not choices:
+                raise ValueError("choices required")
+            result["value"] = random.choice(choices)
 
-            if operation == "sin":
-                result = math.sin(angle)
-            elif operation == "cos":
-                result = math.cos(angle)
-            elif operation == "tan":
-                result = math.tan(angle)
-            elif operation == "asin":
-                result = math.asin(angle)
-                if degrees:
-                    result = math.degrees(result)
-            elif operation == "acos":
-                result = math.acos(angle)
-                if degrees:
-                    result = math.degrees(result)
-            elif operation == "atan":
-                result = math.atan(angle)
-                if degrees:
-                    result = math.degrees(result)
-            elif operation == "atan2":
-                y = params.get("y", 0)
-                result = math.atan2(float(y), angle)
-                if degrees:
-                    result = math.degrees(result)
-            elif operation == "sinh":
-                result = math.sinh(angle)
-            elif operation == "cosh":
-                result = math.cosh(angle)
-            elif operation == "tanh":
-                result = math.tanh(angle)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+        elif op == "shuffle":
+            items = kwargs.get("items", [])
+            shuffled = list(items)
+            random.shuffle(shuffled)
+            result["items"] = shuffled
 
-            return ActionResult(success=True, message=f"{operation}({value}) = {result}", data={"result": result})
+        elif op == "sample":
+            items = kwargs.get("items", [])
+            count = kwargs.get("count", 1)
+            if not items:
+                raise ValueError("items required")
+            result["items"] = random.sample(items, min(count, len(items)))
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Trig error: {str(e)}")
+        # Utilities
+        elif op == "abs":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = abs(value)
 
+        elif op == "factorial":
+            if value is None:
+                raise ValueError("value required")
+            result["value"] = math.factorial(int(value))
 
-class MathRandomAction(BaseAction):
-    """Random number generation."""
-    action_type = "math_random"
-    display_name = "随机数"
-    description = "随机数生成"
+        elif op == "gcd":
+            if a is None or b is None:
+                raise ValueError("a and b required")
+            result["value"] = math.gcd(int(a), int(b))
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "random")
-            min_val = params.get("min", 0)
-            max_val = params.get("max", 1)
-            count = params.get("count", 1)
-            seed = params.get("seed", None)
+        else:
+            raise ValueError(f"Unknown operation: {operation}")
 
-            if seed is not None:
-                random.seed(seed)
-
-            if operation == "random":
-                results = [random.random() for _ in range(count)]
-            elif operation == "uniform":
-                results = [random.uniform(min_val, max_val) for _ in range(count)]
-            elif operation == "randint":
-                results = [random.randint(int(min_val), int(max_val)) for _ in range(count)]
-            elif operation == "randrange":
-                step = params.get("step", 1)
-                results = [random.randrange(int(min_val), int(max_val), step) for _ in range(count)]
-            elif operation == "choice":
-                choices = params.get("choices", [min_val, max_val])
-                results = [random.choice(choices) for _ in range(count)]
-            elif operation == "shuffle":
-                items = params.get("items", list(range(int(min_val), int(max_val) + 1)))
-                result_list = list(items)
-                random.shuffle(result_list)
-                results = result_list
-            elif operation == "sample":
-                population = params.get("population", list(range(int(min_val), int(max_val) + 1)))
-                results = random.sample(population, min(count, len(population)))
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-            return ActionResult(
-                success=True,
-                message=f"Generated {len(results)} random values",
-                data={"results": results, "count": len(results)}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Random error: {str(e)}")
+        return result
