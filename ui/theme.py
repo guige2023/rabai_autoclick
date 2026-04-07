@@ -788,15 +788,20 @@ class ThemeManager(QObject):
         """Get animated button stylesheet.
 
         Args:
-            style: Button style ('default', 'success', 'danger').
+            style: Button style ('default', 'success', 'danger', 'info', 'warning').
 
         Returns:
             CSS stylesheet string for buttons.
         """
-        if style == 'success':
-            return self.get_stylesheet('button_success')
-        elif style == 'danger':
-            return self.get_stylesheet('button_danger')
+        style_map = {
+            'success': 'button_success',
+            'danger': 'button_danger',
+            'info': 'button_info',
+            'warning': 'button_warning',
+        }
+        stylesheet_name = style_map.get(style)
+        if stylesheet_name:
+            return self.get_stylesheet(stylesheet_name)
         return self.get_stylesheet('button_animated')
 
 
