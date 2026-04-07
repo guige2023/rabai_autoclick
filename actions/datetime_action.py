@@ -1,401 +1,340 @@
-"""DateTime action module for RabAI AutoClick.
+"""Datetime action module for RabAI AutoClick.
 
-Provides datetime operations:
-- DateTimeNowAction: Get current datetime
-- DateTimeParseAction: Parse datetime string
-- DateTimeFormatAction: Format datetime
-- DateTimeDiffAction: Calculate datetime difference
-- DateTimeAddAction: Add time to datetime
-- DateTimeConvertAction: Convert timezone
+Provides datetime parsing and formatting utilities:
+- ParseDatetimeAction: Parse string to datetime
+- FormatDatetimeAction: Format datetime to string
+- NowAction: Get current datetime
+- TodayAction: Get today's date
+- DateDiffAction: Calculate date difference
+- DateArithmeticAction: Add/subtract from date
+- TimestampAction: Convert to/from timestamp
+- ParseDateAction: Parse date string
+- FormatDateAction: Format date to string
+- TimezonesAction: Timezone conversions
 """
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
-
+from typing import Any, Dict, List, Optional, Union
 import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import datetime
+
+_parent_dir = __import__('os').path.dirname(__import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class DateTimeNowAction(BaseAction):
+class DatetimeParseAction(BaseAction):
+    """Parse string to datetime."""
+    action_type = "datetime_parse"
+    display_name = "解析日期时间"
+    description = "将字符串解析为日期时间"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute parse datetime."""
+        date_string = params.get('date_string', '')
+        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
+        output_var = params.get('output_var', 'parsed_datetime')
+
+        try:
+            resolved_string = context.resolve_value(date_string) if isinstance(date_string, str) else date_string
+            resolved_format = context.resolve_value(format_str) if isinstance(format_str, str) else format_str
+            
+            result = datetime.datetime.strptime(resolved_string, resolved_format)
+            context.set_variable(output_var, {"datetime": result.isoformat(), "timestamp": result.timestamp()})
+            return ActionResult(success=True, message=f"parsed: {result}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"parse failed: {e}")
+
+
+class DatetimeFormatAction(BaseAction):
+    """Format datetime to string."""
+    action_type = "datetime_format"
+    display_name = "格式化日期时间"
+    description = "将日期时间格式化为字符串"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute format datetime."""
+        dt_value = params.get('datetime', None)
+        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
+        output_var = params.get('output_var', 'formatted_datetime')
+
+        try:
+            resolved_dt = context.resolve_value(dt_value) if dt_value is not None else None
+            resolved_format = context.resolve_value(format_str) if isinstance(format_str, str) else format_str
+            
+            if resolved_dt is None:
+                resolved_dt = datetime.datetime.now()
+            elif isinstance(resolved_dt, (int, float)):
+                resolved_dt = datetime.datetime.fromtimestamp(resolved_dt)
+            elif isinstance(resolved_dt, str):
+                resolved_dt = datetime.datetime.fromisoformat(resolved_dt)
+            
+            result = resolved_dt.strftime(resolved_format)
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"formatted: {result}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"format failed: {e}")
+
+
+class DatetimeNowAction(BaseAction):
     """Get current datetime."""
     action_type = "datetime_now"
     display_name = "当前时间"
-    description = "获取当前时间"
-    version = "1.0"
+    description = "获取当前日期时间"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute now.
-
-        Args:
-            context: Execution context.
-            params: Dict with timezone, format, output_var.
-
-        Returns:
-            ActionResult with current datetime.
-        """
-        timezone_str = params.get('timezone', 'UTC')
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'datetime_now')
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute now."""
+        utc = params.get('utc', False)
+        output_var = params.get('output_var', 'now_datetime')
 
         try:
-            resolved_tz = context.resolve_value(timezone_str) if timezone_str else 'UTC'
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
-
-            if resolved_tz == 'UTC':
-                now = datetime.now(timezone.utc)
-            elif resolved_tz == 'Local':
-                now = datetime.now()
+            resolved_utc = context.resolve_value(utc) if isinstance(utc, str) else utc
+            
+            if resolved_utc:
+                now = datetime.datetime.utcnow()
             else:
-                now = datetime.now()
-
-            result_str = now.strftime(resolved_format)
-            result = {
-                'datetime': now.isoformat(),
-                'formatted': result_str,
-                'timestamp': now.timestamp(),
-            }
-
-            context.set(output_var, result if not format_str else result_str)
-
-            return ActionResult(
-                success=True,
-                message=f"当前时间: {result_str}",
-                data={'result': result, 'output_var': output_var}
-            )
+                now = datetime.datetime.now()
+            
+            context.set_variable(output_var, {"isoformat": now.isoformat(), "timestamp": now.timestamp()})
+            return ActionResult(success=True, message=f"now: {now}")
         except Exception as e:
-            return ActionResult(success=False, message=f"获取当前时间失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'timezone': 'UTC', 'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'datetime_now'}
+            return ActionResult(success=False, message=f"now failed: {e}")
 
 
-class DateTimeParseAction(BaseAction):
-    """Parse datetime string."""
-    action_type = "datetime_parse"
-    display_name = "解析时间"
-    description = "解析时间字符串"
-    version = "1.0"
+class DatetimeTodayAction(BaseAction):
+    """Get today's date."""
+    action_type = "datetime_today"
+    display_name = "今天日期"
+    description = "获取今天的日期"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute parse.
-
-        Args:
-            context: Execution context.
-            params: Dict with date_string, format, output_var.
-
-        Returns:
-            ActionResult with parsed datetime.
-        """
-        date_string = params.get('date_string', '')
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'datetime_parsed')
-
-        valid, msg = self.validate_type(date_string, str, 'date_string')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute today."""
+        output_var = params.get('output_var', 'today_date')
 
         try:
-            resolved_str = context.resolve_value(date_string)
-            resolved_format = context.resolve_value(format_str) if format_str else None
-
-            if resolved_format:
-                dt = datetime.strptime(resolved_str, resolved_format)
-            else:
-                formats = [
-                    '%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d/%m/%Y %H:%M:%S',
-                    '%d/%m/%Y', '%Y/%m/%d', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y'
-                ]
-                dt = None
-                for fmt in formats:
-                    try:
-                        dt = datetime.strptime(resolved_str, fmt)
-                        break
-                    except ValueError:
-                        continue
-
-                if dt is None:
-                    return ActionResult(success=False, message=f"无法解析日期: {resolved_str}")
-
-            result = {
-                'datetime': dt.isoformat(),
-                'timestamp': dt.timestamp(),
-                'year': dt.year,
-                'month': dt.month,
-                'day': dt.day,
-                'hour': dt.hour,
-                'minute': dt.minute,
-                'second': dt.second,
-            }
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"已解析: {dt.strftime('%Y-%m-%d %H:%M:%S')}",
-                data={'result': result, 'output_var': output_var}
-            )
+            today = datetime.date.today()
+            context.set_variable(output_var, {"isoformat": today.isoformat(), "year": today.year, "month": today.month, "day": today.day})
+            return ActionResult(success=True, message=f"today: {today}")
         except Exception as e:
-            return ActionResult(success=False, message=f"解析时间失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['date_string']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': None, 'output_var': 'datetime_parsed'}
+            return ActionResult(success=False, message=f"today failed: {e}")
 
 
-class DateTimeFormatAction(BaseAction):
-    """Format datetime."""
-    action_type = "datetime_format"
-    display_name = "格式化时间"
-    description = "格式化时间"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute format.
-
-        Args:
-            context: Execution context.
-            params: Dict with datetime_val, format_str, output_var.
-
-        Returns:
-            ActionResult with formatted string.
-        """
-        datetime_val = params.get('datetime_val', '')
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'datetime_formatted')
-
-        try:
-            resolved_val = context.resolve_value(datetime_val)
-            resolved_format = context.resolve_value(format_str)
-
-            if isinstance(resolved_val, str):
-                dt = datetime.fromisoformat(resolved_val.replace('Z', '+00:00'))
-            elif isinstance(resolved_val, (int, float)):
-                dt = datetime.fromtimestamp(resolved_val)
-            else:
-                dt = resolved_val
-
-            result = dt.strftime(resolved_format)
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"格式化: {result}",
-                data={'formatted': result, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"格式化时间失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime_val', 'format']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'datetime_formatted'}
-
-
-class DateTimeDiffAction(BaseAction):
-    """Calculate datetime difference."""
+class DatetimeDiffAction(BaseAction):
+    """Calculate date difference."""
     action_type = "datetime_diff"
-    display_name = "时间差计算"
-    description = "计算时间差"
-    version = "1.0"
+    display_name = "日期差"
+    description = "计算两个日期的差值"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute diff.
-
-        Args:
-            context: Execution context.
-            params: Dict with datetime1, datetime2, output_var.
-
-        Returns:
-            ActionResult with difference.
-        """
-        datetime1 = params.get('datetime1', '')
-        datetime2 = params.get('datetime2', '')
-        output_var = params.get('output_var', 'datetime_diff')
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute date diff."""
+        date1 = params.get('date1', None)
+        date2 = params.get('date2', None)
+        unit = params.get('unit', 'days')
+        output_var = params.get('output_var', 'diff_result')
 
         try:
-            resolved_d1 = context.resolve_value(datetime1)
-            resolved_d2 = context.resolve_value(datetime2)
-
-            if isinstance(resolved_d1, str):
-                dt1 = datetime.fromisoformat(resolved_d1.replace('Z', '+00:00'))
+            resolved_date1 = context.resolve_value(date1) if isinstance(date1, str) else date1
+            resolved_date2 = context.resolve_value(date2) if isinstance(date2, str) else date2
+            
+            if isinstance(resolved_date1, str):
+                resolved_date1 = datetime.date.fromisoformat(resolved_date1)
+            elif isinstance(resolved_date1, datetime.datetime):
+                resolved_date1 = resolved_date1.date()
+            
+            if isinstance(resolved_date2, str):
+                resolved_date2 = datetime.date.fromisoformat(resolved_date2)
+            elif isinstance(resolved_date2, datetime.datetime):
+                resolved_date2 = resolved_date2.date()
+            
+            delta = resolved_date2 - resolved_date1
+            
+            if unit == 'seconds':
+                result = delta.total_seconds()
+            elif unit == 'minutes':
+                result = delta.total_seconds() / 60
+            elif unit == 'hours':
+                result = delta.total_seconds() / 3600
+            elif unit == 'days':
+                result = delta.days
+            elif unit == 'weeks':
+                result = delta.days / 7
             else:
-                dt1 = datetime.fromtimestamp(resolved_d1)
-
-            if isinstance(resolved_d2, str):
-                dt2 = datetime.fromisoformat(resolved_d2.replace('Z', '+00:00'))
-            else:
-                dt2 = datetime.fromtimestamp(resolved_d2)
-
-            diff = dt1 - dt2
-            total_seconds = diff.total_seconds()
-
-            result = {
-                'seconds': total_seconds,
-                'minutes': total_seconds / 60,
-                'hours': total_seconds / 3600,
-                'days': diff.days,
-                'microseconds': diff.microseconds,
-            }
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"时间差: {diff.days} 天",
-                data={'diff': result, 'output_var': output_var}
-            )
+                result = delta.days
+            
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"diff: {result} {unit}")
         except Exception as e:
-            return ActionResult(success=False, message=f"时间差计算失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime1', 'datetime2']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'datetime_diff'}
+            return ActionResult(success=False, message=f"diff failed: {e}")
 
 
-class DateTimeAddAction(BaseAction):
-    """Add time to datetime."""
-    action_type = "datetime_add"
-    display_name = "时间加减"
-    description = "时间加减"
-    version = "1.0"
+class DatetimeArithmeticAction(BaseAction):
+    """Add/subtract from date."""
+    action_type = "datetime_arithmetic"
+    display_name = "日期运算"
+    description = "对日期进行加减运算"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute add.
-
-        Args:
-            context: Execution context.
-            params: Dict with datetime_val, days, hours, minutes, seconds, output_var.
-
-        Returns:
-            ActionResult with new datetime.
-        """
-        datetime_val = params.get('datetime_val', '')
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute date arithmetic."""
+        date_value = params.get('date', None)
+        years = params.get('years', 0)
+        months = params.get('months', 0)
         days = params.get('days', 0)
         hours = params.get('hours', 0)
         minutes = params.get('minutes', 0)
         seconds = params.get('seconds', 0)
-        output_var = params.get('output_var', 'datetime_result')
+        output_var = params.get('output_var', 'arithmetic_result')
 
         try:
-            resolved_val = context.resolve_value(datetime_val)
-            resolved_days = context.resolve_value(days)
-            resolved_hours = context.resolve_value(hours)
-            resolved_minutes = context.resolve_value(minutes)
-            resolved_seconds = context.resolve_value(seconds)
-
-            if isinstance(resolved_val, str):
-                dt = datetime.fromisoformat(resolved_val.replace('Z', '+00:00'))
-            elif isinstance(resolved_val, (int, float)):
-                dt = datetime.fromtimestamp(resolved_val)
+            resolved_date = context.resolve_value(date_value) if isinstance(date_value, str) else date_value
+            
+            if resolved_date is None:
+                dt = datetime.datetime.now()
+            elif isinstance(resolved_date, str):
+                try:
+                    dt = datetime.datetime.fromisoformat(resolved_date)
+                except ValueError:
+                    dt = datetime.datetime.strptime(resolved_date, '%Y-%m-%d')
+            elif isinstance(resolved_date, datetime.date):
+                dt = datetime.datetime.combine(resolved_date, datetime.time())
             else:
-                dt = resolved_val
-
-            delta = timedelta(
-                days=int(resolved_days),
-                hours=int(resolved_hours),
-                minutes=int(resolved_minutes),
-                seconds=int(resolved_seconds)
-            )
-
-            result_dt = dt + delta
-
-            context.set(output_var, result_dt.isoformat())
-
-            return ActionResult(
-                success=True,
-                message=f"计算结果: {result_dt.strftime('%Y-%m-%d %H:%M:%S')}",
-                data={'result': result_dt.isoformat(), 'output_var': output_var}
-            )
+                dt = resolved_date
+            
+            from dateutil.relativedelta import relativedelta
+            result = dt + relativedelta(years=years, months=months, days=days, hours=hours, minutes=minutes, seconds=seconds)
+            
+            context.set_variable(output_var, {"isoformat": result.isoformat(), "timestamp": result.timestamp()})
+            return ActionResult(success=True, message=f"result: {result}")
+        except ImportError:
+            return ActionResult(success=False, message="dateutil not available, use basic datetime only")
         except Exception as e:
-            return ActionResult(success=False, message=f"时间加减失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime_val']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'days': 0, 'hours': 0, 'minutes': 0, 'seconds': 0, 'output_var': 'datetime_result'}
+            return ActionResult(success=False, message=f"arithmetic failed: {e}")
 
 
-class DateTimeConvertAction(BaseAction):
-    """Convert timezone."""
-    action_type = "datetime_convert"
-    display_name = "时区转换"
-    description = "时区转换"
-    version = "1.0"
+class DatetimeTimestampAction(BaseAction):
+    """Convert to/from timestamp."""
+    action_type = "datetime_timestamp"
+    display_name = "时间戳转换"
+    description = "在日期时间和时间戳之间转换"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute convert.
-
-        Args:
-            context: Execution context.
-            params: Dict with datetime_val, from_tz, to_tz, output_var.
-
-        Returns:
-            ActionResult with converted datetime.
-        """
-        datetime_val = params.get('datetime_val', '')
-        from_tz = params.get('from_tz', 'UTC')
-        to_tz = params.get('to_tz', 'Asia/Shanghai')
-        output_var = params.get('output_var', 'datetime_converted')
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute timestamp conversion."""
+        value = params.get('value', None)
+        direction = params.get('direction', 'to_timestamp')
+        output_var = params.get('output_var', 'timestamp_result')
 
         try:
-            resolved_val = context.resolve_value(datetime_val)
-
-            if isinstance(resolved_val, str):
-                dt = datetime.fromisoformat(resolved_val.replace('Z', '+00:00'))
-            elif isinstance(resolved_val, (int, float)):
-                dt = datetime.fromtimestamp(resolved_val)
+            resolved_value = context.resolve_value(value) if isinstance(value, str) else value
+            
+            if direction == 'to_timestamp':
+                if isinstance(resolved_value, str):
+                    try:
+                        dt = datetime.datetime.fromisoformat(resolved_value)
+                    except ValueError:
+                        dt = datetime.datetime.strptime(resolved_value, '%Y-%m-%d %H:%M:%S')
+                elif isinstance(resolved_value, datetime.datetime):
+                    dt = resolved_value
+                else:
+                    dt = datetime.datetime.fromtimestamp(resolved_value)
+                result = dt.timestamp()
             else:
-                dt = resolved_val
-
-            result = dt.isoformat()
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"时区转换: {result}",
-                data={'result': result, 'output_var': output_var}
-            )
+                if isinstance(resolved_value, (int, float)):
+                    dt = datetime.datetime.fromtimestamp(resolved_value)
+                else:
+                    dt = datetime.datetime.fromtimestamp(float(resolved_value))
+                result = dt.isoformat()
+            
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"{direction}: {result}")
         except Exception as e:
-            return ActionResult(success=False, message=f"时区转换失败: {str(e)}")
+            return ActionResult(success=False, message=f"timestamp failed: {e}")
 
-    def get_required_params(self) -> List[str]:
-        return ['datetime_val', 'from_tz', 'to_tz']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'datetime_converted'}
+class DatetimeParseDateAction(BaseAction):
+    """Parse date string."""
+    action_type = "datetime_parse_date"
+    display_name = "解析日期"
+    description = "将字符串解析为日期"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute parse date."""
+        date_string = params.get('date_string', '')
+        format_str = params.get('format', '%Y-%m-%d')
+        output_var = params.get('output_var', 'parsed_date')
+
+        try:
+            resolved_string = context.resolve_value(date_string) if isinstance(date_string, str) else date_string
+            resolved_format = context.resolve_value(format_str) if isinstance(format_str, str) else format_str
+            
+            result = datetime.datetime.strptime(resolved_string, resolved_format).date()
+            context.set_variable(output_var, {"isoformat": result.isoformat(), "year": result.year, "month": result.month, "day": result.day})
+            return ActionResult(success=True, message=f"parsed: {result}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"parse date failed: {e}")
+
+
+class DatetimeFormatDateAction(BaseAction):
+    """Format date to string."""
+    action_type = "datetime_format_date"
+    display_name = "格式化日期"
+    description = "将日期格式化为字符串"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute format date."""
+        date_value = params.get('date', None)
+        format_str = params.get('format', '%Y-%m-%d')
+        output_var = params.get('output_var', 'formatted_date')
+
+        try:
+            resolved_date = context.resolve_value(date_value) if isinstance(date_value, str) else date_value
+            
+            if resolved_date is None:
+                resolved_date = datetime.date.today()
+            elif isinstance(resolved_date, str):
+                resolved_date = datetime.date.fromisoformat(resolved_date)
+            elif isinstance(resolved_date, datetime.datetime):
+                resolved_date = resolved_date.date()
+            
+            result = resolved_date.strftime(format_str)
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"formatted: {result}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"format date failed: {e}")
+
+
+class DatetimeRangeAction(BaseAction):
+    """Generate date range."""
+    action_type = "datetime_range"
+    display_name = "日期范围"
+    description = "生成日期范围"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute date range."""
+        start = params.get('start', None)
+        end = params.get('end', None)
+        step_days = params.get('step_days', 1)
+        output_var = params.get('output_var', 'date_range_result')
+
+        try:
+            resolved_start = context.resolve_value(start) if isinstance(start, str) else start
+            resolved_end = context.resolve_value(end) if isinstance(end, str) else end
+            resolved_step = context.resolve_value(step_days) if isinstance(step_days, str) else step_days
+            
+            if isinstance(resolved_start, str):
+                resolved_start = datetime.date.fromisoformat(resolved_start)
+            elif isinstance(resolved_start, datetime.datetime):
+                resolved_start = resolved_start.date()
+            
+            if isinstance(resolved_end, str):
+                resolved_end = datetime.date.fromisoformat(resolved_end)
+            elif isinstance(resolved_end, datetime.datetime):
+                resolved_end = resolved_end.date()
+            
+            dates = []
+            current = resolved_start
+            while current <= resolved_end:
+                dates.append(current.isoformat())
+                current += datetime.timedelta(days=resolved_step)
+            
+            context.set_variable(output_var, dates)
+            return ActionResult(success=True, message=f"generated {len(dates)} dates")
+        except Exception as e:
+            return ActionResult(success=False, message=f"date range failed: {e}")

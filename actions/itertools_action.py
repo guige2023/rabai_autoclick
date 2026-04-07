@@ -1,471 +1,466 @@
+"""Itertools action module for RabAI AutoClick.
+
+Provides itertools extensions and utilities:
+- ChunkFunction: Split iterable into chunks of fixed size
+- WindowFunction: Sliding window over iterable
+- FlattenFunction: Flatten nested iterables
+- UniqueFunction: Get unique elements preserving order
+- UniqueByFunction: Unique by key function
+- GrouperFunction: Group elements in chunks
+- RoundrobinFunction: Round-robin from iterables
+- PartitionFunction: Partition by predicate
+- TakeFunction: Take n elements
+- DropFunction: Drop n elements
+- PowersetFunction: All subsets of iterable
+- PairwiseFunction: Consecutive pairs
 """
-itertools extensions - chunk, window, flatten, unique, and more.
-"""
 
-from __future__ import annotations
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, Union, Generic
+import sys
+import itertools as it
 
-import itertools
-import math
-from typing import (
-    Any,
-    Callable,
-    Iterable,
-    Iterator,
-    List,
-    Optional,
-    TypeVar,
-    Union,
-)
+_parent_dir = __import__('os').path.dirname(__import__('os').path.dirname(__import__('os').path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
-T = TypeVar("T")
-K = TypeVar("K")
-V = TypeVar("V")
+T = TypeVar('T')
+K = TypeVar('K')
 
 
-def chunk(iterable: Iterable[T], size: int) -> Iterator[List[T]]:
-    """
-    Split an iterable into chunks of specified size.
+def chunk(iterable: Iterator, size: int) -> Iterator[List]:
+    """Split iterable into chunks of fixed size.
     
     Args:
-        iterable: Input iterable to chunk
-        size: Maximum size of each chunk (must be > 0)
+        iterable: Source iterable.
+        size: Chunk size (must be positive).
     
     Yields:
-        Lists of up to `size` elements from the iterable
-    
-    Raises:
-        ValueError: If size is not a positive integer
-    
-    Example:
-        >>> list(chunk([1, 2, 3, 4, 5], 2))
-        [[1, 2], [3, 4], [5]]
+        Lists of up to size elements.
     """
-    if size <= 0:
-        raise ValueError(f"Chunk size must be positive, got {size}")
-    iterator = iter(iterable)
+    if size < 1:
+        raise ValueError(f"chunk size must be positive, got {size}")
+    it_iter = iter(iterable)
     while True:
-        batch = list(itertools.islice(iterator, size))
+        batch = list(it.islice(it_iter, size))
         if not batch:
             break
         yield batch
 
 
-def window(
-    iterable: Iterable[T],
-    size: int,
-    step: int = 1,
-    fillvalue: Optional[T] = None,
-) -> Iterator[List[T]]:
-    """
-    Sliding window over an iterable.
+def window(iterable: Iterator, n: int = 2) -> Iterator[tuple]:
+    """Sliding window over iterable.
     
     Args:
-        iterable: Input iterable
-        size: Window size (must be > 0)
-        step: Step size between windows (default 1)
-        fillvalue: Value to use for missing elements if specified
+        iterable: Source iterable.
+        n: Window size (default 2).
     
     Yields:
-        Lists representing each window position
-    
-    Raises:
-        ValueError: If size is not positive
-    
-    Example:
-        >>> list(window([1, 2, 3, 4], 3))
-        [[1, 2, 3], [2, 3, 4]]
+        Tuples of n consecutive elements.
     """
-    if size <= 0:
-        raise ValueError(f"Window size must be positive, got {size}")
-    if step <= 0:
-        raise ValueError(f"Step must be positive, got {step}")
-    
-    iterator = iter(iterable)
-    window_list = list(itertools.islice(iterator, size))
-    
-    if len(window_list) < size:
-        if fillvalue is None:
-            return
-        while len(window_list) < size:
-            window_list.append(fillvalue)
-    
-    yield window_list
-    
-    for item in iterator:
-        window_list = window_list[step:] + [item]
-        if fillvalue is None and len(window_list) < size:
-            continue
-        yield window_list[:size]
+    if n < 1:
+        raise ValueError(f"window size must be positive, got {n}")
+    it_iter = iter(iterable)
+    win = list(it.islice(it_iter, n))
+    if len(win) < n:
+        return
+    yield tuple(win)
+    for item in it_iter:
+        win = win[1:] + [item]
+        yield tuple(win)
 
 
-def flatten(
-    nested: Iterable[Any],
-    depth: Optional[int] = None,
-    types: Optional[tuple] = (list, tuple),
-) -> Iterator[Any]:
-    """
-    Recursively flatten a nested iterable.
+def flatten(nested: Any, depth: Optional[int] = None) -> Iterator:
+    """Flatten nested iterables.
     
     Args:
-        nested: Nested iterable to flatten
-        depth: Maximum depth to flatten (None for unlimited)
-        types: Tuple of types to consider as iterable
+        nested: Nested iterable to flatten.
+        depth: Max depth to flatten (None = unlimited).
     
     Yields:
-        Single flattened elements
-    
-    Example:
-        >>> list(flatten([[1, 2], [3, [4, 5]]]))
-        [1, 2, 3, 4, 5]
+        Individual elements.
     """
     for item in nested:
         if depth is None or depth > 0:
-            if isinstance(item, types):
-                depth_arg = None if depth is None else depth - 1
-                yield from flatten(item, depth=depth_arg, types=types)
+            if isinstance(item, (list, tuple, set)):
+                yield from flatten(item, None if depth is None else depth - 1)
             else:
                 yield item
         else:
             yield item
 
 
-def unique(
-    iterable: Iterable[T],
-    key: Optional[Callable[[T], Any]] = None,
-    preserve_order: bool = True,
-) -> Iterator[T]:
-    """
-    Get unique elements from an iterable.
+def unique(iterable: Iterator) -> Iterator:
+    """Get unique elements preserving order.
     
     Args:
-        iterable: Input iterable
-        key: Optional function to compute key for uniqueness
-        preserve_order: If True (default), preserves insertion order
+        iterable: Source iterable.
     
     Yields:
-        Unique elements in order first seen
-    
-    Example:
-        >>> list(unique([1, 2, 2, 3, 1, 3]))
-        [1, 2, 3]
+        Elements in order of first appearance.
     """
-    if preserve_order:
-        seen_keys: set = set()
-        seen_list: List[T] = []
-        for item in iterable:
-            k = key(item) if key else item
-            if k not in seen_keys:
-                seen_keys.add(k)
-                seen_list.append(item)
-        yield from seen_list
-    else:
-        seen: set = set()
-        for item in iterable:
-            k = key(item) if key else item
-            if k not in seen:
-                seen.add(k)
-                yield item
+    seen = set()
+    for item in iterable:
+        if item not in seen:
+            seen.add(item)
+            yield item
 
 
-def batched(
-    iterable: Iterable[T],
-    n: int,
-    fillvalue: Optional[T] = None,
-) -> Iterator[tuple]:
-    """
-    Backport of itertools.batched for older Python versions.
-    
-    Batch data into tuples of length n. The last batch may be shorter.
+def unique_by(iterable: Iterator, key: Callable[[Any], K]) -> Iterator:
+    """Get unique elements by key function.
     
     Args:
-        iterable: Input iterable
-        n: Batch size
-        fillvalue: Value to fill last batch if provided
+        iterable: Source iterable.
+        key: Function to extract comparison key.
     
     Yields:
-        Tuples of up to n elements
-    
-    Example:
-        >>> list(batched([1, 2, 3, 4, 5], 2))
-        [(1, 2), (3, 4), (5,)]
+        First element for each unique key.
     """
-    if n < 1:
-        raise ValueError(f"Batch size must be >= 1, got {n}")
-    iterator = iter(iterable)
+    seen = set()
+    for item in iterable:
+        k = key(item)
+        if k not in seen:
+            seen.add(k)
+            yield item
+
+
+def grouper(iterable: Iterator, n: int, fillvalue: Any = None) -> Iterator[tuple]:
+    """Group elements in chunks with fill value.
+    
+    Args:
+        iterable: Source iterable.
+        n: Chunk size.
+        fillvalue: Value to fill incomplete last chunk.
+    
+    Yields:
+        Tuples of n elements.
+    """
+    it_iter = iter(iterable)
     while True:
-        batch = tuple(itertools.islice(iterator, n))
+        batch = list(it.islice(it_iter, n))
         if not batch:
             break
-        if fillvalue is not None and len(batch) < n:
-            batch = batch + (fillvalue,) * (n - len(batch))
-        yield batch
+        if len(batch) < n:
+            batch.extend([fillvalue] * (n - len(batch)))
+        yield tuple(batch)
 
 
-def distribute(n: int, iterable: Iterable[T]) -> Iterator[Iterator[T]]:
-    """
-    Distribute items from iterable across n rounds.
+def roundrobin(*iterables: Iterator) -> Iterator:
+    """Round-robin from multiple iterables.
     
     Args:
-        n: Number of rounds (must be > 0)
-        iterable: Input iterable
+        *iterables: Multiple source iterables.
     
     Yields:
-        Iterator for each round
-    
-    Example:
-        >>> rounds = list(distribute(3, range(10)))
-        >>> len(rounds)
-        3
+        Elements in round-robin fashion.
     """
-    if n < 1:
-        raise ValueError(f"Number of rounds must be >= 1, got {n}")
-    
-    items = list(iterable)
-    if not items:
-        return
-    
-    n = min(n, len(items))
-    queue: List[List[T]] = [[] for _ in range(n)]
-    
-    for i, item in enumerate(items):
-        queue[i % n].append(item)
-    
-    for round_items in queue:
-        if round_items:
-            yield iter(round_items)
+    pending = len(iterables)
+    nexts = iter(iterables)
+    nexts_list = []
+    for i in range(pending):
+        try:
+            nexts_list.append(next(nexts).__iter__())
+        except StopIteration:
+            pass
+    pending = len(nexts_list)
+    while pending:
+        to_remove = []
+        for i, nxt in enumerate(nexts_list):
+            try:
+                yield next(nxt)
+            except StopIteration:
+                to_remove.append(i)
+        for i in reversed(to_remove):
+            del nexts_list[i]
+            pending -= 1
 
 
-def divide(n: int, iterable: Iterable[T]) -> Iterator[List[T]]:
-    """
-    Divide an iterable into n roughly equal parts.
+def partition(pred: Callable[[Any], bool], iterable: Iterator) -> tuple:
+    """Partition iterable by predicate.
     
     Args:
-        n: Number of parts (must be > 0)
-        iterable: Input iterable
-    
-    Yields:
-        List for each part
-    
-    Example:
-        >>> parts = list(divide(3, range(10)))
-        >>> [len(p) for p in parts]
-        [4, 3, 3]
-    """
-    if n < 1:
-        raise ValueError(f"Number of parts must be >= 1, got {n}")
-    
-    items = list(iterable)
-    if not items:
-        return
-    
-    n = min(n, len(items))
-    base_size, remainder = divmod(len(items), n)
-    
-    start = 0
-    for i in range(n):
-        size = base_size + (1 if i < remainder else 0)
-        yield items[start:start + size]
-        start += size
-
-
-def unique_in_order(sequence: Iterable[T]) -> Iterator[T]:
-    """
-    Yield unique elements in order, removing consecutive duplicates.
-    
-    Args:
-        sequence: Input sequence (string, list, etc.)
-    
-    Yields:
-        Elements with no consecutive duplicates
-    
-    Example:
-        >>> list(unique_in_order("AAAABBBCCDAABBB"))
-        ['A', 'B', 'C', 'D', 'A', 'B']
-    """
-    prev: Optional[T] = None
-    for item in sequence:
-        if item != prev:
-            yield item
-            prev = item
-
-
-def grouper(
-    iterable: Iterable[T],
-    n: int,
-    fillvalue: Optional[T] = None,
-) -> Iterator[tuple]:
-    """
-    Collect data into fixed-length chunks.
-    
-    Args:
-        iterable: Input iterable
-        n: Chunk size
-        fillvalue: Value to fill incomplete chunk
-    
-    Yields:
-        Tuples of exactly n elements (last may have fillvalue)
-    
-    Example:
-        >>> list(grouper('ABCDEFG', 3, 'x'))
-        [('A', 'B', 'C'), ('D', 'E', 'F'), ('G', 'x', 'x')]
-    """
-    yield from batched(iterable, n, fillvalue=fillvalue)
-
-
-def iterate(start: T) -> Iterator[T]:
-    """
-    Generate infinite sequence of value, f(value), f(f(value)), etc.
-    
-    Args:
-        start: Starting value
-    
-    Yields:
-        Infinite sequence of transformed values
-    
-    Example:
-        >>> import operator
-        >>> it = iterate(1)
-        >>> next(it), next(it), next(it)
-        (1, 2, 3)
-    """
-    while True:
-        yield start
-        start = start + 1
-
-
-def flatten_levels(
-    nested: Iterable[Any],
-    levels: int,
-    types: Optional[tuple] = (list, tuple),
-) -> Iterator[Any]:
-    """
-    Flatten a nested iterable by a specific number of levels.
-    
-    Args:
-        nested: Nested iterable to flatten
-        levels: Number of levels to flatten
-        types: Tuple of types to consider as iterable
-    
-    Yields:
-        Elements flattened by specified levels
-    
-    Example:
-        >>> list(flatten_levels([[[1, 2], [3]], [[4]]], 1))
-        [[1, 2], [3], [4]]
-    """
-    return flatten(nested, depth=levels, types=types)
-
-
-def sliding_window_2d(
-    matrix: List[List[T]],
-    window_size: int,
-    step: int = 1,
-) -> Iterator[List[List[T]]]:
-    """
-    Extract sliding windows from a 2D matrix.
-    
-    Args:
-        matrix: 2D matrix (list of lists)
-        window_size: Size of square window
-        step: Step size between windows
-    
-    Yields:
-        2D windows extracted from the matrix
-    
-    Example:
-        >>> m = [[1,2,3],[4,5,6],[7,8,9]]
-        >>> for win in sliding_window_2d(m, 2):
-        ...     print(win)
-        [[1, 2], [4, 5]]
-        [[2, 3], [5, 6]]
-        [[4, 5], [7, 8]]
-        [[5, 6], [8, 9]]
-    """
-    if not matrix:
-        return
-    
-    rows = len(matrix)
-    cols = len(matrix[0]) if matrix else 0
-    
-    if window_size > rows or window_size > cols:
-        return
-    
-    for r in range(0, rows - window_size + 1, step):
-        for c in range(0, cols - window_size + 1, step):
-            window = [row[c:c + window_size] for row in matrix[r:r + window_size]]
-            yield window
-
-
-def intersperse(
-    iterable: Iterable[T],
-    delimiter: T,
-) -> Iterator[T]:
-    """
-    Yield items from iterable with delimiter between each.
-    
-    Args:
-        iterable: Input iterable
-        delimiter: Value to insert between items
-    
-    Yields:
-        Items with delimiter interspersed
-    
-    Example:
-        >>> list(intersperse([1, 2, 3], 0))
-        [1, 0, 2, 0, 3]
-    """
-    iterator = iter(iterable)
-    try:
-        yield next(iterator)
-    except StopIteration:
-        return
-    for item in iterator:
-        yield delimiter
-        yield item
-
-
-def quantify(iterable: Iterable[Any], pred: Optional[Callable[[Any], bool]] = None) -> int:
-    """
-    Count the number of items where pred(item) is True.
-    
-    Args:
-        iterable: Input iterable
-        pred: Predicate function (default: identity/bool)
+        pred: Predicate function (True/False).
+        iterable: Source iterable.
     
     Returns:
-        Count of items where pred returns True
-    
-    Example:
-        >>> quantify([True, False, True, True])
-        3
+        Tuple of (elements passing, elements failing).
     """
-    if pred is None:
-        return sum(1 for item in iterable if item)
-    return sum(1 for item in iterable if pred(item))
+    true_part = []
+    false_part = []
+    for item in iterable:
+        if pred(item):
+            true_part.append(item)
+        else:
+            false_part.append(item)
+    return true_part, false_part
 
 
-def list_compare(l1: List[T], l2: List[T]) -> int:
-    """
-    Lexicographic comparison of two lists.
+def take(n: int, iterable: Iterator) -> List:
+    """Take first n elements.
     
     Args:
-        l1: First list
-        l2: Second list
+        n: Number of elements.
+        iterable: Source iterable.
     
     Returns:
-        -1 if l1 < l2, 0 if equal, 1 if l1 > l2
-    
-    Example:
-        >>> list_compare([1, 2, 3], [1, 2, 4])
-        -1
+        List of first n elements.
     """
-    for a, b in zip(l1, l2):
-        if a < b:
-            return -1
-        if a > b:
-            return 1
-    if len(l1) < len(l2):
-        return -1
-    if len(l1) > len(l2):
-        return 1
-    return 0
+    return list(it.islice(iterable, n))
+
+
+def drop(n: int, iterable: Iterator) -> Iterator:
+    """Drop first n elements.
+    
+    Args:
+        n: Number of elements to skip.
+        iterable: Source iterable.
+    
+    Yields:
+        Elements after dropping first n.
+    """
+    return it.islice(iterable, n, None)
+
+
+def powerset(iterable: Iterator) -> Iterator[tuple]:
+    """All subsets of iterable.
+    
+    Args:
+        iterable: Source iterable.
+    
+    Yields:
+        Tuples representing all subsets.
+    """
+    items = list(iterable)
+    for r in range(len(items) + 1):
+        yield from it.combinations(items, r)
+
+
+def pairwise(iterable: Iterator) -> Iterator[tuple]:
+    """Consecutive pairs.
+    
+    Args:
+        iterable: Source iterable.
+    
+    Yields:
+        Tuples of consecutive elements.
+    """
+    a, b = it.tee(iterable)
+    next(b, None)
+    return zip(a, b)
+
+
+class ItertoolsChunkAction(BaseAction):
+    """Split iterable into chunks of fixed size."""
+    action_type = "itertools_chunk"
+    display_name = "拆分块"
+    description = "将可迭代对象拆分为固定大小的块"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute chunk operation."""
+        iterable = params.get('iterable', [])
+        size = params.get('size', 10)
+        output_var = params.get('output_var', 'chunk_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            resolved_size = context.resolve_value(size)
+            result = list(chunk(iter(resolved_iterable), resolved_size))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"chunked into {len(result)} chunks")
+        except Exception as e:
+            return ActionResult(success=False, message=f"chunk failed: {e}")
+
+
+class ItertoolsWindowAction(BaseAction):
+    """Sliding window over iterable."""
+    action_type = "itertools_window"
+    display_name = "滑动窗口"
+    description = "对可迭代对象执行滑动窗口操作"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute window operation."""
+        iterable = params.get('iterable', [])
+        n = params.get('n', 2)
+        output_var = params.get('output_var', 'window_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            resolved_n = context.resolve_value(n)
+            result = list(window(iter(resolved_iterable), resolved_n))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"window size {n}: {len(result)} windows")
+        except Exception as e:
+            return ActionResult(success=False, message=f"window failed: {e}")
+
+
+class ItertoolsFlattenAction(BaseAction):
+    """Flatten nested iterables."""
+    action_type = "itertools_flatten"
+    display_name = "扁平化"
+    description = "将嵌套的可迭代对象扁平化"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute flatten operation."""
+        nested = params.get('nested', [])
+        depth = params.get('depth', None)
+        output_var = params.get('output_var', 'flatten_result')
+
+        try:
+            resolved_nested = context.resolve_value(nested)
+            resolved_depth = context.resolve_value(depth) if depth is not None else None
+            result = list(flatten(resolved_nested, resolved_depth))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"flattened to {len(result)} elements")
+        except Exception as e:
+            return ActionResult(success=False, message=f"flatten failed: {e}")
+
+
+class ItertoolsUniqueAction(BaseAction):
+    """Get unique elements preserving order."""
+    action_type = "itertools_unique"
+    display_name = "去重"
+    description = "获取不重复元素（保持顺序）"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute unique operation."""
+        iterable = params.get('iterable', [])
+        output_var = params.get('output_var', 'unique_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            result = list(unique(iter(resolved_iterable)))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"got {len(result)} unique elements")
+        except Exception as e:
+            return ActionResult(success=False, message=f"unique failed: {e}")
+
+
+class ItertoolsUniqueByAction(BaseAction):
+    """Unique elements by key function."""
+    action_type = "itertools_unique_by"
+    display_name = "按Key去重"
+    description = "通过Key函数获取不重复元素"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute unique_by operation."""
+        iterable = params.get('iterable', [])
+        key_str = params.get('key', 'lambda x: x')
+        output_var = params.get('output_var', 'unique_by_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            key_func = eval(key_str, {"__builtins__": {}}, {})
+            result = list(unique_by(iter(resolved_iterable), key_func))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"got {len(result)} unique elements by key")
+        except Exception as e:
+            return ActionResult(success=False, message=f"unique_by failed: {e}")
+
+
+class ItertoolsGrouperAction(BaseAction):
+    """Group elements in chunks."""
+    action_type = "itertools_grouper"
+    display_name = "分组"
+    description = "将元素按固定大小分组"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute grouper operation."""
+        iterable = params.get('iterable', [])
+        n = params.get('n', 3)
+        fillvalue = params.get('fillvalue', None)
+        output_var = params.get('output_var', 'grouper_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            resolved_n = context.resolve_value(n)
+            result = list(grouper(iter(resolved_iterable), resolved_n, fillvalue))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"grouped into {len(result)} groups")
+        except Exception as e:
+            return ActionResult(success=False, message=f"grouper failed: {e}")
+
+
+class ItertoolsPartitionAction(BaseAction):
+    """Partition iterable by predicate."""
+    action_type = "itertools_partition"
+    display_name = "分区"
+    description = "按条件将元素分为两部分"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute partition operation."""
+        iterable = params.get('iterable', [])
+        pred_str = params.get('predicate', 'lambda x: bool(x)')
+        output_var = params.get('output_var', 'partition_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            pred_func = eval(pred_str, {"__builtins__": {}}, {})
+            true_part, false_part = partition(pred_func, iter(resolved_iterable))
+            result = {"true": true_part, "false": false_part}
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"partitioned: {len(true_part)} true, {len(false_part)} false")
+        except Exception as e:
+            return ActionResult(success=False, message=f"partition failed: {e}")
+
+
+class ItertoolsTakeAction(BaseAction):
+    """Take first n elements."""
+    action_type = "itertools_take"
+    display_name = "取前N个"
+    description = "获取可迭代对象的前N个元素"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute take operation."""
+        iterable = params.get('iterable', [])
+        n = params.get('n', 5)
+        output_var = params.get('output_var', 'take_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            resolved_n = context.resolve_value(n)
+            result = take(resolved_n, iter(resolved_iterable))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"took {len(result)} elements")
+        except Exception as e:
+            return ActionResult(success=False, message=f"take failed: {e}")
+
+
+class ItertoolsDropAction(BaseAction):
+    """Drop first n elements."""
+    action_type = "itertools_drop"
+    display_name = "丢弃前N个"
+    description = "丢弃可迭代对象的前N个元素"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute drop operation."""
+        iterable = params.get('iterable', [])
+        n = params.get('n', 5)
+        output_var = params.get('output_var', 'drop_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            resolved_n = context.resolve_value(n)
+            result = list(drop(resolved_n, iter(resolved_iterable)))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"dropped, {len(result)} remaining")
+        except Exception as e:
+            return ActionResult(success=False, message=f"drop failed: {e}")
+
+
+class ItertoolsPowersetAction(BaseAction):
+    """All subsets of iterable."""
+    action_type = "itertools_powerset"
+    display_name = "幂集"
+    description = "生成可迭代对象的所有子集"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute powerset operation."""
+        iterable = params.get('iterable', [])
+        output_var = params.get('output_var', 'powerset_result')
+
+        try:
+            resolved_iterable = context.resolve_value(iterable)
+            result = list(powerset(iter(resolved_iterable)))
+            context.set_variable(output_var, result)
+            return ActionResult(success=True, message=f"generated {len(result)} subsets")
+        except Exception as e:
+            return ActionResult(success=False, message=f"powerset failed: {e}")

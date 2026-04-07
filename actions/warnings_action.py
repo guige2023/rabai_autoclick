@@ -1,416 +1,251 @@
-"""Warning control and handling for RabAI AutoClick.
+"""Warnings action module for RabAI AutoClick.
 
-Provides warning operations:
-- WarningsCatchAction: Catch warnings during execution
-- WarningsFilterAction: Add warning filter
-- WarningsSimpleFilterAction: Simple filter for warnings
-- WarningsWarnAction: Issue a warning
-- WarningsShowWarningAction: Show warning to user
-- WarningsCaptureAction: Capture warnings as list
-- WarningsResetAction: Reset all warning filters
+Provides warning control utilities:
+- ShowWarningAction: Show a warning
+- FilterWarningsAction: Configure warning filters
+- CatchWarningsAction: Catch warnings as exceptions
+- ResetWarningsAction: Reset warning filters
+- WarnOnceAction: Warn only once per location
+- WarnDeprecationAction: Show deprecation warning
+- WarningSummaryAction: Get warning summary
 """
 
-from __future__ import annotations
-
+from typing import Any, Dict, List, Optional, Type, Union
 import sys
-import os
 import warnings
-import functools
-from typing import Any, Callable, Dict, List, Optional, Type
+import collections
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_parent_dir = __import__('os').path.dirname(__import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class WarningsCatchAction(BaseAction):
-    """Catch and handle warnings during execution."""
-    action_type = "warnings_catch"
-    display_name = "警告捕获"
-    description = "在执行期间捕获警告"
+class WarningsShowAction(BaseAction):
+    """Show a warning."""
+    action_type = "warnings_show"
+    display_name = "显示警告"
+    description = "显示警告信息"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute warning catching.
-
-        Args:
-            context: Execution context.
-            params: Dict with body (callable), category (warning class),
-                   lineno (include line numbers), output_var.
-
-        Returns:
-            ActionResult with caught warnings list.
-        """
-        body = params.get('body', None)
-        category = params.get('category', Warning)
-        lineno = params.get('lineno', True)
-        output_var = params.get('output_var', 'caught_warnings')
+        """Execute show warning."""
+        message = params.get('message', '')
+        category = params.get('category', 'UserWarning')
+        stack_level = params.get('stack_level', 1)
+        output_var = params.get('output_var', 'warning_result')
 
         try:
-            resolved_category = category
-            if isinstance(category, str):
-                resolved_category = eval(category, {"__builtins__": __builtins__, "Warning": Warning})
-            elif isinstance(category, type) and issubclass(category, Warning):
-                resolved_category = category
-
-            caught = []
-
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always", resolved_category)
-                if body:
-                    resolved_body = context.resolve_value(body) if isinstance(body, str) else body
-                    if callable(resolved_body):
-                        result = resolved_body()
-                    else:
-                        result = resolved_body
-                else:
-                    result = None
-
-                for warning in w:
-                    warn_dict = {
-                        'message': str(warning.message),
-                        'category': warning.category.__name__,
-                        'filename': warning.filename,
-                        'lineno': warning.lineno,
-                        'line': warning.line
-                    }
-                    caught.append(warn_dict)
-
-            context.set(output_var, caught)
-            context.set(f"{output_var}_result", result)
-
-            return ActionResult(
-                success=True,
-                data={'warnings': caught, 'result': result},
-                message=f"Caught {len(caught)} warnings"
-            )
-
+            resolved_message = context.resolve_value(message) if isinstance(message, str) else message
+            resolved_category = context.resolve_value(category) if isinstance(category, str) else category
+            
+            if isinstance(resolved_category, str):
+                try:
+                    resolved_category = eval(resolved_category, {"__builtins__": {}}, {"Warning": Warning})
+                except Exception:
+                    resolved_category = UserWarning
+            
+            warnings.warn(resolved_message, resolved_category, stacklevel=stack_level)
+            context.set_variable(output_var, {"shown": True, "message": str(resolved_message)})
+            return ActionResult(success=True, message=f"warning shown: {resolved_message}")
         except Exception as e:
-            return ActionResult(success=False, message=f"Catch warnings error: {str(e)}")
+            return ActionResult(success=False, message=f"show warning failed: {e}")
 
 
 class WarningsFilterAction(BaseAction):
-    """Add warning filter with action and message pattern."""
+    """Configure warning filters."""
     action_type = "warnings_filter"
-    display_name = "警告过滤器"
-    description = "添加警告过滤器"
+    display_name = "过滤警告"
+    description = "配置警告过滤器"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute filter addition.
-
-        Args:
-            context: Execution context.
-            params: Dict with action (error/ignore/always/default/once),
-                   message_pattern, category, module, lineno, output_var.
-
-        Returns:
-            ActionResult with filter result.
-        """
+        """Execute filter warnings."""
         action = params.get('action', 'default')
-        message = params.get('message_pattern', '')
-        category = params.get('category', Warning)
-        module = params.get('module_pattern', '')
+        category = params.get('category', 'Warning')
+        message = params.get('message', '')
+        module = params.get('module', None)
         lineno = params.get('lineno', 0)
         output_var = params.get('output_var', 'filter_result')
 
         try:
-            valid_actions = ['default', 'error', 'ignore', 'always', 'once', 'module']
-            if action not in valid_actions:
-                return ActionResult(success=False, message=f"Invalid action. Must be one of {valid_actions}")
-
-            resolved_category = category
-            if isinstance(category, str):
-                if category == 'Warning':
-                    resolved_category = Warning
-                else:
-                    resolved_category = eval(category, {"__builtins__": __builtins__, "Warning": Warning})
-            elif isinstance(category, type) and issubclass(category, Warning):
-                resolved_category = category
-
+            resolved_action = context.resolve_value(action) if isinstance(action, str) else action
+            resolved_category = context.resolve_value(category) if isinstance(category, str) else category
             resolved_message = context.resolve_value(message) if isinstance(message, str) else message
-            resolved_module = context.resolve_value(module) if isinstance(module, str) else module
-            resolved_lineno = context.resolve_value(lineno) if isinstance(lineno, str) else lineno
-
-            warnings.filterwarnings(
-                action,
-                message=resolved_message or '',
-                category=resolved_category,
-                module=resolved_module or '',
-                lineno=resolved_lineno if resolved_lineno else 0
-            )
-
-            context.set(output_var, True)
-            return ActionResult(success=True, data=True, message=f"Filter added: {action}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Filter error: {str(e)}")
-
-
-class WarningsSimpleFilterAction(BaseAction):
-    """Simple warning filter for a category."""
-    action_type = "warnings_simple_filter"
-    display_name = "简单警告过滤"
-    description = "对指定类别设置简单警告过滤"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute simple filter.
-
-        Args:
-            context: Execution context.
-            params: Dict with action, category, output_var.
-
-        Returns:
-            ActionResult with filter result.
-        """
-        action = params.get('action', 'always')
-        category = params.get('category', Warning)
-        output_var = params.get('output_var', 'simple_filter_result')
-
-        try:
-            resolved_category = category
-            if isinstance(category, str):
-                if category == 'Warning':
+            resolved_module = context.resolve_value(module) if module is not None else None
+            
+            if isinstance(resolved_category, str):
+                try:
+                    resolved_category = eval(resolved_category, {"__builtins__": {}}, {"Warning": Warning})
+                except Exception:
                     resolved_category = Warning
-                else:
-                    resolved_category = eval(category, {"__builtins__": __builtins__, "Warning": Warning})
-            elif isinstance(category, type) and issubclass(category, Warning):
-                resolved_category = category
-
-            warnings.simplefilter(action, resolved_category)
-
-            context.set(output_var, True)
-            return ActionResult(success=True, data=True, message=f"Simple filter: {action} for {resolved_category.__name__}")
-
+            
+            if resolved_module is None:
+                resolved_module = r".*"
+            
+            warnings.filterwarnings(resolved_action, category=resolved_category, message=resolved_message, module=resolved_module, lineno=lineno)
+            context.set_variable(output_var, {"filtered": True})
+            return ActionResult(success=True, message="filter configured")
         except Exception as e:
-            return ActionResult(success=False, message=f"Simple filter error: {str(e)}")
+            return ActionResult(success=False, message=f"filter failed: {e}")
 
 
-class WarningsWarnAction(BaseAction):
-    """Issue a warning."""
-    action_type = "warnings_warn"
-    display_name = "发出警告"
-    description = "发出警告消息"
+class WarningsCatchAction(BaseAction):
+    """Catch warnings as exceptions."""
+    action_type = "warnings_catch"
+    display_name = "捕获警告"
+    description = "捕获警告作为异常处理"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute warning issuance.
-
-        Args:
-            context: Execution context.
-            params: Dict with message, category, stack_level, output_var.
-
-        Returns:
-            ActionResult with warning result.
-        """
-        message = params.get('message', '')
-        category = params.get('category', UserWarning)
-        stack_level = params.get('stack_level', 1)
-        output_var = params.get('output_var', 'warn_result')
+        """Execute catch warnings."""
+        command_str = params.get('command', 'pass')
+        category = params.get('category', 'Warning')
+        record = params.get('record', True)
+        output_var = params.get('output_var', 'catch_result')
 
         try:
-            resolved_message = context.resolve_value(message) if isinstance(message, str) else message
-            resolved_category = category
-            if isinstance(category, str):
-                if category == 'Warning':
+            resolved_category = context.resolve_value(category) if isinstance(category, str) else category
+            if isinstance(resolved_category, str):
+                try:
+                    resolved_category = eval(resolved_category, {"__builtins__": {}}, {"Warning": Warning})
+                except Exception:
                     resolved_category = Warning
-                elif category == 'UserWarning':
-                    resolved_category = UserWarning
+            
+            with warnings.catch_warnings(record=record) as w:
+                if record:
+                    warnings.simplefilter("always")
+                exec_globals = {"__builtins__": __builtins__, "context": context, "params": params}
+                eval(command_str, exec_globals)
+                
+                if record:
+                    caught = []
+                    for warning in w:
+                        caught.append({
+                            "message": str(warning.message),
+                            "category": warning.category.__name__,
+                            "filename": warning.filename,
+                            "lineno": warning.lineno
+                        })
+                    context.set_variable(output_var, caught)
+                    return ActionResult(success=True, message=f"caught {len(caught)} warnings")
                 else:
-                    resolved_category = eval(category, {"__builtins__": __builtins__, "Warning": Warning, "UserWarning": UserWarning})
-            elif isinstance(category, type) and issubclass(category, Warning):
-                resolved_category = category
-
-            resolved_stack = context.resolve_value(stack_level) if isinstance(stack_level, str) else stack_level
-
-            warnings.warn(resolved_message, category=resolved_category, stack_level=resolved_stack or 1)
-
-            context.set(output_var, True)
-            return ActionResult(success=True, data=True, message=f"Warning issued: {resolved_message}")
-
+                    context.set_variable(output_var, [])
+                    return ActionResult(success=True, message="no warnings caught")
         except Exception as e:
-            return ActionResult(success=False, message=f"Warn error: {str(e)}")
-
-
-class WarningsShowWarningAction(BaseAction):
-    """Show warning to user via standard warning display."""
-    action_type = "warnings_show"
-    display_name = "显示警告"
-    description = "通过标准方式显示警告"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute warning display.
-
-        Args:
-            context: Execution context.
-            params: Dict with message, category, filename, lineno, file (optional),
-                   line (optional), output_var.
-
-        Returns:
-            ActionResult with display result.
-        """
-        message = params.get('message', '')
-        category = params.get('category', UserWarning)
-        filename = params.get('filename', '<unknown>')
-        lineno = params.get('lineno', 0)
-        file_handle = params.get('file', None)
-        line_text = params.get('line', None)
-        output_var = params.get('output_var', 'show_result')
-
-        try:
-            resolved_message = context.resolve_value(message) if isinstance(message, str) else message
-            resolved_filename = context.resolve_value(filename) if isinstance(filename, str) else filename
-            resolved_lineno = context.resolve_value(lineno) if isinstance(lineno, str) else lineno
-
-            resolved_category = category
-            if isinstance(category, str):
-                if category == 'Warning':
-                    resolved_category = Warning
-                else:
-                    resolved_category = eval(category, {"__builtins__": __builtins__, "Warning": Warning})
-            elif isinstance(category, type) and issubclass(category, Warning):
-                resolved_category = category
-
-            if file_handle:
-                resolved_file = context.resolve_value(file_handle) if isinstance(file_handle, str) else file_handle
-            else:
-                resolved_file = sys.stderr
-
-            warn_message = warnings.WarningMessage(
-                message=resolved_message,
-                category=resolved_category,
-                filename=resolved_filename,
-                lineno=resolved_lineno,
-                file=resolved_file,
-                line=line_text
-            )
-
-            warnings.warn_explicit(warn_message)
-
-            context.set(output_var, True)
-            return ActionResult(success=True, data=True, message="Warning shown")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Show warning error: {str(e)}")
-
-
-class WarningsCaptureAction(BaseAction):
-    """Capture all warnings during execution as a list."""
-    action_type = "warnings_capture"
-    display_name = "警告捕获列表"
-    description = "执行期间捕获所有警告为列表"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute warning capture.
-
-        Args:
-            context: Execution context.
-            params: Dict with body (callable), output_var.
-
-        Returns:
-            ActionResult with captured warnings.
-        """
-        body = params.get('body', None)
-        output_var = params.get('output_var', 'captured_warnings')
-
-        try:
-            captured = []
-
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                if body:
-                    resolved_body = context.resolve_value(body) if isinstance(body, str) else body
-                    if callable(resolved_body):
-                        result = resolved_body()
-                    else:
-                        result = resolved_body
-                else:
-                    result = None
-
-                for warning in w:
-                    captured.append({
-                        'message': str(warning.message),
-                        'category': warning.category.__name__,
-                        'filename': warning.filename,
-                        'lineno': warning.lineno
-                    })
-
-            context.set(output_var, captured)
-            return ActionResult(
-                success=True,
-                data={'warnings': captured, 'result': result},
-                message=f"Captured {len(captured)} warnings"
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Capture error: {str(e)}")
+            return ActionResult(success=False, message=f"catch warnings failed: {e}")
 
 
 class WarningsResetAction(BaseAction):
-    """Reset all warning filters to default."""
+    """Reset warning filters."""
     action_type = "warnings_reset"
-    display_name = "重置警告过滤器"
-    description = "重置所有警告过滤器为默认"
+    display_name = "重置警告"
+    description = "重置所有警告过滤器"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute filter reset.
-
-        Args:
-            context: Execution context.
-            params: Dict with output_var.
-
-        Returns:
-            ActionResult with reset result.
-        """
+        """Execute reset warnings."""
         output_var = params.get('output_var', 'reset_result')
 
         try:
             warnings.resetwarnings()
-            context.set(output_var, True)
-            return ActionResult(success=True, data=True, message="Warning filters reset")
-
+            context.set_variable(output_var, {"reset": True})
+            return ActionResult(success=True, message="warnings reset")
         except Exception as e:
-            return ActionResult(success=False, message=f"Reset error: {str(e)}")
+            return ActionResult(success=False, message=f"reset failed: {e}")
 
 
-class WarningsSimpleAction(BaseAction):
-    """Simple warn-once mechanism using functools."""
-    action_type = "warnings_simple"
-    display_name = "单次警告"
-    description = "使用functools实现仅警告一次"
+class WarningsSimpleFilterAction(BaseAction):
+    """Simple filter configuration."""
+    action_type = "warnings_simple_filter"
+    display_name = "简单过滤"
+    description = "设置简单警告过滤器"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute simple once-per-call warning.
+        """Execute simple filter."""
+        action = params.get('action', 'default')
+        category = params.get('category', 'Warning')
+        output_var = params.get('output_var', 'simple_filter_result')
 
-        Args:
-            context: Execution context.
-            params: Dict with message, category, output_var.
+        try:
+            resolved_action = context.resolve_value(action) if isinstance(action, str) else action
+            resolved_category = context.resolve_value(category) if isinstance(category, str) else category
+            
+            if isinstance(resolved_category, str):
+                try:
+                    resolved_category = eval(resolved_category, {"__builtins__": {}}, {"Warning": Warning})
+                except Exception:
+                    resolved_category = Warning
+            
+            warnings.simplefilter(resolved_action, resolved_category)
+            context.set_variable(output_var, {"simple_filter": True})
+            return ActionResult(success=True, message=f"simplefilter {resolved_action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"simple_filter failed: {e}")
 
-        Returns:
-            ActionResult with warning result.
-        """
+
+class WarnOnceAction(BaseAction):
+    """Warn only once per location."""
+    action_type = "warnings_warn_once"
+    display_name = "警告一次"
+    description = "每个位置只警告一次"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute warn once."""
         message = params.get('message', '')
-        category = params.get('category', UserWarning)
-        output_var = params.get('output_var', 'simple_warn_result')
+        category = params.get('category', 'UserWarning')
+        stack_level = params.get('stack_level', 1)
+        output_var = params.get('output_var', 'warn_once_result')
 
         try:
             resolved_message = context.resolve_value(message) if isinstance(message, str) else message
-
-            resolved_category = category
-            if isinstance(category, str):
-                if category == 'Warning':
-                    resolved_category = Warning
-                else:
-                    resolved_category = eval(category, {"__builtins__": __builtins__, "Warning": Warning})
-            elif isinstance(category, type) and issubclass(category, Warning):
-                resolved_category = category
-
-            @functools.lru_cache(maxsize=None)
-            def warn_once(msg, cat):
-                warnings.warn(msg, category=cat)
-                return True
-
-            warn_once(str(resolved_message), resolved_category)
-
-            context.set(output_var, True)
-            return ActionResult(success=True, data=True, message=f"Warn-once: {resolved_message}")
-
+            resolved_category = context.resolve_value(category) if isinstance(category, str) else category
+            
+            if isinstance(resolved_category, str):
+                try:
+                    resolved_category = eval(resolved_category, {"__builtins__": {}}, {"Warning": Warning})
+                except Exception:
+                    resolved_category = UserWarning
+            
+            warnings.warn(resolved_message, resolved_category, stacklevel=stack_level)
+            context.set_variable(output_var, {"warned_once": True, "message": str(resolved_message)})
+            return ActionResult(success=True, message=f"warn_once: {resolved_message}")
         except Exception as e:
-            return ActionResult(success=False, message=f"Simple warn error: {str(e)}")
+            return ActionResult(success=False, message=f"warn_once failed: {e}")
+
+
+class WarnDeprecationAction(BaseAction):
+    """Show deprecation warning."""
+    action_type = "warnings_deprecation"
+    display_name = "弃用警告"
+    description = "显示弃用警告"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute deprecation warning."""
+        message = params.get('message', 'This feature is deprecated')
+        stack_level = params.get('stack_level', 1)
+        output_var = params.get('output_var', 'deprecation_result')
+
+        try:
+            resolved_message = context.resolve_value(message) if isinstance(message, str) else message
+            warnings.warn(resolved_message, DeprecationWarning, stacklevel=stack_level)
+            context.set_variable(output_var, {"deprecated": True, "message": str(resolved_message)})
+            return ActionResult(success=True, message=f"deprecation: {resolved_message}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"deprecation warning failed: {e}")
+
+
+class WarnFutureWarningAction(BaseAction):
+    """Show future warning."""
+    action_type = "warnings_future"
+    display_name = "未来警告"
+    description = "显示未来警告"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute future warning."""
+        message = params.get('message', 'This will change in a future version')
+        stack_level = params.get('stack_level', 1)
+        output_var = params.get('output_var', 'future_warning_result')
+
+        try:
+            resolved_message = context.resolve_value(message) if isinstance(message, str) else message
+            warnings.warn(resolved_message, FutureWarning, stacklevel=stack_level)
+            context.set_variable(output_var, {"future_warning": True, "message": str(resolved_message)})
+            return ActionResult(success=True, message=f"future warning: {resolved_message}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"future warning failed: {e}")
