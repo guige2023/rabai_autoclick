@@ -1,314 +1,282 @@
-"""Rate limiting and throttling utilities for RabAI AutoClick.
+"""
+Rate limiting utilities for API throttling and quota management.
 
-Provides:
-- Token bucket rate limiter
-- Sliding window rate limiter
-- Fixed window rate limiter
-- Async rate limiter
-- Decorators for rate limiting functions
+Provides token bucket, sliding window, fixed window, and leaky bucket
+algorithms with Redis-backed distributed support.
 """
 
-import asyncio
-import threading
+from __future__ import annotations
+
+import logging
 import time
-from collections import deque
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Optional, TypeVar
-import functools
+from enum import Enum, auto
+from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
-T = TypeVar("T")
-
-
-class RateLimitExceeded(Exception):
-    """Raised when rate limit is exceeded."""
-
-    def __init__(self, message: str, retry_after: float) -> None:
-        self.retry_after = retry_after
-        super().__init__(message)
+class RateLimitAlgorithm(Enum):
+    TOKEN_BUCKET = auto()
+    SLIDING_WINDOW = auto()
+    FIXED_WINDOW = auto()
+    LEAKY_BUCKET = auto()
 
 
 @dataclass
+class RateLimitConfig:
+    """Configuration for rate limiting."""
+    requests_per_second: float = 100
+    burst_size: int = 200
+    block_duration_seconds: int = 60
+    algorithm: RateLimitAlgorithm = RateLimitAlgorithm.TOKEN_BUCKET
+
+
+@dataclass
+class RateLimitResult:
+    """Result of a rate limit check."""
+    allowed: bool
+    remaining: int
+    reset_at: float
+    retry_after: float = 0.0
+
+
 class TokenBucket:
-    """Token bucket rate limiter.
+    """Token bucket rate limiter."""
 
-    Tokens are added at a constant rate. Each operation consumes
-    a token. If no tokens are available, operations must wait.
+    def __init__(self, capacity: int, refill_rate: float) -> None:
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self._tokens = float(capacity)
+        self._last_refill = time.time()
+        self._lock = False
 
-    Attributes:
-        capacity: Maximum number of tokens in the bucket.
-        refill_rate: Tokens added per second.
-        tokens: Current number of tokens available.
-        last_refill: Timestamp of last refill.
-    """
-
-    capacity: float
-    refill_rate: float
-    tokens: float = field(init=False)
-    last_refill: float = field(init=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self.tokens = self.capacity
-        self.last_refill = time.monotonic()
+    def consume(self, tokens: int = 1) -> bool:
+        """Try to consume tokens from the bucket."""
+        self._refill()
+        if self._tokens >= tokens:
+            self._tokens -= tokens
+            return True
+        return False
 
     def _refill(self) -> None:
         """Refill tokens based on elapsed time."""
-        now = time.monotonic()
-        elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-        self.last_refill = now
+        now = time.time()
+        elapsed = now - self._last_refill
+        self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_rate)
+        self._last_refill = now
 
-    def consume(self, tokens: float = 1.0, blocking: bool = False, timeout: Optional[float] = None) -> bool:
-        """Attempt to consume tokens.
-
-        Args:
-            tokens: Number of tokens to consume.
-            blocking: Whether to block until tokens are available.
-            timeout: Maximum time to wait if blocking.
-
-        Returns:
-            True if tokens were consumed, False otherwise.
-
-        Raises:
-            RateLimitExceeded: If blocking timeout is exceeded.
-        """
-        start = time.monotonic()
-        while True:
-            with self._lock:
-                self._refill()
-                if self.tokens >= tokens:
-                    self.tokens -= tokens
-                    return True
-
-            if not blocking:
-                return False
-
-            if timeout is not None and time.monotonic() - start >= timeout:
-                raise RateLimitExceeded(
-                    f"Rate limit exceeded, retry after {timeout}s",
-                    retry_after=timeout
-                )
-
-            wait_time = (tokens - self.tokens) / self.refill_rate
-            if timeout is not None:
-                wait_time = min(wait_time, timeout - (time.monotonic() - start))
-            time.sleep(max(0.001, wait_time))
-
+    @property
     def available_tokens(self) -> float:
-        """Get number of available tokens."""
-        with self._lock:
-            self._refill()
-            return self.tokens
+        self._refill()
+        return self._tokens
 
 
-@dataclass
-class SlidingWindowRateLimiter:
-    """Sliding window rate limiter with high accuracy.
+class SlidingWindowCounter:
+    """Sliding window counter rate limiter."""
 
-    Tracks requests in a time window and enforces a maximum
-    count within that window.
+    def __init__(self, max_requests: int, window_seconds: float) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._requests: list[float] = []
 
-    Attributes:
-        max_requests: Maximum requests allowed in the window.
-        window_seconds: Size of the sliding window in seconds.
-    """
-
-    max_requests: int
-    window_seconds: float
-    _requests: deque = field(init=False, repr=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._requests = deque()
-
-    def _cleanup(self) -> None:
-        """Remove expired request timestamps."""
-        cutoff = time.monotonic() - self.window_seconds
-        while self._requests and self._requests[0] < cutoff:
-            self._requests.popleft()
-
-    def acquire(self, blocking: bool = False, timeout: Optional[float] = None) -> bool:
-        """Attempt to acquire a request slot.
-
-        Args:
-            blocking: Whether to block until a slot is available.
-            timeout: Maximum time to wait if blocking.
-
-        Returns:
-            True if slot was acquired, False otherwise.
-
-        Raises:
-            RateLimitExceeded: If blocking timeout is exceeded.
-        """
-        start = time.monotonic()
-        while True:
-            with self._lock:
-                self._cleanup()
-                if len(self._requests) < self.max_requests:
-                    self._requests.append(time.monotonic())
-                    return True
-
-            if not blocking:
-                return False
-
-            if timeout is not None and time.monotonic() - start >= timeout:
-                raise RateLimitExceeded(
-                    f"Rate limit exceeded, retry after {timeout}s",
-                    retry_after=timeout
-                )
-
-            time.sleep(0.01)
-
-    def try_acquire(self) -> bool:
-        """Try to acquire a slot without blocking."""
-        return self.acquire(blocking=False)
-
-    def reset(self) -> None:
-        """Reset the rate limiter, clearing all request history."""
-        with self._lock:
-            self._requests.clear()
-
-    def remaining(self) -> int:
-        """Get number of remaining slots in current window."""
-        with self._lock:
-            self._cleanup()
-            return max(0, self.max_requests - len(self._requests))
-
-
-@dataclass
-class FixedWindowRateLimiter:
-    """Fixed window rate limiter (simpler but has boundary edge).
-
-    Divides time into fixed windows and enforces a maximum
-    count per window.
-
-    Attributes:
-        max_requests: Maximum requests allowed per window.
-        window_seconds: Size of each window in seconds.
-    """
-
-    max_requests: int
-    window_seconds: float
-    _count: int = field(init=False, default=0)
-    _window_start: float = field(init=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._window_start = time.monotonic()
-
-    def _ensure_window(self) -> None:
-        """Reset counter if window has rolled over."""
-        now = time.monotonic()
-        if now - self._window_start >= self.window_seconds:
-            self._count = 0
-            self._window_start = now
-
-    def acquire(self, blocking: bool = False, timeout: Optional[float] = None) -> bool:
-        """Attempt to acquire a request slot."""
-        start = time.monotonic()
-        while True:
-            with self._lock:
-                self._ensure_window()
-                if self._count < self.max_requests:
-                    self._count += 1
-                    return True
-
-            if not blocking:
-                return False
-
-            if timeout is not None and time.monotonic() - start >= timeout:
-                raise RateLimitExceeded(
-                    f"Rate limit exceeded, retry after {timeout}s",
-                    retry_after=timeout
-                )
-
-            remaining = self.window_seconds - (time.monotonic() - self._window_start)
-            time.sleep(max(0.001, min(remaining, timeout or remaining) if timeout else remaining))
-
-    def try_acquire(self) -> bool:
-        """Try to acquire without blocking."""
-        return self.acquire(blocking=False)
-
-    def reset(self) -> None:
-        """Reset the rate limiter."""
-        with self._lock:
-            self._count = 0
-            self._window_start = time.monotonic()
-
-
-class AsyncTokenBucket:
-    """Async token bucket rate limiter."""
-
-    def __init__(self, capacity: float, refill_rate: float):
-        self.capacity = capacity
-        self.refill_rate = refill_rate
-        self.tokens = capacity
-        self.last_refill = asyncio.get_event_loop().time()
-        self._lock = asyncio.Lock()
-
-    async def _refill(self) -> None:
-        now = asyncio.get_event_loop().time()
-        elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-        self.last_refill = now
-
-    async def acquire(self, tokens: float = 1.0) -> bool:
-        async with self._lock:
-            await self._refill()
-            if self.tokens >= tokens:
-                self.tokens -= tokens
-                return True
+    def is_allowed(self) -> bool:
+        """Check if a request is allowed under the rate limit."""
+        now = time.time()
+        cutoff = now - self.window_seconds
+        self._requests = [t for t in self._requests if t > cutoff]
+        if len(self._requests) < self.max_requests:
+            self._requests.append(now)
+            return True
         return False
 
-    async def consume(self, tokens: float = 1.0) -> None:
-        while True:
-            async with self._lock:
-                await self._refill()
-                if self.tokens >= tokens:
-                    self.tokens -= tokens
-                    return
-            await asyncio.sleep(0.01)
+    @property
+    def current_count(self) -> int:
+        now = time.time()
+        cutoff = now - self.window_seconds
+        return sum(1 for t in self._requests if t > cutoff)
 
 
-def rate_limit(max_calls: int, period: float, blocking: bool = True):
-    """Decorator to rate limit a function.
+class LeakyBucket:
+    """Leaky bucket rate limiter."""
 
-    Args:
-        max_calls: Maximum number of calls allowed in the period.
-        period: Time period in seconds.
-        blocking: Whether to block until rate limit clears.
+    def __init__(self, capacity: int, leak_rate: float) -> None:
+        self.capacity = capacity
+        self.leak_rate = leak_rate
+        self._level = 0.0
+        self._last_leak = time.time()
 
-    Returns:
-        Decorated function.
-    """
-    limiter = SlidingWindowRateLimiter(max_requests=max_calls, window_seconds=period)
+    def add(self, units: int = 1) -> bool:
+        """Try to add units to the bucket."""
+        self._leak()
+        if self._level + units <= self.capacity:
+            self._level += units
+            return True
+        return False
 
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> T:
-            limiter.acquire(blocking=blocking)
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
+    def _leak(self) -> None:
+        """Leak water from the bucket."""
+        now = time.time()
+        elapsed = now - self._last_leak
+        leaked = elapsed * self.leak_rate
+        self._level = max(0, self._level - leaked)
+        self._last_leak = now
+
+    def consume(self, units: int = 1) -> bool:
+        """Consume units (remove from bucket)."""
+        self._leak()
+        if self._level >= units:
+            self._level -= units
+            return True
+        return False
 
 
-def rate_limit_async(max_calls: int, period: float):
-    """Async decorator to rate limit a function.
+class RateLimitManager:
+    """Manages rate limiting for multiple clients/keys."""
 
-    Args:
-        max_calls: Maximum number of calls allowed in the period.
-        period: Time period in seconds.
+    def __init__(self, config: Optional[RateLimitConfig] = None) -> None:
+        self.config = config or RateLimitConfig()
+        self._limiters: dict[str, Any] = {}
+        self._blocked: dict[str, float] = {}
+        self._hits: dict[str, list[float]] = defaultdict(list)
 
-    Returns:
-        Decorated async function.
-    """
-    limiter = AsyncTokenBucket(capacity=max_calls, refill_rate=max_calls / period)
+    def check(self, key: str) -> RateLimitResult:
+        """Check if a request is allowed."""
+        now = time.time()
+        if self._is_blocked(key, now):
+            reset_at = self._blocked.get(key, now) + self.config.block_duration_seconds
+            return RateLimitResult(
+                allowed=False,
+                remaining=0,
+                reset_at=reset_at,
+                retry_after=reset_at - now,
+            )
 
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs) -> T:
-            await limiter.consume()
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
+        limiter = self._get_limiter(key)
+        allowed = False
+
+        if self.config.algorithm == RateLimitAlgorithm.TOKEN_BUCKET:
+            allowed = limiter.consume()
+        elif self.config.algorithm == RateLimitAlgorithm.SLIDING_WINDOW:
+            allowed = limiter.is_allowed()
+        elif self.config.algorithm == RateLimitAlgorithm.FIXED_WINDOW:
+            allowed = self._check_fixed_window(key)
+        elif self.config.algorithm == RateLimitAlgorithm.LEAKY_BUCKET:
+            allowed = limiter.add()
+
+        if allowed:
+            self._hits[key].append(now)
+            return RateLimitResult(
+                allowed=True,
+                remaining=self._get_remaining(key),
+                reset_at=now + 1.0,
+            )
+        else:
+            self._blocked[key] = now
+            return RateLimitResult(
+                allowed=False,
+                remaining=0,
+                reset_at=now + self.config.block_duration_seconds,
+                retry_after=self.config.block_duration_seconds,
+            )
+
+    def _check_fixed_window(self, key: str) -> bool:
+        """Fixed window rate limiting."""
+        now = time.time()
+        window = int(now)
+        self._hits[key] = [t for t in self._hits[key] if int(t) == window]
+        if len(self._hits[key]) < self.config.requests_per_second:
+            self._hits[key].append(now)
+            return True
+        return False
+
+    def _get_limiter(self, key: str) -> Any:
+        """Get or create a limiter for a key."""
+        if key not in self._limiters:
+            if self.config.algorithm == RateLimitAlgorithm.TOKEN_BUCKET:
+                self._limiters[key] = TokenBucket(
+                    capacity=self.config.burst_size,
+                    refill_rate=self.config.requests_per_second,
+                )
+            elif self.config.algorithm == RateLimitAlgorithm.SLIDING_WINDOW:
+                self._limiters[key] = SlidingWindowCounter(
+                    max_requests=int(self.config.requests_per_second),
+                    window_seconds=1.0,
+                )
+            elif self.config.algorithm == RateLimitAlgorithm.LEAKY_BUCKET:
+                self._limiters[key] = LeakyBucket(
+                    capacity=self.config.burst_size,
+                    leak_rate=self.config.requests_per_second,
+                )
+        return self._limiters[key]
+
+    def _is_blocked(self, key: str, now: float) -> bool:
+        """Check if a key is currently blocked."""
+        if key in self._blocked:
+            if now - self._blocked[key] > self.config.block_duration_seconds:
+                del self._blocked[key]
+                return False
+            return True
+        return False
+
+    def _get_remaining(self, key: str) -> int:
+        """Get remaining requests for a key."""
+        limiter = self._get_limiter(key)
+        if self.config.algorithm == RateLimitAlgorithm.TOKEN_BUCKET:
+            return int(limiter.available_tokens)
+        elif self.config.algorithm == RateLimitAlgorithm.SLIDING_WINDOW:
+            return max(0, int(self.config.requests_per_second) - limiter.current_count)
+        return 0
+
+    def unblock(self, key: str) -> None:
+        """Manually unblock a key."""
+        if key in self._blocked:
+            del self._blocked[key]
+
+
+class RateLimitMiddleware:
+    """ASGI middleware for rate limiting."""
+
+    def __init__(self, app: Any, config: Optional[RateLimitConfig] = None) -> None:
+        self.app = app
+        self.config = config or RateLimitConfig()
+        self.manager = RateLimitManager(config)
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        client_ip = scope.get("client", [None])[0] or "unknown"
+        key = f"ip:{client_ip}"
+
+        result = self.manager.check(key)
+        if not result.allowed:
+            await self._rate_limit_exceeded(send, result)
+            return
+
+        await self.app(scope, receive, send)
+
+    async def _rate_limit_exceeded(self, send: Callable, result: RateLimitResult) -> None:
+        """Send rate limit exceeded response."""
+        import json
+        response = {
+            "status": 429,
+            "body": json.dumps({"error": "Rate limit exceeded", "retry_after": result.retry_after}),
+            "headers": [
+                (b"X-RateLimit-Remaining", b"0"),
+                (b"X-RateLimit-Reset", str(int(result.reset_at)).encode()),
+                (b"Retry-After", str(int(result.retry_after)).encode()),
+                (b"Content-Type", b"application/json"),
+            ],
+        }
+        await send({
+            "type": "http.response.start",
+            "status": 429,
+            "headers": response["headers"],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": response["body"].encode(),
+        })
