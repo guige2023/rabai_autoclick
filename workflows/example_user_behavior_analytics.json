@@ -1,0 +1,117 @@
+{
+  "name": "User Behavior Analytics Workflow",
+  "description": "Automate UBA anomaly detection review",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "uba_anomalies_to_review": 60,
+    "current_anomaly": 0,
+    "confirmed_anomalies": 0,
+    "false_positives": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "uba_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize UBA counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open UBA platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "uba_analysis_loop",
+      "count": "{{uba_anomalies_to_review}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start UBA analysis loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select UBA anomaly"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for anomaly review"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/uba_anomaly_{{uba_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture UBA screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "uba_counter",
+      "value": "{{uba_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment UBA counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{uba_counter < uba_anomalies_to_review}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more anomalies"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next anomaly"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/user_behavior_analytics_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

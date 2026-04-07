@@ -1,0 +1,117 @@
+{
+  "name": "Cloud Workload Protection Workflow",
+  "description": "Automate cloud workload security monitoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "workloads_to_protect": 58,
+    "current_workload": 0,
+    "protected_workloads": 0,
+    "exposed_workloads": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "workload_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize workload counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open CWPP dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "workload_protection_loop",
+      "count": "{{workloads_to_protect}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start workload protection loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select workload"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for protection check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/workload_protect_{{workload_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture workload screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "workload_counter",
+      "value": "{{workload_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment workload counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{workload_counter < workloads_to_protect}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more workloads"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next workload"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/cloud_workload_protection_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

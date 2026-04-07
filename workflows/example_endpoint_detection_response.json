@@ -1,0 +1,117 @@
+{
+  "name": "Endpoint Detection Response Workflow",
+  "description": "Automate EDR alert investigation",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "edr_alerts_to_investigate": 72,
+    "current_alert": 0,
+    "true_positives": 0,
+    "false_positives": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "edr_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize EDR counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open EDR console"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for console"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "edr_investigation_loop",
+      "count": "{{edr_alerts_to_investigate}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start EDR investigation loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select EDR alert"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for alert investigation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/edr_investigate_{{edr_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture EDR screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "edr_counter",
+      "value": "{{edr_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment EDR counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{edr_counter < edr_alerts_to_investigate}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more alerts"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next alert"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/endpoint_detection_response_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

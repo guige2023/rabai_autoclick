@@ -1,0 +1,117 @@
+{
+  "name": "Security Policy Enforcement Workflow",
+  "description": "Automate security policy deployment verification",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "policies_to_enforce": 68,
+    "current_policy": 0,
+    "enforced_policies": 0,
+    "failed_enforcements": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "enforce_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize enforce counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open policy management console"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for console"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "policy_enforcement_loop",
+      "count": "{{policies_to_enforce}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start policy enforcement loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select security policy"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for enforcement check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/policy_enforce_{{enforce_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture enforcement screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "enforce_counter",
+      "value": "{{enforce_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment enforce counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{enforce_counter < policies_to_enforce}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more policies"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next policy"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_policy_enforcement_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
