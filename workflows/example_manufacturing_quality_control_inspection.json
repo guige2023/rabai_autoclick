@@ -1,23 +1,23 @@
 {
-  "name": "Insurance Policy Management Workflow",
-  "description": "Automate insurance policy lifecycle management from quote to renewal",
+  "name": "Manufacturing Quality Control Inspection Workflow",
+  "description": "Automate manufacturing quality control inspection from sampling to defect logging",
   "version": "1.0",
   "author": "RabAI Team",
   "variables": {
-    "policies_to_manage": 45,
-    "current_policy": 0,
-    "processed_policies": 0,
-    "pending_renewals": 0
+    "inspections_to_complete": 50,
+    "current_inspection": 0,
+    "passed_inspections": 0,
+    "failed_inspections": 0
   },
   "steps": [
     {
       "id": 1,
       "type": "set_variable",
-      "name": "policy_counter",
+      "name": "inspection_counter",
       "value": 0,
       "value_type": "int",
       "pre_delay": 1.0,
-      "comment": "Initialize policy counter"
+      "comment": "Initialize inspection counter"
     },
     {
       "id": 2,
@@ -27,23 +27,23 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.3,
-      "comment": "Open policy administration system"
+      "comment": "Open quality management system"
     },
     {
       "id": 3,
       "type": "delay",
       "seconds": 3.0,
       "pre_delay": 0.5,
-      "comment": "Wait for system to load"
+      "comment": "Wait for QMS to load"
     },
     {
       "id": 4,
       "type": "loop",
-      "loop_id": "policy_management_loop",
-      "count": "{{policies_to_manage}}",
+      "loop_id": "inspection_loop",
+      "count": "{{inspections_to_complete}}",
       "loop_start": 5,
       "pre_delay": 0.3,
-      "comment": "Start policy management loop"
+      "comment": "Start inspection loop"
     },
     {
       "id": 5,
@@ -53,21 +53,21 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.4,
-      "comment": "Open policy record"
+      "comment": "Select inspection batch"
     },
     {
       "id": 6,
       "type": "delay",
       "seconds": 1.5,
       "pre_delay": 0.3,
-      "comment": "Wait for policy to load"
+      "comment": "Wait for batch details"
     },
     {
       "id": 7,
       "type": "screenshot",
-      "save_path": "./screenshots/policy_{{policy_counter}}.png",
+      "save_path": "./screenshots/inspection_{{inspection_counter}}.png",
       "pre_delay": 0.5,
-      "comment": "Capture policy screenshot"
+      "comment": "Capture inspection screenshot"
     },
     {
       "id": 8,
@@ -77,14 +77,14 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.3,
-      "comment": "Review coverage details"
+      "comment": "Record measurement data"
     },
     {
       "id": 9,
       "type": "delay",
       "seconds": 1.0,
       "pre_delay": 0.2,
-      "comment": "Wait for review"
+      "comment": "Wait for recording"
     },
     {
       "id": 10,
@@ -94,14 +94,14 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.3,
-      "comment": "Verify premium payments"
+      "comment": "Compare against specifications"
     },
     {
       "id": 11,
       "type": "delay",
       "seconds": 1.5,
       "pre_delay": 0.2,
-      "comment": "Wait for verification"
+      "comment": "Wait for comparison"
     },
     {
       "id": 12,
@@ -111,53 +111,53 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.3,
-      "comment": "Process endorsement if needed"
+      "comment": "Log inspection results"
     },
     {
       "id": 13,
       "type": "delay",
-      "seconds": 2.0,
+      "seconds": 1.0,
       "pre_delay": 0.2,
-      "comment": "Wait for processing"
+      "comment": "Wait for logging"
     },
     {
       "id": 14,
       "type": "screenshot",
-      "save_path": "./screenshots/policy_updated_{{policy_counter}}.png",
+      "save_path": "./screenshots/inspection_result_{{inspection_counter}}.png",
       "pre_delay": 0.5,
-      "comment": "Capture update confirmation"
+      "comment": "Capture result screenshot"
     },
     {
       "id": 15,
       "type": "set_variable",
-      "name": "policy_counter",
-      "value": "{{policy_counter + 1}}",
+      "name": "inspection_counter",
+      "value": "{{inspection_counter + 1}}",
       "value_type": "expression",
       "pre_delay": 0.2,
-      "comment": "Increment policy counter"
+      "comment": "Increment inspection counter"
     },
     {
       "id": 16,
       "type": "condition",
-      "condition": "{{policy_counter < policies_to_manage}}",
+      "condition": "{{inspection_counter < inspections_to_complete}}",
       "true_next": 17,
       "false_next": 18,
       "pre_delay": 0.1,
-      "comment": "Check if more policies"
+      "comment": "Check if more inspections"
     },
     {
       "id": 17,
       "type": "goto",
       "step_id": 4,
       "pre_delay": 0.1,
-      "comment": "Continue to next policy"
+      "comment": "Continue to next inspection"
     },
     {
       "id": 18,
       "type": "screenshot",
-      "save_path": "./screenshots/policy_management_complete.png",
+      "save_path": "./screenshots/inspection_batch_complete.png",
       "pre_delay": 0.5,
-      "comment": "Capture completion screenshot"
+      "comment": "Capture batch completion"
     },
     {
       "id": 19,

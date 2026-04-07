@@ -1,23 +1,23 @@
 {
-  "name": "Insurance Policy Management Workflow",
-  "description": "Automate insurance policy lifecycle management from quote to renewal",
+  "name": "Legal Contract Review Workflow",
+  "description": "Automate legal contract review process including clause extraction and risk assessment",
   "version": "1.0",
   "author": "RabAI Team",
   "variables": {
-    "policies_to_manage": 45,
-    "current_policy": 0,
-    "processed_policies": 0,
-    "pending_renewals": 0
+    "contracts_to_review": 35,
+    "current_contract": 0,
+    "reviewed_contracts": 0,
+    "flagged_contracts": 0
   },
   "steps": [
     {
       "id": 1,
       "type": "set_variable",
-      "name": "policy_counter",
+      "name": "contract_counter",
       "value": 0,
       "value_type": "int",
       "pre_delay": 1.0,
-      "comment": "Initialize policy counter"
+      "comment": "Initialize contract counter"
     },
     {
       "id": 2,
@@ -27,7 +27,7 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.3,
-      "comment": "Open policy administration system"
+      "comment": "Open contract management system"
     },
     {
       "id": 3,
@@ -39,11 +39,11 @@
     {
       "id": 4,
       "type": "loop",
-      "loop_id": "policy_management_loop",
-      "count": "{{policies_to_manage}}",
+      "loop_id": "contract_review_loop",
+      "count": "{{contracts_to_review}}",
       "loop_start": 5,
       "pre_delay": 0.3,
-      "comment": "Start policy management loop"
+      "comment": "Start contract review loop"
     },
     {
       "id": 5,
@@ -53,21 +53,21 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.4,
-      "comment": "Open policy record"
+      "comment": "Open contract for review"
     },
     {
       "id": 6,
       "type": "delay",
       "seconds": 1.5,
       "pre_delay": 0.3,
-      "comment": "Wait for policy to load"
+      "comment": "Wait for contract to load"
     },
     {
       "id": 7,
       "type": "screenshot",
-      "save_path": "./screenshots/policy_{{policy_counter}}.png",
+      "save_path": "./screenshots/contract_{{contract_counter}}.png",
       "pre_delay": 0.5,
-      "comment": "Capture policy screenshot"
+      "comment": "Capture contract screenshot"
     },
     {
       "id": 8,
@@ -77,14 +77,14 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.3,
-      "comment": "Review coverage details"
+      "comment": "Extract key clauses"
     },
     {
       "id": 9,
       "type": "delay",
       "seconds": 1.0,
       "pre_delay": 0.2,
-      "comment": "Wait for review"
+      "comment": "Wait for extraction"
     },
     {
       "id": 10,
@@ -94,14 +94,14 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.3,
-      "comment": "Verify premium payments"
+      "comment": "Identify risk provisions"
     },
     {
       "id": 11,
       "type": "delay",
       "seconds": 1.5,
       "pre_delay": 0.2,
-      "comment": "Wait for verification"
+      "comment": "Wait for risk analysis"
     },
     {
       "id": 12,
@@ -111,51 +111,51 @@
       "button": "left",
       "clicks": 1,
       "pre_delay": 0.3,
-      "comment": "Process endorsement if needed"
+      "comment": "Mark for approval"
     },
     {
       "id": 13,
       "type": "delay",
-      "seconds": 2.0,
+      "seconds": 1.0,
       "pre_delay": 0.2,
-      "comment": "Wait for processing"
+      "comment": "Wait for marking"
     },
     {
       "id": 14,
       "type": "screenshot",
-      "save_path": "./screenshots/policy_updated_{{policy_counter}}.png",
+      "save_path": "./screenshots/contract_reviewed_{{contract_counter}}.png",
       "pre_delay": 0.5,
-      "comment": "Capture update confirmation"
+      "comment": "Capture review confirmation"
     },
     {
       "id": 15,
       "type": "set_variable",
-      "name": "policy_counter",
-      "value": "{{policy_counter + 1}}",
+      "name": "contract_counter",
+      "value": "{{contract_counter + 1}}",
       "value_type": "expression",
       "pre_delay": 0.2,
-      "comment": "Increment policy counter"
+      "comment": "Increment contract counter"
     },
     {
       "id": 16,
       "type": "condition",
-      "condition": "{{policy_counter < policies_to_manage}}",
+      "condition": "{{contract_counter < contracts_to_review}}",
       "true_next": 17,
       "false_next": 18,
       "pre_delay": 0.1,
-      "comment": "Check if more policies"
+      "comment": "Check if more contracts"
     },
     {
       "id": 17,
       "type": "goto",
       "step_id": 4,
       "pre_delay": 0.1,
-      "comment": "Continue to next policy"
+      "comment": "Continue to next contract"
     },
     {
       "id": 18,
       "type": "screenshot",
-      "save_path": "./screenshots/policy_management_complete.png",
+      "save_path": "./screenshots/contract_review_complete.png",
       "pre_delay": 0.5,
       "comment": "Capture completion screenshot"
     },
