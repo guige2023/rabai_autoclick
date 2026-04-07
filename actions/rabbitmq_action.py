@@ -1,593 +1,677 @@
-"""RabbitMQ action module for RabAI AutoClick.
-
-Provides RabbitMQ messaging operations:
-- RabbitMQPublishAction: Publish message to exchange
-- RabbitMQConsumeAction: Consume messages from queue
-- RabbitMQDeclareQueueAction: Declare queue
-- RabbitMQDeclareExchangeAction: Declare exchange
-- RabbitMQBindAction: Bind queue to exchange
-- RabbitMQDeleteQueueAction: Delete queue
-- RabbitMQPurgeAction: Purge queue
-- RabbitMQHealthAction: Check RabbitMQ health
 """
+RabbitMQ message broker actions.
+"""
+from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import subprocess
+from typing import Dict, Any, Optional, List
+from urllib.parse import urlparse
 
 
-def get_rabbitmq_connection(host='localhost', port=5672, user='guest', password='guest', vhost='/'):
-    """Get RabbitMQ connection."""
+def run_rabbitmqctl(
+    args: List[str],
+    node: str = 'rabbit@localhost'
+) -> Dict[str, Any]:
+    """
+    Execute rabbitmqctl command.
+
+    Args:
+        args: rabbitmqctl arguments.
+        node: RabbitMQ node name.
+
+    Returns:
+        Command result.
+    """
+    cmd = ['rabbitmqctl', '-n', node] + args
+
     try:
-        import pika
-        credentials = pika.PlainCredentials(user, password)
-        params = pika.ConnectionParameters(
-            host=host, port=port,
-            virtual_host=vhost,
-            credentials=credentials
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
         )
-        return pika.BlockingConnection(params)
-    except ImportError:
-        return None
-    except Exception:
-        return None
 
-
-class RabbitMQPublishAction(BaseAction):
-    """Publish message to exchange."""
-    action_type = "rabbitmq_publish"
-    display_name = "RabbitMQ发布"
-    description = "向RabbitMQ交换机发布消息"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute publish.
-
-        Args:
-            context: Execution context.
-            params: Dict with exchange, routing_key, message, host, port, user, password.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        exchange = params.get('exchange', '')
-        routing_key = params.get('routing_key', '')
-        message = params.get('message', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 5672)
-        user = params.get('user', 'guest')
-        password = params.get('password', 'guest')
-        vhost = params.get('vhost', '/')
-
-        valid, msg = self.validate_type(message, str, 'message')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_exchange = context.resolve_value(exchange)
-            resolved_routing = context.resolve_value(routing_key)
-            resolved_message = context.resolve_value(message)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_user = context.resolve_value(user)
-            resolved_pwd = context.resolve_value(password)
-            resolved_vhost = context.resolve_value(vhost)
-
-            conn = get_rabbitmq_connection(resolved_host, int(resolved_port), resolved_user, resolved_pwd, resolved_vhost)
-            if conn is None:
-                return ActionResult(
-                    success=False,
-                    message="pika未安装或无法连接: pip install pika"
-                )
-
-            channel = conn.channel()
-
-            if isinstance(resolved_message, dict):
-                body = json.dumps(resolved_message).encode('utf-8')
-            else:
-                body = str(resolved_message).encode('utf-8')
-
-            channel.basic_publish(
-                exchange=resolved_exchange,
-                routing_key=resolved_routing,
-                body=body
-            )
-
-            conn.close()
-
-            return ActionResult(
-                success=True,
-                message=f"消息已发布: {resolved_routing}",
-                data={'exchange': resolved_exchange, 'routing_key': resolved_routing}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"RabbitMQ发布失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['exchange', 'routing_key', 'message']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 5672, 'user': 'guest', 'password': 'guest', 'vhost': '/'}
-
-
-class RabbitMQConsumeAction(BaseAction):
-    """Consume messages from queue."""
-    action_type = "rabbitmq_consume"
-    display_name = "RabbitMQ消费"
-    description = "从RabbitMQ队列消费消息"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute consume.
-
-        Args:
-            context: Execution context.
-            params: Dict with queue, count, auto_ack, host, port, user, password, output_var.
-
-        Returns:
-            ActionResult with messages.
-        """
-        queue = params.get('queue', '')
-        count = params.get('count', 1)
-        auto_ack = params.get('auto_ack', True)
-        host = params.get('host', 'localhost')
-        port = params.get('port', 5672)
-        user = params.get('user', 'guest')
-        password = params.get('password', 'guest')
-        vhost = params.get('vhost', '/')
-        output_var = params.get('output_var', 'rabbitmq_messages')
-
-        valid, msg = self.validate_type(queue, str, 'queue')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_queue = context.resolve_value(queue)
-            resolved_count = context.resolve_value(count)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_user = context.resolve_value(user)
-            resolved_pwd = context.resolve_value(password)
-            resolved_vhost = context.resolve_value(vhost)
-
-            conn = get_rabbitmq_connection(resolved_host, int(resolved_port), resolved_user, resolved_pwd, resolved_vhost)
-            if conn is None:
-                return ActionResult(
-                    success=False,
-                    message="无法连接RabbitMQ"
-                )
-
-            channel = conn.channel()
-
-            messages = []
-            for _ in range(int(resolved_count)):
-                method, props, body = channel.basic_get(queue=resolved_queue, auto_ack=auto_ack)
-                if method:
-                    try:
-                        data = json.loads(body.decode('utf-8'))
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        data = body.decode('utf-8', errors='replace')
-
-                    messages.append({
-                        'body': data,
-                        'delivery_tag': method.delivery_tag
-                    })
-
-            conn.close()
-
-            context.set(output_var, messages)
-
-            return ActionResult(
-                success=True,
-                message=f"消费 {len(messages)} 条消息",
-                data={'count': len(messages), 'messages': messages, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"RabbitMQ消费失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['queue']
-
-    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'count': 1, 'auto_ack': True, 'host': 'localhost', 'port': 5672,
-            'user': 'guest', 'password': 'guest', 'vhost': '/',
-            'output_var': 'rabbitmq_messages'
+            'success': result.returncode == 0,
+            'output': result.stdout,
+            'error': result.stderr,
+        }
+    except FileNotFoundError:
+        return {
+            'success': False,
+            'output': '',
+            'error': 'rabbitmqctl not found',
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'output': '',
+            'error': str(e),
         }
 
 
-class RabbitMQDeclareQueueAction(BaseAction):
-    """Declare queue."""
-    action_type = "rabbitmq_declare_queue"
-    display_name = "RabbitMQ声明队列"
-    description = "声明RabbitMQ队列"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute declare.
-
-        Args:
-            context: Execution context.
-            params: Dict with queue, durable, host, port, user, password.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        queue = params.get('queue', '')
-        durable = params.get('durable', True)
-        host = params.get('host', 'localhost')
-        port = params.get('port', 5672)
-        user = params.get('user', 'guest')
-        password = params.get('password', 'guest')
-        vhost = params.get('vhost', '/')
-
-        valid, msg = self.validate_type(queue, str, 'queue')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_queue = context.resolve_value(queue)
-            resolved_durable = context.resolve_value(durable)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_user = context.resolve_value(user)
-            resolved_pwd = context.resolve_value(password)
-            resolved_vhost = context.resolve_value(vhost)
-
-            conn = get_rabbitmq_connection(resolved_host, int(resolved_port), resolved_user, resolved_pwd, resolved_vhost)
-            if conn is None:
-                return ActionResult(
-                    success=False,
-                    message="无法连接RabbitMQ"
-                )
-
-            channel = conn.channel()
-            result = channel.queue_declare(queue=resolved_queue, durable=resolved_durable)
-
-            conn.close()
-
-            return ActionResult(
-                success=True,
-                message=f"队列已声明: {resolved_queue} (消息数: {result.method.message_count})",
-                data={'queue': resolved_queue, 'message_count': result.method.message_count, 'consumer_count': result.method.consumer_count}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"RabbitMQ声明队列失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['queue']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'durable': True, 'host': 'localhost', 'port': 5672, 'user': 'guest', 'password': 'guest', 'vhost': '/'}
-
-
-class RabbitMQDeclareExchangeAction(BaseAction):
-    """Declare exchange."""
-    action_type = "rabbitmq_declare_exchange"
-    display_name = "RabbitMQ声明交换机"
-    description = "声明RabbitMQ交换机"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute declare.
-
-        Args:
-            context: Execution context.
-            params: Dict with exchange, type, durable, host, port, user, password.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        exchange = params.get('exchange', '')
-        exchange_type = params.get('type', 'direct')
-        durable = params.get('durable', True)
-        host = params.get('host', 'localhost')
-        port = params.get('port', 5672)
-        user = params.get('user', 'guest')
-        password = params.get('password', 'guest')
-        vhost = params.get('vhost', '/')
-
-        valid, msg = self.validate_type(exchange, str, 'exchange')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_exchange = context.resolve_value(exchange)
-            resolved_type = context.resolve_value(exchange_type)
-            resolved_durable = context.resolve_value(durable)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_user = context.resolve_value(user)
-            resolved_pwd = context.resolve_value(password)
-            resolved_vhost = context.resolve_value(vhost)
-
-            conn = get_rabbitmq_connection(resolved_host, int(resolved_port), resolved_user, resolved_pwd, resolved_vhost)
-            if conn is None:
-                return ActionResult(
-                    success=False,
-                    message="无法连接RabbitMQ"
-                )
-
-            channel = conn.channel()
-            channel.exchange_declare(
-                exchange=resolved_exchange,
-                exchange_type=resolved_type,
-                durable=resolved_durable
-            )
-
-            conn.close()
-
-            return ActionResult(
-                success=True,
-                message=f"交换机已声明: {resolved_exchange} ({resolved_type})",
-                data={'exchange': resolved_exchange, 'type': resolved_type}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"RabbitMQ声明交换机失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['exchange']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'type': 'direct', 'durable': True, 'host': 'localhost', 'port': 5672, 'user': 'guest', 'password': 'guest', 'vhost': '/'}
-
-
-class RabbitMQBindAction(BaseAction):
-    """Bind queue to exchange."""
-    action_type = "rabbitmq_bind"
-    display_name = "RabbitMQ绑定"
-    description = "将队列绑定到交换机"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute bind.
-
-        Args:
-            context: Execution context.
-            params: Dict with queue, exchange, routing_key, host, port, user, password.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        queue = params.get('queue', '')
-        exchange = params.get('exchange', '')
-        routing_key = params.get('routing_key', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 5672)
-        user = params.get('user', 'guest')
-        password = params.get('password', 'guest')
-        vhost = params.get('vhost', '/')
-
-        valid, msg = self.validate_type(queue, str, 'queue')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_queue = context.resolve_value(queue)
-            resolved_exchange = context.resolve_value(exchange)
-            resolved_routing = context.resolve_value(routing_key)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_user = context.resolve_value(user)
-            resolved_pwd = context.resolve_value(password)
-            resolved_vhost = context.resolve_value(vhost)
-
-            conn = get_rabbitmq_connection(resolved_host, int(resolved_port), resolved_user, resolved_pwd, resolved_vhost)
-            if conn is None:
-                return ActionResult(
-                    success=False,
-                    message="无法连接RabbitMQ"
-                )
-
-            channel = conn.channel()
-            channel.queue_bind(
-                queue=resolved_queue,
-                exchange=resolved_exchange,
-                routing_key=resolved_routing
-            )
-
-            conn.close()
-
-            return ActionResult(
-                success=True,
-                message=f"已绑定: {resolved_queue} -> {resolved_exchange} ({resolved_routing})",
-                data={'queue': resolved_queue, 'exchange': resolved_exchange, 'routing_key': resolved_routing}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"RabbitMQ绑定失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['queue', 'exchange', 'routing_key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 5672, 'user': 'guest', 'password': 'guest', 'vhost': '/'}
-
-
-class RabbitMQDeleteQueueAction(BaseAction):
-    """Delete queue."""
-    action_type = "rabbitmq_delete_queue"
-    display_name = "RabbitMQ删除队列"
-    description = "删除RabbitMQ队列"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute delete.
-
-        Args:
-            context: Execution context.
-            params: Dict with queue, host, port, user, password.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        queue = params.get('queue', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 5672)
-        user = params.get('user', 'guest')
-        password = params.get('password', 'guest')
-        vhost = params.get('vhost', '/')
-
-        valid, msg = self.validate_type(queue, str, 'queue')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_queue = context.resolve_value(queue)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_user = context.resolve_value(user)
-            resolved_pwd = context.resolve_value(password)
-            resolved_vhost = context.resolve_value(vhost)
-
-            conn = get_rabbitmq_connection(resolved_host, int(resolved_port), resolved_user, resolved_pwd, resolved_vhost)
-            if conn is None:
-                return ActionResult(
-                    success=False,
-                    message="无法连接RabbitMQ"
-                )
-
-            channel = conn.channel()
-            channel.queue_delete(queue=resolved_queue)
-
-            conn.close()
-
-            return ActionResult(
-                success=True,
-                message=f"队列已删除: {resolved_queue}",
-                data={'queue': resolved_queue}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"RabbitMQ删除队列失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['queue']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 5672, 'user': 'guest', 'password': 'guest', 'vhost': '/'}
-
-
-class RabbitMQHealthAction(BaseAction):
-    """Check RabbitMQ health."""
-    action_type = "rabbitmq_health"
-    display_name = "RabbitMQ健康检查"
-    description = "检查RabbitMQ健康状态"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute health.
-
-        Args:
-            context: Execution context.
-            params: Dict with host, port, user, password, output_var.
-
-        Returns:
-            ActionResult with health status.
-        """
-        host = params.get('host', 'localhost')
-        port = params.get('port', 5672)
-        user = params.get('user', 'guest')
-        password = params.get('password', 'guest')
-        vhost = params.get('vhost', '/')
-        output_var = params.get('output_var', 'rabbitmq_health')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_user = context.resolve_value(user)
-            resolved_pwd = context.resolve_value(password)
-            resolved_vhost = context.resolve_value(vhost)
-
-            conn = get_rabbitmq_connection(resolved_host, int(resolved_port), resolved_user, resolved_pwd, resolved_vhost)
-            if conn is None:
-                return ActionResult(
-                    success=False,
-                    message="无法连接RabbitMQ"
-                )
-
-            channel = conn.channel()
-            result = channel.queue_declare(queue='health_check', durable=False, passive=True)
-            channel.queue_delete(queue='health_check')
-
-            health = {
-                'connected': True,
-                'host': resolved_host,
-                'port': resolved_port,
-                'vhost': resolved_vhost,
-                'open_connections': conn.channel_count()
-            }
-
-            conn.close()
-
-            context.set(output_var, health)
-
-            return ActionResult(
-                success=True,
-                message=f"RabbitMQ健康: {conn.channel_count()} 通道开放",
-                data=health
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"RabbitMQ健康检查失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
+def list_queues(node: str = 'rabbit@localhost') -> List[Dict[str, Any]]:
+    """
+    List all queues.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        List of queue information.
+    """
+    result = run_rabbitmqctl(['list_queues', 'name', 'messages', 'consumers', 'vhost'], node)
+
+    if not result['success']:
         return []
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 5672, 'user': 'guest', 'password': 'guest', 'vhost': '/', 'output_var': 'rabbitmq_health'}
+    queues = []
+    for line in result['output'].splitlines():
+        if not line or line.startswith('...') or line.startswith('Listing'):
+            continue
+
+        parts = line.split('\t')
+        if len(parts) >= 4:
+            queues.append({
+                'name': parts[0],
+                'messages': int(parts[1]) if parts[1] else 0,
+                'consumers': int(parts[2]) if parts[2] else 0,
+                'vhost': parts[3],
+            })
+
+    return queues
+
+
+def list_exchanges(node: str = 'rabbit@localhost') -> List[Dict[str, Any]]:
+    """
+    List all exchanges.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        List of exchange information.
+    """
+    result = run_rabbitmqctl(
+        ['list_exchanges', 'name', 'type', 'durable', 'auto_delete', 'vhost'],
+        node
+    )
+
+    if not result['success']:
+        return []
+
+    exchanges = []
+    for line in result['output'].splitlines():
+        if not line or line.startswith('...') or line.startswith('Listing'):
+            continue
+
+        parts = line.split('\t')
+        if len(parts) >= 5:
+            exchanges.append({
+                'name': parts[0],
+                'type': parts[1],
+                'durable': parts[2] == 'true',
+                'auto_delete': parts[3] == 'true',
+                'vhost': parts[4],
+            })
+
+    return exchanges
+
+
+def list_bindings(node: str = 'rabbit@localhost') -> List[Dict[str, Any]]:
+    """
+    List all bindings.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        List of binding information.
+    """
+    result = run_rabbitmqctl(
+        ['list_bindings', 'source_name', 'destination_name', 'routing_key', 'vhost'],
+        node
+    )
+
+    if not result['success']:
+        return []
+
+    bindings = []
+    for line in result['output'].splitlines():
+        if not line or line.startswith('...') or line.startswith('Listing'):
+            continue
+
+        parts = line.split('\t')
+        if len(parts) >= 4:
+            bindings.append({
+                'source': parts[0],
+                'destination': parts[1],
+                'routing_key': parts[2],
+                'vhost': parts[3],
+            })
+
+    return bindings
+
+
+def list_connections(node: str = 'rabbit@localhost') -> List[Dict[str, Any]]:
+    """
+    List all connections.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        List of connection information.
+    """
+    result = run_rabbitmqctl(
+        ['list_connections', 'name', 'port', 'user', 'state', 'vhost'],
+        node
+    )
+
+    if not result['success']:
+        return []
+
+    connections = []
+    for line in result['output'].splitlines():
+        if not line or line.startswith('...') or line.startswith('Listing'):
+            continue
+
+        parts = line.split('\t')
+        if len(parts) >= 5:
+            connections.append({
+                'name': parts[0],
+                'port': parts[1],
+                'user': parts[2],
+                'state': parts[3],
+                'vhost': parts[4],
+            })
+
+    return connections
+
+
+def list_channels(node: str = 'rabbit@localhost') -> List[Dict[str, Any]]:
+    """
+    List all channels.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        List of channel information.
+    """
+    result = run_rabbitmqctl(
+        ['list_channels', 'pid', 'name', 'user', 'messages', 'consumers'],
+        node
+    )
+
+    if not result['success']:
+        return []
+
+    channels = []
+    for line in result['output'].splitlines():
+        if not line or line.startswith('...') or line.startswith('Listing'):
+            continue
+
+        parts = line.split('\t')
+        if len(parts) >= 5:
+            channels.append({
+                'pid': parts[0],
+                'name': parts[1],
+                'user': parts[2],
+                'messages': int(parts[3]) if parts[3] else 0,
+                'consumers': int(parts[4]) if len(parts) > 4 and parts[4] else 0,
+            })
+
+    return channels
+
+
+def get_queue_info(queue_name: str, vhost: str = '/', node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Get information about a specific queue.
+
+    Args:
+        queue_name: Queue name.
+        vhost: Virtual host.
+        node: RabbitMQ node name.
+
+    Returns:
+        Queue information.
+    """
+    result = run_rabbitmqctl(
+        ['list_queues', 'name', 'messages', 'consumers', 'durable', 'vhost'],
+        node
+    )
+
+    if not result['success']:
+        return {'error': result['error']}
+
+    for line in result['output'].splitlines():
+        if not line or line.startswith('...'):
+            continue
+
+        parts = line.split('\t')
+        if len(parts) >= 5 and parts[0] == queue_name and parts[4] == vhost:
+            return {
+                'name': parts[0],
+                'messages': int(parts[1]) if parts[1] else 0,
+                'consumers': int(parts[2]) if parts[2] else 0,
+                'durable': parts[3] == 'true',
+                'vhost': parts[4],
+            }
+
+    return {'error': 'Queue not found'}
+
+
+def purge_queue(queue_name: str, vhost: str = '/', node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Purge all messages from a queue.
+
+    Args:
+        queue_name: Queue name.
+        vhost: Virtual host.
+        node: RabbitMQ node name.
+
+    Returns:
+        Purge result.
+    """
+    vhost_escaped = vhost.replace('/', '%2f')
+    return run_rabbitmqctl(['purge_queue', '-p', vhost_escaped, queue_name], node)
+
+
+def delete_queue(queue_name: str, vhost: str = '/', node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Delete a queue.
+
+    Args:
+        queue_name: Queue name.
+        vhost: Virtual host.
+        node: RabbitMQ node name.
+
+    Returns:
+        Deletion result.
+    """
+    vhost_escaped = vhost.replace('/', '%2f')
+    return run_rabbitmqctl(['delete_queue', '-p', vhost_escaped, queue_name], node)
+
+
+def delete_exchange(exchange_name: str, vhost: str = '/', node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Delete an exchange.
+
+    Args:
+        exchange_name: Exchange name.
+        vhost: Virtual host.
+        node: RabbitMQ node name.
+
+    Returns:
+        Deletion result.
+    """
+    vhost_escaped = vhost.replace('/', '%2f')
+    return run_rabbitmqctl(['delete_exchange', '-p', vhost_escaped, exchange_name], node)
+
+
+def add_user(username: str, password: str, node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Add a user.
+
+    Args:
+        username: Username.
+        password: Password.
+        node: RabbitMQ node name.
+
+    Returns:
+        Result.
+    """
+    return run_rabbitmqctl(['add_user', username, password], node)
+
+
+def set_user_tags(username: str, tags: List[str], node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Set user tags (roles).
+
+    Args:
+        username: Username.
+        tags: List of tags (e.g., ['administrator', 'monitoring']).
+        node: RabbitMQ node name.
+
+    Returns:
+        Result.
+    """
+    return run_rabbitmqctl(['set_user_tags', username] + tags, node)
+
+
+def list_users(node: str = 'rabbit@localhost') -> List[Dict[str, Any]]:
+    """
+    List all users.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        List of user information.
+    """
+    result = run_rabbitmqctl(['list_users'], node)
+
+    if not result['success']:
+        return []
+
+    users = []
+    for line in result['output'].splitlines():
+        if not line or line.startswith('...') or line.startswith('Listing'):
+            continue
+
+        parts = line.split('\t')
+        if parts:
+            users.append({
+                'name': parts[0],
+                'tags': parts[1].split(' ') if len(parts) > 1 and parts[1] else [],
+            })
+
+    return users
+
+
+def set_permissions(
+    username: str,
+    vhost: str = '/',
+    configure: str = '.*',
+    write: str = '.*',
+    read: str = '.*',
+    node: str = 'rabbit@localhost'
+) -> Dict[str, Any]:
+    """
+    Set user permissions for a vhost.
+
+    Args:
+        username: Username.
+        vhost: Virtual host.
+        configure: Configure pattern.
+        write: Write pattern.
+        read: Read pattern.
+        node: RabbitMQ node name.
+
+    Returns:
+        Result.
+    """
+    vhost_escaped = vhost.replace('/', '%2f')
+    return run_rabbitmqctl(
+        ['set_permissions', '-p', vhost_escaped, username, configure, write, read],
+        node
+    )
+
+
+def list_permissions(username: str, vhost: str = '/', node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    List permissions for a user.
+
+    Args:
+        username: Username.
+        vhost: Virtual host.
+        node: RabbitMQ node name.
+
+    Returns:
+        Permission information.
+    """
+    vhost_escaped = vhost.replace('/', '%2f')
+    result = run_rabbitmqctl(['list_user_permissions', '-p', vhost_escaped, username], node)
+
+    if not result['success']:
+        return {'error': result['error']}
+
+    for line in result['output'].splitlines():
+        if not line or line.startswith('...'):
+            continue
+
+        parts = line.split('\t')
+        if len(parts) >= 4:
+            return {
+                'username': username,
+                'vhost': vhost,
+                'configure': parts[0],
+                'write': parts[1],
+                'read': parts[2],
+            }
+
+    return {'error': 'User not found'}
+
+
+def get_cluster_status(node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Get cluster status.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        Cluster status information.
+    """
+    result = run_rabbitmqctl(['cluster_status'], node)
+
+    if result['success']:
+        return {
+            'success': True,
+            'status': result['output'],
+        }
+
+    return {'success': False, 'error': result['error']}
+
+
+def get_vhosts(node: str = 'rabbit@localhost') -> List[str]:
+    """
+    List all virtual hosts.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        List of vhost names.
+    """
+    result = run_rabbitmqctl(['list_vhosts', 'name'], node)
+
+    if not result['success']:
+        return []
+
+    return [line.strip() for line in result['output'].splitlines() if line.strip()]
+
+
+def close_all_connections(reason: str = 'administrative shutdown', node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Close all connections.
+
+    Args:
+        reason: Reason for closing.
+        node: RabbitMQ node name.
+
+    Returns:
+        Result.
+    """
+    return run_rabbitmqctl(['close_all_connections', reason], node)
+
+
+def get_memory_usage(node: str = 'rabbit@localhost') -> Dict[str, Any]:
+    """
+    Get memory usage information.
+
+    Args:
+        node: RabbitMQ node name.
+
+    Returns:
+        Memory usage breakdown.
+    """
+    result = run_rabbitmqctl(['list_users'], node)
+
+    mem_result = run_rabbitmqctl(['report'], node)
+
+    if mem_result['success']:
+        lines = mem_result['output'].splitlines()
+        memory_info = {}
+
+        for line in lines:
+            if ':' in line and 'memory' in line.lower():
+                parts = line.split(':')
+                if len(parts) >= 2:
+                    memory_info[parts[0].strip()] = parts[1].strip()
+
+        return {
+            'success': True,
+            'memory': memory_info,
+        }
+
+    return {'success': False, 'error': mem_result.get('error', 'Failed to get memory')}
+
+
+class RabbitMQPublisher:
+    """Simple RabbitMQ publisher using pika-like interface."""
+
+    def __init__(
+        self,
+        host: str = 'localhost',
+        port: int = 5672,
+        username: str = 'guest',
+        password: str = 'guest',
+        vhost: str = '/'
+    ):
+        """
+        Initialize publisher.
+
+        Args:
+            host: RabbitMQ host.
+            port: RabbitMQ port.
+            username: Username.
+            password: Password.
+            vhost: Virtual host.
+        """
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.vhost = vhost
+
+
+def publish_message(
+    host: str,
+    queue: str,
+    message: str,
+    exchange: str = '',
+    routing_key: str = '',
+    username: str = 'guest',
+    password: str = 'guest',
+    vhost: str = '/'
+) -> Dict[str, Any]:
+    """
+    Publish a message to a queue.
+
+    Args:
+        host: RabbitMQ host.
+        queue: Target queue name.
+        message: Message content.
+        exchange: Exchange name (optional).
+        routing_key: Routing key (optional).
+        username: Username.
+        password: Password.
+        vhost: Virtual host.
+
+    Returns:
+        Publish result.
+    """
+    try:
+        import pika
+    except ImportError:
+        return {
+            'success': False,
+            'error': 'pika not installed. Install with: pip install pika',
+        }
+
+    credentials = pika.PlainCredentials(username, password)
+    parameters = pika.ConnectionParameters(
+        host=host,
+        virtual_host=vhost,
+        credentials=credentials
+    )
+
+    try:
+        connection = pika.BlockingConnection(parameters)
+        channel = connection.channel()
+
+        channel.queue_declare(queue=queue, durable=True)
+
+        channel.basic_publish(
+            exchange=exchange,
+            routing_key=routing_key or queue,
+            body=message.encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type='application/json',
+            )
+        )
+
+        connection.close()
+
+        return {'success': True, 'queue': queue}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def consume_messages(
+    host: str,
+    queue: str,
+    callback: str = 'print',
+    username: str = 'guest',
+    password: str = 'guest',
+    vhost: str = '/',
+    max_messages: int = 0
+) -> Dict[str, Any]:
+    """
+    Consume messages from a queue.
+
+    Args:
+        host: RabbitMQ host.
+        queue: Queue name.
+        callback: Callback function name.
+        username: Username.
+        password: Password.
+        vhost: Virtual host.
+        max_messages: Max messages to consume (0 for unlimited).
+
+    Returns:
+        Consumer result.
+    """
+    try:
+        import pika
+    except ImportError:
+        return {
+            'success': False,
+            'error': 'pika not installed',
+        }
+
+    credentials = pika.PlainCredentials(username, password)
+    parameters = pika.ConnectionParameters(
+        host=host,
+        virtual_host=vhost,
+        credentials=credentials
+    )
+
+    def callback_func(ch, method, properties, body):
+        print(f"Message: {body.decode('utf-8')}")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+
+    try:
+        connection = pika.BlockingConnection(parameters)
+        channel = connection.channel()
+
+        channel.queue_declare(queue=queue, durable=True)
+
+        if max_messages > 0:
+            for _ in range(max_messages):
+                method, properties, body = channel.basic_get(queue=queue)
+                if method:
+                    callback_func(channel, method, properties, body)
+        else:
+            channel.basic_consume(queue=queue, on_message_callback=callback_func)
+            channel.start_consuming()
+
+        connection.close()
+        return {'success': True}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}

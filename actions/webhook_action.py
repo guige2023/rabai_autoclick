@@ -1,517 +1,533 @@
-"""Webhook action module for RabAI AutoClick.
-
-Provides webhook operations:
-- WebhookSendAction: Send webhook request
-- WebhookListenAction: Start webhook listener
-- WebhookServerAction: Start HTTP server for webhooks
-- WebhookVerifyAction: Verify webhook signature
-- WebhookRetryAction: Retry failed webhook
 """
+Webhook sending and management actions.
+"""
+from __future__ import annotations
 
-import json
-import hashlib
+import requests
 import hmac
+import hashlib
 import time
-import os
-import subprocess
-from typing import Any, Dict, List, Optional
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import urllib.parse
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from typing import Dict, Any, Optional, List
+from urllib.parse import urlparse
 
 
-class WebhookSendAction(BaseAction):
-    """Send webhook request."""
-    action_type = "webhook_send"
-    display_name = "发送Webhook"
-    description = "发送Webhook请求"
-    version = "1.0"
+def send_webhook(
+    url: str,
+    method: str = 'POST',
+    data: Optional[Dict[str, Any]] = None,
+    json_data: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 30,
+    verify_ssl: bool = True
+) -> Dict[str, Any]:
+    """
+    Send a webhook request.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute send.
+    Args:
+        url: Webhook URL.
+        method: HTTP method.
+        data: Form data to send.
+        json_data: JSON data to send.
+        headers: Custom headers.
+        timeout: Request timeout in seconds.
+        verify_ssl: Verify SSL certificates.
 
-        Args:
-            context: Execution context.
-            params: Dict with url, method, body, headers, secret, output_var.
+    Returns:
+        Response information.
+    """
+    merged_headers = headers or {}
 
-        Returns:
-            ActionResult with response.
-        """
-        url = params.get('url', '')
-        method = params.get('method', 'POST')
-        body = params.get('body', '')
-        headers = params.get('headers', {})
-        secret = params.get('secret', '')
-        output_var = params.get('output_var', 'webhook_response')
-        timeout = params.get('timeout', 30)
+    if json_data and 'Content-Type' not in merged_headers:
+        merged_headers['Content-Type'] = 'application/json'
 
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    try:
+        response = requests.request(
+            method=method.upper(),
+            url=url,
+            data=data,
+            json=json_data,
+            headers=merged_headers,
+            timeout=timeout,
+            verify=verify_ssl
+        )
 
-        try:
-            import urllib.request
-
-            resolved_url = context.resolve_value(url)
-            resolved_method = context.resolve_value(method)
-            resolved_body = context.resolve_value(body) if body else ''
-            resolved_headers = context.resolve_value(headers) if headers else {}
-            resolved_secret = context.resolve_value(secret) if secret else ''
-            resolved_timeout = context.resolve_value(timeout)
-
-            if isinstance(resolved_body, dict):
-                encoded_body = json.dumps(resolved_body).encode('utf-8')
-                content_type = 'application/json'
-            else:
-                encoded_body = str(resolved_body).encode('utf-8')
-                content_type = 'text/plain'
-
-            request = urllib.request.Request(
-                resolved_url,
-                data=encoded_body,
-                method=resolved_method.upper()
-            )
-            request.add_header('Content-Type', content_type)
-
-            # Add signature if secret provided
-            if resolved_secret:
-                signature = hmac.new(
-                    resolved_secret.encode('utf-8'),
-                    encoded_body,
-                    hashlib.sha256
-                ).hexdigest()
-                request.add_header('X-Webhook-Signature', f'sha256={signature}')
-
-            request.add_header('X-Webhook-Timestamp', str(int(time.time())))
-
-            for k, v in resolved_headers.items():
-                request.add_header(k, str(v))
-
-            with urllib.request.urlopen(request, timeout=int(resolved_timeout)) as resp:
-                response_body = resp.read().decode('utf-8')
-                status = resp.status
-
-                try:
-                    data = json.loads(response_body)
-                except (json.JSONDecodeError, ValueError):
-                    data = response_body
-
-                result = {'status': status, 'body': data}
-                context.set(output_var, result)
-
-                return ActionResult(
-                    success=status < 400,
-                    message=f"Webhook {resolved_method} -> {status}",
-                    data={'status': status, 'output_var': output_var}
-                )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Webhook发送失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'method': 'POST', 'body': '', 'headers': {}, 'secret': '',
-            'output_var': 'webhook_response', 'timeout': 30
+            'success': response.ok,
+            'status_code': response.status_code,
+            'response': response.text[:1000] if response.text else None,
+            'headers': dict(response.headers),
+        }
+    except requests.Timeout:
+        return {
+            'success': False,
+            'error': 'Request timed out',
+            'status_code': None,
+        }
+    except requests.RequestException as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'status_code': None,
         }
 
 
-class WebhookVerifyAction(BaseAction):
-    """Verify webhook signature."""
-    action_type = "webhook_verify"
-    display_name = "验证Webhook签名"
-    description = "验证Webhook请求签名"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute verify.
-
-        Args:
-            context: Execution context.
-            params: Dict with payload, signature, secret, output_var.
-
-        Returns:
-            ActionResult with verification result.
-        """
-        payload = params.get('payload', '')
-        signature = params.get('signature', '')
-        secret = params.get('secret', '')
-        output_var = params.get('output_var', 'webhook_valid')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_payload = context.resolve_value(payload) if payload else ''
-            resolved_sig = context.resolve_value(signature) if signature else ''
-            resolved_secret = context.resolve_value(secret) if secret else ''
-
-            if isinstance(resolved_payload, dict):
-                payload_bytes = json.dumps(resolved_payload).encode('utf-8')
-            else:
-                payload_bytes = str(resolved_payload).encode('utf-8')
-
-            expected = hmac.new(
-                resolved_secret.encode('utf-8'),
-                payload_bytes,
-                hashlib.sha256
-            ).hexdigest()
-
-            if resolved_sig.startswith('sha256='):
-                resolved_sig = resolved_sig[7:]
-
-            valid = hmac.compare_digest(expected, resolved_sig)
-            context.set(output_var, valid)
-
-            return ActionResult(
-                success=True,
-                message=f"签名验证: {'通过' if valid else '失败'}",
-                data={'valid': valid, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"签名验证失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['payload', 'signature', 'secret']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'webhook_valid'}
-
-
-class WebhookRetryAction(BaseAction):
-    """Retry failed webhook."""
-    action_type = "webhook_retry"
-    display_name = "重试Webhook"
-    description = "重试发送失败的Webhook"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute retry.
-
-        Args:
-            context: Execution context.
-            params: Dict with webhook_data, max_retries, output_var.
-
-        Returns:
-            ActionResult with response.
-        """
-        webhook_data = params.get('webhook_data', {})
-        max_retries = params.get('max_retries', 3)
-        output_var = params.get('output_var', 'webhook_retry_response')
-
-        valid, msg = self.validate_type(webhook_data, dict, 'webhook_data')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_data = context.resolve_value(webhook_data)
-            resolved_retries = context.resolve_value(max_retries)
-
-            url = resolved_data.get('url', '')
-            method = resolved_data.get('method', 'POST')
-            body = resolved_data.get('body', '')
-            headers = resolved_data.get('headers', {})
-            secret = resolved_data.get('secret', '')
-
-            if not url:
-                return ActionResult(
-                    success=False,
-                    message="webhook_data中缺少url"
-                )
-
-            last_error = None
-            for attempt in range(int(resolved_retries)):
-                try:
-                    import urllib.request
-
-                    if isinstance(body, dict):
-                        encoded_body = json.dumps(body).encode('utf-8')
-                        content_type = 'application/json'
-                    else:
-                        encoded_body = str(body).encode('utf-8')
-                        content_type = 'text/plain'
-
-                    request = urllib.request.Request(
-                        url,
-                        data=encoded_body,
-                        method=method.upper()
-                    )
-                    request.add_header('Content-Type', content_type)
-
-                    if secret:
-                        signature = hmac.new(
-                            secret.encode('utf-8'),
-                            encoded_body,
-                            hashlib.sha256
-                        ).hexdigest()
-                        request.add_header('X-Webhook-Signature', f'sha256={signature}')
-
-                    request.add_header('X-Webhook-Timestamp', str(int(time.time())))
-                    request.add_header('X-Webhook-Retry', str(attempt + 1))
-
-                    for k, v in headers.items():
-                        request.add_header(k, str(v))
-
-                    with urllib.request.urlopen(request, timeout=30) as resp:
-                        response_body = resp.read().decode('utf-8')
-                        status = resp.status
-
-                        try:
-                            data = json.loads(response_body)
-                        except (json.JSONDecodeError, ValueError):
-                            data = response_body
-
-                        result = {'status': status, 'body': data, 'attempts': attempt + 1}
-                        context.set(output_var, result)
-
-                        return ActionResult(
-                            success=True,
-                            message=f"Webhook重试成功 (尝试 {attempt + 1})",
-                            data=result
-                        )
-
-                except Exception as e:
-                    last_error = str(e)
-                    time.sleep(2 ** attempt)
-
-            return ActionResult(
-                success=False,
-                message=f"Webhook重试全部失败: {last_error}",
-                data={'error': last_error, 'attempts': resolved_retries}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Webhook重试失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['webhook_data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'max_retries': 3, 'output_var': 'webhook_retry_response'}
-
-
-class WebhookBatchSendAction(BaseAction):
-    """Send multiple webhooks in batch."""
-    action_type = "webhook_batch_send"
-    display_name = "批量发送Webhook"
-    description = "批量发送多个Webhook请求"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute batch send.
-
-        Args:
-            context: Execution context.
-            params: Dict with webhooks, output_var.
-
-        Returns:
-            ActionResult with batch results.
-        """
-        webhooks = params.get('webhooks', [])
-        output_var = params.get('output_var', 'webhook_batch_results')
-
-        valid, msg = self.validate_type(webhooks, list, 'webhooks')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_webhooks = context.resolve_value(webhooks)
-
-            if not isinstance(resolved_webhooks, list):
-                return ActionResult(
-                    success=False,
-                    message="webhooks参数必须是列表"
-                )
-
-            results = []
-            for i, wh in enumerate(resolved_webhooks):
-                url = wh.get('url', '')
-                method = wh.get('method', 'POST')
-                body = wh.get('body', {})
-
-                try:
-                    import urllib.request
-
-                    if isinstance(body, dict):
-                        encoded_body = json.dumps(body).encode('utf-8')
-                    else:
-                        encoded_body = str(body).encode('utf-8')
-
-                    request = urllib.request.Request(
-                        url,
-                        data=encoded_body,
-                        method=method.upper()
-                    )
-                    request.add_header('Content-Type', 'application/json')
-
-                    with urllib.request.urlopen(request, timeout=30) as resp:
-                        results.append({
-                            'index': i,
-                            'url': url,
-                            'success': True,
-                            'status': resp.status
-                        })
-                except Exception as e:
-                    results.append({
-                        'index': i,
-                        'url': url,
-                        'success': False,
-                        'error': str(e)
-                    })
-
-            success_count = sum(1 for r in results if r.get('success', False))
-
-            context.set(output_var, results)
-
-            return ActionResult(
-                success=True,
-                message=f"批量Webhook完成: {success_count}/{len(results)} 成功",
-                data={'total': len(results), 'success': success_count, 'results': results, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"批量Webhook失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['webhooks']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'webhook_batch_results'}
-
-
-class WebhookListenAction(BaseAction):
-    """Listen for webhook (simple HTTP server)."""
-    action_type = "webhook_listen"
-    display_name = "监听Webhook"
-    description = "启动Webhook监听服务器"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute listen.
-
-        Args:
-            context: Execution context.
-            params: Dict with port, path, output_var.
-
-        Returns:
-            ActionResult indicating server started.
-        """
-        port = params.get('port', 8080)
-        path = params.get('path', '/webhook')
-        output_var = params.get('output_var', 'webhook_payload')
-        timeout = params.get('timeout', 60)
-
-        valid, msg = self.validate_type(port, int, 'port')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_port = context.resolve_value(port)
-            resolved_path = context.resolve_value(path)
-            resolved_timeout = context.resolve_value(timeout)
-
-            class WebhookHandler(BaseHTTPRequestHandler):
-                webhook_payload = None
-
-                def do_POST(self):
-                    content_length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(content_length).decode('utf-8')
-
-                    try:
-                        data = json.loads(body)
-                    except (json.JSONDecodeError, ValueError):
-                        data = body
-
-                    WebhookHandler.webhook_payload = data
-
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'received'}).encode('utf-8'))
-
-                def log_message(self, format, *args):
-                    pass
-
-            server = HTTPServer(('0.0.0.0', int(resolved_port)), WebhookHandler)
-
-            # Run server in background thread
-            def run_server():
-                server.serve_forever()
-
-            thread = Thread(target=run_server, daemon=True)
-            thread.start()
-
-            # Wait for webhook or timeout
-            start = time.time()
-            payload = None
-            while time.time() - start < int(resolved_timeout):
-                if WebhookHandler.webhook_payload is not None:
-                    payload = WebhookHandler.webhook_payload
-                    break
-                time.sleep(0.5)
-
-            server.shutdown()
-
-            if payload is not None:
-                context.set(output_var, payload)
-
-                return ActionResult(
-                    success=True,
-                    message=f"收到Webhook: {str(payload)[:50]}",
-                    data={'payload': payload, 'output_var': output_var}
-                )
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Webhook监听超时 ({int(resolved_timeout)}s)"
-                )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Webhook监听失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['port']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'path': '/webhook', 'output_var': 'webhook_payload', 'timeout': 60}
+def send_github_webhook(
+    url: str,
+    event: str,
+    payload: Dict[str, Any],
+    secret: Optional[str] = None,
+    timeout: int = 30
+) -> Dict[str, Any]:
+    """
+    Send a GitHub webhook.
+
+    Args:
+        url: GitHub webhook URL.
+        event: Event type (e.g., 'push', 'pull_request').
+        payload: Webhook payload.
+        secret: Webhook secret for signature.
+        timeout: Request timeout.
+
+    Returns:
+        Result information.
+    """
+    import json
+
+    headers = {
+        'Content-Type': 'application/json',
+        'X-GitHub-Event': event,
+        'X-GitHub-Delivery': f'{int(time.time() * 1000)}',
+    }
+
+    body = json.dumps(payload)
+
+    if secret:
+        signature = hmac.new(
+            secret.encode('utf-8'),
+            body.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        headers['X-Hub-Signature-256'] = f'sha256={signature}'
+
+    try:
+        response = requests.post(
+            url,
+            data=body,
+            headers=headers,
+            timeout=timeout
+        )
+
+        return {
+            'success': response.ok,
+            'status_code': response.status_code,
+            'event': event,
+        }
+    except requests.RequestException as e:
+        return {
+            'success': False,
+            'error': str(e),
+        }
+
+
+def send_slack_webhook(
+    url: str,
+    message: str,
+    username: Optional[str] = None,
+    icon_emoji: Optional[str] = None,
+    channel: Optional[str] = None,
+    blocks: Optional[List[Dict[str, Any]]] = None,
+    timeout: int = 30
+) -> Dict[str, Any]:
+    """
+    Send a Slack webhook.
+
+    Args:
+        url: Slack webhook URL.
+        message: Message text.
+        username: Bot username.
+        icon_emoji: Bot icon emoji.
+        channel: Channel override.
+        blocks: Slack block kit blocks.
+        timeout: Request timeout.
+
+    Returns:
+        Result information.
+    """
+    payload: Dict[str, Any] = {'text': message}
+
+    if username:
+        payload['username'] = username
+
+    if icon_emoji:
+        payload['icon_emoji'] = icon_emoji
+
+    if channel:
+        payload['channel'] = channel
+
+    if blocks:
+        payload['blocks'] = blocks
+
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=timeout
+        )
+
+        return {
+            'success': response.ok,
+            'status_code': response.status_code,
+        }
+    except requests.RequestException as e:
+        return {
+            'success': False,
+            'error': str(e),
+        }
+
+
+def send_discord_webhook(
+    url: str,
+    content: str,
+    username: Optional[str] = None,
+    avatar_url: Optional[str] = None,
+    embeds: Optional[List[Dict[str, Any]]] = None,
+    timeout: int = 30
+) -> Dict[str, Any]:
+    """
+    Send a Discord webhook.
+
+    Args:
+        url: Discord webhook URL.
+        content: Message content.
+        username: Override username.
+        avatar_url: Override avatar URL.
+        embeds: Discord embeds.
+        timeout: Request timeout.
+
+    Returns:
+        Result information.
+    """
+    payload: Dict[str, Any] = {'content': content}
+
+    if username:
+        payload['username'] = username
+
+    if avatar_url:
+        payload['avatar_url'] = avatar_url
+
+    if embeds:
+        payload['embeds'] = embeds
+
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=timeout
+        )
+
+        return {
+            'success': response.ok,
+            'status_code': response.status_code,
+        }
+    except requests.RequestException as e:
+        return {
+            'success': False,
+            'error': str(e),
+        }
+
+
+def send_teams_webhook(
+    url: str,
+    title: str,
+    message: str,
+    color: Optional[str] = None,
+    timeout: int = 30
+) -> Dict[str, Any]:
+    """
+    Send a Microsoft Teams webhook.
+
+    Args:
+        url: Teams webhook URL.
+        title: Message title.
+        message: Message content.
+        color: Accent color (hex).
+        timeout: Request timeout.
+
+    Returns:
+        Result information.
+    """
+    payload = {
+        '@type': 'MessageCard',
+        '@context': 'http://schema.org/extensions',
+        'themeColor': color or '0078D4',
+        'summary': title,
+        'sections': [{
+            'activityTitle': title,
+            'activitySubtitle': '',
+            'text': message,
+        }]
+    }
+
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=timeout,
+            headers={'Content-Type': 'application/json'}
+        )
+
+        return {
+            'success': response.ok,
+            'status_code': response.status_code,
+        }
+    except requests.RequestException as e:
+        return {
+            'success': False,
+            'error': str(e),
+        }
+
+
+def verify_webhook_signature(
+    payload: bytes,
+    signature: str,
+    secret: str,
+    algorithm: str = 'sha256'
+) -> bool:
+    """
+    Verify webhook signature.
+
+    Args:
+        payload: Raw request payload.
+        signature: Signature header value.
+        secret: Webhook secret.
+        algorithm: Hash algorithm.
+
+    Returns:
+        True if signature is valid.
+    """
+    if algorithm == 'sha256':
+        expected = 'sha256=' + hmac.new(
+            secret.encode('utf-8'),
+            payload,
+            hashlib.sha256
+        ).hexdigest()
+    elif algorithm == 'sha1':
+        expected = 'sha1=' + hmac.new(
+            secret.encode('utf-8'),
+            payload,
+            hashlib.sha1
+        ).hexdigest()
+    else:
+        return False
+
+    return hmac.compare_digest(expected, signature)
+
+
+def create_webhook_signature(
+    payload: bytes,
+    secret: str,
+    algorithm: str = 'sha256'
+) -> str:
+    """
+    Create a webhook signature.
+
+    Args:
+        payload: Request payload.
+        secret: Webhook secret.
+        algorithm: Hash algorithm.
+
+    Returns:
+        Signature header value.
+    """
+    if algorithm == 'sha256':
+        return 'sha256=' + hmac.new(
+            secret.encode('utf-8'),
+            payload,
+            hashlib.sha256
+        ).hexdigest()
+    elif algorithm == 'sha1':
+        return 'sha1=' + hmac.new(
+            secret.encode('utf-8'),
+            payload,
+            hashlib.sha1
+        ).hexdigest()
+    else:
+        raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+
+def parse_webhook_url(url: str) -> Dict[str, Any]:
+    """
+    Parse a webhook URL to extract components.
+
+    Args:
+        url: Webhook URL.
+
+    Returns:
+        URL components.
+    """
+    parsed = urlparse(url)
+
+    return {
+        'scheme': parsed.scheme,
+        'host': parsed.netloc,
+        'path': parsed.path,
+        'query': dict(p.split('=') for p in parsed.query.split('&') if '=' in p) if parsed.query else {},
+    }
+
+
+def batch_webhook(urls: List[str], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Send the same payload to multiple webhooks.
+
+    Args:
+        urls: List of webhook URLs.
+        payload: Data to send.
+
+    Returns:
+        Summary of results.
+    """
+    results = []
+
+    for url in urls:
+        result = send_webhook(url, json_data=payload)
+        results.append({
+            'url': url,
+            'success': result['success'],
+            'status_code': result.get('status_code'),
+        })
+
+    return {
+        'total': len(urls),
+        'successful': sum(1 for r in results if r['success']),
+        'failed': sum(1 for r in results if not r['success']),
+        'results': results,
+    }
+
+
+def create_slack_block_message(
+    header: str,
+    body: str,
+    footer: Optional[str] = None,
+    image_url: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create a structured Slack message with blocks.
+
+    Args:
+        header: Header text.
+        body: Body text.
+        footer: Optional footer text.
+        image_url: Optional image URL.
+
+    Returns:
+        Slack message payload.
+    """
+    blocks: List[Dict[str, Any]] = [
+        {
+            'type': 'header',
+            'text': {
+                'type': 'plain_text',
+                'text': header,
+                'emoji': True,
+            }
+        },
+        {
+            'type': 'section',
+            'text': {
+                'type': 'mrkdwn',
+                'text': body,
+            }
+        },
+    ]
+
+    if image_url:
+        blocks.append({
+            'type': 'image',
+            'image_url': image_url,
+            'alt_text': header,
+        })
+
+    if footer:
+        blocks.append({
+            'type': 'context',
+            'elements': [
+                {
+                    'type': 'mrkdwn',
+                    'text': footer,
+                }
+            ]
+        })
+
+    return {
+        'blocks': blocks,
+        'text': header,
+    }
+
+
+def create_discord_embed(
+    title: str,
+    description: str,
+    color: Optional[int] = None,
+    url: Optional[str] = None,
+    author_name: Optional[str] = None,
+    author_url: Optional[str] = None,
+    thumbnail_url: Optional[str] = None,
+    image_url: Optional[str] = None,
+    footer_text: Optional[str] = None,
+    fields: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """
+    Create a Discord embed.
+
+    Args:
+        title: Embed title.
+        description: Embed description.
+        color: Color (decimal).
+        url: Link title URL.
+        author_name: Author name.
+        author_url: Author URL.
+        thumbnail_url: Thumbnail image URL.
+        image_url: Main image URL.
+        footer_text: Footer text.
+        fields: List of field objects.
+
+    Returns:
+        Discord embed payload.
+    """
+    embed: Dict[str, Any] = {
+        'title': title,
+        'description': description,
+    }
+
+    if color:
+        embed['color'] = color
+
+    if url:
+        embed['url'] = url
+
+    if author_name:
+        author = {'name': author_name}
+        if author_url:
+            author['url'] = author_url
+        embed['author'] = author
+
+    if thumbnail_url:
+        embed['thumbnail'] = {'url': thumbnail_url}
+
+    if image_url:
+        embed['image'] = {'url': image_url}
+
+    if footer_text:
+        embed['footer'] = {'text': footer_text}
+
+    if fields:
+        embed['fields'] = [
+            {
+                'name': f.get('name', ''),
+                'value': f.get('value', ''),
+                'inline': f.get('inline', False),
+            }
+            for f in fields
+        ]
+
+    return embed

@@ -1,582 +1,523 @@
-"""Elasticsearch action module for RabAI AutoClick.
-
-Provides Elasticsearch operations:
-- ElasticsearchSearchAction: Search documents
-- ElasticsearchIndexAction: Index document
-- ElasticsearchDeleteAction: Delete document
-- ElasticsearchCreateIndexAction: Create index
-- ElasticsearchBulkAction: Bulk index documents
-- ElasticsearchCountAction: Count documents
-- ElasticsearchMappingAction: Get index mapping
-- ElasticsearchClusterHealthAction: Cluster health
 """
+Elasticsearch search and indexing actions.
+"""
+from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import requests
+from typing import Dict, Any, Optional, List
+from urllib.parse import urljoin
 
 
-def get_es_client(host='localhost', port=9200, scheme='http', user=None, password=None):
-    """Get Elasticsearch client."""
+class ElasticsearchClient:
+    """Elasticsearch API client."""
+
+    def __init__(
+        self,
+        hosts: Optional[List[str]] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        timeout: int = 30,
+        verify_certs: bool = True
+    ):
+        """
+        Initialize Elasticsearch client.
+
+        Args:
+            hosts: List of Elasticsearch host URLs.
+            username: Username for authentication.
+            password: Password for authentication.
+            timeout: Request timeout in seconds.
+            verify_certs: Verify SSL certificates.
+        """
+        if hosts is None:
+            hosts = ['http://localhost:9200']
+
+        self.hosts = hosts
+        self.timeout = timeout
+
+        self.session = requests.Session()
+
+        if username and password:
+            self.session.auth = (username, password)
+
+        self.session.verify = verify_certs
+
+    def _get_url(self, path: str) -> str:
+        """Build URL for a request."""
+        return urljoin(self.hosts[0], path)
+
+    def index_document(
+        self,
+        index: str,
+        doc_type: str,
+        document: Dict[str, Any],
+        id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Index a document.
+
+        Args:
+            index: Index name.
+            doc_type: Document type.
+            document: Document body.
+            id: Optional document ID.
+
+        Returns:
+            Indexing result.
+        """
+        url = f'/{index}/{doc_type}'
+
+        if id:
+            url += f'/{id}'
+
+        try:
+            response = self.session.put(
+                url,
+                json=document,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            return {'error': str(e)}
+
+    def search(
+        self,
+        index: str,
+        query: Dict[str, Any],
+        size: int = 10,
+        from_: int = 0,
+        sort: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Search for documents.
+
+        Args:
+            index: Index name.
+            query: Elasticsearch query DSL.
+            size: Number of results.
+            from_: Starting offset.
+            sort: Sort criteria.
+
+        Returns:
+            Search results.
+        """
+        url = f'/{index}/_search'
+
+        params = {
+            'size': size,
+            'from': from_,
+        }
+
+        body = {'query': query}
+
+        if sort:
+            body['sort'] = sort
+
+        try:
+            response = self.session.get(
+                url,
+                json=body,
+                params=params,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            return {'error': str(e)}
+
+    def get_document(
+        self,
+        index: str,
+        doc_type: str,
+        doc_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get a document by ID.
+
+        Args:
+            index: Index name.
+            doc_type: Document type.
+            doc_id: Document ID.
+
+        Returns:
+            Document or None.
+        """
+        url = f'/{index}/{doc_type}/{doc_id}'
+
+        try:
+            response = self.session.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException:
+            return None
+
+    def delete_document(
+        self,
+        index: str,
+        doc_type: str,
+        doc_id: str
+    ) -> Dict[str, Any]:
+        """
+        Delete a document.
+
+        Args:
+            index: Index name.
+            doc_type: Document type.
+            doc_id: Document ID.
+
+        Returns:
+            Deletion result.
+        """
+        url = f'/{index}/{doc_type}/{doc_id}'
+
+        try:
+            response = self.session.delete(url, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            return {'error': str(e)}
+
+    def create_index(
+        self,
+        index: str,
+        mappings: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Create an index.
+
+        Args:
+            index: Index name.
+            mappings: Index mappings.
+            settings: Index settings.
+
+        Returns:
+            Creation result.
+        """
+        url = f'/{index}'
+
+        body = {}
+        if mappings:
+            body['mappings'] = mappings
+        if settings:
+            body['settings'] = settings
+
+        try:
+            response = self.session.put(url, json=body, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            return {'error': str(e)}
+
+    def delete_index(self, index: str) -> Dict[str, Any]:
+        """
+        Delete an index.
+
+        Args:
+            index: Index name.
+
+        Returns:
+            Deletion result.
+        """
+        url = f'/{index}'
+
+        try:
+            response = self.session.delete(url, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            return {'error': str(e)}
+
+    def get_cluster_health() -> Dict[str, Any]:
+        """Get cluster health."""
+        url = '/_cluster/health'
+
+        try:
+            response = requests.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            return {'error': str(e)}
+
+
+def search_all(
+    es_url: str,
+    index: str,
+    query: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Perform a simple search.
+
+    Args:
+        es_url: Elasticsearch URL.
+        index: Index name.
+        query: Query string.
+        username: Optional auth username.
+        password: Optional auth password.
+
+    Returns:
+        List of matching documents.
+    """
+    session = requests.Session()
+    if username and password:
+        session.auth = (username, password)
+
+    url = f'{es_url.rstrip("/")}/{index}/_search'
+
+    body = {
+        'query': {
+            'query_string': {'query': query}
+        }
+    }
+
     try:
-        from elasticsearch import Elasticsearch
-        hosts = [f"{scheme}://{host}:{port}"]
-        if user and password:
-            return Elasticsearch(hosts, basic_auth=(user, password))
-        return Elasticsearch(hosts)
-    except ImportError:
-        return None
-
-
-class ElasticsearchSearchAction(BaseAction):
-    """Search documents."""
-    action_type = "elasticsearch_search"
-    display_name = "ES搜索"
-    description = "搜索Elasticsearch文档"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute search.
-
-        Args:
-            context: Execution context.
-            params: Dict with index, query, host, port, output_var.
-
-        Returns:
-            ActionResult with search results.
-        """
-        index = params.get('index', '')
-        query = params.get('query', {})
-        host = params.get('host', 'localhost')
-        port = params.get('port', 9200)
-        output_var = params.get('output_var', 'es_results')
-
-        valid, msg = self.validate_type(index, str, 'index')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_index = context.resolve_value(index)
-            resolved_query = context.resolve_value(query) if query else {'match_all': {}}
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_es_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="elasticsearch-py未安装: pip install elasticsearch"
-                )
-
-            response = client.search(index=resolved_index, body=resolved_query)
-            hits = response.get('hits', {}).get('hits', [])
-            total = response.get('hits', {}).get('total', {}).get('value', 0)
-
-            results = [hit['_source'] for hit in hits]
-            context.set(output_var, results)
-
-            return ActionResult(
-                success=True,
-                message=f"搜索完成: {total} 条匹配, 返回 {len(results)} 条",
-                data={'total': total, 'results': results, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"ES搜索失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['index']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'query': {}, 'host': 'localhost', 'port': 9200, 'output_var': 'es_results'}
-
-
-class ElasticsearchIndexAction(BaseAction):
-    """Index document."""
-    action_type = "elasticsearch_index"
-    display_name = "ES索引文档"
-    description = "将文档索引到Elasticsearch"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute index.
-
-        Args:
-            context: Execution context.
-            params: Dict with index, doc_id, document, host, port.
-
-        Returns:
-            ActionResult with result.
-        """
-        index = params.get('index', '')
-        doc_id = params.get('doc_id', '')
-        document = params.get('document', {})
-        host = params.get('host', 'localhost')
-        port = params.get('port', 9200)
-
-        valid, msg = self.validate_type(index, str, 'index')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_index = context.resolve_value(index)
-            resolved_doc = context.resolve_value(document)
-            resolved_id = context.resolve_value(doc_id) if doc_id else None
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_es_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="elasticsearch-py未安装"
-                )
-
-            kwargs = {'index': resolved_index, 'document': resolved_doc}
-            if resolved_id:
-                kwargs['id'] = resolved_id
-
-            result = client.index(**kwargs)
-
-            return ActionResult(
-                success=True,
-                message=f"文档已索引: {result.get('_id', resolved_id)}",
-                data={'id': result.get('_id'), 'result': result.get('result')}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"ES索引失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['index', 'document']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'doc_id': '', 'host': 'localhost', 'port': 9200}
-
-
-class ElasticsearchDeleteAction(BaseAction):
-    """Delete document."""
-    action_type = "elasticsearch_delete"
-    display_name = "ES删除文档"
-    description = "删除Elasticsearch文档"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute delete.
-
-        Args:
-            context: Execution context.
-            params: Dict with index, doc_id, host, port.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        index = params.get('index', '')
-        doc_id = params.get('doc_id', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 9200)
-
-        valid, msg = self.validate_type(index, str, 'index')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(doc_id, str, 'doc_id')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_index = context.resolve_value(index)
-            resolved_id = context.resolve_value(doc_id)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_es_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="elasticsearch-py未安装"
-                )
-
-            result = client.delete(index=resolved_index, id=resolved_id)
-
-            return ActionResult(
-                success=True,
-                message=f"文档已删除: {resolved_id}",
-                data={'id': resolved_id, 'result': result.get('result')}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"ES删除失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['index', 'doc_id']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 9200}
-
-
-class ElasticsearchCreateIndexAction(BaseAction):
-    """Create index."""
-    action_type = "elasticsearch_create_index"
-    display_name = "ES创建索引"
-    description = "创建Elasticsearch索引"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute create index.
-
-        Args:
-            context: Execution context.
-            params: Dict with index, mappings, settings, host, port.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        index = params.get('index', '')
-        mappings = params.get('mappings', {})
-        settings = params.get('settings', {})
-        host = params.get('host', 'localhost')
-        port = params.get('port', 9200)
-
-        valid, msg = self.validate_type(index, str, 'index')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_index = context.resolve_value(index)
-            resolved_mappings = context.resolve_value(mappings) if mappings else {}
-            resolved_settings = context.resolve_value(settings) if settings else {}
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_es_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="elasticsearch-py未安装"
-                )
-
-            kwargs = {'index': resolved_index}
-            if resolved_mappings:
-                kwargs['mappings'] = resolved_mappings
-            if resolved_settings:
-                kwargs['settings'] = resolved_settings
-
-            result = client.indices.create(**kwargs)
-
-            return ActionResult(
-                success=True,
-                message=f"索引已创建: {resolved_index}",
-                data={'index': resolved_index, 'acknowledged': result.get('acknowledged')}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"ES创建索引失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['index']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'mappings': {}, 'settings': {}, 'host': 'localhost', 'port': 9200}
-
-
-class ElasticsearchBulkAction(BaseAction):
-    """Bulk index documents."""
-    action_type = "elasticsearch_bulk"
-    display_name = "ES批量索引"
-    description = "批量索引Elasticsearch文档"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute bulk.
-
-        Args:
-            context: Execution context.
-            params: Dict with index, documents, host, port, output_var.
-
-        Returns:
-            ActionResult with bulk result.
-        """
-        index = params.get('index', '')
-        documents = params.get('documents', [])
-        host = params.get('host', 'localhost')
-        port = params.get('port', 9200)
-        output_var = params.get('output_var', 'bulk_result')
-
-        valid, msg = self.validate_type(index, str, 'index')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_index = context.resolve_value(index)
-            resolved_docs = context.resolve_value(documents)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_es_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="elasticsearch-py未安装"
-                )
-
-            from elasticsearch.helpers import bulk
-
-            actions = []
-            for doc in resolved_docs:
-                actions.append({
-                    '_index': resolved_index,
-                    '_source': doc
-                })
-
-            success, failed = bulk(client, actions)
-
-            result = {'success': success, 'failed': len(failed) if failed else 0}
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=failed is None or len(failed) == 0,
-                message=f"批量索引完成: {success} 成功, {len(failed) if failed else 0} 失败",
-                data=result
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"ES批量索引失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['index', 'documents']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 9200, 'output_var': 'bulk_result'}
-
-
-class ElasticsearchCountAction(BaseAction):
-    """Count documents."""
-    action_type = "elasticsearch_count"
-    display_name = "ES计数"
-    description = "统计Elasticsearch文档数量"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute count.
-
-        Args:
-            context: Execution context.
-            params: Dict with index, query, host, port, output_var.
-
-        Returns:
-            ActionResult with count.
-        """
-        index = params.get('index', '')
-        query = params.get('query', {})
-        host = params.get('host', 'localhost')
-        port = params.get('port', 9200)
-        output_var = params.get('output_var', 'es_count')
-
-        valid, msg = self.validate_type(index, str, 'index')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_index = context.resolve_value(index)
-            resolved_query = context.resolve_value(query) if query else {}
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_es_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="elasticsearch-py未安装"
-                )
-
-            kwargs = {'index': resolved_index}
-            if resolved_query:
-                kwargs['query'] = resolved_query
-
-            result = client.count(**kwargs)
-            count = result.get('count', 0)
-
-            context.set(output_var, count)
-
-            return ActionResult(
-                success=True,
-                message=f"文档数量: {count}",
-                data={'count': count, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"ES计数失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['index']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'query': {}, 'host': 'localhost', 'port': 9200, 'output_var': 'es_count'}
-
-
-class ElasticsearchMappingAction(BaseAction):
-    """Get index mapping."""
-    action_type = "elasticsearch_mapping"
-    display_name = "ES获取映射"
-    description = "获取Elasticsearch索引映射"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute mapping.
-
-        Args:
-            context: Execution context.
-            params: Dict with index, host, port, output_var.
-
-        Returns:
-            ActionResult with mapping.
-        """
-        index = params.get('index', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 9200)
-        output_var = params.get('output_var', 'es_mapping')
-
-        valid, msg = self.validate_type(index, str, 'index')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_index = context.resolve_value(index)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_es_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="elasticsearch-py未安装"
-                )
-
-            mapping = client.indices.get_mapping(index=resolved_index)
-            context.set(output_var, mapping)
-
-            return ActionResult(
-                success=True,
-                message=f"获取映射: {resolved_index}",
-                data={'mapping': mapping, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"ES获取映射失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['index']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 9200, 'output_var': 'es_mapping'}
-
-
-class ElasticsearchClusterHealthAction(BaseAction):
-    """Get cluster health."""
-    action_type = "elasticsearch_cluster_health"
-    display_name = "ES集群健康"
-    description = "获取Elasticsearch集群健康状态"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute cluster health.
-
-        Args:
-            context: Execution context.
-            params: Dict with host, port, output_var.
-
-        Returns:
-            ActionResult with health status.
-        """
-        host = params.get('host', 'localhost')
-        port = params.get('port', 9200)
-        output_var = params.get('output_var', 'es_health')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_es_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="elasticsearch-py未安装"
-                )
-
-            health = client.cluster.health()
-            context.set(output_var, health)
-
-            status = health.get('status', 'unknown')
-
-            return ActionResult(
-                success=status != 'red',
-                message=f"集群健康: {status}",
-                data=health
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"ES集群健康检查失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
+        response = session.post(url, json=body, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        hits = data.get('hits', {}).get('hits', [])
+        return [hit['_source'] for hit in hits]
+    except Exception:
         return []
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 9200, 'output_var': 'es_health'}
+
+def match_query(
+    es_url: str,
+    index: str,
+    field: str,
+    value: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Perform a match query.
+
+    Args:
+        es_url: Elasticsearch URL.
+        index: Index name.
+        field: Field to search.
+        value: Value to match.
+        username: Optional auth username.
+        password: Optional auth password.
+
+    Returns:
+        List of matching documents.
+    """
+    session = requests.Session()
+    if username and password:
+        session.auth = (username, password)
+
+    url = f'{es_url.rstrip("/")}/{index}/_search'
+
+    body = {
+        'query': {
+            'match': {field: value}
+        }
+    }
+
+    try:
+        response = session.post(url, json=body, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        hits = data.get('hits', {}).get('hits', [])
+        return [hit['_source'] for hit in hits]
+    except Exception:
+        return []
+
+
+def bulk_index(
+    es_url: str,
+    index: str,
+    doc_type: str,
+    documents: List[Dict[str, Any]],
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Bulk index documents.
+
+    Args:
+        es_url: Elasticsearch URL.
+        index: Index name.
+        doc_type: Document type.
+        documents: List of documents to index.
+        username: Optional auth username.
+        password: Optional auth password.
+
+    Returns:
+        Bulk indexing result.
+    """
+    session = requests.Session()
+    if username and password:
+        session.auth = (username, password)
+
+    url = f'{es_url.rstrip("/")}/_bulk'
+
+    lines = []
+    for doc in documents:
+        lines.append({'index': {'_index': index, '_type': doc_type}})
+        lines.append(doc)
+
+    import json
+    body = '\n'.join(json.dumps(line) for line in lines) + '\n'
+
+    try:
+        response = session.post(
+            url,
+            data=body.encode('utf-8'),
+            headers={'Content-Type': 'application/x-ndjson'},
+            timeout=60
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def create_mapping(
+    es_url: str,
+    index: str,
+    doc_type: str,
+    properties: Dict[str, Dict[str, Any]],
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create an index with mapping.
+
+    Args:
+        es_url: Elasticsearch URL.
+        index: Index name.
+        doc_type: Document type.
+        properties: Field properties.
+        username: Optional auth username.
+        password: Optional auth password.
+
+    Returns:
+        Creation result.
+    """
+    session = requests.Session()
+    if username and password:
+        session.auth = (username, password)
+
+    url = f'{es_url.rstrip("/")}/{index}'
+
+    body = {
+        'mappings': {
+            doc_type: {
+                'properties': properties
+            }
+        }
+    }
+
+    try:
+        response = session.put(url, json=body, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def count_documents(
+    es_url: str,
+    index: str,
+    query: Optional[Dict[str, Any]] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> int:
+    """
+    Count documents in an index.
+
+    Args:
+        es_url: Elasticsearch URL.
+        index: Index name.
+        query: Optional query to filter.
+        username: Optional auth username.
+        password: Optional auth password.
+
+    Returns:
+        Document count.
+    """
+    session = requests.Session()
+    if username and password:
+        session.auth = (username, password)
+
+    url = f'{es_url.rstrip("/")}/{index}/_count'
+
+    body = {}
+    if query:
+        body['query'] = query
+
+    try:
+        response = session.post(url, json=body, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('count', 0)
+    except Exception:
+        return 0
+
+
+def get_index_stats(
+    es_url: str,
+    index: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get index statistics.
+
+    Args:
+        es_url: Elasticsearch URL.
+        index: Index name.
+        username: Optional auth username.
+        password: Optional auth password.
+
+    Returns:
+        Index statistics.
+    """
+    session = requests.Session()
+    if username and password:
+        session.auth = (username, password)
+
+    url = f'{es_url.rstrip("/")}/{index}/_stats'
+
+    try:
+        response = session.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def list_indices(
+    es_url: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> List[str]:
+    """
+    List all indices.
+
+    Args:
+        es_url: Elasticsearch URL.
+        username: Optional auth username.
+        password: Optional auth password.
+
+    Returns:
+        List of index names.
+    """
+    session = requests.Session()
+    if username and password:
+        session.auth = (username, password)
+
+    url = f'{es_url.rstrip("/")}/_cat/indices?h=index'
+
+    try:
+        response = session.get(url, timeout=30)
+        response.raise_for_status()
+        return [line.strip() for line in response.text.splitlines() if line.strip()]
+    except Exception:
+        return []
