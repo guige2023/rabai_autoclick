@@ -1,406 +1,258 @@
-"""HTTP requests action module for RabAI AutoClick.
+"""HTTP requests action with retry, auth, and session management.
 
-Provides HTTP operations:
-- GetRequestAction: HTTP GET with params and headers
-- PostRequestAction: HTTP POST with JSON/form data
-- PutRequestAction: HTTP PUT request
-- DeleteRequestAction: HTTP DELETE request
-- PatchRequestAction: HTTP PATCH request
-- BatchRequestAction: Execute multiple HTTP requests
-- DownloadFileAction: Download file from URL
+This module provides HTTP client capabilities including GET/POST requests,
+authentication, retry logic, and response parsing.
+
+Example:
+    >>> action = RequestsAction()
+    >>> result = action.execute(method="GET", url="https://api.example.com")
 """
+
+from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 
-class GetRequestAction(BaseAction):
-    """HTTP GET request with query parameters."""
-    action_type = "http_get"
-    display_name = "HTTP GET"
-    description = "执行HTTP GET请求"
+@dataclass
+class RequestConfig:
+    """Configuration for HTTP requests."""
+    timeout: int = 30
+    retries: int = 3
+    retry_delay: float = 1.0
+    backoff_factor: float = 2.0
+    verify_ssl: bool = True
+    follow_redirects: bool = True
+    max_redirects: int = 5
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            import urllib.request
-            import urllib.parse
-            import urllib.error
 
-            url = params.get("url", "")
-            query_params = params.get("params", {})
-            headers = params.get("headers", {})
-            timeout = params.get("timeout", 30)
+@dataclass
+class ResponseData:
+    """Parsed HTTP response."""
+    status_code: int
+    headers: dict[str, str]
+    body: Any
+    text: str
+    json_data: Optional[dict] = None
+    elapsed_ms: float = 0.0
 
-            if not url:
-                return ActionResult(success=False, message="URL is required")
 
-            if query_params:
-                encoded_params = urllib.parse.urlencode(query_params)
-                url = url + ("?" + encoded_params if "?" not in url else "&" + encoded_params)
+class RequestsAction:
+    """HTTP requests action with retry and authentication.
 
-            req = urllib.request.Request(url)
-            req.add_header("User-Agent", "Mozilla/5.0 (compatible; RabAIAutoClick/1.0)")
-            for key, value in headers.items():
-                req.add_header(key, value)
+    Provides comprehensive HTTP client with automatic retry,
+    session management, and response parsing.
 
+    Example:
+        >>> action = RequestsAction()
+        >>> result = action.execute(
+        ...     method="POST",
+        ...     url="https://api.example.com/data",
+        ...     json={"key": "value"}
+        ... )
+    """
+
+    def __init__(self, config: Optional[RequestConfig] = None) -> None:
+        """Initialize requests action.
+
+        Args:
+            config: Optional request configuration.
+        """
+        self.config = config or RequestConfig()
+        self._session: Optional[Any] = None
+
+    def execute(
+        self,
+        method: str,
+        url: str,
+        params: Optional[dict] = None,
+        data: Optional[Any] = None,
+        json: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        auth: Optional[tuple[str, str]] = None,
+        timeout: Optional[int] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute HTTP request.
+
+        Args:
+            method: HTTP method (GET, POST, PUT, DELETE, etc.).
+            url: Target URL.
+            params: Query parameters.
+            data: Form data.
+            json: JSON body.
+            headers: Custom headers.
+            auth: Basic auth tuple (username, password).
+            timeout: Request timeout override.
+            **kwargs: Additional request parameters.
+
+        Returns:
+            Dictionary with response data.
+
+        Raises:
+            ValueError: If method or URL is invalid.
+            requests.RequestException: If request fails after retries.
+        """
+        import requests
+        from requests.exceptions import RequestException
+
+        if not url:
+            raise ValueError("URL is required")
+
+        method = method.upper()
+        if method not in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+            raise ValueError(f"Invalid method: {method}")
+
+        timeout = timeout or self.config.timeout
+        result: dict[str, Any] = {"method": method, "url": url, "success": True}
+
+        # Build request kwargs
+        req_kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "verify": self.config.verify_ssl,
+            "allow_redirects": self.config.follow_redirects,
+        }
+
+        if params:
+            req_kwargs["params"] = params
+        if data:
+            req_kwargs["data"] = data
+        if json:
+            req_kwargs["json"] = json
+        if headers:
+            req_kwargs["headers"] = headers
+        if auth:
+            req_kwargs["auth"] = auth
+        if kwargs:
+            req_kwargs.update(kwargs)
+
+        # Execute with retry
+        retries = self.config.retries
+        delay = self.config.retry_delay
+        last_error: Optional[Exception] = None
+
+        for attempt in range(retries + 1):
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    content = response.read()
-                    content_type = response.headers.get("Content-Type", "")
+                start_time = time.time()
 
-                    if "application/json" in content_type:
-                        data = json.loads(content.decode("utf-8"))
-                    else:
-                        data = content.decode("utf-8", errors="replace")
+                if self._session:
+                    response = self._session.request(method, url, **req_kwargs)
+                else:
+                    response = requests.request(method, url, **req_kwargs)
 
-                    return ActionResult(
-                        success=True,
-                        message="GET request successful",
-                        data={
-                            "status_code": response.status,
-                            "content": data,
-                            "headers": dict(response.headers),
-                            "content_type": content_type
-                        }
-                    )
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="replace")
-                return ActionResult(success=False, message=f"HTTP {e.code}: {e.reason}", data={"body": body})
-            except Exception as e:
-                return ActionResult(success=False, message=f"Request failed: {str(e)}")
+                elapsed_ms = (time.time() - start_time) * 1000
 
-        except ImportError:
-            return ActionResult(success=False, message="urllib not available")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+                result["status_code"] = response.status_code
+                result["elapsed_ms"] = elapsed_ms
+                result["headers"] = dict(response.headers)
 
-
-class PostRequestAction(BaseAction):
-    """HTTP POST request with JSON or form data."""
-    action_type = "http_post"
-    display_name = "HTTP POST"
-    description = "执行HTTP POST请求"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            import urllib.request
-            import urllib.parse
-            import urllib.error
-
-            url = params.get("url", "")
-            data = params.get("data", {})
-            json_data = params.get("json")
-            headers = params.get("headers", {})
-            timeout = params.get("timeout", 30)
-
-            if not url:
-                return ActionResult(success=False, message="URL is required")
-
-            if json_data is not None:
-                body = json.dumps(json_data).encode("utf-8")
-                content_type = "application/json"
-            elif data:
-                body = urllib.parse.urlencode(data).encode("utf-8")
-                content_type = "application/x-www-form-urlencoded"
-            else:
-                body = b""
-
-            req = urllib.request.Request(url, data=body)
-            req.add_header("User-Agent", "Mozilla/5.0 (compatible; RabAIAutoClick/1.0)")
-            req.add_header("Content-Type", content_type)
-            for key, value in headers.items():
-                req.add_header(key, value)
-
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    content = response.read()
-                    content_type = response.headers.get("Content-Type", "")
-
-                    if "application/json" in content_type:
-                        result = json.loads(content.decode("utf-8"))
-                    else:
-                        result = content.decode("utf-8", errors="replace")
-
-                    return ActionResult(
-                        success=True,
-                        message="POST request successful",
-                        data={"status_code": response.status, "content": result}
-                    )
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="replace")
-                return ActionResult(success=False, message=f"HTTP {e.code}: {e.reason}", data={"body": body})
-            except Exception as e:
-                return ActionResult(success=False, message=f"Request failed: {str(e)}")
-
-        except ImportError:
-            return ActionResult(success=False, message="urllib not available")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-
-
-class PutRequestAction(BaseAction):
-    """HTTP PUT request."""
-    action_type = "http_put"
-    display_name = "HTTP PUT"
-    description = "执行HTTP PUT请求"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            import urllib.request
-            import urllib.parse
-            import urllib.error
-
-            url = params.get("url", "")
-            data = params.get("data", {})
-            headers = params.get("headers", {})
-            timeout = params.get("timeout", 30)
-
-            if not url:
-                return ActionResult(success=False, message="URL is required")
-
-            if data:
-                body = json.dumps(data).encode("utf-8") if isinstance(data, dict) else str(data).encode("utf-8")
-            else:
-                body = b""
-
-            req = urllib.request.Request(url, data=body, method="PUT")
-            req.add_header("User-Agent", "Mozilla/5.0 (compatible; RabAIAutoClick/1.0)")
-            for key, value in headers.items():
-                req.add_header(key, value)
-
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    content = response.read().decode("utf-8", errors="replace")
-                    return ActionResult(
-                        success=True,
-                        message="PUT request successful",
-                        data={"status_code": response.status, "content": content}
-                    )
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="replace")
-                return ActionResult(success=False, message=f"HTTP {e.code}: {e.reason}", data={"body": body})
-            except Exception as e:
-                return ActionResult(success=False, message=f"Request failed: {str(e)}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-
-
-class DeleteRequestAction(BaseAction):
-    """HTTP DELETE request."""
-    action_type = "http_delete"
-    display_name = "HTTP DELETE"
-    description = "执行HTTP DELETE请求"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            import urllib.request
-            import urllib.error
-
-            url = params.get("url", "")
-            headers = params.get("headers", {})
-            timeout = params.get("timeout", 30)
-
-            if not url:
-                return ActionResult(success=False, message="URL is required")
-
-            req = urllib.request.Request(url, method="DELETE")
-            req.add_header("User-Agent", "Mozilla/5.0 (compatible; RabAIAutoClick/1.0)")
-            for key, value in headers.items():
-                req.add_header(key, value)
-
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    content = response.read().decode("utf-8", errors="replace")
-                    return ActionResult(
-                        success=True,
-                        message="DELETE request successful",
-                        data={"status_code": response.status, "content": content}
-                    )
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="replace")
-                return ActionResult(success=False, message=f"HTTP {e.code}: {e.reason}", data={"body": body})
-            except Exception as e:
-                return ActionResult(success=False, message=f"Request failed: {str(e)}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-
-
-class PatchRequestAction(BaseAction):
-    """HTTP PATCH request."""
-    action_type = "http_patch"
-    display_name = "HTTP PATCH"
-    description = "执行HTTP PATCH请求"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            import urllib.request
-            import urllib.error
-
-            url = params.get("url", "")
-            data = params.get("data", {})
-            headers = params.get("headers", {})
-            timeout = params.get("timeout", 30)
-
-            if not url:
-                return ActionResult(success=False, message="URL is required")
-
-            if data:
-                body = json.dumps(data).encode("utf-8") if isinstance(data, dict) else str(data).encode("utf-8")
-            else:
-                body = b""
-
-            req = urllib.request.Request(url, data=body, method="PATCH")
-            req.add_header("User-Agent", "Mozilla/5.0 (compatible; RabAIAutoClick/1.0)")
-            req.add_header("Content-Type", "application/json")
-            for key, value in headers.items():
-                req.add_header(key, value)
-
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    content = response.read().decode("utf-8", errors="replace")
-                    return ActionResult(
-                        success=True,
-                        message="PATCH request successful",
-                        data={"status_code": response.status, "content": content}
-                    )
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="replace")
-                return ActionResult(success=False, message=f"HTTP {e.code}: {e.reason}", data={"body": body})
-            except Exception as e:
-                return ActionResult(success=False, message=f"Request failed: {str(e)}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-
-
-class BatchRequestAction(BaseAction):
-    """Execute multiple HTTP requests in batch."""
-    action_type = "http_batch"
-    display_name = "批量HTTP请求"
-    description = "批量执行多个HTTP请求"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            requests_config = params.get("requests", [])
-            max_concurrent = params.get("max_concurrent", 3)
-            delay = params.get("delay", 0.5)
-
-            if not requests_config:
-                return ActionResult(success=False, message="No requests configured")
-
-            results = []
-            for i, req_config in enumerate(requests_config):
-                method = req_config.get("method", "GET").upper()
-                url = req_config.get("url", "")
-                headers = req_config.get("headers", {})
-                data = req_config.get("data", {})
-
+                # Parse response
                 try:
-                    if method == "GET":
-                        action = GetRequestAction()
-                    elif method == "POST":
-                        action = PostRequestAction()
-                    elif method == "PUT":
-                        action = PutRequestAction()
-                    elif method == "DELETE":
-                        action = DeleteRequestAction()
-                    elif method == "PATCH":
-                        action = PatchRequestAction()
-                    else:
-                        results.append({"index": i, "success": False, "message": f"Unknown method: {method}"})
-                        continue
+                    result["json_data"] = response.json()
+                    result["body"] = result["json_data"]
+                except (json.JSONDecodeError, ValueError):
+                    result["body"] = response.text
+                    result["text"] = response.text
 
-                    result = action.execute(context, {"url": url, "headers": headers, "data": data})
-                    results.append({
-                        "index": i,
-                        "success": result.success,
-                        "message": result.message,
-                        "data": result.data
-                    })
-
-                    if i < len(requests_config) - 1:
+                # Handle status codes
+                if response.status_code >= 400:
+                    if attempt < retries and self._is_retryable(response.status_code):
                         time.sleep(delay)
+                        delay *= self.config.backoff_factor
+                        continue
+                    result["success"] = False
+                    result["error"] = f"HTTP {response.status_code}"
 
-                except Exception as e:
-                    results.append({"index": i, "success": False, "message": str(e)})
+                return result
 
-            success_count = sum(1 for r in results if r.get("success", False))
+            except RequestException as e:
+                last_error = e
+                if attempt < retries:
+                    time.sleep(delay)
+                    delay *= self.config.backoff_factor
+                else:
+                    result["success"] = False
+                    result["error"] = str(last_error)
 
-            return ActionResult(
-                success=True,
-                message=f"Batch completed: {success_count}/{len(results)} successful",
-                data={"results": results, "success_count": success_count, "total": len(results)}
-            )
+        return result
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Batch error: {str(e)}")
+    def _is_retryable(self, status_code: int) -> bool:
+        """Check if HTTP status code is retryable.
 
+        Args:
+            status_code: HTTP status code.
 
-class DownloadFileAction(BaseAction):
-    """Download file from URL."""
-    action_type = "download_file"
-    display_name = "下载文件"
-    description = "从URL下载文件"
+        Returns:
+            True if request should be retried.
+        """
+        return status_code in (408, 429, 500, 502, 503, 504)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+    def create_session(self, cookies: Optional[dict] = None) -> None:
+        """Create persistent session with cookies.
+
+        Args:
+            cookies: Optional initial cookies.
+        """
+        import requests
+        self._session = requests.Session()
+        if cookies:
+            self._session.cookies.update(cookies)
+
+    def close_session(self) -> None:
+        """Close the HTTP session."""
+        if self._session:
+            self._session.close()
+            self._session = None
+
+    def download_file(
+        self,
+        url: str,
+        path: str,
+        chunk_size: int = 8192,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Download file from URL.
+
+        Args:
+            url: File URL.
+            path: Destination path.
+            chunk_size: Download chunk size.
+            progress_callback: Optional progress callback.
+            **kwargs: Additional request parameters.
+
+        Returns:
+            Download result dictionary.
+        """
+        import requests
+
+        result: dict[str, Any] = {"url": url, "path": path, "success": True}
+
         try:
-            import urllib.request
-            import urllib.error
-            os.makedirs = os.makedirs
-            path = os.path
+            response = requests.get(url, stream=True, **kwargs)
+            response.raise_for_status()
 
-            url = params.get("url", "")
-            output_path = params.get("output_path", "")
-            filename = params.get("filename", "")
-            timeout = params.get("timeout", 60)
+            total_size = int(response.headers.get("content-length", 0))
+            downloaded = 0
 
-            if not url:
-                return ActionResult(success=False, message="URL is required")
+            with open(path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            progress_callback(downloaded, total_size)
 
-            if not output_path:
-                output_path = "/tmp"
-
-            try:
-                with urllib.request.urlopen(url, timeout=timeout) as response:
-                    content = response.read()
-                    content_disposition = response.headers.get("Content-Disposition", "")
-                    if not filename:
-                        match = content_disposition and re.search(r'filename="?([^";]+)"?', content_disposition)
-                        filename = match.group(1) if match else url.split("/")[-1].split("?")[0]
-
-                    if not filename:
-                        return ActionResult(success=False, message="Could not determine filename")
-
-                    filepath = path.join(output_path, filename)
-                    os.makedirs(path.dirname(filepath) if path.dirname(filepath) else ".", exist_ok=True)
-
-                    with open(filepath, "wb") as f:
-                        f.write(content)
-
-                    return ActionResult(
-                        success=True,
-                        message=f"Downloaded {len(content)} bytes",
-                        data={
-                            "filepath": filepath,
-                            "filename": filename,
-                            "size": len(content),
-                            "content_type": response.headers.get("Content-Type", "")
-                        }
-                    )
-            except urllib.error.HTTPError as e:
-                return ActionResult(success=False, message=f"HTTP {e.code}: {e.reason}")
-            except Exception as e:
-                return ActionResult(success=False, message=f"Download failed: {str(e)}")
+            result["size"] = downloaded
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+            result["success"] = False
+            result["error"] = str(e)
+
+        return result
+
+    def __del__(self) -> None:
+        """Cleanup on destruction."""
+        self.close_session()

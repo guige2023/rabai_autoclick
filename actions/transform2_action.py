@@ -1,421 +1,279 @@
-"""Transform2 action module for RabAI AutoClick.
+"""Data transformation action module for RabAI AutoClick.
 
-Provides additional transform operations:
-- TransformMapAction: Map function over list
-- TransformFilterAction: Filter list by condition
-- TransformReduceAction: Reduce list to single value
-- TransformGroupByAction: Group list by key
-- TransformSortByAction: Sort list by key
+Provides transformation operations:
+- TransformMapAction: Map values through a function
+- TransformFilterAction: Filter values
+- TransformFlattenAction: Flatten nested structure
+- TransformGroupAction: Group by key
+- TransformSortAction: Sort by key
+- TransformUniqueAction: Get unique values
 """
 
-from typing import Any, Dict, List, Callable
+from __future__ import annotations
 
 import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from typing import Any, Dict, List, Optional, Callable
+
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
 class TransformMapAction(BaseAction):
-    """Map function over list."""
+    """Map values through transformation."""
     action_type = "transform_map"
-    display_name = "映射转换"
-    description = "对列表中每个元素应用转换"
+    display_name = "数据映射"
+    description = "映射转换数据"
+    version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute map transform.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute map transformation."""
+        data = params.get('data', [])
+        field = params.get('field', None)
+        transform = params.get('transform', None)  # upper, lower, int, float, str, abs, len
+        output_var = params.get('output_var', 'mapped_data')
 
-        Args:
-            context: Execution context.
-            params: Dict with items, transform_type, output_var.
-
-        Returns:
-            ActionResult with transformed list.
-        """
-        items = params.get('items', [])
-        transform_type = params.get('transform_type', 'double')
-        output_var = params.get('output_var', 'mapped_items')
+        if not data:
+            return ActionResult(success=False, message="data is required")
 
         try:
-            resolved_items = context.resolve_value(items)
-            resolved_type = context.resolve_value(transform_type)
+            import copy
 
-            if not isinstance(resolved_items, list):
-                return ActionResult(
-                    success=False,
-                    message="映射需要列表类型"
-                )
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_field = context.resolve_value(field) if context else field
+            resolved_transform = context.resolve_value(transform) if context else transform
 
             result = []
-            for item in resolved_items:
-                try:
-                    if resolved_type == 'double':
-                        result.append(item * 2)
-                    elif resolved_type == 'square':
-                        result.append(item ** 2)
-                    elif resolved_type == 'abs':
-                        result.append(abs(item))
-                    elif resolved_type == 'str':
-                        result.append(str(item))
-                    elif resolved_type == 'int':
-                        result.append(int(item))
-                    elif resolved_type == 'float':
-                        result.append(float(item))
-                    elif resolved_type == 'upper':
-                        result.append(str(item).upper())
-                    elif resolved_type == 'lower':
-                        result.append(str(item).lower())
-                    else:
-                        result.append(item)
-                except:
-                    result.append(item)
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"映射转换: {len(result)} 项",
-                data={
-                    'original': resolved_items,
-                    'transform_type': resolved_type,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"映射转换失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'transform_type': 'double', 'output_var': 'mapped_items'}
-
-
-class TransformFilterAction(BaseAction):
-    """Filter list by condition."""
-    action_type = "transform_filter"
-    display_name = "过滤转换"
-    description = "根据条件过滤列表元素"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute filter transform.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, condition, threshold, output_var.
-
-        Returns:
-            ActionResult with filtered list.
-        """
-        items = params.get('items', [])
-        condition = params.get('condition', 'gt')
-        threshold = params.get('threshold', 0)
-        output_var = params.get('output_var', 'filtered_items')
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_condition = context.resolve_value(condition)
-            resolved_threshold = context.resolve_value(threshold)
-
-            if not isinstance(resolved_items, list):
-                return ActionResult(
-                    success=False,
-                    message="过滤需要列表类型"
-                )
-
-            result = []
-            for item in resolved_items:
-                try:
-                    if resolved_condition == 'gt':
-                        keep = item > resolved_threshold
-                    elif resolved_condition == 'gte':
-                        keep = item >= resolved_threshold
-                    elif resolved_condition == 'lt':
-                        keep = item < resolved_threshold
-                    elif resolved_condition == 'lte':
-                        keep = item <= resolved_threshold
-                    elif resolved_condition == 'eq':
-                        keep = item == resolved_threshold
-                    elif resolved_condition == 'neq':
-                        keep = item != resolved_threshold
-                    elif resolved_condition == 'empty':
-                        keep = not item
-                    elif resolved_condition == 'not_empty':
-                        keep = bool(item)
-                    else:
-                        keep = True
-
-                    if keep:
-                        result.append(item)
-                except:
-                    pass
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"过滤转换: {len(result)}/{len(resolved_items)} 项",
-                data={
-                    'original': resolved_items,
-                    'condition': resolved_condition,
-                    'threshold': resolved_threshold,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"过滤转换失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'condition': 'gt', 'threshold': 0, 'output_var': 'filtered_items'}
-
-
-class TransformReduceAction(BaseAction):
-    """Reduce list to single value."""
-    action_type = "transform_reduce"
-    display_name = "聚合转换"
-    description = "将列表聚合为单个值"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute reduce transform.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, reduce_type, output_var.
-
-        Returns:
-            ActionResult with reduced value.
-        """
-        items = params.get('items', [])
-        reduce_type = params.get('reduce_type', 'sum')
-        output_var = params.get('output_var', 'reduced_value')
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_type = context.resolve_value(reduce_type)
-
-            if not isinstance(resolved_items, list):
-                return ActionResult(
-                    success=False,
-                    message="聚合需要列表类型"
-                )
-
-            if not resolved_items:
-                return ActionResult(
-                    success=False,
-                    message="聚合列表不能为空"
-                )
-
-            if resolved_type == 'sum':
-                result = sum(resolved_items)
-            elif resolved_type == 'product':
-                result = 1
-                for item in resolved_items:
-                    result *= item
-            elif resolved_type == 'min':
-                result = min(resolved_items)
-            elif resolved_type == 'max':
-                result = max(resolved_items)
-            elif resolved_type == 'avg' or resolved_type == 'mean':
-                result = sum(resolved_items) / len(resolved_items)
-            elif resolved_type == 'count':
-                result = len(resolved_items)
-            elif resolved_type == 'first':
-                result = resolved_items[0]
-            elif resolved_type == 'last':
-                result = resolved_items[-1]
-            elif resolved_type == 'join':
-                result = ''.join(str(item) for item in resolved_items)
-            else:
-                result = sum(resolved_items)
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"聚合转换: {result}",
-                data={
-                    'original': resolved_items,
-                    'reduce_type': resolved_type,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"聚合转换失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'reduce_type': 'sum', 'output_var': 'reduced_value'}
-
-
-class TransformGroupByAction(BaseAction):
-    """Group list by key."""
-    action_type = "transform_group_by"
-    display_name = "分组转换"
-    description = "按键对列表分组"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute group by transform.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, key, output_var.
-
-        Returns:
-            ActionResult with grouped dict.
-        """
-        items = params.get('items', [])
-        key = params.get('key', '')
-        output_var = params.get('output_var', 'grouped_items')
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_key = context.resolve_value(key) if key else None
-
-            if not isinstance(resolved_items, list):
-                return ActionResult(
-                    success=False,
-                    message="分组需要列表类型"
-                )
-
-            grouped = {}
-            for item in resolved_items:
-                if resolved_key:
-                    if isinstance(item, dict):
-                        group_key = item.get(resolved_key, 'unknown')
-                    else:
-                        group_key = 'unknown'
+            for item in resolved_data:
+                if isinstance(item, dict) and resolved_field:
+                    val = item.get(resolved_field)
                 else:
-                    group_key = str(type(item).__name__)
+                    val = item
 
-                if group_key not in grouped:
-                    grouped[group_key] = []
-                grouped[group_key].append(item)
+                if resolved_transform:
+                    t = resolved_transform.lower()
+                    if t == 'upper':
+                        val = str(val).upper()
+                    elif t == 'lower':
+                        val = str(val).lower()
+                    elif t == 'int':
+                        val = int(val)
+                    elif t == 'float':
+                        val = float(val)
+                    elif t == 'str':
+                        val = str(val)
+                    elif t == 'abs':
+                        val = abs(float(val))
+                    elif t == 'len':
+                        val = len(val)
 
-            context.set(output_var, grouped)
+                if isinstance(item, dict) and resolved_field:
+                    item = copy.copy(item)
+                    item[resolved_field] = val
+                    result.append(item)
+                else:
+                    result.append(val)
 
-            return ActionResult(
-                success=True,
-                message=f"分组转换: {len(grouped)} 组",
-                data={
-                    'original': resolved_items,
-                    'key': resolved_key,
-                    'groups': grouped,
-                    'output_var': output_var
-                }
-            )
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Mapped {len(result)} items", data={'result': result})
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"分组转换失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Map error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['items']
+        return ['data']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'key': '', 'output_var': 'grouped_items'}
+        return {'field': None, 'transform': None, 'output_var': 'mapped_data'}
 
 
-class TransformSortByAction(BaseAction):
-    """Sort list by key."""
-    action_type = "transform_sort_by"
-    display_name = "排序转换"
-    description = "按键对列表排序"
+class TransformFlattenAction(BaseAction):
+    """Flatten nested structure."""
+    action_type = "transform_flatten"
+    display_name = "数据扁平化"
+    description = "扁平化嵌套结构"
+    version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sort by transform.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute flatten."""
+        data = params.get('data', [])
+        max_depth = params.get('max_depth', 10)
+        output_var = params.get('output_var', 'flattened_data')
 
-        Args:
-            context: Execution context.
-            params: Dict with items, key, reverse, output_var.
-
-        Returns:
-            ActionResult with sorted list.
-        """
-        items = params.get('items', [])
-        key = params.get('key', '')
-        reverse = params.get('reverse', False)
-        output_var = params.get('output_var', 'sorted_items')
+        if not data:
+            return ActionResult(success=False, message="data is required")
 
         try:
-            resolved_items = context.resolve_value(items)
-            resolved_key = context.resolve_value(key) if key else None
-            resolved_reverse = context.resolve_value(reverse) if reverse else False
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_depth = context.resolve_value(max_depth) if context else max_depth
 
-            if not isinstance(resolved_items, list):
-                return ActionResult(
-                    success=False,
-                    message="排序需要列表类型"
-                )
+            def _flatten(obj, depth=0):
+                if depth >= resolved_depth:
+                    return [obj]
+                if isinstance(obj, list):
+                    result = []
+                    for item in obj:
+                        result.extend(_flatten(item, depth + 1))
+                    return result
+                elif isinstance(obj, dict):
+                    result = []
+                    for value in obj.values():
+                        result.extend(_flatten(value, depth + 1))
+                    return result
+                else:
+                    return [obj]
+
+            flattened = _flatten(resolved_data)
+            if context:
+                context.set(output_var, flattened)
+            return ActionResult(success=True, message=f"Flattened to {len(flattened)} items", data={'result': flattened})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Flatten error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['data']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'max_depth': 10, 'output_var': 'flattened_data'}
+
+
+class TransformUniqueAction(BaseAction):
+    """Get unique values."""
+    action_type = "transform_unique"
+    display_name = "数据去重"
+    description = "获取唯一值"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute unique."""
+        data = params.get('data', [])
+        key = params.get('key', None)  # for dict items
+        output_var = params.get('output_var', 'unique_data')
+
+        if not data:
+            return ActionResult(success=False, message="data is required")
+
+        try:
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_key = context.resolve_value(key) if context else key
 
             if resolved_key:
-                result = sorted(
-                    resolved_items,
-                    key=lambda x: x.get(resolved_key, 0) if isinstance(x, dict) else x,
-                    reverse=resolved_reverse
-                )
+                seen = set()
+                unique = []
+                for item in resolved_data:
+                    if isinstance(item, dict):
+                        k = item.get(resolved_key)
+                    else:
+                        k = item
+                    if k not in seen:
+                        seen.add(k)
+                        unique.append(item)
             else:
-                result = sorted(resolved_items, reverse=resolved_reverse)
+                unique = list(dict.fromkeys(resolved_data))
 
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"排序转换: {len(result)} 项",
-                data={
-                    'original': resolved_items,
-                    'key': resolved_key,
-                    'reverse': resolved_reverse,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
+            if context:
+                context.set(output_var, unique)
+            return ActionResult(success=True, message=f"Unique: {len(unique)} items", data={'result': unique, 'count': len(unique)})
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"排序转换失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Unique error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['items']
+        return ['data']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'key': '', 'reverse': False, 'output_var': 'sorted_items'}
+        return {'key': None, 'output_var': 'unique_data'}
+
+
+class TransformGroupAction(BaseAction):
+    """Group data by key."""
+    action_type = "transform_group"
+    display_name = "数据分组"
+    description = "按键分组"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute group."""
+        data = params.get('data', [])
+        key = params.get('key', '')
+        output_var = params.get('output_var', 'grouped_data')
+
+        if not data or not key:
+            return ActionResult(success=False, message="data and key are required")
+
+        try:
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_key = context.resolve_value(key) if context else key
+
+            groups = {}
+            for item in resolved_data:
+                if isinstance(item, dict):
+                    group_val = item.get(resolved_key)
+                else:
+                    group_val = str(item)
+                if group_val not in groups:
+                    groups[group_val] = []
+                groups[group_val].append(item)
+
+            if context:
+                context.set(output_var, groups)
+            return ActionResult(success=True, message=f"Grouped into {len(groups)} groups", data={'groups': {k: len(v) for k, v in groups.items()}, 'count': len(groups)})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Group error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['data', 'key']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'grouped_data'}
+
+
+class TransformPivotAction(BaseAction):
+    """Pivot data (transpose rows/columns)."""
+    action_type = "transform_pivot"
+    display_name = "数据透视"
+    description = "数据透视转换"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute pivot."""
+        data = params.get('data', [])
+        row_key = params.get('row_key', '')
+        col_key = params.get('col_key', '')
+        value_key = params.get('value_key', '')
+        output_var = params.get('output_var', 'pivoted_data')
+
+        if not data or not row_key or not value_key:
+            return ActionResult(success=False, message="data, row_key, and value_key are required")
+
+        try:
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_row = context.resolve_value(row_key) if context else row_key
+            resolved_col = context.resolve_value(col_key) if context else col_key
+            resolved_val = context.resolve_value(value_key) if context else value_key
+
+            pivot = {}
+            for item in resolved_data:
+                if isinstance(item, dict):
+                    row = item.get(resolved_row)
+                    if resolved_col:
+                        col = item.get(resolved_col)
+                        if row not in pivot:
+                            pivot[row] = {}
+                        pivot[row][col] = item.get(resolved_val)
+                    else:
+                        if row not in pivot:
+                            pivot[row] = []
+                        pivot[row].append(item.get(resolved_val))
+
+            if context:
+                context.set(output_var, pivot)
+            return ActionResult(success=True, message=f"Pivoted data: {len(pivot)} rows", data={'result': pivot})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Pivot error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['data', 'row_key', 'value_key']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'col_key': '', 'output_var': 'pivoted_data'}

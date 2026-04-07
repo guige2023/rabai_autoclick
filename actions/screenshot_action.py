@@ -1,361 +1,286 @@
-"""Screenshot action module for RabAI AutoClick.
+"""Screenshot capture and analysis action.
 
-Provides screenshot operations:
-- ScreenshotFullAction: Take full screen screenshot
-- ScreenshotRegionAction: Take screenshot of region
-- ScreenshotWindowAction: Take screenshot of window
-- ScreenshotSaveAction: Save screenshot to file
-- ScreenshotToClipboardAction: Copy screenshot to clipboard
+This module provides screenshot capture capabilities including
+full screen, region capture, and image analysis for automation.
+
+Example:
+    >>> action = ScreenshotAction()
+    >>> result = action.execute(mode="full")
 """
 
-from typing import Any, Dict, List, Tuple
+from __future__ import annotations
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import base64
+import io
+import time
+from dataclasses import dataclass
+from typing import Any, Optional
 
 
-class ScreenshotFullAction(BaseAction):
-    """Take full screen screenshot."""
-    action_type = "screenshot_full"
-    display_name = "全屏截图"
-    description = "截取整个屏幕"
-    version = "1.0"
+@dataclass
+class ScreenshotResult:
+    """Result from screenshot capture."""
+    success: bool
+    path: Optional[str] = None
+    image_data: Optional[str] = None
+    size: Optional[tuple[int, int]] = None
+    error: Optional[str] = None
+
+
+class ScreenshotAction:
+    """Screenshot capture and analysis action.
+
+    Provides multiple screenshot modes including full screen,
+    region capture, window capture, and basic image analysis.
+
+    Example:
+        >>> action = ScreenshotAction()
+        >>> result = action.execute(mode="region", region=(0, 0, 800, 600))
+    """
+
+    def __init__(self) -> None:
+        """Initialize screenshot action."""
+        self._last_screenshot: Optional[Any] = None
 
     def execute(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute full screenshot.
+        mode: str = "full",
+        region: Optional[tuple[int, int, int, int]] = None,
+        path: Optional[str] = None,
+        encoding: str = "png",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute screenshot capture.
 
         Args:
-            context: Execution context.
-            params: Dict with output_var.
+            mode: Capture mode ('full', 'region', 'window').
+            region: Region tuple (x, y, width, height).
+            path: Optional save path.
+            encoding: Image encoding ('png', 'jpg').
+            **kwargs: Additional parameters.
 
         Returns:
-            ActionResult with screenshot image path.
+            Screenshot result dictionary.
+
+        Raises:
+            ValueError: If mode is invalid.
         """
-        output_var = params.get('output_var', 'screenshot_path')
-
         try:
-            import mss
-            import os
-
-            with mss.mss() as sct:
-                monitor = sct.monitors[0]
-                sct.shot(mon=monitor, output='screenshot_full.png')
-
-            abs_path = os.path.abspath('screenshot_full.png')
-            context.set(output_var, abs_path)
-
-            return ActionResult(
-                success=True,
-                message=f"全屏截图完成: {abs_path}",
-                data={
-                    'path': abs_path,
-                    'output_var': output_var
-                }
-            )
+            from PIL import Image, ImageGrab
         except ImportError:
-            return ActionResult(
-                success=False,
-                message="全屏截图失败: 未安装mss库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"全屏截图失败: {str(e)}"
-            )
+            return {
+                "success": False,
+                "error": "Pillow not installed. Run: pip install pillow",
+            }
 
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'screenshot_path'}
-
-
-class ScreenshotRegionAction(BaseAction):
-    """Take screenshot of region."""
-    action_type = "screenshot_region"
-    display_name = "区域截图"
-    description = "截取屏幕指定区域"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute region screenshot.
-
-        Args:
-            context: Execution context.
-            params: Dict with left, top, right, bottom, output_var.
-
-        Returns:
-            ActionResult with screenshot image path.
-        """
-        left = params.get('left', 0)
-        top = params.get('top', 0)
-        right = params.get('right', 100)
-        bottom = params.get('bottom', 100)
-        output_var = params.get('output_var', 'screenshot_path')
+        mode = mode.lower()
+        result: dict[str, Any] = {"mode": mode, "success": True}
 
         try:
-            import mss
-            import os
-
-            resolved_bounds = (
-                int(context.resolve_value(left)),
-                int(context.resolve_value(top)),
-                int(context.resolve_value(right)),
-                int(context.resolve_value(bottom))
-            )
-
-            with mss.mss() as sct:
-                monitor = {
-                    "left": resolved_bounds[0],
-                    "top": resolved_bounds[1],
-                    "width": resolved_bounds[2] - resolved_bounds[0],
-                    "height": resolved_bounds[3] - resolved_bounds[1]
-                }
-                sct.shot(mon=monitor, output='screenshot_region.png')
-
-            abs_path = os.path.abspath('screenshot_region.png')
-            context.set(output_var, abs_path)
-
-            return ActionResult(
-                success=True,
-                message=f"区域截图完成: {abs_path}",
-                data={
-                    'path': abs_path,
-                    'bounds': resolved_bounds,
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="区域截图失败: 未安装mss库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"区域截图失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['left', 'top', 'right', 'bottom']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'screenshot_path'}
-
-
-class ScreenshotWindowAction(BaseAction):
-    """Take screenshot of window."""
-    action_type = "screenshot_window"
-    display_name = "窗口截图"
-    description = "截取指定窗口"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute window screenshot.
-
-        Args:
-            context: Execution context.
-            params: Dict with title, output_var.
-
-        Returns:
-            ActionResult with screenshot image path.
-        """
-        title = params.get('title', '')
-        output_var = params.get('output_var', 'screenshot_path')
-
-        try:
-            import mss
-            import os
-            import subprocess
-
-            resolved_title = context.resolve_value(title)
-
-            if resolved_title:
-                import re
-                script = f'''
-                tell application "System Events"
-                    set win to first window of (first process whose name contains "{resolved_title}")
-                    return window title of win
-                end tell
-                '''
+            if mode == "full":
+                img = ImageGrab.grab()
+            elif mode == "region":
+                if not region:
+                    raise ValueError("region required for 'region' mode")
+                img = ImageGrab.grab(bbox=region)
+                result["region"] = region
+            elif mode == "window":
+                title = kwargs.get("title")
+                img = self._capture_window(title)
             else:
-                script = '''
-                tell application "System Events"
-                    return name of first window of front process
-                end tell
-                '''
+                raise ValueError(f"Unknown mode: {mode}")
 
-            context.set(output_var, os.path.abspath('screenshot_window.png'))
+            self._last_screenshot = img
+            result["size"] = img.size
 
-            return ActionResult(
-                success=True,
-                message="窗口截图完成",
-                data={
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="窗口截图失败: 未安装mss库"
-            )
+            # Save if path provided
+            if path:
+                img.save(path, format=encoding.upper())
+                result["path"] = path
+
+            # Encode to base64
+            buffer = io.BytesIO()
+            img.save(buffer, format=encoding.upper())
+            img_bytes = buffer.getvalue()
+            result["image_data"] = base64.b64encode(img_bytes).decode()
+            result["size_bytes"] = len(img_bytes)
+
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"窗口截图失败: {str(e)}"
-            )
+            result["success"] = False
+            result["error"] = str(e)
 
-    def get_required_params(self) -> List[str]:
-        return []
+        return result
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'title': '', 'output_var': 'screenshot_path'}
-
-
-class ScreenshotSaveAction(BaseAction):
-    """Save screenshot to file."""
-    action_type = "screenshot_save"
-    display_name = "保存截图"
-    description = "保存截图到指定文件"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute screenshot save.
+    def _capture_window(self, title: Optional[str] = None) -> Any:
+        """Capture specific window by title.
 
         Args:
-            context: Execution context.
-            params: Dict with path, format, output_var.
+            title: Window title (partial match).
 
         Returns:
-            ActionResult with save status.
+            PIL Image of window.
         """
-        path = params.get('path', 'screenshot.png')
-        format_str = params.get('format', 'png')
-        output_var = params.get('output_var', 'save_status')
-
         try:
-            import mss
-            import os
-
-            resolved_path = context.resolve_value(path)
-            resolved_format = context.resolve_value(format_str) if format_str else 'png'
-
-            with mss.mss() as sct:
-                monitor = sct.monitors[0]
-                sct.shot(mon=monitor, output=resolved_path)
-
-            abs_path = os.path.abspath(resolved_path)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"保存截图完成: {abs_path}",
-                data={
-                    'path': abs_path,
-                    'format': resolved_format,
-                    'output_var': output_var
-                }
-            )
+            import pyscreeze
         except ImportError:
-            return ActionResult(
-                success=False,
-                message="保存截图失败: 未安装mss库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"保存截图失败: {str(e)}"
-            )
+            import pyscreeze as _ps
+            pyscreeze = _ps
 
-    def get_required_params(self) -> List[str]:
-        return []
+        if title:
+            # Try to locate window by title
+            windows = self._find_windows(title)
+            if windows:
+                bbox = windows[0]
+                from PIL import ImageGrab
+                return ImageGrab.grab(bbox=bbox)
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'path': 'screenshot.png', 'format': 'png', 'output_var': 'save_status'}
+        # Fallback to full screen
+        from PIL import ImageGrab
+        return ImageGrab.grab()
 
-
-class ScreenshotToClipboardAction(BaseAction):
-    """Copy screenshot to clipboard."""
-    action_type = "screenshot_to_clipboard"
-    display_name = "截图到剪贴板"
-    description = "截取屏幕并复制到剪贴板"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute screenshot to clipboard.
+    def _find_windows(self, title: str) -> list[tuple[int, int, int, int]]:
+        """Find windows matching title.
 
         Args:
-            context: Execution context.
-            params: Dict with output_var.
+            title: Window title to search for.
 
         Returns:
-            ActionResult with copy status.
+            List of window bounding boxes.
         """
-        output_var = params.get('output_var', 'clipboard_status')
+        try:
+            import pywintypes
+            import win32gui
+            import win32con
+        except ImportError:
+            return []
+
+        windows = []
+
+        def callback(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd):
+                window_title = win32gui.GetWindowText(hwnd)
+                if title.lower() in window_title.lower():
+                    rect = win32gui.GetWindowRect(hwnd)
+                    windows.append(rect)
+            return True
 
         try:
-            import mss
-            import pyperclip
-            from PIL import Image
-            import io
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            pass
 
-            with mss.mss() as sct:
-                monitor = sct.monitors[0]
-                img = sct.grab(monitor)
+        return windows
 
-            mss_img = Image.frombytes("RGB", img.size, img.bgra, "raw", "BGRX")
-            output = io.BytesIO()
-            mss_img.save(output, format='PNG')
-            output.seek(0)
+    def analyze_image(
+        self,
+        image_path: Optional[str] = None,
+        data: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Analyze screenshot for colors, brightness, etc.
 
-            import pyperclip
-            pyperclip.copy(output)
+        Args:
+            image_path: Path to image file.
+            data: Base64 encoded image data.
 
-            context.set(output_var, True)
+        Returns:
+            Analysis result dictionary.
+        """
+        from PIL import Image
+        import io
 
-            return ActionResult(
-                success=True,
-                message="截图到剪贴板完成",
-                data={
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="截图到剪贴板失败: 未安装mss或pyperclip库"
-            )
+        result: dict[str, Any] = {"success": True}
+
+        try:
+            if data:
+                img_data = base64.b64decode(data)
+                img = Image.open(io.BytesIO(img_data))
+            elif image_path:
+                img = Image.open(image_path)
+            else:
+                raise ValueError("image_path or data required")
+
+            # Convert to RGB if necessary
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            result["size"] = img.size
+            result["mode"] = img.mode
+
+            # Sample colors
+            pixels = list(img.getdata())
+            if pixels:
+                avg_color = tuple(
+                    sum(c[i] for c in pixels) // len(pixels)
+                    for i in range(3)
+                )
+                result["average_color"] = avg_color
+
+                # Find most common color
+                from collections import Counter
+                counter = Counter(pixels)
+                result["most_common_color"] = counter.most_common(1)[0][0]
+
+            # Calculate brightness
+            if pixels:
+                brightness = sum(
+                    0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+                    for c in pixels
+                ) / len(pixels)
+                result["average_brightness"] = brightness
+
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"截图到剪贴板失败: {str(e)}"
-            )
+            result["success"] = False
+            result["error"] = str(e)
 
-    def get_required_params(self) -> List[str]:
-        return []
+        return result
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'clipboard_status'}
+    def compare_screenshots(
+        self,
+        image1: str,
+        image2: str,
+        threshold: float = 0.95,
+    ) -> dict[str, Any]:
+        """Compare two screenshots for differences.
+
+        Args:
+            image1: First image path.
+            image2: Second image path.
+            threshold: Similarity threshold (0-1).
+
+        Returns:
+            Comparison result dictionary.
+        """
+        from PIL import Image
+        import math
+
+        result: dict[str, Any] = {"success": True}
+
+        try:
+            img1 = Image.open(image1).convert("RGB")
+            img2 = Image.open(image2).convert("RGB")
+
+            if img1.size != img2.size:
+                result["match"] = False
+                result["reason"] = "Different sizes"
+                return result
+
+            # Calculate pixel difference
+            pixels1 = list(img1.getdata())
+            pixels2 = list(img2.getdata())
+
+            diff_count = 0
+            for p1, p2 in zip(pixels1, pixels2):
+                if p1 != p2:
+                    diff_count += 1
+
+            similarity = 1 - (diff_count / len(pixels1))
+            result["similarity"] = similarity
+            result["match"] = similarity >= threshold
+            result["diff_pixels"] = diff_count
+            result["diff_percent"] = (diff_count / len(pixels1)) * 100
+
+        except Exception as e:
+            result["success"] = False
+            result["error"] = str(e)
+
+        return result

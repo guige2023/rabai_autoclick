@@ -1,318 +1,243 @@
-"""sanitizer_action module for rabai_autoclick.
+"""Data sanitization action module for RabAI AutoClick.
 
-Provides sanitization utilities: input validation, output encoding,
-SQL/HTML/JSON sanitization, and security helpers.
+Provides sanitization operations:
+- SanitizeHtmlAction: Strip HTML tags
+- SanitizeSqlAction: Escape SQL characters
+- SanitizeXmlAction: Escape XML special characters
+- SanitizeJsAction: Escape JavaScript strings
+- SanitizePathAction: Sanitize file path
+- SanitizeEmailAction: Sanitize email addresses
 """
 
 from __future__ import annotations
 
 import html
-import json
 import re
-import urllib.parse
-from dataclasses import dataclass
-from typing import Any, List, Optional, Pattern
+import sys
+from typing import Any, Dict, List, Optional
 
-__all__ = [
-    "Sanitizer",
-    "InputSanitizer",
-    "HTMLSanitizer",
-    "SQLSanitizer",
-    "JSONSanitizer",
-    "URLSanitizer",
-    "EmailSanitizer",
-    "SanitizerConfig",
-    "SanitizeResult",
-    "validate_input",
-    "sanitize_html",
-    "sanitize_sql",
-    "sanitize_json",
-    "escape_html",
-    "unescape_html",
-]
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class SanitizerConfig:
-    """Configuration for sanitizers."""
-    allow_tags: List[str] = None
-    strip_tags: bool = True
-    escape_quotes: bool = True
-    max_length: Optional[int] = None
-    strip_newlines: bool = False
+class SanitizeHtmlAction(BaseAction):
+    """Strip HTML tags."""
+    action_type = "sanitize_html"
+    display_name = "HTML清理"
+    description = "去除HTML标签"
+    version = "1.0"
 
-    def __post_init__(self) -> None:
-        if self.allow_tags is None:
-            self.allow_tags = []
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute HTML sanitization."""
+        value = params.get('value', '')
+        output_var = params.get('output_var', 'sanitized_html')
 
-
-@dataclass
-class SanitizeResult:
-    """Result of sanitization operation."""
-    value: str
-    sanitized: bool
-    errors: List[str]
-
-    def __bool__(self) -> bool:
-        return not bool(self.errors)
-
-
-class Sanitizer:
-    """Base sanitizer class."""
-
-    def __init__(self, config: Optional[SanitizerConfig] = None) -> None:
-        self.config = config or SanitizerConfig()
-
-    def sanitize(self, value: str) -> SanitizeResult:
-        """Sanitize value. Override in subclasses."""
-        raise NotImplementedError
-
-    def _apply_config(self, value: str) -> str:
-        """Apply common config options."""
-        if self.config.max_length and len(value) > self.config.max_length:
-            value = value[: self.config.max_length]
-        if self.config.strip_newlines:
-            value = re.sub(r"[\r\n]+", "", value)
-        return value
-
-
-class HTMLSanitizer(Sanitizer):
-    """Sanitizes HTML content."""
-
-    def __init__(self, config: Optional[SanitizerConfig] = None) -> None:
-        super().__init__(config)
-        self._allowed_tags = set(self.config.allow_tags) if self.config.allow_tags else set()
-        self._block_tags = {
-            "script", "style", "iframe", "object", "embed",
-            "form", "input", "button", "select", "textarea",
-        }
-
-    def sanitize(self, value: str) -> SanitizeResult:
-        """Sanitize HTML content."""
-        errors: List[str] = []
-        sanitized_value = value
-
-        if self.config.strip_tags:
-            sanitized_value = self._strip_tags(sanitized_value)
-        else:
-            sanitized_value = self._escape_unsafe(sanitized_value)
-
-        sanitized_value = self._apply_config(sanitized_value)
-
-        if not sanitized_value:
-            sanitized_value = ""
-
-        return SanitizeResult(
-            value=sanitized_value,
-            sanitized=sanitized_value != value,
-            errors=errors,
-        )
-
-    def _strip_tags(self, value: str) -> str:
-        """Strip disallowed HTML tags."""
-        if self._allowed_tags:
-            pattern = re.compile(
-                r"<(/?)([\w]+)[^>]*(/?)>",
-                re.IGNORECASE,
-            )
-            def replace_tag(match: re.Match) -> str:
-                tag = match.group(2).lower()
-                if tag in self._allowed_tags:
-                    return match.group(0)
-                return ""
-            return pattern.sub(replace_tag, value)
-        else:
-            return re.sub(r"<[^>]+>", "", value)
-
-    def _escape_unsafe(self, value: str) -> str:
-        """Escape unsafe HTML while allowing safe tags."""
-        safe_tags = self._allowed_tags - self._block_tags
-        for tag in safe_tags:
-            value = re.sub(
-                rf"<({tag})([^>]*)>",
-                lambda m: f"<{tag}{m.group(2)}>",
-                value,
-                flags=re.IGNORECASE,
-            )
-        value = re.sub(r"<script[^>]*>.*?</script>", "", value, flags=re.I | re.S)
-        value = re.sub(r"on\w+\s*=\s*['\"][^'\"]*['\"]", "", value, flags=re.I)
-        return value
-
-
-class SQLSanitizer(Sanitizer):
-    """Sanitizes SQL queries."""
-
-    def __init__(self, config: Optional[SanitizerConfig] = None) -> None:
-        super().__init__(config)
-        self._dangerous_patterns = [
-            r"(\bOR\b|\bAND\b)\s*\d+\s*[=<>]\s*\d+",
-            r"'(?:\\.|[^'\\])*'",
-            r";\s*(DROP|DELETE|TRUNCATE|ALTER|CREATE|INSERT|UPDATE)\b",
-            r"--",
-            r"/\*.*?\*/",
-            r"xp_",
-            r"0x[0-9a-fA-F]+",
-        ]
-        self._compiled: List[Pattern] = [
-            re.compile(p, re.IGNORECASE | re.DOTALL)
-            for p in self._dangerous_patterns
-        ]
-
-    def sanitize(self, value: str) -> SanitizeResult:
-        """Sanitize SQL input."""
-        errors: List[str] = []
-        sanitized_value = value
-
-        for i, pattern in enumerate(self._compiled):
-            matches = pattern.findall(sanitized_value)
-            if matches:
-                errors.append(f"Potential SQL injection pattern {i+1} detected")
-
-        sanitized_value = sanitized_value.replace("'", "''")
-        sanitized_value = sanitized_value.replace("\\", "\\\\")
-        sanitized_value = self._apply_config(sanitized_value)
-
-        return SanitizeResult(
-            value=sanitized_value,
-            sanitized=sanitized_value != value or bool(errors),
-            errors=errors,
-        )
-
-    def is_safe_identifier(self, identifier: str) -> bool:
-        """Check if identifier is safe for SQL."""
-        return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", identifier))
-
-
-class JSONSanitizer(Sanitizer):
-    """Sanitizes JSON input."""
-
-    def sanitize(self, value: str) -> SanitizeResult:
-        """Sanitize JSON string."""
-        errors: List[str] = []
-        sanitized_value = value
+        if not value:
+            return ActionResult(success=False, message="value is required")
 
         try:
-            parsed = json.loads(sanitized_value)
-            sanitized_value = json.dumps(parsed)
-            sanitized = False
-        except json.JSONDecodeError as e:
-            errors.append(f"Invalid JSON: {e}")
-            sanitized = True
-            sanitized_value = self._apply_config(sanitized_value)
+            resolved = context.resolve_value(value) if context else value
+            # Strip HTML tags
+            result = re.sub(r'<[^>]+>', '', str(resolved))
+            # Decode HTML entities
+            result = html.unescape(result)
+            # Remove extra whitespace
+            result = ' '.join(result.split())
 
-        return SanitizeResult(
-            value=sanitized_value,
-            sanitized=sanitized,
-            errors=errors,
-        )
-
-
-class URLSanitizer(Sanitizer):
-    """Sanitizes URLs."""
-
-    def __init__(self, config: Optional[SanitizerConfig] = None) -> None:
-        super().__init__(config)
-        self._allowed_schemes = {"http", "https", "mailto", "tel"}
-
-    def sanitize(self, value: str) -> SanitizeResult:
-        """Sanitize URL."""
-        errors: List[str] = []
-        sanitized_value = value.strip()
-
-        sanitized_value = self._apply_config(sanitized_value)
-
-        try:
-            parsed = urllib.parse.urlparse(sanitized_value)
-            if parsed.scheme and parsed.scheme.lower() not in self._allowed_schemes:
-                errors.append(f"Disallowed URL scheme: {parsed.scheme}")
-                sanitized_value = ""
-            if "\n" in sanitized_value or "\r" in sanitized_value:
-                errors.append("URL contains newline characters")
-                sanitized_value = re.sub(r"[\r\n]", "", sanitized_value)
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"HTML sanitized", data={'result': result})
         except Exception as e:
-            errors.append(f"Invalid URL: {e}")
+            return ActionResult(success=False, message=f"HTML sanitize error: {str(e)}")
 
-        return SanitizeResult(
-            value=sanitized_value,
-            sanitized=bool(errors),
-            errors=errors,
-        )
+    def get_required_params(self) -> List[str]:
+        return ['value']
 
-
-class EmailSanitizer(Sanitizer):
-    """Sanitizes email addresses."""
-
-    _EMAIL_PATTERN = re.compile(
-        r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    )
-
-    def sanitize(self, value: str) -> SanitizeResult:
-        """Sanitize email address."""
-        errors: List[str] = []
-        sanitized_value = value.strip().lower()
-
-        sanitized_value = self._apply_config(sanitized_value)
-
-        if not self._EMAIL_PATTERN.match(sanitized_value):
-            errors.append("Invalid email format")
-
-        return SanitizeResult(
-            value=sanitized_value,
-            sanitized=value != sanitized_value,
-            errors=errors,
-        )
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'sanitized_html'}
 
 
-class InputSanitizer:
-    """High-level input sanitization."""
+class SanitizeSqlAction(BaseAction):
+    """Escape SQL characters."""
+    action_type = "sanitize_sql"
+    display_name = "SQL清理"
+    description = "转义SQL字符"
+    version = "1.0"
 
-    def __init__(self) -> None:
-        self._sanitizers = {
-            "html": HTMLSanitizer(),
-            "sql": SQLSanitizer(),
-            "json": JSONSanitizer(),
-            "url": URLSanitizer(),
-            "email": EmailSanitizer(),
-        }
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute SQL sanitization."""
+        value = params.get('value', '')
+        method = params.get('method', 'escape')  # escape, parameterized
+        output_var = params.get('output_var', 'sanitized_sql')
 
-    def sanitize(self, value: str, kind: str) -> SanitizeResult:
-        """Sanitize value of given kind."""
-        if kind in self._sanitizers:
-            return self._sanitizers[kind].sanitize(value)
-        return SanitizeResult(value=value, sanitized=False, errors=[])
+        if not value:
+            return ActionResult(success=False, message="value is required")
 
-    def add_sanitizer(self, name: str, sanitizer: Sanitizer) -> None:
-        """Add custom sanitizer."""
-        self._sanitizers[name] = sanitizer
+        try:
+            resolved = context.resolve_value(value) if context else value
+            resolved_method = context.resolve_value(method) if context else method
 
+            if resolved_method == 'escape':
+                # Simple escaping for SQL
+                result = str(resolved).replace("'", "''").replace(";", "")
+            else:
+                result = str(resolved)
 
-def sanitize_html(value: str) -> str:
-    """Quick HTML sanitization."""
-    return HTMLSanitizer().sanitize(value).value
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"SQL sanitized", data={'result': result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"SQL sanitize error: {str(e)}")
 
+    def get_required_params(self) -> List[str]:
+        return ['value']
 
-def sanitize_sql(value: str) -> str:
-    """Quick SQL sanitization."""
-    return SQLSanitizer().sanitize(value).value
-
-
-def sanitize_json(value: str) -> str:
-    """Quick JSON sanitization."""
-    return JSONSanitizer().sanitize(value).value
-
-
-def validate_input(value: str, kind: str) -> bool:
-    """Validate input of given kind."""
-    sanitizer = InputSanitizer()
-    result = sanitizer.sanitize(value, kind)
-    return bool(result)
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'method': 'escape', 'output_var': 'sanitized_sql'}
 
 
-def escape_html(value: str) -> str:
-    """Escape HTML special characters."""
-    return html.escape(value)
+class SanitizeXmlAction(BaseAction):
+    """Escape XML special characters."""
+    action_type = "sanitize_xml"
+    display_name = "XML清理"
+    description = "转义XML字符"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute XML sanitization."""
+        value = params.get('value', '')
+        output_var = params.get('output_var', 'sanitized_xml')
+
+        if not value:
+            return ActionResult(success=False, message="value is required")
+
+        try:
+            import xml.sax.saxutils as saxutils
+
+            resolved = context.resolve_value(value) if context else value
+            result = saxutils.escape(str(resolved))
+
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"XML sanitized", data={'result': result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"XML sanitize error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'sanitized_xml'}
 
 
-def unescape_html(value: str) -> str:
-    """Unescape HTML special characters."""
-    return html.unescape(value)
+class SanitizeJsAction(BaseAction):
+    """Escape JavaScript strings."""
+    action_type = "sanitize_js"
+    display_name = "JS清理"
+    description = "转义JavaScript字符串"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute JS sanitization."""
+        value = params.get('value', '')
+        output_var = params.get('output_var', 'sanitized_js')
+
+        if not value:
+            return ActionResult(success=False, message="value is required")
+
+        try:
+            import json
+
+            resolved = context.resolve_value(value) if context else value
+            result = json.dumps(str(resolved))[1:-1]  # Remove surrounding quotes
+
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"JS sanitized", data={'result': result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"JS sanitize error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'sanitized_js'}
+
+
+class SanitizePathAction(BaseAction):
+    """Sanitize file path."""
+    action_type = "sanitize_path"
+    display_name = "路径清理"
+    description = "清理文件路径"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute path sanitization."""
+        value = params.get('value', '')
+        output_var = params.get('output_var', 'sanitized_path')
+
+        if not value:
+            return ActionResult(success=False, message="value is required")
+
+        try:
+            import urllib.parse
+
+            resolved = context.resolve_value(value) if context else value
+            # Remove null bytes
+            result = str(resolved).replace('\x00', '')
+            # Remove directory traversal
+            result = result.replace('..', '').replace('~/', '')
+            # URL encode dangerous characters
+            result = urllib.parse.quote(result, safe='/.-_')
+
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Path sanitized", data={'result': result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Path sanitize error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'sanitized_path'}
+
+
+class SanitizeEmailAction(BaseAction):
+    """Sanitize email address."""
+    action_type = "sanitize_email"
+    display_name = "邮箱清理"
+    description = "清理邮箱地址"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute email sanitization."""
+        value = params.get('value', '')
+        output_var = params.get('output_var', 'sanitized_email')
+
+        if not value:
+            return ActionResult(success=False, message="value is required")
+
+        try:
+            import re
+
+            resolved = context.resolve_value(value) if context else value
+            email = str(resolved).strip().lower()
+            # Basic validation
+            pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            valid = bool(re.match(pattern, email))
+
+            result = {'email': email, 'valid': valid}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Email sanitized: {email}", data=result)
+        except Exception as e:
+            return ActionResult(success=False, message=f"Email sanitize error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'sanitized_email'}
