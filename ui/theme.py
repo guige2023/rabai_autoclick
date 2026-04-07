@@ -412,7 +412,7 @@ class ThemeManager(QObject):
         stylesheets = {
             "main_window": f"""
                 QMainWindow {{ background-color: {c['bg_main']}; }}
-                QTabWidget::pane {{ border: 1px solid {c['border']}; background-color: {c['bg_widget']}; }}
+                QTabWidget::pane {{ border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
                 QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; border-top-left-radius: 4px; border-top-right-radius: 4px; }}
                 QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
                 QTabBar::tab:hover {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
@@ -639,7 +639,7 @@ class ThemeManager(QObject):
         stylesheets = {
             "main_window": f"""
                 QMainWindow {{ background-color: {c['bg_main']}; }}
-                QTabWidget::pane {{ border: 1px solid {c['border']}; background-color: {c['bg_widget']}; }}
+                QTabWidget::pane {{ border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
                 QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; border-top-left-radius: 4px; border-top-right-radius: 4px; }}
                 QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
                 QTabBar::tab:hover {{ background-color: {c['bg_hover']}; cursor: pointinghand; }}
