@@ -1,0 +1,117 @@
+{
+  "name": "Ecommerce Pricing Optimization Workflow",
+  "description": "Automate pricing analysis and updates",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "products_to_analyze": 46,
+    "current_product": 0,
+    "analyzed_products": 0,
+    "price_changes": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "pricing_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize pricing counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open pricing optimization system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "pricing_optimization_loop",
+      "count": "{{products_to_analyze}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start pricing optimization loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select product for pricing"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for pricing analysis"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/pricing_optimization_{{pricing_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture pricing screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "pricing_counter",
+      "value": "{{pricing_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment pricing counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{pricing_counter < products_to_analyze}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more products"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next product"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/ecommerce_pricing_optimization_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
