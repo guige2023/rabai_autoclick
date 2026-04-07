@@ -1,0 +1,117 @@
+{
+  "name": "Security Quota Management Workflow",
+  "description": "Automate security resource quota monitoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "quotas_to_monitor": 62,
+    "current_quota": 0,
+    "within_limits": 0,
+    "exceeded_quotas": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "quota_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize quota counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open quota management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "quota_monitoring_loop",
+      "count": "{{quotas_to_monitor}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start quota monitoring loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select quota item"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for quota check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/quota_monitor_{{quota_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture quota screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "quota_counter",
+      "value": "{{quota_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment quota counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{quota_counter < quotas_to_monitor}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more quotas"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next quota"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_quota_management_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
