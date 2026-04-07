@@ -59,10 +59,65 @@ class StatsDialog(QDialog):
     def _on_theme_changed(self, theme):
         """Handle theme changes to update colors."""
         self._colors = theme_manager.colors
-    
+        self._apply_stylesheet()
+
+    def _apply_stylesheet(self) -> None:
+        """Apply themed stylesheet to the dialog."""
+        colors = self._colors
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {colors['bg_widget']};
+            }}
+            QLabel {{
+                color: {colors['text_primary']};
+            }}
+            QGroupBox {{
+                font-weight: bold;
+                border: 1px solid {colors['border']};
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: {colors['text_primary']};
+            }}
+            QTabWidget::pane {{
+                border: 1px solid {colors['border']};
+                background-color: {colors['bg_widget']};
+            }}
+            QTabBar::tab {{
+                padding: 6px 12px;
+                background-color: {colors['bg_toolbar']};
+                color: {colors['text_primary']};
+            }}
+            QTabBar::tab:selected {{
+                background-color: {colors['bg_widget']};
+            }}
+            QTableWidget {{
+                background-color: {colors['bg_widget']};
+                color: {colors['text_primary']};
+                border: 1px solid {colors['border']};
+            }}
+            QHeaderView::section {{
+                background-color: {colors['bg_toolbar']};
+                color: {colors['text_primary']};
+                padding: 4px;
+                border: 1px solid {colors['border']};
+            }}
+            QTextEdit {{
+                background-color: {colors['bg_widget']};
+                color: {colors['text_primary']};
+                border: 1px solid {colors['border']};
+            }}
+        """)
+
     def _init_ui(self) -> None:
         """Initialize the dialog UI components."""
         layout = QVBoxLayout(self)
+        self._apply_stylesheet()
         
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
@@ -76,15 +131,17 @@ class StatsDialog(QDialog):
         btn_layout.addStretch()
         
         refresh_btn = QPushButton("🔄 刷新数据")
+        refresh_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         refresh_btn.clicked.connect(self._load_data)
         btn_layout.addWidget(refresh_btn)
 
         clear_btn = QPushButton("🗑 清除历史")
+        clear_btn.setStyleSheet(theme_manager.get_button_stylesheet('danger'))
         clear_btn.clicked.connect(self._clear_history)
-        clear_btn.setStyleSheet(f"background-color: {self._colors['error']}; color: white;")
         btn_layout.addWidget(clear_btn)
 
         close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(close_btn)
 
