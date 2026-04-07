@@ -2109,10 +2109,10 @@ class MainWindow(QMainWindow):
         
         self._update_all_panels()
     
-    def _on_predictive_action(self, action_type: str, params: dict):
+    def _on_predictive_action(self, action_type: str, params: dict) -> None:
         app_logger.info(f"预测动作触发: {action_type} - {params}", "Predictive")
     
-    def _on_workflow_imported(self, workflow: dict):
+    def _on_workflow_imported(self, workflow: dict) -> None:
         self.current_workflow = workflow
         self.step_configs = {}
         self.next_step_id = 1
