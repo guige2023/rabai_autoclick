@@ -226,16 +226,33 @@ class PredictTab(BaseTab):
         self.analyze_result.pack(fill=tk.BOTH, expand=True, pady=10)
 
     def _record_action(self) -> None:
-        """Record a user action to the predictive engine."""
-        def do_record():
+        """
+        Record a user action to the predictive engine.
+        
+        Validates JSON context input and numeric duration before recording.
+        """
+        def do_record() -> str:
             engine = create_predictive_engine(str(DATA_DIR))
-            ctx = json.loads(self.context_var.get()) if self.context_var.get() != "{}" else {}
+            ctx = {}
+            context_str = self.context_var.get()
+            if context_str and context_str != "{}":
+                try:
+                    ctx = json.loads(context_str)
+                except json.JSONDecodeError as e:
+                    return f"❌ JSON格式错误: {str(e)}"
+            
+            duration_str = self.duration_var.get()
+            try:
+                duration = float(duration_str) if duration_str else 0.0
+            except ValueError:
+                return f"❌ 耗时必须是数字: {duration_str}"
+            
             engine.record_action(
                 self.action_type_var.get(),
                 self.target_var.get(),
                 ctx,
                 self.result_var.get(),
-                float(self.duration_var.get())
+                duration
             )
             return f"✓ 已记录动作: {self.action_type_var.get()} -> {self.target_var.get()}"
 
@@ -370,6 +387,8 @@ class HealTab(BaseTab):
     def _analyze_error(self) -> None:
         """
         Analyze error and get fix suggestions.
+        
+        Validates step index is a valid integer before analysis.
         """
         def do_analyze():
             system = create_self_healing_system(str(DATA_DIR))
@@ -377,12 +396,18 @@ class HealTab(BaseTab):
             class MockError(Exception):
                 pass
             
+            step_index_str = self.step_index_var.get()
+            try:
+                step_index = int(step_index_str) if step_index_str else 0
+            except ValueError:
+                return None, ["❌ 步骤索引必须是整数"]
+            
             err = MockError(self.error_var.get())
             record = system.analyze_error(
                 err, 
                 self.workflow_name_var.get(), 
                 self.step_name_var.get(), 
-                int(self.step_index_var.get()), 
+                step_index, 
                 {}
             )
             suggestions = system.get_fix_suggestions(record)
