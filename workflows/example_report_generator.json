@@ -1,0 +1,205 @@
+{
+  "name": "Report Generation Workflow",
+  "description": "Automate report generation and distribution",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "report_type": "sales",
+    "date_range": "last_7_days",
+    "recipients": ["manager@example.com", "team@example.com"],
+    "current_recipient": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open reporting system"
+    },
+    {
+      "id": 2,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 3,
+      "type": "click_image",
+      "template": "./templates/new_report.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click new report"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for dialog"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 300,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click report type dropdown"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "{{report_type}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Select report type"
+    },
+    {
+      "id": 7,
+      "type": "key_press",
+      "key": "enter",
+      "pre_delay": 0.2,
+      "comment": "Confirm selection"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 300,
+      "y": 250,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click date range field"
+    },
+    {
+      "id": 9,
+      "type": "type_text",
+      "text": "{{date_range}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Set date range"
+    },
+    {
+      "id": 10,
+      "type": "click_image",
+      "template": "./templates/generate_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click generate button"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for report generation"
+    },
+    {
+      "id": 12,
+      "type": "screenshot",
+      "save_path": "./screenshots/report_preview.png",
+      "pre_delay": 0.5,
+      "comment": "Capture report preview"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "recipient_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 0.2,
+      "comment": "Initialize recipient index"
+    },
+    {
+      "id": 14,
+      "type": "loop",
+      "loop_id": "recipients_loop",
+      "count": 2,
+      "loop_start": 15,
+      "pre_delay": 0.3,
+      "comment": "Loop through recipients"
+    },
+    {
+      "id": 15,
+      "type": "click_image",
+      "template": "./templates/share_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click share button"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for share dialog"
+    },
+    {
+      "id": 17,
+      "type": "click",
+      "x": 400,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click email field"
+    },
+    {
+      "id": 18,
+      "type": "type_text",
+      "text": "{{recipients[recipient_index]}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter recipient email"
+    },
+    {
+      "id": 19,
+      "type": "set_variable",
+      "name": "recipient_index",
+      "value": "{{recipient_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment recipient index"
+    },
+    {
+      "id": 20,
+      "type": "click_image",
+      "template": "./templates/send_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click send button"
+    },
+    {
+      "id": 21,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for send"
+    },
+    {
+      "id": 22,
+      "type": "screenshot",
+      "save_path": "./screenshots/report_sent.png",
+      "pre_delay": 0.5,
+      "comment": "Capture confirmation"
+    },
+    {
+      "id": 23,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
