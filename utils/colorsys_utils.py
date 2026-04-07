@@ -63,3 +63,116 @@ class Color:
 
     def to_dict(self) -> Dict[str, any]:
         return {\"rgb\": self.rgb, \"hex\": self.hex, \"hsv\": self.hsv, \"hsl\": self.hsl}
+
+def parse_color(color: ColorInput) -> Color:
+    """Parse various color formats into a Color object."""
+    if isinstance(color, Color):
+        return color
+    if isinstance(color, tuple):
+        return Color(color[0], color[1], color[2])
+    if isinstance(color, str):
+        color_str = color.strip().lstrip("#")
+        if len(color_str) in (6, 3):
+            if len(color_str) == 3:
+                color_str = "".join(c * 2 for c in color_str)
+            r = int(color_str[0:2], 16)
+            g = int(color_str[2:4], 16)
+            b = int(color_str[4:6], 16)
+            return Color(r, g, b)
+    raise ValueError(f"Cannot parse color: {color!r}")
+
+
+def lighten(color: ColorInput, amount: float = 0.2) -> Color:
+    """Lighten a color by blending with white."""
+    c = parse_color(color)
+    return c.blend_with(Color(255, 255, 255), amount)
+
+
+def darken(color: ColorInput, amount: float = 0.2) -> Color:
+    """Darken a color by blending with black."""
+    c = parse_color(color)
+    return c.blend_with(Color(0, 0, 0), amount)
+
+
+def saturate(color: ColorInput, amount: float = 0.2) -> Color:
+    """Increase saturation of a color."""
+    c = parse_color(color)
+    h, s, v = c.hsv
+    s = min(1.0, s * (1 + amount))
+    r, g, b = _hsv_to_rgb(h, s, v)
+    return Color(r, g, b, c.a)
+
+
+def desaturate(color: ColorInput, amount: float = 0.2) -> Color:
+    """Decrease saturation of a color."""
+    c = parse_color(color)
+    h, s, v = c.hsv
+    s = max(0.0, s * (1 - amount))
+    r, g, b = _hsv_to_rgb(h, s, v)
+    return Color(r, g, b, c.a)
+
+
+def rotate_hue(color: ColorInput, degrees: float) -> Color:
+    """Rotate the hue of a color."""
+    c = parse_color(color)
+    h, s, v = c.hsv
+    h = (h + degrees / 360) % 1.0
+    r, g, b = _hsv_to_rgb(h, s, v)
+    return Color(r, g, b, c.a)
+
+
+def complementary(color: ColorInput) -> Color:
+    """Get the complementary color (180 degree hue rotation)."""
+    return rotate_hue(color, 180)
+
+
+def rgb_to_hsv(r: int, g: int, b: int) -> HSV:
+    """Convert RGB to HSV."""
+    h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    return (round(h, 6), round(s, 6), round(v, 6))
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> RGB:
+    """Convert HSV to RGB."""
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (round(r * 255), round(g * 255), round(b * 255))
+
+
+def hsv_to_rgb(h: float, s: float, v: float) -> RGB:
+    """Convert HSV to RGB."""
+    return _hsv_to_rgb(h, s, v)
+
+
+def generate_palette(
+    base_color: ColorInput,
+    count: int = 5,
+    palette_type: str = "analogous"
+) -> List[Color]:
+    """Generate a color palette from a base color."""
+    c = parse_color(base_color)
+    h, s, v = c.hsv
+    palette: List[Color] = []
+
+    if palette_type == "analogous":
+        for i in range(count):
+            offset = (i - count // 2) * 30
+            new_h = (h + offset / 360) % 1.0
+            r, g, b = _hsv_to_rgb(new_h, s, v)
+            palette.append(Color(r, g, b, c.a))
+
+    elif palette_type == "complementary":
+        comp_h = (h + 0.5) % 1.0
+        r, g, b = _hsv_to_rgb(comp_h, s, v)
+        palette.append(Color(r, g, b, c.a))
+        for i in range(1, count // 2 + 1):
+            factor = i / (count // 2 + 1)
+            palette.append(lighten(c, factor * 0.3))
+            palette.append(darken(c, factor * 0.3))
+
+    elif palette_type == "monochromatic":
+        for i in range(count):
+            new_v = min(1.0, max(0.0, v - 0.3 + i * 0.15))
+            r, g, b = _hsv_to_rgb(h, s, new_v)
+            palette.append(Color(r, g, b, c.a))
+
+    return palette[:count]
