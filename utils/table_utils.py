@@ -177,3 +177,28 @@ def print_grid(grid: List[List[Any]], sep: str = " ") -> None:
     """Print a 2D grid."""
     for row in grid:
         print(sep.join(str(cell) for cell in row))
+
+
+
+def grid_bfs(
+    grid: List[List[Any]],
+    start: Tuple[int, int],
+    passable: Callable[[Any], bool] = None
+) -> Iterator[Tuple[int, int, Any]]:
+    """BFS traversal of a grid with obstacle detection."""
+    if passable is None:
+        passable = lambda x: x != "#"
+    rows, cols = len(grid), len(grid[0])
+    visited = set()
+    queue = [start]
+    visited.add(start)
+    while queue:
+        r, c = queue.pop(0)
+        yield (r, c, grid[r][c])
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
+                if passable(grid[nr][nc]):
+                    visited.add((nr, nc))
+                    queue.append((nr, nc))
+
