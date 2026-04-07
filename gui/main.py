@@ -1187,12 +1187,24 @@ class ShareTab(BaseTab):
             return
 
         def do_register():
+            """
+            Register a workflow from a JSON file.
+            
+            Returns:
+                The workflow ID string.
+            """
             share_sys = create_share_system(str(DATA_DIR))
             with open(workflow_file, "r", encoding="utf-8") as f:
                 workflow_data = json.load(f)
             return share_sys.register_workflow(workflow_data)
 
-        def show_result(wf_id):
+        def show_result(wf_id: str) -> None:
+            """
+            Handle the result of workflow registration.
+            
+            Args:
+                wf_id: The registered workflow ID.
+            """
             self.log(f"✅ 已注册工作流: {wf_id}")
 
         self.run_async(do_register, show_result)
