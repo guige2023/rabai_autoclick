@@ -1,714 +1,399 @@
-"""Markdown action module for RabAI AutoClick.
-
-Provides markdown processing operations:
-- MarkdownParseAction: Parse markdown to AST
-- MarkdownToHtmlAction: Convert markdown to HTML
-- MarkdownToPdfAction: Convert markdown to PDF
-- MarkdownExtractLinksAction: Extract all links from markdown
-- MarkdownExtractImagesAction: Extract all images from markdown
-- MarkdownExtractHeadingsAction: Extract all headings
-- MarkdownExtractCodeBlocksAction: Extract code blocks
-- MarkdownRenderAction: Render markdown for display
-- MarkdownTocAction: Generate table of contents
-- MarkdownWordCountAction: Count words and characters
 """
+Markdown processing and formatting actions.
+"""
+from __future__ import annotations
 
 import re
-import os
-import subprocess
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class MarkdownParseAction(BaseAction):
-    """Parse markdown to structured data."""
-    action_type = "markdown_parse"
-    display_name = "解析Markdown"
-    description = "解析Markdown内容为结构化数据"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute parse.
-
-        Args:
-            context: Execution context.
-            params: Dict with content or file_path, output_var.
-
-        Returns:
-            ActionResult with parsed markdown.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'markdown_parsed')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            # Simple parsing - extract basic structure
-            lines = resolved_content.split('\n')
-            parsed = {
-                'headings': [],
-                'links': [],
-                'images': [],
-                'code_blocks': [],
-                'lists': [],
-                'tables': [],
-                'paragraphs': []
-            }
-
-            in_code_block = False
-            code_block_content = []
-            code_block_lang = ''
-
-            for line in lines:
-                if line.startswith('```'):
-                    if not in_code_block:
-                        in_code_block = True
-                        code_block_lang = line[3:].strip()
-                        code_block_content = []
-                    else:
-                        in_code_block = False
-                        parsed['code_blocks'].append({
-                            'language': code_block_lang,
-                            'content': '\n'.join(code_block_content)
-                        })
-                    continue
-
-                if in_code_block:
-                    code_block_content.append(line)
-                    continue
-
-                # Headings
-                m = re.match(r'^(#{1,6})\s+(.+)$', line)
-                if m:
-                    parsed['headings'].append({
-                        'level': len(m.group(1)),
-                        'text': m.group(2).strip()
-                    })
-                    continue
-
-                # Links
-                for match in re.finditer(r'\[([^\]]+)\]\(([^\)]+)\)', line):
-                    parsed['links'].append({
-                        'text': match.group(1),
-                        'url': match.group(2)
-                    })
-
-                # Images
-                for match in re.finditer(r'!\[([^\]]*)\]\(([^\)]+)\)', line):
-                    parsed['images'].append({
-                        'alt': match.group(1),
-                        'url': match.group(2)
-                    })
-
-                # List items
-                if re.match(r'^[\-\*\+]\s+', line) or re.match(r'^\d+\.\s+', line):
-                    parsed['lists'].append(line.strip())
-
-            context.set(output_var, parsed)
-
-            return ActionResult(
-                success=True,
-                message=f"已解析Markdown: {len(parsed['headings'])} 标题, {len(parsed['links'])} 链接",
-                data={
-                    'headings': len(parsed['headings']),
-                    'links': len(parsed['links']),
-                    'images': len(parsed['images']),
-                    'code_blocks': len(parsed['code_blocks']),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"解析Markdown失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'markdown_parsed'}
-
-
-class MarkdownToHtmlAction(BaseAction):
-    """Convert markdown to HTML."""
-    action_type = "markdown_to_html"
-    display_name = "Markdown转HTML"
-    description = "将Markdown转换为HTML"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute convert.
-
-        Args:
-            context: Execution context.
-            params: Dict with content or file_path, output_var.
-
-        Returns:
-            ActionResult with HTML.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'html_content')
-        output_file = params.get('output_file', '')
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            # Try to use mistune or commonmark
-            html_output = ''
-            try:
-                import mistune
-                md = mistune.create_markdown()
-                html_output = md(resolved_content)
-            except ImportError:
-                try:
-                    import commonmark
-                    parser = commonmark.Parser()
-                    ast = parser.parse(resolved_content)
-                    renderer = commonmark.HtmlRenderer()
-                    html_output = renderer.render(ast)
-                except ImportError:
-                    # Fallback: simple regex-based conversion
-                    html_output = self._simple_convert(resolved_content)
-
-            context.set(output_var, html_output)
-
-            if output_file:
-                resolved_out = context.resolve_value(output_file)
-                with open(resolved_out, 'w', encoding='utf-8') as f:
-                    f.write(html_output)
-
-            return ActionResult(
-                success=True,
-                message=f"已转换为HTML ({len(html_output)} 字符)",
-                data={'length': len(html_output), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Markdown转HTML失败: {str(e)}"
-            )
-
-    def _simple_convert(self, md: str) -> str:
-        html = md
-        # Headings
-        for i in range(6, 0, -1):
-            pattern = r'^' + '#' * i + r'\s+(.+)$'
-            html = re.sub(pattern, f'<h{i}>\\1</h{i}>', html, flags=re.MULTILINE)
-        # Bold
-        html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html)
-        html = re.sub(r'__(.+?)__', r'<strong>\1</strong>', html)
-        # Italic
-        html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', html)
-        html = re.sub(r'_(.+?)_', r'<em>\1</em>', html)
-        # Links
-        html = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', html)
-        # Images
-        html = re.sub(r'!\[([^\]]*)\]\(([^\)]+)\)', r'<img src="\2" alt="\1"/>', html)
-        # Code blocks
-        html = re.sub(r'```(\w*)\n(.+?)```', r'<pre><code class="\1">\2</code></pre>', html, flags=re.DOTALL)
-        # Inline code
-        html = re.sub(r'`([^`]+)`', r'<code>\1</code>', html)
-        # Line breaks
-        html = html.replace('\n\n', '</p><p>')
-        html = '<p>' + html + '</p>'
-        return html
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'html_content', 'output_file': ''}
-
-
-class MarkdownExtractLinksAction(BaseAction):
-    """Extract all links from markdown."""
-    action_type = "markdown_extract_links"
-    display_name = "提取链接"
-    description = "从Markdown中提取所有链接"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute extract.
-
-        Args:
-            context: Execution context.
-            params: Dict with content or file_path, output_var.
-
-        Returns:
-            ActionResult with links.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'markdown_links')
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            links = []
-            for match in re.finditer(r'\[([^\]]+)\]\(([^\)]+)\)', resolved_content):
-                links.append({
-                    'text': match.group(1),
-                    'url': match.group(2)
-                })
-
-            context.set(output_var, links)
-
-            return ActionResult(
-                success=True,
-                message=f"提取到 {len(links)} 个链接",
-                data={'count': len(links), 'links': links, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"提取链接失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'markdown_links'}
-
-
-class MarkdownExtractImagesAction(BaseAction):
-    """Extract all images from markdown."""
-    action_type = "markdown_extract_images"
-    display_name = "提取图片"
-    description = "从Markdown中提取所有图片"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute extract.
-
-        Args:
-            context: Execution context.
-            params: Dict with content or file_path, output_var.
-
-        Returns:
-            ActionResult with images.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'markdown_images')
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            images = []
-            for match in re.finditer(r'!\[([^\]]*)\]\(([^\)]+)\)', resolved_content):
-                images.append({
-                    'alt': match.group(1),
-                    'url': match.group(2)
-                })
-
-            context.set(output_var, images)
-
-            return ActionResult(
-                success=True,
-                message=f"提取到 {len(images)} 张图片",
-                data={'count': len(images), 'images': images, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"提取图片失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'markdown_images'}
-
-
-class MarkdownExtractHeadingsAction(BaseAction):
-    """Extract all headings from markdown."""
-    action_type = "markdown_extract_headings"
-    display_name = "提取标题"
-    description = "从Markdown中提取所有标题"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute extract.
-
-        Args:
-            context: Execution context.
-            params: Dict with content or file_path, output_var.
-
-        Returns:
-            ActionResult with headings.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'markdown_headings')
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            headings = []
-            for match in re.finditer(r'^(#{1,6})\s+(.+)$', resolved_content, re.MULTILINE):
-                headings.append({
-                    'level': len(match.group(1)),
-                    'text': match.group(2).strip()
-                })
-
-            context.set(output_var, headings)
-
-            return ActionResult(
-                success=True,
-                message=f"提取到 {len(headings)} 个标题",
-                data={'count': len(headings), 'headings': headings, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"提取标题失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'markdown_headings'}
-
-
-class MarkdownExtractCodeBlocksAction(BaseAction):
-    """Extract all code blocks from markdown."""
-    action_type = "markdown_extract_code_blocks"
-    display_name = "提取代码块"
-    description = "从Markdown中提取所有代码块"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute extract.
-
-        Args:
-            context: Execution context.
-            params: Dict with content or file_path, output_var.
-
-        Returns:
-            ActionResult with code blocks.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'markdown_code_blocks')
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            code_blocks = []
-            for match in re.finditer(r'```(\w*)\n(.*?)```', resolved_content, re.DOTALL):
-                code_blocks.append({
-                    'language': match.group(1),
-                    'content': match.group(2).strip()
-                })
-
-            context.set(output_var, code_blocks)
-
-            return ActionResult(
-                success=True,
-                message=f"提取到 {len(code_blocks)} 个代码块",
-                data={'count': len(code_blocks), 'code_blocks': code_blocks, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"提取代码块失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'markdown_code_blocks'}
-
-
-class MarkdownTocAction(BaseAction):
-    """Generate table of contents."""
-    action_type = "markdown_toc"
-    display_name = "生成目录"
-    description = "从Markdown生成目录"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute TOC.
-
-        Args:
-            context: Execution context.
-            params: Dict with content or file_path, output_var, max_level.
-
-        Returns:
-            ActionResult with TOC.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'markdown_toc')
-        max_level = params.get('max_level', 3)
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            resolved_max = context.resolve_value(max_level)
-            headings = []
-            for match in re.finditer(r'^(#{1,6})\s+(.+)$', resolved_content, re.MULTILINE):
-                level = len(match.group(1))
-                if level <= resolved_max:
-                    headings.append({
-                        'level': level,
-                        'text': match.group(2).strip()
-                    })
-
-            # Generate TOC markdown
-            toc_lines = []
-            for h in headings:
-                indent = '  ' * (h['level'] - 1)
-                anchor = h['text'].lower().replace(' ', '-')
-                toc_lines.append(f"{indent}- [{h['text']}](#{anchor})")
-
-            toc = '\n'.join(toc_lines)
-            context.set(output_var, toc)
-
-            return ActionResult(
-                success=True,
-                message=f"已生成目录 ({len(headings)} 项)",
-                data={'toc': toc, 'count': len(headings), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"生成目录失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'markdown_toc', 'max_level': 3}
-
-
-class MarkdownWordCountAction(BaseAction):
-    """Count words and characters."""
-    action_type = "markdown_word_count"
-    display_name = "统计字数"
-    description = "统计Markdown的字数和字符数"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute count.
-
-        Args:
-            context: Execution context.
-            params: Dict with content or file_path, output_var.
-
-        Returns:
-            ActionResult with counts.
-        """
-        content = params.get('content', '')
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'word_count')
-
-        try:
-            resolved_content = ''
-            if content:
-                resolved_content = context.resolve_value(content)
-            elif file_path:
-                resolved_path = context.resolve_value(file_path)
-                if not os.path.exists(resolved_path):
-                    return ActionResult(
-                        success=False,
-                        message=f"文件不存在: {resolved_path}"
-                    )
-                with open(resolved_path, 'r', encoding='utf-8') as f:
-                    resolved_content = f.read()
-            else:
-                return ActionResult(
-                    success=False,
-                    message="必须提供content或file_path"
-                )
-
-            # Strip markdown syntax for accurate count
-            stripped = re.sub(r'```[\s\S]*?```', '', resolved_content)
-            stripped = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', '', stripped)
-            stripped = re.sub(r'\[[^\]]+\]\([^\)]+\)', '', stripped)
-            stripped = re.sub(r'[#*_`~\[\]]', '', stripped)
-
-            chars = len(stripped)
-            words = len(stripped.split())
-            lines = len(resolved_content.split('\n'))
-
-            counts = {'chars': chars, 'words': words, 'lines': lines}
-            context.set(output_var, counts)
-
-            return ActionResult(
-                success=True,
-                message=f"字数统计: {words} 词, {chars} 字符, {lines} 行",
-                data=counts
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"统计字数失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'content': '', 'file_path': '', 'output_var': 'word_count'}
+from typing import Dict, Any, Optional, List
+from html import escape as html_escape
+
+
+def render_markdown(markdown: str) -> str:
+    """
+    Render Markdown to HTML.
+
+    Args:
+        markdown: Markdown text.
+
+    Returns:
+        HTML string.
+    """
+    html = markdown
+
+    html = re.sub(r'^###### (.+)$', r'<h6>\1</h6>', html, flags=re.MULTILINE)
+    html = re.sub(r'^##### (.+)$', r'<h5>\1</h5>', html, flags=re.MULTILINE)
+    html = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', html, flags=re.MULTILINE)
+    html = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+    html = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
+    html = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
+
+    html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html)
+    html = re.sub(r'__(.+?)__', r'<strong>\1</strong>', html)
+    html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', html)
+    html = re.sub(r'_(.+?)_', r'<em>\1</em>', html)
+
+    html = re.sub(r'~~(.+?)~~', r'<del>\1</del>', html)
+
+    html = re.sub(r'`(.+?)`', r'<code>\1</code>', html)
+
+    lines = html.split('\n')
+    in_list = False
+    result_lines = []
+
+    for line in lines:
+        list_match = re.match(r'^[\-\*] (.+)$', line)
+        if list_match:
+            if not in_list:
+                result_lines.append('<ul>')
+                in_list = True
+            result_lines.append(f'  <li>{list_match.group(1)}</li>')
+        else:
+            if in_list:
+                result_lines.append('</ul>')
+                in_list = False
+            result_lines.append(line)
+
+    if in_list:
+        result_lines.append('</ul>')
+
+    html = '\n'.join(result_lines)
+
+    html = re.sub(
+        r'\[(.+?)\]\((.+?)\)',
+        r'<a href="\2">\1</a>',
+        html
+    )
+
+    html = re.sub(r'!\[(.+?)\]\((.+?)\)', r'<img src="\2" alt="\1">', html)
+
+    html = re.sub(r'^> (.+)$', r'<blockquote>\1</blockquote>', html, flags=re.MULTILINE)
+
+    html = re.sub(r'^---$', '<hr>', html, flags=re.MULTILINE)
+
+    html = html.replace('\n\n', '</p><p>')
+    html = f'<p>{html}</p>'
+
+    return html
+
+
+def extract_headings(markdown: str) -> List[Dict[str, Any]]:
+    """
+    Extract all headings from Markdown.
+
+    Args:
+        markdown: Markdown text.
+
+    Returns:
+        List of heading dictionaries.
+    """
+    headings: List[Dict[str, Any]] = []
+
+    lines = markdown.split('\n')
+
+    for line in lines:
+        match = re.match(r'^(#{1,6}) (.+)$', line)
+        if match:
+            headings.append({
+                'level': len(match.group(1)),
+                'text': match.group(2).strip(),
+            })
+
+    return headings
+
+
+def extract_links(markdown: str) -> List[Dict[str, str]]:
+    """
+    Extract all links from Markdown.
+
+    Args:
+        markdown: Markdown text.
+
+    Returns:
+        List of link dictionaries.
+    """
+    links: List[Dict[str, str]] = []
+
+    for match in re.finditer(r'\[(.+?)\]\((.+?)\)', markdown):
+        links.append({
+            'text': match.group(1),
+            'url': match.group(2),
+        })
+
+    return links
+
+
+def extract_code_blocks(markdown: str) -> List[Dict[str, str]]:
+    """
+    Extract all code blocks from Markdown.
+
+    Args:
+        markdown: Markdown text.
+
+    Returns:
+        List of code block dictionaries.
+    """
+    blocks: List[Dict[str, str]] = []
+
+    pattern = r'```(\w*)\n(.*?)```'
+
+    for match in re.finditer(pattern, markdown, re.DOTALL):
+        blocks.append({
+            'language': match.group(1),
+            'code': match.group(2).strip(),
+        })
+
+    return blocks
+
+
+def strip_markdown(markdown: str) -> str:
+    """
+    Remove all Markdown formatting from text.
+
+    Args:
+        markdown: Markdown text.
+
+    Returns:
+        Plain text.
+    """
+    text = markdown
+
+    text = re.sub(r'^#{1,6} ', '', text, flags=re.MULTILINE)
+
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'_(.+?)_', r'\1', text)
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+
+    text = re.sub(r'`(.+?)`', r'\1', text)
+
+    text = re.sub(r'```.*?\n(.*?)```', r'\1', text, flags=re.DOTALL)
+
+    text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
+
+    text = re.sub(r'!\[.*?\]\(.+?\)', '', text)
+
+    text = re.sub(r'^> ', '', text, flags=re.MULTILINE)
+
+    text = re.sub(r'^[\-\*] ', '', text, flags=re.MULTILINE)
+
+    text = re.sub(r'^---$', '', text, flags=re.MULTILINE)
+
+    return text.strip()
+
+
+def create_markdown_table(
+    headers: List[str],
+    rows: List[List[str]]
+) -> str:
+    """
+    Create a Markdown table.
+
+    Args:
+        headers: Column headers.
+        rows: Data rows.
+
+    Returns:
+        Markdown table string.
+    """
+    lines = []
+
+    lines.append('| ' + ' | '.join(headers) + ' |')
+
+    lines.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+
+    for row in rows:
+        lines.append('| ' + ' | '.join(str(cell) for cell in row) + ' |')
+
+    return '\n'.join(lines)
+
+
+def markdown_to_plain_text(markdown: str) -> str:
+    """
+    Convert Markdown to plain text.
+
+    Args:
+        markdown: Markdown text.
+
+    Returns:
+        Plain text.
+    """
+    return strip_markdown(markdown)
+
+
+def word_count(markdown: str) -> int:
+    """
+    Count words in Markdown (excluding formatting).
+
+    Args:
+        markdown: Markdown text.
+
+    Returns:
+        Word count.
+    """
+    text = strip_markdown(markdown)
+    words = re.findall(r'\b\w+\b', text)
+    return len(words)
+
+
+def extract_images(markdown: str) -> List[Dict[str, str]]:
+    """
+    Extract all images from Markdown.
+
+    Args:
+        markdown: Markdown text.
+
+    Returns:
+        List of image dictionaries.
+    """
+    images: List[Dict[str, str]] = []
+
+    for match in re.finditer(r'!\[(.+?)\]\((.+?)\)', markdown):
+        images.append({
+            'alt': match.group(1),
+            'url': match.group(2),
+        })
+
+    return images
+
+
+def add_syntax_highlighting(
+    code: str,
+    language: str
+) -> str:
+    """
+    Wrap code in a fenced code block with language.
+
+    Args:
+        code: Code content.
+        language: Programming language.
+
+    Returns:
+        Markdown code block.
+    """
+    return f'```{language}\n{code}\n```'
+
+
+def create_link(text: str, url: str) -> str:
+    """
+    Create a Markdown link.
+
+    Args:
+        text: Link text.
+        url: Link URL.
+
+    Returns:
+        Markdown link.
+    """
+    return f'[{text}]({url})'
+
+
+def create_image(alt: str, url: str) -> str:
+    """
+    Create a Markdown image.
+
+    Args:
+        alt: Alt text.
+        url: Image URL.
+
+    Returns:
+        Markdown image.
+    """
+    return f'![{alt}]({url})'
+
+
+def create_heading(text: str, level: int = 1) -> str:
+    """
+    Create a Markdown heading.
+
+    Args:
+        text: Heading text.
+        level: Heading level (1-6).
+
+    Returns:
+        Markdown heading.
+    """
+    level = max(1, min(6, level))
+    return f"{'#' * level} {text}"
+
+
+def create_task_list(items: List[Dict[str, Any]]) -> str:
+    """
+    Create a Markdown task list.
+
+    Args:
+        items: List of items with 'text' and 'checked' keys.
+
+    Returns:
+        Markdown task list.
+    """
+    lines = []
+    for item in items:
+        checkbox = '[x]' if item.get('checked', False) else '[ ]'
+        lines.append(f'- {checkbox} {item.get("text", "")}')
+    return '\n'.join(lines)
+
+
+def extract_table_data(markdown_table: str) -> Dict[str, Any]:
+    """
+    Parse a Markdown table into data.
+
+    Args:
+        markdown_table: Markdown table.
+
+    Returns:
+        Dictionary with headers and rows.
+    """
+    lines = markdown_table.strip().split('\n')
+
+    if len(lines) < 2:
+        return {'headers': [], 'rows': []}
+
+    headers = [h.strip() for h in lines[0].split('|')[1:-1]]
+
+    rows = []
+    for line in lines[2:]:
+        cells = [c.strip() for c in line.split('|')[1:-1]]
+        if cells:
+            rows.append(cells)
+
+    return {'headers': headers, 'rows': rows}
+
+
+def is_valid_markdown_link(text: str) -> bool:
+    """
+    Check if text is a valid Markdown link.
+
+    Args:
+        text: Text to check.
+
+    Returns:
+        True if valid link format.
+    """
+    return bool(re.match(r'\[.+?\]\(.+?\)', text))
+
+
+def markdown_to_github_issue(body: str) -> str:
+    """
+    Format Markdown for GitHub issues.
+
+    Args:
+        body: Markdown body.
+
+    Returns:
+        GitHub-formatted Markdown.
+    """
+    lines = body.split('\n')
+    result = []
+
+    for line in lines:
+        if re.match(r'^#{1,6} ', line):
+            result.append(line)
+        elif re.match(r'^\- \[ \]', line):
+            result.append(line)
+        elif re.match(r'^\- \[x\]', line):
+            result.append(line)
+        else:
+            result.append(line)
+
+    return '\n'.join(result)
