@@ -1,0 +1,117 @@
+{
+  "name": "Aerospace Maintenance Tracking Workflow",
+  "description": "Automate aerospace maintenance tracking",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "maintenance_items": 49,
+    "current_item": 0,
+    "tracked_items": 0,
+    "overdue_maintenance": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "maintenance_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize maintenance counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open maintenance tracking system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "maintenance_tracking_loop",
+      "count": "{{maintenance_items}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start maintenance tracking loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select item for maintenance"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for tracking update"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/maintenance_tracking_{{maintenance_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture tracking screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "maintenance_counter",
+      "value": "{{maintenance_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment maintenance counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{maintenance_counter < maintenance_items}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more items"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next item"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/aerospace_maintenance_tracking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
