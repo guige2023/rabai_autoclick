@@ -431,7 +431,18 @@ class HealTab(BaseTab):
 
 
 class SceneTab(BaseTab):
-    def setup_ui(self):
+    """
+    Scene management tab for organizing workflows into logical groups.
+    
+    Features:
+        - List and filter scenes by tags
+        - Create new scenes
+        - View scene statistics
+        - Activate/deactivate scenes
+    """
+    
+    def setup_ui(self) -> None:
+        """Set up the tab's UI components."""
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -502,7 +513,10 @@ class SceneTab(BaseTab):
         self.scene_stats_result = scrolledtext.ScrolledText(frame, height=10, state='disabled')
         self.scene_stats_result.pack(fill=tk.BOTH, expand=True, pady=10)
 
-    def _list_scenes(self):
+    def _list_scenes(self) -> None:
+        """
+        List scenes, optionally filtered by tag.
+        """
         def do_list():
             manager = create_scene_manager(str(DATA_DIR))
             tags = [self.tag_filter_var.get()] if self.tag_filter_var.get() else None
@@ -518,7 +532,10 @@ class SceneTab(BaseTab):
 
         self.run_async(do_list, show_result)
 
-    def _activate_scene(self):
+    def _activate_scene(self) -> None:
+        """
+        Activate the selected scene in the scene tree.
+        """
         selected = self.scene_tree.selection()
         if not selected:
             messagebox.showwarning("提示", "请先选择一个场景")
@@ -539,7 +556,10 @@ class SceneTab(BaseTab):
 
         self.run_async(do_activate, show_result)
 
-    def _create_scene(self):
+    def _create_scene(self) -> None:
+        """
+        Create a new scene with the specified name, description, and icon.
+        """
         def do_create():
             manager = create_scene_manager(str(DATA_DIR))
             return manager.create_scene(self.scene_name_var.get(), self.scene_desc_var.get(), self.scene_icon_var.get())
@@ -551,7 +571,10 @@ class SceneTab(BaseTab):
 
         self.run_async(do_create, show_result)
 
-    def _get_stats(self):
+    def _get_stats(self) -> None:
+        """
+        Retrieve and display scene statistics.
+        """
         def do_stats():
             manager = create_scene_manager(str(DATA_DIR))
             return manager.get_scene_statistics()
