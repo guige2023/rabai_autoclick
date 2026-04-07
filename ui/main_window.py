@@ -1447,8 +1447,8 @@ class MainWindow(QMainWindow):
                 execution_stats.record_error(step.get('type', 'unknown'), result.message)
         except Exception as e:
             logger.error(f"Step end error: {e}")
-    
-    def _on_engine_workflow_end(self, success):
+
+    def _on_engine_workflow_end(self, success: bool) -> None:
         try:
             if not self._is_looping:
                 return
@@ -1494,8 +1494,8 @@ class MainWindow(QMainWindow):
                 app_logger.warning("工作流已停止", "Workflow")
         except Exception as e:
             logger.error(f"Workflow end error: {e}")
-    
-    def _on_engine_error(self, step, message: str):
+
+    def _on_engine_error(self, step: dict, message: str) -> None:
         try:
             app_logger.error(f"步骤 [{step.get('id')}] 错误: {message}", "Engine")
             execution_stats.record_error(step.get('type', 'unknown'), message)
