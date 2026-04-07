@@ -1,777 +1,613 @@
-"""Redis action module for RabAI AutoClick.
-
-Provides Redis operations:
-- RedisSetAction: Set key-value
-- RedisGetAction: Get value
-- RedisDeleteAction: Delete key
-- RedisExistsAction: Check if key exists
-- RedisExpireAction: Set key expiration
-- RedisKeysAction: Find keys by pattern
-- RedisHsetAction: Set hash field
-- RedisHgetAction: Get hash field
-- RedisLpushAction: Push to list
-- RedisLrangeAction: Get list range
-- RedisPublishAction: Publish to channel
-- RedisInfoAction: Get Redis info
 """
+Redis operations actions.
+"""
+from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional, Union
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import redis
+from typing import Dict, Any, Optional, List, Union
 
 
-def get_redis_client(host='localhost', port=6379, db=0, password=None):
-    """Get Redis client."""
+def create_redis_client(
+    host: str = 'localhost',
+    port: int = 6379,
+    db: int = 0,
+    password: Optional[str] = None,
+    decode_responses: bool = True
+) -> redis.Redis:
+    """
+    Create a Redis client.
+
+    Args:
+        host: Redis host.
+        port: Redis port.
+        db: Database number.
+        password: Redis password.
+        decode_responses: Decode responses to strings.
+
+    Returns:
+        Redis client.
+    """
+    return redis.Redis(
+        host=host,
+        port=port,
+        db=db,
+        password=password,
+        decode_responses=decode_responses
+    )
+
+
+def ping_redis(client: redis.Redis) -> bool:
+    """
+    Ping Redis server.
+
+    Args:
+        client: Redis client.
+
+    Returns:
+        True if connected.
+    """
     try:
-        import redis
-        return redis.Redis(host=host, port=port, db=db, password=password, decode_responses=True)
-    except ImportError:
-        return None
-
-
-class RedisSetAction(BaseAction):
-    """Set key-value."""
-    action_type = "redis_set"
-    display_name = "Redis设置"
-    description = "设置Redis键值"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute set.
-
-        Args:
-            context: Execution context.
-            params: Dict with key, value, host, port, db, expire.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        key = params.get('key', '')
-        value = params.get('value', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-        expire = params.get('expire', 0)
-
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_key = context.resolve_value(key)
-            resolved_value = context.resolve_value(value)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-            resolved_expire = context.resolve_value(expire)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装: pip install redis"
-                )
-
-            if isinstance(resolved_value, (dict, list)):
-                serialized = json.dumps(resolved_value)
-            else:
-                serialized = str(resolved_value)
-
-            client.set(resolved_key, serialized)
-
-            if resolved_expire and int(resolved_expire) > 0:
-                client.expire(resolved_key, int(resolved_expire))
-
-            return ActionResult(
-                success=True,
-                message=f"已设置: {resolved_key}",
-                data={'key': resolved_key}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis set失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['key', 'value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379, 'db': 0, 'expire': 0}
-
-
-class RedisGetAction(BaseAction):
-    """Get value."""
-    action_type = "redis_get"
-    display_name = "Redis获取"
-    description = "获取Redis值"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute get.
-
-        Args:
-            context: Execution context.
-            params: Dict with key, host, port, db, output_var.
-
-        Returns:
-            ActionResult with value.
-        """
-        key = params.get('key', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-        output_var = params.get('output_var', 'redis_value')
-
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_key = context.resolve_value(key)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            value = client.get(resolved_key)
-
-            if value is None:
-                context.set(output_var, None)
-                return ActionResult(
-                    success=True,
-                    message=f"键不存在: {resolved_key}",
-                    data={'value': None, 'output_var': output_var}
-                )
-
-            # Try to deserialize JSON
-            try:
-                deserialized = json.loads(value)
-                context.set(output_var, deserialized)
-                value_display = deserialized
-            except (json.JSONDecodeError, TypeError):
-                context.set(output_var, value)
-                value_display = value
-
-            return ActionResult(
-                success=True,
-                message=f"获取: {str(value_display)[:50]}",
-                data={'value': value_display, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis get失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379, 'db': 0, 'output_var': 'redis_value'}
-
-
-class RedisDeleteAction(BaseAction):
-    """Delete key."""
-    action_type = "redis_delete"
-    display_name = "Redis删除"
-    description = "删除Redis键"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute delete.
-
-        Args:
-            context: Execution context.
-            params: Dict with key, host, port, db.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        key = params.get('key', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_key = context.resolve_value(key)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            deleted = client.delete(resolved_key)
-
-            return ActionResult(
-                success=True,
-                message=f"已删除: {resolved_key} ({deleted} 键)",
-                data={'deleted': deleted}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis delete失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379, 'db': 0}
-
-
-class RedisKeysAction(BaseAction):
-    """Find keys by pattern."""
-    action_type = "redis_keys"
-    display_name = "Redis搜索键"
-    description = "按模式搜索Redis键"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute keys.
-
-        Args:
-            context: Execution context.
-            params: Dict with pattern, host, port, db, output_var.
-
-        Returns:
-            ActionResult with key list.
-        """
-        pattern = params.get('pattern', '*')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-        output_var = params.get('output_var', 'redis_keys')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_pattern = context.resolve_value(pattern)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            keys = client.keys(resolved_pattern)
-            context.set(output_var, keys)
-
-            return ActionResult(
-                success=True,
-                message=f"找到 {len(keys)} 个键",
-                data={'count': len(keys), 'keys': keys, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis keys失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'pattern': '*', 'host': 'localhost', 'port': 6379, 'db': 0, 'output_var': 'redis_keys'}
-
-
-class RedisExpireAction(BaseAction):
-    """Set key expiration."""
-    action_type = "redis_expire"
-    display_name = "Redis设置过期"
-    description = "设置Redis键过期时间"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute expire.
-
-        Args:
-            context: Execution context.
-            params: Dict with key, seconds, host, port, db.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        key = params.get('key', '')
-        seconds = params.get('seconds', 60)
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_key = context.resolve_value(key)
-            resolved_seconds = context.resolve_value(seconds)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            result = client.expire(resolved_key, int(resolved_seconds))
-
-            return ActionResult(
-                success=result,
-                message=f"过期时间已设置: {resolved_key} ({resolved_seconds}s)",
-                data={'key': resolved_key, 'seconds': resolved_seconds, 'set': result}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis expire失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['key', 'seconds']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379, 'db': 0}
-
-
-class RedisHsetAction(BaseAction):
-    """Set hash field."""
-    action_type = "redis_hset"
-    display_name = "Redis哈希设置"
-    description = "设置Redis哈希字段"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute hset.
-
-        Args:
-            context: Execution context.
-            params: Dict with key, field, value, host, port, db.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        key = params.get('key', '')
-        field = params.get('field', '')
-        value = params.get('value', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_key = context.resolve_value(key)
-            resolved_field = context.resolve_value(field)
-            resolved_value = context.resolve_value(value)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            client.hset(resolved_key, resolved_field, str(resolved_value))
-
-            return ActionResult(
-                success=True,
-                message=f"已设置: {resolved_key}.{resolved_field}",
-                data={'key': resolved_key, 'field': resolved_field}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis hset失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['key', 'field', 'value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379, 'db': 0}
-
-
-class RedisHgetAction(BaseAction):
-    """Get hash field."""
-    action_type = "redis_hget"
-    display_name = "Redis哈希获取"
-    description = "获取Redis哈希字段"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute hget.
-
-        Args:
-            context: Execution context.
-            params: Dict with key, field, host, port, db, output_var.
-
-        Returns:
-            ActionResult with value.
-        """
-        key = params.get('key', '')
-        field = params.get('field', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-        output_var = params.get('output_var', 'redis_hash_value')
-
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_key = context.resolve_value(key)
-            resolved_field = context.resolve_value(field)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            value = client.hget(resolved_key, resolved_field)
-            context.set(output_var, value)
-
-            return ActionResult(
-                success=True,
-                message=f"获取: {resolved_key}.{resolved_field}",
-                data={'value': value, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis hget失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['key', 'field']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379, 'db': 0, 'output_var': 'redis_hash_value'}
-
-
-class RedisLpushAction(BaseAction):
-    """Push to list."""
-    action_type = "redis_lpush"
-    display_name = "Redis列表推入"
-    description = "向Redis列表左侧推入"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute lpush.
-
-        Args:
-            context: Execution context.
-            params: Dict with key, value, host, port, db.
-
-        Returns:
-            ActionResult with list length.
-        """
-        key = params.get('key', '')
-        value = params.get('value', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_key = context.resolve_value(key)
-            resolved_value = context.resolve_value(value)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            length = client.lpush(resolved_key, str(resolved_value))
-
-            return ActionResult(
-                success=True,
-                message=f"已推入: {resolved_key} (长度 {length})",
-                data={'key': resolved_key, 'length': length}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis lpush失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['key', 'value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379, 'db': 0}
-
-
-class RedisLrangeAction(BaseAction):
-    """Get list range."""
-    action_type = "redis_lrange"
-    display_name = "Redis列表范围"
-    description = "获取Redis列表范围"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute lrange.
-
-        Args:
-            context: Execution context.
-            params: Dict with key, start, stop, host, port, db, output_var.
-
-        Returns:
-            ActionResult with list items.
-        """
-        key = params.get('key', '')
-        start = params.get('start', 0)
-        stop = params.get('stop', -1)
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-        output_var = params.get('output_var', 'redis_list')
-
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_key = context.resolve_value(key)
-            resolved_start = context.resolve_value(start)
-            resolved_stop = context.resolve_value(stop)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            items = client.lrange(resolved_key, int(resolved_start), int(resolved_stop))
-            context.set(output_var, items)
-
-            return ActionResult(
-                success=True,
-                message=f"获取列表: {len(items)} 项",
-                data={'items': items, 'count': len(items), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis lrange失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'start': 0, 'stop': -1, 'host': 'localhost', 'port': 6379, 'db': 0, 'output_var': 'redis_list'}
-
-
-class RedisPublishAction(BaseAction):
-    """Publish to channel."""
-    action_type = "redis_publish"
-    display_name = "Redis发布"
-    description = "向Redis频道发布消息"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute publish.
-
-        Args:
-            context: Execution context.
-            params: Dict with channel, message, host, port.
-
-        Returns:
-            ActionResult with subscriber count.
-        """
-        channel = params.get('channel', '')
-        message = params.get('message', '')
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-
-        valid, msg = self.validate_type(channel, str, 'channel')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_channel = context.resolve_value(channel)
-            resolved_message = context.resolve_value(message)
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-
-            client = get_redis_client(resolved_host, int(resolved_port))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
-
-            count = client.publish(resolved_channel, str(resolved_message))
-
-            return ActionResult(
-                success=True,
-                message=f"已发布到 {resolved_channel}: {count} 订阅者",
-                data={'channel': resolved_channel, 'subscribers': count}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis publish失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['channel', 'message']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379}
-
-
-class RedisInfoAction(BaseAction):
-    """Get Redis info."""
-    action_type = "redis_info"
-    display_name = "Redis信息"
-    description = "获取Redis服务器信息"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute info.
-
-        Args:
-            context: Execution context.
-            params: Dict with host, port, db, output_var.
-
-        Returns:
-            ActionResult with Redis info.
-        """
-        host = params.get('host', 'localhost')
-        port = params.get('port', 6379)
-        db = params.get('db', 0)
-        output_var = params.get('output_var', 'redis_info')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_db = context.resolve_value(db)
-
-            client = get_redis_client(resolved_host, int(resolved_port), int(resolved_db))
-            if client is None:
-                return ActionResult(
-                    success=False,
-                    message="redis-py未安装"
-                )
+        return client.ping()
+    except redis.RedisError:
+        return False
 
+
+def get_value(client: redis.Redis, key: str) -> Optional[str]:
+    """
+    Get a value from Redis.
+
+    Args:
+        client: Redis client.
+        key: Key name.
+
+    Returns:
+        Value or None.
+    """
+    return client.get(key)
+
+
+def set_value(
+    client: redis.Redis,
+    key: str,
+    value: str,
+    expire: Optional[int] = None
+) -> bool:
+    """
+    Set a value in Redis.
+
+    Args:
+        client: Redis client.
+        key: Key name.
+        value: Value to set.
+        expire: Expiration in seconds.
+
+    Returns:
+        True if successful.
+    """
+    return client.set(key, value, ex=expire)
+
+
+def delete_key(client: redis.Redis, key: str) -> bool:
+    """
+    Delete a key.
+
+    Args:
+        client: Redis client.
+        key: Key to delete.
+
+    Returns:
+        True if key was deleted.
+    """
+    return bool(client.delete(key))
+
+
+def key_exists(client: redis.Redis, key: str) -> bool:
+    """
+    Check if a key exists.
+
+    Args:
+        client: Redis client.
+        key: Key to check.
+
+    Returns:
+        True if key exists.
+    """
+    return bool(client.exists(key))
+
+
+def get_ttl(client: redis.Redis, key: str) -> int:
+    """
+    Get TTL of a key.
+
+    Args:
+        client: Redis client.
+        key: Key name.
+
+    Returns:
+        TTL in seconds, -1 if no expiry, -2 if key doesn't exist.
+    """
+    return client.ttl(key)
+
+
+def expire_key(client: redis.Redis, key: str, seconds: int) -> bool:
+    """
+    Set expiration on a key.
+
+    Args:
+        client: Redis client.
+        key: Key name.
+        seconds: Expiration in seconds.
+
+    Returns:
+        True if expiration was set.
+    """
+    return client.expire(key, seconds)
+
+
+def increment(client: redis.Redis, key: str, amount: int = 1) -> int:
+    """
+    Increment a value.
+
+    Args:
+        client: Redis client.
+        key: Key name.
+        amount: Amount to increment.
+
+    Returns:
+        New value.
+    """
+    return client.incrby(key, amount)
+
+
+def decrement(client: redis.Redis, key: str, amount: int = 1) -> int:
+    """
+    Decrement a value.
+
+    Args:
+        client: Redis client.
+        key: Key name.
+        amount: Amount to decrement.
+
+    Returns:
+        New value.
+    """
+    return client.decrby(key, amount)
+
+
+def get_hash(client: redis.Redis, key: str) -> Dict[str, str]:
+    """
+    Get all fields and values of a hash.
+
+    Args:
+        client: Redis client.
+        key: Hash key.
+
+    Returns:
+        Dictionary of field-value pairs.
+    """
+    return client.hgetall(key)
+
+
+def set_hash_field(
+    client: redis.Redis,
+    key: str,
+    field: str,
+    value: str
+) -> bool:
+    """
+    Set a field in a hash.
+
+    Args:
+        client: Redis client.
+        key: Hash key.
+        field: Field name.
+        value: Field value.
+
+    Returns:
+        True if set.
+    """
+    return bool(client.hset(key, field, value))
+
+
+def get_hash_field(client: redis.Redis, key: str, field: str) -> Optional[str]:
+    """
+    Get a field from a hash.
+
+    Args:
+        client: Redis client.
+        key: Hash key.
+        field: Field name.
+
+    Returns:
+        Field value or None.
+    """
+    return client.hget(key, field)
+
+
+def delete_hash_fields(client: redis.Redis, key: str, fields: List[str]) -> int:
+    """
+    Delete fields from a hash.
+
+    Args:
+        client: Redis client.
+        key: Hash key.
+        fields: List of field names.
+
+    Returns:
+        Number of fields deleted.
+    """
+    return client.hdel(key, *fields)
+
+
+def get_list(client: redis.Redis, key: str, start: int = 0, end: int = -1) -> List[str]:
+    """
+    Get list items.
+
+    Args:
+        client: Redis client.
+        key: List key.
+        start: Start index.
+        end: End index (-1 for all).
+
+    Returns:
+        List of items.
+    """
+    return client.lrange(key, start, end)
+
+
+def push_to_list(
+    client: redis.Redis,
+    key: str,
+    value: str,
+    left: bool = False
+) -> int:
+    """
+    Push to a list.
+
+    Args:
+        client: Redis client.
+        key: List key.
+        value: Value to push.
+        left: Push to left (front) or right (back).
+
+    Returns:
+        List length after push.
+    """
+    if left:
+        return client.lpush(key, value)
+    return client.rpush(key, value)
+
+
+def pop_from_list(client: redis.Redis, key: str, left: bool = False) -> Optional[str]:
+    """
+    Pop from a list.
+
+    Args:
+        client: Redis client.
+        key: List key.
+        left: Pop from left (front) or right (back).
+
+    Returns:
+        Popped value or None.
+    """
+    if left:
+        return client.lpop(key)
+    return client.rpop(key)
+
+
+def get_set(client: redis.Redis, key: str) -> set:
+    """
+    Get all members of a set.
+
+    Args:
+        client: Redis client.
+        key: Set key.
+
+    Returns:
+        Set of members.
+    """
+    return client.smembers(key)
+
+
+def add_to_set(client: redis.Redis, key: str, *values: str) -> int:
+    """
+    Add members to a set.
+
+    Args:
+        client: Redis client.
+        key: Set key.
+        values: Values to add.
+
+    Returns:
+        Number of members added.
+    """
+    return client.sadd(key, *values)
+
+
+def is_set_member(client: redis.Redis, key: str, value: str) -> bool:
+    """
+    Check if value is a member of set.
+
+    Args:
+        client: Redis client.
+        key: Set key.
+        value: Value to check.
+
+    Returns:
+        True if member.
+    """
+    return client.sismember(key, value)
+
+
+def remove_from_set(client: redis.Redis, key: str, *values: str) -> int:
+    """
+    Remove members from a set.
+
+    Args:
+        client: Redis client.
+        key: Set key.
+        values: Values to remove.
+
+    Returns:
+        Number of members removed.
+    """
+    return client.srem(key, *values)
+
+
+def get_sorted_set(client: redis.Redis, key: str, start: int = 0, end: int = -1) -> List:
+    """
+    Get sorted set range with scores.
+
+    Args:
+        client: Redis client.
+        key: Sorted set key.
+        start: Start index.
+        end: End index (-1 for all).
+
+    Returns:
+        List of (member, score) tuples.
+    """
+    return client.zrange(key, start, end, withscores=True)
+
+
+def add_to_sorted_set(
+    client: redis.Redis,
+    key: str,
+    mapping: Dict[str, float]
+) -> int:
+    """
+    Add members to sorted set with scores.
+
+    Args:
+        client: Redis client.
+        key: Sorted set key.
+        mapping: Dictionary of member -> score.
+
+    Returns:
+        Number of members added.
+    """
+    return client.zadd(key, mapping)
+
+
+def get_sorted_set_rank(client: redis.Redis, key: str, member: str) -> Optional[int]:
+    """
+    Get rank of member in sorted set (ascending).
+
+    Args:
+        client: Redis client.
+        key: Sorted set key.
+        member: Member name.
+
+    Returns:
+        Rank (0-indexed) or None.
+    """
+    return client.zrank(key, member)
+
+
+def get_sorted_set_score(client: redis.Redis, key: str, member: str) -> Optional[float]:
+    """
+    Get score of member in sorted set.
+
+    Args:
+        client: Redis client.
+        key: Sorted set key.
+        member: Member name.
+
+    Returns:
+        Score or None.
+    """
+    return client.zscore(key, member)
+
+
+def publish_message(client: redis.Redis, channel: str, message: str) -> int:
+    """
+    Publish a message to a channel.
+
+    Args:
+        client: Redis client.
+        channel: Channel name.
+        message: Message to publish.
+
+    Returns:
+        Number of subscribers received.
+    """
+    return client.publish(channel, message)
+
+
+def get_all_keys(client: redis.Redis, pattern: str = '*') -> List[str]:
+    """
+    Get all keys matching pattern.
+
+    Args:
+        client: Redis client.
+        pattern: Key pattern.
+
+    Returns:
+        List of keys.
+    """
+    return client.keys(pattern)
+
+
+def get_database_info(client: redis.Redis) -> Dict[str, Any]:
+    """
+    Get Redis database info.
+
+    Args:
+        client: Redis client.
+
+    Returns:
+        Database info.
+    """
+    return client.info()
+
+
+def flush_database(client: redis.Redis, db: int = 0) -> bool:
+    """
+    Flush a database.
+
+    Args:
+        client: Redis client.
+        db: Database number.
+
+    Returns:
+        True if flushed.
+    """
+    return client.flushdb()
+
+
+def test_connection(
+    host: str = 'localhost',
+    port: int = 6379,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Test Redis connection.
+
+    Args:
+        host: Redis host.
+        port: Redis port.
+        password: Redis password.
+
+    Returns:
+        Test result.
+    """
+    try:
+        client = create_redis_client(
+            host=host,
+            port=port,
+            password=password
+        )
+
+        if client.ping():
             info = client.info()
-            context.set(output_var, info)
+            return {
+                'success': True,
+                'host': host,
+                'port': port,
+                'version': info.get('redis_version'),
+            }
+        return {'success': False, 'error': 'Ping failed'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
 
-            return ActionResult(
-                success=True,
-                message=f"Redis: {info.get('redis_version', '?')} ({info.get('used_memory_human', '?')})",
-                data=info
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Redis info失败: {str(e)}"
-            )
 
-    def get_required_params(self) -> List[str]:
-        return []
+def cache_set(
+    client: redis.Redis,
+    key: str,
+    value: str,
+    ttl: int = 300
+) -> bool:
+    """
+    Set a cached value with TTL.
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'host': 'localhost', 'port': 6379, 'db': 0, 'output_var': 'redis_info'}
+    Args:
+        client: Redis client.
+        key: Cache key.
+        value: Value to cache.
+        ttl: Time to live in seconds.
+
+    Returns:
+        True if set.
+    """
+    return client.setex(key, ttl, value)
+
+
+def cache_get(client: redis.Redis, key: str) -> Optional[str]:
+    """
+    Get a cached value.
+
+    Args:
+        client: Redis client.
+        key: Cache key.
+
+    Returns:
+        Cached value or None.
+    """
+    return client.get(key)
+
+
+def cache_delete(client: redis.Redis, key: str) -> bool:
+    """
+    Delete a cached value.
+
+    Args:
+        client: Redis client.
+        key: Cache key.
+
+    Returns:
+        True if deleted.
+    """
+    return bool(client.delete(key))
+
+
+def increment_counter(client: redis.Redis, key: str, ttl: Optional[int] = None) -> int:
+    """
+    Increment a counter, creating it if needed.
+
+    Args:
+        client: Redis client.
+        key: Counter key.
+        ttl: Optional TTL.
+
+    Returns:
+        New counter value.
+    """
+    pipe = client.pipeline()
+    pipe.incr(key)
+    if ttl:
+        pipe.expire(key, ttl)
+    results = pipe.execute()
+    return results[0]
+
+
+def get_or_set_lock(
+    client: redis.Redis,
+    lock_name: str,
+    ttl: int = 10
+) -> bool:
+    """
+    Acquire a distributed lock.
+
+    Args:
+        client: Redis client.
+        lock_name: Lock name.
+        ttl: Lock TTL in seconds.
+
+    Returns:
+        True if lock acquired.
+    """
+    return bool(client.set(f'lock:{lock_name}', '1', nx=True, ex=ttl))
+
+
+def release_lock(client: redis.Redis, lock_name: str) -> bool:
+    """
+    Release a distributed lock.
+
+    Args:
+        client: Redis client.
+        lock_name: Lock name.
+
+    Returns:
+        True if released.
+    """
+    return bool(client.delete(f'lock:{lock_name}'))

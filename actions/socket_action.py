@@ -1,597 +1,557 @@
-"""Socket action module for RabAI AutoClick.
-
-Provides socket/network operations:
-- SocketConnectAction: Connect to TCP socket
-- SocketSendAction: Send data via socket
-- SocketReceiveAction: Receive data from socket
-- SocketCloseAction: Close socket connection
-- SocketListenAction: Start TCP server
-- SocketUdpSendAction: Send UDP datagram
-- SocketUdpReceiveAction: Receive UDP datagram
 """
+TCP/UDP socket operations actions.
+"""
+from __future__ import annotations
 
 import socket
-import ssl
-import json
-import time
-from typing import Any, Dict, List, Optional
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class SocketConnectAction(BaseAction):
-    """Connect to TCP socket."""
-    action_type = "socket_connect"
-    display_name = "Socket连接"
-    description = "建立TCP socket连接"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute connect.
-
-        Args:
-            context: Execution context.
-            params: Dict with host, port, use_ssl, timeout, output_var.
-
-        Returns:
-            ActionResult with socket fd.
-        """
-        host = params.get('host', '')
-        port = params.get('port', 80)
-        use_ssl = params.get('use_ssl', False)
-        timeout = params.get('timeout', 30)
-        output_var = params.get('output_var', 'socket_fd')
-
-        valid, msg = self.validate_type(host, str, 'host')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_ssl = context.resolve_value(use_ssl)
-            resolved_timeout = context.resolve_value(timeout)
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(int(resolved_timeout))
-
-            if resolved_ssl:
-                context_s = ssl.create_default_context()
-                sock = context_s.wrap_socket(sock, server_hostname=resolved_host)
-
-            sock.connect((resolved_host, int(resolved_port)))
-
-            # Store socket in context for later use
-            context.set(output_var, id(sock))
-            context._socket_registry = getattr(context, '_socket_registry', {})
-            context._socket_registry[str(id(sock))] = sock
-
-            return ActionResult(
-                success=True,
-                message=f"已连接到 {resolved_host}:{resolved_port}",
-                data={'host': resolved_host, 'port': resolved_port, 'socket_id': id(sock), 'output_var': output_var}
-            )
-        except socket.timeout:
-            return ActionResult(
-                success=False,
-                message=f"连接超时: {resolved_host}:{resolved_port}"
-            )
-        except socket.error as e:
-            return ActionResult(
-                success=False,
-                message=f"Socket连接失败: {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Socket连接失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['host', 'port']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'use_ssl': False, 'timeout': 30, 'output_var': 'socket_fd'}
-
-
-class SocketSendAction(BaseAction):
-    """Send data via socket."""
-    action_type = "socket_send"
-    display_name = "Socket发送"
-    description = "通过socket发送数据"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute send.
-
-        Args:
-            context: Execution context.
-            params: Dict with socket_id, data, encoding.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        socket_id = params.get('socket_id', '')
-        data = params.get('data', '')
-        encoding = params.get('encoding', 'utf-8')
-
-        valid, msg = self.validate_type(data, str, 'data')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            registry = getattr(context, '_socket_registry', {})
-            sock = registry.get(str(socket_id))
-
-            if sock is None:
-                return ActionResult(
-                    success=False,
-                    message=f"Socket不存在: {socket_id}"
-                )
-
-            resolved_data = context.resolve_value(data)
-            resolved_encoding = context.resolve_value(encoding)
-
-            if isinstance(resolved_data, dict):
-                encoded = json.dumps(resolved_data).encode(resolved_encoding)
-            else:
-                encoded = str(resolved_data).encode(resolved_encoding)
-
-            sock.sendall(encoded)
-
-            return ActionResult(
-                success=True,
-                message=f"已发送 {len(encoded)} 字节",
-                data={'bytes_sent': len(encoded)}
-            )
-        except socket.error as e:
-            return ActionResult(
-                success=False,
-                message=f"Socket发送失败: {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Socket发送失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['socket_id', 'data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'encoding': 'utf-8'}
-
-
-class SocketReceiveAction(BaseAction):
-    """Receive data from socket."""
-    action_type = "socket_receive"
-    display_name = "Socket接收"
-    description = "从socket接收数据"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute receive.
-
-        Args:
-            context: Execution context.
-            params: Dict with socket_id, size, output_var.
-
-        Returns:
-            ActionResult with received data.
-        """
-        socket_id = params.get('socket_id', '')
-        size = params.get('size', 4096)
-        output_var = params.get('output_var', 'socket_data')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            registry = getattr(context, '_socket_registry', {})
-            sock = registry.get(str(socket_id))
-
-            if sock is None:
-                return ActionResult(
-                    success=False,
-                    message=f"Socket不存在: {socket_id}"
-                )
-
-            resolved_size = context.resolve_value(size)
-
-            sock.settimeout(10)
-            data = sock.recv(int(resolved_size))
-
-            context.set(output_var, data)
-
-            return ActionResult(
-                success=True,
-                message=f"接收到 {len(data)} 字节",
-                data={'data': data, 'size': len(data), 'output_var': output_var}
-            )
-        except socket.timeout:
-            return ActionResult(
-                success=False,
-                message="Socket接收超时"
-            )
-        except socket.error as e:
-            return ActionResult(
-                success=False,
-                message=f"Socket接收失败: {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Socket接收失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['socket_id']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'size': 4096, 'output_var': 'socket_data'}
-
-
-class SocketCloseAction(BaseAction):
-    """Close socket connection."""
-    action_type = "socket_close"
-    display_name = "Socket关闭"
-    description = "关闭socket连接"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute close.
-
-        Args:
-            context: Execution context.
-            params: Dict with socket_id.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        socket_id = params.get('socket_id', '')
-
-        try:
-            registry = getattr(context, '_socket_registry', {})
-            sock = registry.pop(str(socket_id), None)
-
-            if sock is None:
-                return ActionResult(
-                    success=False,
-                    message=f"Socket不存在: {socket_id}"
-                )
-
-            sock.close()
-
-            return ActionResult(
-                success=True,
-                message=f"Socket已关闭: {socket_id}",
-                data={'socket_id': socket_id}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Socket关闭失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['socket_id']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
-
-
-class SocketUdpSendAction(BaseAction):
-    """Send UDP datagram."""
-    action_type = "socket_udp_send"
-    display_name = "UDP发送"
-    description = "发送UDP数据报"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute UDP send.
-
-        Args:
-            context: Execution context.
-            params: Dict with host, port, data, output_var.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        host = params.get('host', '')
-        port = params.get('port', 80)
-        data = params.get('data', '')
-
-        valid, msg = self.validate_type(host, str, 'host')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(data, str, 'data')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_data = context.resolve_value(data)
-
-            if isinstance(resolved_data, dict):
-                encoded = json.dumps(resolved_data).encode('utf-8')
-            else:
-                encoded = str(resolved_data).encode('utf-8')
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.sendto(encoded, (resolved_host, int(resolved_port)))
-            sock.close()
-
-            return ActionResult(
-                success=True,
-                message=f"UDP已发送 {len(encoded)} 字节到 {resolved_host}:{resolved_port}",
-                data={'bytes_sent': len(encoded), 'host': resolved_host, 'port': resolved_port}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"UDP发送失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['host', 'port', 'data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
-
-
-class SocketUdpReceiveAction(BaseAction):
-    """Receive UDP datagram."""
-    action_type = "socket_udp_receive"
-    display_name = "UDP接收"
-    description = "接收UDP数据报"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute UDP receive.
-
-        Args:
-            context: Execution context.
-            params: Dict with port, size, timeout, output_var.
-
-        Returns:
-            ActionResult with received data.
-        """
-        port = params.get('port', 8080)
-        size = params.get('size', 4096)
-        timeout = params.get('timeout', 5)
-        output_var = params.get('output_var', 'udp_data')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_port = context.resolve_value(port)
-            resolved_size = context.resolve_value(size)
-            resolved_timeout = context.resolve_value(timeout)
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(int(resolved_timeout))
-            sock.bind(('0.0.0.0', int(resolved_port)))
-
-            data, addr = sock.recvfrom(int(resolved_size))
-            sock.close()
-
-            context.set(output_var, data)
-
-            return ActionResult(
-                success=True,
-                message=f"UDP接收 {len(data)} 字节 from {addr[0]}:{addr[1]}",
-                data={'data': data, 'from': f'{addr[0]}:{addr[1]}', 'output_var': output_var}
-            )
-        except socket.timeout:
-            return ActionResult(
-                success=False,
-                message="UDP接收超时"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"UDP接收失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['port']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'size': 4096, 'timeout': 5, 'output_var': 'udp_data'}
-
-
-class SocketPingAction(BaseAction):
-    """Ping a host via socket (TCP handshake check)."""
-    action_type = "socket_ping"
-    display_name = "Socket Ping"
-    description = "通过socket检查主机可达性"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute ping.
-
-        Args:
-            context: Execution context.
-            params: Dict with host, port, timeout, output_var.
-
-        Returns:
-            ActionResult with latency.
-        """
-        host = params.get('host', '')
-        port = params.get('port', 80)
-        timeout = params.get('timeout', 5)
-        output_var = params.get('output_var', 'ping_result')
-
-        valid, msg = self.validate_type(host, str, 'host')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_host = context.resolve_value(host)
-            resolved_port = context.resolve_value(port)
-            resolved_timeout = context.resolve_value(timeout)
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(int(resolved_timeout))
-
-            start = time.time()
-            sock.connect((resolved_host, int(resolved_port)))
-            latency_ms = (time.time() - start) * 1000
-            sock.close()
-
-            result = {
-                'host': resolved_host,
-                'port': resolved_port,
-                'latency_ms': round(latency_ms, 2),
-                'reachable': True
-            }
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"Ping {resolved_host}:{resolved_port} - {latency_ms:.2f}ms",
-                data=result
-            )
-        except socket.timeout:
-            result = {
-                'host': resolved_host,
-                'port': resolved_port,
-                'reachable': False,
-                'error': 'timeout'
-            }
-            context.set(output_var, result)
-            return ActionResult(
-                success=False,
-                message=f"Ping超时: {resolved_host}:{resolved_port}",
-                data=result
-            )
-        except Exception as e:
-            result = {
-                'host': resolved_host,
-                'port': resolved_port,
-                'reachable': False,
-                'error': str(e)
-            }
-            context.set(output_var, result)
-            return ActionResult(
-                success=False,
-                message=f"Ping失败: {str(e)}",
-                data=result
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['host', 'port']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'timeout': 5, 'output_var': 'ping_result'}
-
-
-class SocketScanAction(BaseAction):
-    """Scan ports on a host."""
-    action_type = "socket_scan"
-    display_name = "端口扫描"
-    description = "扫描主机端口"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute port scan.
-
-        Args:
-            context: Execution context.
-            params: Dict with host, ports, timeout, output_var.
-
-        Returns:
-            ActionResult with open ports.
-        """
-        host = params.get('host', '')
-        ports = params.get('ports', [21, 22, 23, 25, 80, 443, 3306, 5432, 6379, 8080])
-        timeout = params.get('timeout', 2)
-        output_var = params.get('output_var', 'scan_results')
-
-        valid, msg = self.validate_type(host, str, 'host')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_host = context.resolve_value(host)
-            resolved_ports = context.resolve_value(ports)
-            resolved_timeout = context.resolve_value(timeout)
-
-            if isinstance(resolved_ports, str):
-                resolved_ports = [int(p.strip()) for p in resolved_ports.split(',')]
-
-            open_ports = []
-
-            for port in resolved_ports:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(int(resolved_timeout))
-                try:
-                    result = sock.connect_ex((resolved_host, int(port)))
-                    if result == 0:
-                        open_ports.append(port)
-                except:
-                    pass
-                finally:
-                    sock.close()
-
-            context.set(output_var, open_ports)
-
-            return ActionResult(
-                success=True,
-                message=f"扫描完成: {len(open_ports)}/{len(resolved_ports)} 端口开放",
-                data={'open_ports': open_ports, 'total': len(resolved_ports), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"端口扫描失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['host']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'ports': [21, 22, 23, 25, 80, 443, 3306, 5432, 6379, 8080], 'timeout': 2, 'output_var': 'scan_results'}
+import select
+from typing import Dict, Any, Optional, List
+
+
+def create_tcp_client(
+    host: str,
+    port: int,
+    timeout: float = 10.0
+) -> socket.socket:
+    """
+    Create a TCP client socket.
+
+    Args:
+        host: Server hostname.
+        port: Server port.
+        timeout: Socket timeout.
+
+    Returns:
+        Connected socket.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect((host, port))
+    return sock
+
+
+def create_udp_client(
+    host: str,
+    port: int
+) -> socket.socket:
+    """
+    Create a UDP socket.
+
+    Args:
+        host: Server hostname.
+        port: Server port.
+
+    Returns:
+        UDP socket.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.connect((host, port))
+    return sock
+
+
+def send_tcp_message(
+    host: str,
+    port: int,
+    message: str,
+    timeout: float = 10.0
+) -> Dict[str, Any]:
+    """
+    Send a message via TCP and receive response.
+
+    Args:
+        host: Server hostname.
+        port: Server port.
+        message: Message to send.
+        timeout: Socket timeout.
+
+    Returns:
+        Response data.
+    """
+    try:
+        sock = create_tcp_client(host, port, timeout)
+
+        sock.sendall(message.encode('utf-8'))
+
+        data = sock.recv(4096)
+
+        sock.close()
+
+        return {
+            'success': True,
+            'response': data.decode('utf-8', errors='replace'),
+            'host': host,
+            'port': port,
+        }
+    except socket.timeout:
+        return {
+            'success': False,
+            'error': 'Connection timed out',
+        }
+    except socket.error as e:
+        return {
+            'success': False,
+            'error': str(e),
+        }
+
+
+def send_udp_message(
+    host: str,
+    port: int,
+    message: str
+) -> Dict[str, Any]:
+    """
+    Send a UDP datagram.
+
+    Args:
+        host: Server hostname.
+        port: Server port.
+        message: Message to send.
+
+    Returns:
+        Send result.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(message.encode('utf-8'), (host, port))
+        sock.close()
+
+        return {
+            'success': True,
+            'host': host,
+            'port': port,
+        }
+    except socket.error as e:
+        return {
+            'success': False,
+            'error': str(e),
+        }
+
+
+def start_tcp_server(
+    host: str,
+    port: int,
+    handler: callable,
+    timeout: float = 30.0
+) -> None:
+    """
+    Start a TCP server.
+
+    Args:
+        host: Bind address.
+        port: Bind port.
+        handler: Callback function(client_socket, address).
+        timeout: Connection timeout.
+    """
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((host, port))
+    server.listen(5)
+
+    server.settimeout(timeout)
+
+    try:
+        while True:
+            client, address = server.accept()
+            handler(client, address)
+            client.close()
+    except socket.timeout:
+        pass
+    finally:
+        server.close()
+
+
+def port_is_open(
+    host: str,
+    port: int,
+    timeout: float = 3.0
+) -> bool:
+    """
+    Check if a port is open.
+
+    Args:
+        host: Hostname.
+        port: Port number.
+        timeout: Connection timeout.
+
+    Returns:
+        True if port is open.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+
+    try:
+        sock.connect((host, port))
+        sock.close()
+        return True
+    except socket.error:
+        return False
+
+
+def scan_ports(
+    host: str,
+    ports: List[int],
+    timeout: float = 1.0
+) -> List[int]:
+    """
+    Scan multiple ports on a host.
+
+    Args:
+        host: Hostname.
+        ports: List of ports to scan.
+        timeout: Connection timeout per port.
+
+    Returns:
+        List of open ports.
+    """
+    open_ports = []
+
+    for port in ports:
+        if port_is_open(host, port, timeout):
+            open_ports.append(port)
+
+    return open_ports
+
+
+def resolve_hostname(hostname: str) -> Optional[str]:
+    """
+    Resolve hostname to IP address.
+
+    Args:
+        hostname: Hostname to resolve.
+
+    Returns:
+        IP address or None.
+    """
+    try:
+        return socket.gethostbyname(hostname)
+    except socket.gaierror:
+        return None
+
+
+def get_local_ip() -> str:
+    """
+    Get the local machine's IP address.
+
+    Returns:
+        Local IP address.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(('8.8.8.8', 80))
+        ip = sock.getsockname()[0]
+        sock.close()
+        return ip
+    except socket.error:
+        return '127.0.0.1'
+
+
+def reverse_dns_lookup(ip: str) -> Optional[str]:
+    """
+    Perform reverse DNS lookup.
+
+    Args:
+        ip: IP address.
+
+    Returns:
+        Hostname or None.
+    """
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except socket.herror:
+        return None
+
+
+def create_tcp_server_simple(
+    host: str,
+    port: int,
+    max_connections: int = 5
+) -> socket.socket:
+    """
+    Create a TCP server socket (without listening).
+
+    Args:
+        host: Bind address.
+        port: Bind port.
+        max_connections: Maximum backlog connections.
+
+    Returns:
+        Server socket.
+    """
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((host, port))
+    server.listen(max_connections)
+    return server
+
+
+def accept_connection(server: socket.socket, timeout: float = 30.0) -> tuple:
+    """
+    Accept a connection on server socket.
+
+    Args:
+        server: Server socket.
+        timeout: Accept timeout.
+
+    Returns:
+        Tuple of (client_socket, address).
+    """
+    server.settimeout(timeout)
+
+    try:
+        return server.accept()
+    except socket.timeout:
+        raise TimeoutError("Accept timed out")
+
+
+def send_data(sock: socket.socket, data: bytes) -> bool:
+    """
+    Send data through socket.
+
+    Args:
+        sock: Socket object.
+        data: Data to send.
+
+    Returns:
+        True if sent successfully.
+    """
+    try:
+        sock.sendall(data)
+        return True
+    except socket.error:
+        return False
+
+
+def receive_data(
+    sock: socket.socket,
+    buffer_size: int = 4096,
+    timeout: float = 10.0
+) -> Optional[bytes]:
+    """
+    Receive data from socket.
+
+    Args:
+        sock: Socket object.
+        buffer_size: Receive buffer size.
+        timeout: Receive timeout.
+
+    Returns:
+        Received data or None.
+    """
+    sock.settimeout(timeout)
+
+    try:
+        data = sock.recv(buffer_size)
+        return data if data else None
+    except socket.timeout:
+        return None
+
+
+def close_socket(sock: socket.socket) -> None:
+    """
+    Safely close a socket.
+
+    Args:
+        sock: Socket to close.
+    """
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except socket.error:
+        pass
+
+    try:
+        sock.close()
+    except socket.error:
+        pass
+
+
+def socket_pair() -> tuple:
+    """
+    Create a pair of connected sockets.
+
+    Returns:
+        Tuple of (sock1, sock2).
+    """
+    return socket.socketpair()
+
+
+def get_service_name(port: int, protocol: str = 'tcp') -> str:
+    """
+    Get service name for port.
+
+    Args:
+        port: Port number.
+        protocol: Protocol ('tcp' or 'udp').
+
+    Returns:
+        Service name or empty string.
+    """
+    try:
+        return socket.getservbyport(port, protocol)
+    except OSError:
+        return ''
+
+
+def is_ipv4(address: str) -> bool:
+    """
+    Check if address is IPv4.
+
+    Args:
+        address: IP address string.
+
+    Returns:
+        True if IPv4.
+    """
+    try:
+        socket.inet_pton(socket.AF_INET, address)
+        return True
+    except socket.error:
+        return False
+
+
+def is_ipv6(address: str) -> bool:
+    """
+    Check if address is IPv6.
+
+    Args:
+        address: IP address string.
+
+    Returns:
+        True if IPv6.
+    """
+    try:
+        socket.inet_pton(socket.AF_INET6, address)
+        return True
+    except socket.error:
+        return False
+
+
+def create_udp_server(
+    host: str,
+    port: int,
+    max_packet_size: int = 65535
+) -> socket.socket:
+    """
+    Create a UDP server socket.
+
+    Args:
+        host: Bind address.
+        port: Bind port.
+        max_packet_size: Maximum receive packet size.
+
+    Returns:
+        Server socket.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    return sock
+
+
+def recvfrom_udp(
+    sock: socket.socket,
+    buffer_size: int = 65535
+) -> tuple:
+    """
+    Receive datagram from UDP socket.
+
+    Args:
+        sock: UDP socket.
+        buffer_size: Buffer size.
+
+    Returns:
+        Tuple of (data, address).
+    """
+    return sock.recvfrom(buffer_size)
+
+
+def sendto_udp(
+    sock: socket.socket,
+    data: bytes,
+    address: tuple
+) -> int:
+    """
+    Send datagram to UDP socket.
+
+    Args:
+        sock: UDP socket.
+        data: Data to send.
+        address: (host, port) tuple.
+
+    Returns:
+        Number of bytes sent.
+    """
+    return sock.sendto(data, address)
+
+
+def set_socket_timeout(sock: socket.socket, timeout: float) -> None:
+    """
+    Set socket timeout.
+
+    Args:
+        sock: Socket object.
+        timeout: Timeout in seconds.
+    """
+    sock.settimeout(timeout)
+
+
+def set_socketBlocking(sock: socket.socket, blocking: bool) -> None:
+    """
+    Set socket blocking mode.
+
+    Args:
+        sock: Socket object.
+        blocking: True for blocking, False for non-blocking.
+    """
+    sock.setblocking(blocking)
+
+
+def get_socket_info(sock: socket.socket) -> Dict[str, Any]:
+    """
+    Get socket connection information.
+
+    Args:
+        sock: Socket object.
+
+    Returns:
+        Socket information.
+    """
+    try:
+        local = sock.getsockname()
+        remote = sock.getpeername()
+
+        return {
+            'local_address': local[0],
+            'local_port': local[1],
+            'remote_address': remote[0],
+            'remote_port': remote[1],
+            'family': sock.family,
+            'type': sock.type,
+            'proto': sock.proto,
+        }
+    except socket.error:
+        return {'error': 'Socket not connected'}
+
+
+def check_connection_alive(sock: socket.socket) -> bool:
+    """
+    Check if socket connection is still alive.
+
+    Args:
+        sock: Socket object.
+
+    Returns:
+        True if connection is alive.
+    """
+    try:
+        sock.setblocking(False)
+        ready = select.select([sock], [], [], 0)
+
+        if ready[0]:
+            data = sock.recv(1, socket.MSG_PEEK)
+            if data == b'':
+                return False
+
+        sock.setblocking(True)
+        return True
+    except:
+        return False
