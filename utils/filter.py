@@ -8,13 +8,13 @@ Provides:
 
 import fnmatch
 import re
-from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
+from typing import Any, Callable, Dict, Generic, Iterable, List, Optional, TypeVar
 
 
 T = TypeVar("T")
 
 
-class Filter:
+class Filter(Generic[T]):
     """Base filter class."""
 
     def matches(self, item: T) -> bool:
