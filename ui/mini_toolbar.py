@@ -201,7 +201,7 @@ class MiniToolbar(QWidget):
             self.run_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {colors['warning']};
-                    color: white;
+                    color: {colors['text_primary']};
                     border: none;
                     border-radius: 4px;
                     padding: 6px 12px;
