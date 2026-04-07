@@ -1,0 +1,117 @@
+{
+  "name": "Government Permit Processing Workflow",
+  "description": "Automate government permit processing",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "permits_to_process": 47,
+    "current_permit": 0,
+    "processed_permits": 0,
+    "rejected_permits": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "permit_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize permit counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open permit processing system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "permit_processing_loop",
+      "count": "{{permits_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start permit processing loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select permit for processing"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for processing"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/permit_processing_{{permit_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture permit screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "permit_counter",
+      "value": "{{permit_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment permit counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{permit_counter < permits_to_process}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more permits"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next permit"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/government_permit_processing_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
