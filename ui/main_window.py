@@ -495,9 +495,13 @@ class StepListWidget(QWidget):
         btn_layout = QHBoxLayout()
 
         self.add_btn = QPushButton("添加步骤")
+        self.add_btn.setStyleSheet(theme_manager.get_button_stylesheet('success'))
         self.remove_btn = QPushButton("删除")
+        self.remove_btn.setStyleSheet(theme_manager.get_button_stylesheet('danger'))
         self.up_btn = QPushButton("↑")
+        self.up_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         self.down_btn = QPushButton("↓")
+        self.down_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
 
         self.up_btn.setMaximumWidth(40)
         self.down_btn.setMaximumWidth(40)
