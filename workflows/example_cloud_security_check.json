@@ -1,0 +1,117 @@
+{
+  "name": "Cloud Security Posture Check Workflow",
+  "description": "Automate cloud security posture verification",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "cloud_services": 18,
+    "current_service": 0,
+    "secure_count": 0,
+    "misconfigured_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "service_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize service counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open cloud security dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "cloud_posture_loop",
+      "count": "{{cloud_services}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start cloud posture loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click service"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for posture check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/cloud_posture_{{service_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture cloud screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "service_counter",
+      "value": "{{service_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment service counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{service_counter < cloud_services}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more services"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next service"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/cloud_security_posture_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
