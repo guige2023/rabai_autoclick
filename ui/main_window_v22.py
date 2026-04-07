@@ -1138,23 +1138,24 @@ class LogWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
-    
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.text_edit = QTextEdit()
         self.text_edit.setReadOnly(True)
-        self.text_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
+        colors = theme_manager.colors
+        self.text_edit.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {colors['status_bar']};
+                color: {colors['status_text']};
                 font-family: Consolas, 'Microsoft YaHei';
                 font-size: 12px;
-            }
+            }}
         """)
         layout.addWidget(self.text_edit)
-        
+
         btn_layout = QHBoxLayout()
         clear_btn = QPushButton("清空日志")
         export_btn = QPushButton("导出日志")
