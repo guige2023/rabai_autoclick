@@ -1462,6 +1462,8 @@ class RecTab(BaseTab):
     def _add_action(self) -> None:
         """
         Manually add an action to the current recording.
+        
+        Validates X/Y coordinates are integers if provided.
         """
         rec_id = self.add_action_rec_id_var.get()
         if not rec_id:
@@ -1470,18 +1472,33 @@ class RecTab(BaseTab):
 
         def do_add():
             converter = create_screen_recorder(str(DATA_DIR))
-            action_data = {
+            action_data: Dict[str, Any] = {
                 "action_type": self.add_action_type_var.get(),
                 "timestamp": time.time()
             }
-            if self.add_action_x_var.get():
-                action_data["x"] = int(self.add_action_x_var.get())
-            if self.add_action_y_var.get():
-                action_data["y"] = int(self.add_action_y_var.get())
-            if self.add_action_text_var.get():
-                action_data["text"] = self.add_action_text_var.get()
-            if self.add_action_key_var.get():
-                action_data["key"] = self.add_action_key_var.get()
+            
+            x_str = self.add_action_x_var.get()
+            y_str = self.add_action_y_var.get()
+            
+            if x_str:
+                try:
+                    action_data["x"] = int(x_str)
+                except ValueError:
+                    return False
+            if y_str:
+                try:
+                    action_data["y"] = int(y_str)
+                except ValueError:
+                    return False
+            
+            text_val = self.add_action_text_var.get()
+            if text_val:
+                action_data["text"] = text_val
+            
+            key_val = self.add_action_key_var.get()
+            if key_val:
+                action_data["key"] = key_val
+            
             return converter.add_action(rec_id, action_data)
 
         def show_result(success):
