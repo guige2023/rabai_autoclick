@@ -1,0 +1,117 @@
+{
+  "name": "Manufacturing Shipment Tracking Workflow",
+  "description": "Automate manufacturing shipment tracking",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "shipments_to_track": 63,
+    "current_shipment": 0,
+    "tracked_shipments": 0,
+    "delivery_delays": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "shipment_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize shipment counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open shipment tracking system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "shipment_tracking_loop",
+      "count": "{{shipments_to_track}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start shipment tracking loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select shipment for tracking"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for tracking update"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/shipment_tracking_{{shipment_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture shipment screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "shipment_counter",
+      "value": "{{shipment_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment shipment counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{shipment_counter < shipments_to_track}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more shipments"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next shipment"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/manufacturing_shipment_tracking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
