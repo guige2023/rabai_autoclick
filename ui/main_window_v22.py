@@ -2883,7 +2883,7 @@ class MainWindow(QMainWindow):
         self.showMinimized()
         QTimer.singleShot(500, self._create_region_selector)
     
-    def _create_region_selector(self):
+    def _create_region_selector(self) -> None:
         try:
             self._region_selector = RegionSelector(mode='region')
             self._region_selector._parent_window = self
