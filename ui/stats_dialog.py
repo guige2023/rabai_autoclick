@@ -6,6 +6,7 @@ and workflow execution history.
 
 import os
 import sys
+import contextlib
 from typing import Dict, Any, List, Optional
 
 from PyQt5.QtCore import Qt
@@ -15,6 +16,17 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QHeaderView, QLabel, QPushButton, QTabWidget,
     QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget
 )
+
+
+@contextlib.contextmanager
+def _batch_updates(widget):
+    """Context manager to batch UI updates for performance."""
+    widget.setUpdatesEnabled(False)
+    try:
+        yield
+    finally:
+        widget.setUpdatesEnabled(True)
+        widget.update()
 
 
 # Add project root to path
@@ -216,102 +228,105 @@ class StatsDialog(QDialog):
             )
         
         # Populate step statistics table
-        self.step_table.setRowCount(0)
-        for stype, stats in summary['step_stats'].items():
-            row = self.step_table.rowCount()
-            self.step_table.insertRow(row)
-            self.step_table.setItem(
-                row, 0, QTableWidgetItem(stype)
-            )
-            self.step_table.setItem(
-                row, 1, QTableWidgetItem(str(stats['count']))
-            )
-            self.step_table.setItem(
-                row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒")
-            )
-            self.step_table.setItem(
-                row, 3, QTableWidgetItem(f"{stats['total_duration']:.1f}秒")
-            )
-            self.step_table.setItem(
-                row, 4, QTableWidgetItem(f"{stats['success_rate']:.1f}%")
-            )
-        
+        with _batch_updates(self.step_table):
+            self.step_table.setRowCount(0)
+            for stype, stats in summary['step_stats'].items():
+                row = self.step_table.rowCount()
+                self.step_table.insertRow(row)
+                self.step_table.setItem(
+                    row, 0, QTableWidgetItem(stype)
+                )
+                self.step_table.setItem(
+                    row, 1, QTableWidgetItem(str(stats['count']))
+                )
+                self.step_table.setItem(
+                    row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒")
+                )
+                self.step_table.setItem(
+                    row, 3, QTableWidgetItem(f"{stats['total_duration']:.1f}秒")
+                )
+                self.step_table.setItem(
+                    row, 4, QTableWidgetItem(f"{stats['success_rate']:.1f}%")
+                )
+
         # Populate step performance table
         step_perf = execution_stats.get_step_performance()
-        self.step_perf_table.setRowCount(0)
-        
-        all_errors: List[str] = []
-        for stype, stats in step_perf.items():
-            row = self.step_perf_table.rowCount()
-            self.step_perf_table.insertRow(row)
-            self.step_perf_table.setItem(
-                row, 0, QTableWidgetItem(stype)
-            )
-            self.step_perf_table.setItem(
-                row, 1, QTableWidgetItem(str(stats['count']))
-            )
-            self.step_perf_table.setItem(
-                row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒")
-            )
-            self.step_perf_table.setItem(
-                row, 3, QTableWidgetItem(f"{stats['min_duration']:.2f}秒")
-            )
-            self.step_perf_table.setItem(
-                row, 4, QTableWidgetItem(f"{stats['max_duration']:.2f}秒")
-            )
-            self.step_perf_table.setItem(
-                row, 5, QTableWidgetItem(f"{stats['success_rate']:.1f}%")
-            )
-            self.step_perf_table.setItem(
-                row, 6, QTableWidgetItem(str(stats['error_count']))
-            )
-            
-            if stats['common_errors']:
-                all_errors.extend(
-                    [f"[{stype}] {e}" for e in stats['common_errors']]
+        with _batch_updates(self.step_perf_table):
+            self.step_perf_table.setRowCount(0)
+
+            all_errors: List[str] = []
+            for stype, stats in step_perf.items():
+                row = self.step_perf_table.rowCount()
+                self.step_perf_table.insertRow(row)
+                self.step_perf_table.setItem(
+                    row, 0, QTableWidgetItem(stype)
                 )
-        
+                self.step_perf_table.setItem(
+                    row, 1, QTableWidgetItem(str(stats['count']))
+                )
+                self.step_perf_table.setItem(
+                    row, 2, QTableWidgetItem(f"{stats['avg_duration']:.2f}秒")
+                )
+                self.step_perf_table.setItem(
+                    row, 3, QTableWidgetItem(f"{stats['min_duration']:.2f}秒")
+                )
+                self.step_perf_table.setItem(
+                    row, 4, QTableWidgetItem(f"{stats['max_duration']:.2f}秒")
+                )
+                self.step_perf_table.setItem(
+                    row, 5, QTableWidgetItem(f"{stats['success_rate']:.1f}%")
+                )
+                self.step_perf_table.setItem(
+                    row, 6, QTableWidgetItem(str(stats['error_count']))
+                )
+
+                if stats['common_errors']:
+                    all_errors.extend(
+                        [f"[{stype}] {e}" for e in stats['common_errors']]
+                    )
+
         self.error_text.setText(
             '\n'.join(all_errors[-20:]) if all_errors else "暂无错误记录"
         )
-        
+
         # Populate history table
         recent = execution_stats.get_recent_sessions(30)
-        self.history_table.setRowCount(0)
-        
-        for session in recent:
-            row = self.history_table.rowCount()
-            self.history_table.insertRow(row)
-            
-            self.history_table.setItem(
-                row, 0, QTableWidgetItem(session.get('date', '-'))
-            )
-            self.history_table.setItem(
-                row, 1,
-                QTableWidgetItem(session.get('workflow_name', '-')[:20])
-            )
-            self.history_table.setItem(
-                row, 2, QTableWidgetItem(str(session.get('loop_count', 1)))
-            )
-            
-            total_dur = session.get('total_duration', 0)
-            self.history_table.setItem(
-                row, 3, QTableWidgetItem(f"{total_dur:.1f}秒")
-            )
-            
-            avg_dur = session.get('avg_loop_duration', 0)
-            self.history_table.setItem(
-                row, 4, QTableWidgetItem(f"{avg_dur:.1f}秒")
-            )
-            
-            status = "✓ 成功" if session.get('success', False) else "✗ 失败"
-            status_item = QTableWidgetItem(status)
-            if session.get('success', False):
-                status_item.setForeground(QColor(self._colors['success']))
-            else:
-                status_item.setForeground(QColor(self._colors['error']))
-            self.history_table.setItem(row, 5, status_item)
-    
+        with _batch_updates(self.history_table):
+            self.history_table.setRowCount(0)
+
+            for session in recent:
+                row = self.history_table.rowCount()
+                self.history_table.insertRow(row)
+
+                self.history_table.setItem(
+                    row, 0, QTableWidgetItem(session.get('date', '-'))
+                )
+                self.history_table.setItem(
+                    row, 1,
+                    QTableWidgetItem(session.get('workflow_name', '-')[:20])
+                )
+                self.history_table.setItem(
+                    row, 2, QTableWidgetItem(str(session.get('loop_count', 1)))
+                )
+
+                total_dur = session.get('total_duration', 0)
+                self.history_table.setItem(
+                    row, 3, QTableWidgetItem(f"{total_dur:.1f}秒")
+                )
+
+                avg_dur = session.get('avg_loop_duration', 0)
+                self.history_table.setItem(
+                    row, 4, QTableWidgetItem(f"{avg_dur:.1f}秒")
+                )
+
+                status = "✓ 成功" if session.get('success', False) else "✗ 失败"
+                status_item = QTableWidgetItem(status)
+                if session.get('success', False):
+                    status_item.setForeground(QColor(self._colors['success']))
+                else:
+                    status_item.setForeground(QColor(self._colors['error']))
+                self.history_table.setItem(row, 5, status_item)
+
     def _clear_history(self) -> None:
         """Clear all execution history after confirmation."""
         from PyQt5.QtWidgets import QMessageBox
