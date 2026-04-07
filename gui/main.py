@@ -1664,7 +1664,7 @@ class RecTab(BaseTab):
 
         ttk.Label(frame, text="检测模式:").grid(row=2, column=0, sticky=tk.W, pady=5)
         self.convert_mode_var = tk.StringVar(value="image")
-        ttk.Combobox(frame, textvariable=self.convert_mode_var, values=["image", "text", "coordinate"], width=30).grid(row=2, column=1, sticky=tk.W, pady=5)
+        ttk.Combobox(frame, textvariable=self.convert_mode_var, values=DETECTION_MODES, width=30).grid(row=2, column=1, sticky=tk.W, pady=5)
 
         ttk.Button(frame, text="🔄 转换为工作流", command=self._convert_workflow).grid(row=3, column=0, columnspan=2, pady=15)
 
