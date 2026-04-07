@@ -2996,9 +2996,21 @@ class MainWindow(QMainWindow):
                 self.teaching_btn.setStyleSheet("")
                 show_toast("按键显示已关闭", 'info')
                 return
-        
+
         super().keyPressEvent(event)
-    
+
+    def changeEvent(self, event):
+        """Handle window state changes to optimize timer usage."""
+        if event.type() == event.WindowStateChange:
+            if self.windowState() & Qt.WindowMinimized:
+                # Pause memory timer when minimized to save resources
+                self._memory_timer.stop()
+            elif self.windowState() & Qt.WindowNoState:
+                # Resume when restored
+                if not self._memory_timer.isActive():
+                    self._memory_timer.start()
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         self._memory_timer.stop()
         self.hotkey_manager.unregister_hotkeys()
