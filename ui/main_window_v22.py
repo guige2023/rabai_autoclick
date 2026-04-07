@@ -1528,21 +1528,22 @@ class PredictiveWidget(QWidget):
     
     def _refresh_predictions(self):
         prediction = self.engine.predict_next_action()
-        
+
         if prediction:
             self.prediction_label.setText(
                 f"🎯 预测动作: {prediction.predicted_action}\n"
                 f"📈 置信度: {prediction.confidence:.0%}\n"
                 f"💡 推理: {prediction.reasoning}"
             )
-            
-            self.alternatives_list.clear()
-            for alt in prediction.alternatives:
-                self.alternatives_list.addItem(f"• {alt}")
+
+            with batch_updates(self.alternatives_list):
+                self.alternatives_list.clear()
+                for alt in prediction.alternatives:
+                    self.alternatives_list.addItem(f"• {alt}")
         else:
             self.prediction_label.setText("暂无足够数据进行预测，请先执行一些工作流")
             self.alternatives_list.clear()
-        
+
         self._update_stats()
     
     def _on_alternative_clicked(self, item):
@@ -1815,13 +1816,14 @@ class ShareWidget(QWidget):
                 show_error("导入失败", f"读取文件失败: {str(e)}")
     
     def _refresh_links(self):
-        self.links_list.clear()
-        try:
-            links = self.share_system.list_shared_workflows()
-            for link in links:
-                self.links_list.addItem(f"🔗 {link.link_id} - {link.workflow_name} (查看: {link.view_count})")
-        except Exception:
-            self.links_list.addItem("暂无分享链接")
+        with batch_updates(self.links_list):
+            self.links_list.clear()
+            try:
+                links = self.share_system.list_shared_workflows()
+                for link in links:
+                    self.links_list.addItem(f"🔗 {link.link_id} - {link.workflow_name} (查看: {link.view_count})")
+            except Exception:
+                self.links_list.addItem("暂无分享链接")
 
 
 class MainWindow(QMainWindow):
