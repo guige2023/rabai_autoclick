@@ -1,0 +1,146 @@
+{
+  "name": "System Health Check Workflow",
+  "description": "Automated system health monitoring and alerting",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "check_interval": 300,
+    "max_checks": 100,
+    "current_check": 0,
+    "cpu_threshold": 80,
+    "memory_threshold": 85
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "check_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize check counter"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "health_check_loop",
+      "count": "{{max_checks}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start health check loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open Task Manager"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for Task Manager"
+    },
+    {
+      "id": 5,
+      "type": "screenshot",
+      "save_path": "./screenshots/health_check_{{check_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture system screenshot"
+    },
+    {
+      "id": 6,
+      "type": "ocr",
+      "region": [50, 50, 300, 150],
+      "output_var": "cpu_usage",
+      "pre_delay": 0.3,
+      "comment": "Read CPU usage"
+    },
+    {
+      "id": 7,
+      "type": "condition",
+      "condition": "{{cpu_usage.includes('High')}}",
+      "true_next": 8,
+      "false_next": 10,
+      "pre_delay": 0.1,
+      "comment": "Check CPU status"
+    },
+    {
+      "id": 8,
+      "type": "click_image",
+      "template": "./templates/alert_icon.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Trigger alert"
+    },
+    {
+      "id": 9,
+      "type": "goto",
+      "step_id": 12,
+      "pre_delay": 0.1,
+      "comment": "Skip to next check"
+    },
+    {
+      "id": 10,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "CPU normal"
+    },
+    {
+      "id": 11,
+      "type": "key_press",
+      "key": "escape",
+      "pre_delay": 0.2,
+      "comment": "Close Task Manager"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "check_counter",
+      "value": "{{check_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment check counter"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{check_counter < max_checks}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more checks"
+    },
+    {
+      "id": 14,
+      "type": "delay",
+      "seconds": "{{check_interval}}",
+      "pre_delay": 0.5,
+      "comment": "Wait before next check"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/health_summary.png",
+      "pre_delay": 0.5,
+      "comment": "Capture final summary"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": false
+  }
+}

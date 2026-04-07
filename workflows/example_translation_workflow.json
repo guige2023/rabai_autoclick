@@ -1,0 +1,148 @@
+{
+  "name": "Translation Workflow",
+  "description": "Automate content translation across multiple languages",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "source_lang": "en",
+    "target_lang": "zh",
+    "content_items": 5,
+    "current_item": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "item_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize item counter"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "translation_loop",
+      "count": "{{content_items}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start translation loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "type_text",
+      "text": "https://translate.google.com",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Open Google Translate"
+    },
+    {
+      "id": 5,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for translation page"
+    },
+    {
+      "id": 6,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click source text area"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/translation_input_{{item_counter}}.png",
+      "pre_delay": 0.3,
+      "comment": "Capture input state"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "Sample text {{item_counter}} for translation testing",
+      "enter_after": false,
+      "pre_delay": 0.3,
+      "comment": "Enter text to translate"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for translation"
+    },
+    {
+      "id": 10,
+      "type": "screenshot",
+      "save_path": "./screenshots/translation_output_{{item_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture translated text"
+    },
+    {
+      "id": 11,
+      "type": "ocr",
+      "region": [400, 200, 700, 400],
+      "output_var": "translated_text",
+      "pre_delay": 0.3,
+      "comment": "Extract translated text"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "item_counter",
+      "value": "{{item_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment item counter"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{item_counter < content_items}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more items"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 6,
+      "pre_delay": 0.2,
+      "comment": "Continue translating"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/translation_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
