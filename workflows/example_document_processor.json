@@ -1,0 +1,178 @@
+{
+  "name": "Document Processor Workflow",
+  "description": "Process and organize documents automatically",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "source_folder": "./documents/inbox",
+    "processed_folder": "./documents/processed",
+    "documents_to_process": 25,
+    "current_doc": 0,
+    "pdf_count": 0,
+    "doc_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "doc_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize document counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open source folder"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.5,
+      "comment": "Wait for folder"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "process_loop",
+      "count": "{{documents_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start processing loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 150,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Select document"
+    },
+    {
+      "id": 6,
+      "type": "key_press",
+      "keys": ["ctrl", "i"],
+      "pre_delay": 0.2,
+      "comment": "Open document info"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for info"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/doc_info_{{doc_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture document info"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "key": "escape",
+      "pre_delay": 0.2,
+      "comment": "Close info"
+    },
+    {
+      "id": 10,
+      "type": "key_press",
+      "keys": ["ctrl", "c"],
+      "pre_delay": 0.2,
+      "comment": "Copy document"
+    },
+    {
+      "id": 11,
+      "type": "click",
+      "x": 600,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Navigate to processed folder"
+    },
+    {
+      "id": 12,
+      "type": "key_press",
+      "keys": ["ctrl", "v"],
+      "pre_delay": 0.5,
+      "comment": "Paste document"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for paste"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/doc_processed_{{doc_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture processed state"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "doc_counter",
+      "value": "{{doc_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment document counter"
+    },
+    {
+      "id": 16,
+      "type": "key_press",
+      "key": "down",
+      "pre_delay": 0.2,
+      "comment": "Move to next document"
+    },
+    {
+      "id": 17,
+      "type": "condition",
+      "condition": "{{doc_counter < documents_to_process}}",
+      "true_next": 18,
+      "false_next": 19,
+      "pre_delay": 0.1,
+      "comment": "Check if more documents"
+    },
+    {
+      "id": 18,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue processing"
+    },
+    {
+      "id": 19,
+      "type": "screenshot",
+      "save_path": "./screenshots/documents_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 20,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
