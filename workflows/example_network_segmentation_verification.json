@@ -1,0 +1,117 @@
+{
+  "name": "Network Segmentation Verification Workflow",
+  "description": "Automate network segmentation testing",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "network_segments_to_verify": 45,
+    "current_segment": 0,
+    "properly_segmented": 0,
+    "breached_segments": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "segment_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize segment counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open network testing tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "segmentation_verification_loop",
+      "count": "{{network_segments_to_verify}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start segmentation verification loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select network segment"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for segmentation test"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/segmentation_verify_{{segment_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture segmentation screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "segment_counter",
+      "value": "{{segment_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment segment counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{segment_counter < network_segments_to_verify}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more segments"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next segment"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/network_segmentation_verification_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
