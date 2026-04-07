@@ -14,6 +14,8 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QApplication, QRubberBand, QWidget
 
+from ui.theme import theme_manager
+
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(
@@ -107,15 +109,17 @@ class RegionSelector(QWidget):
                 self._selection_rect.height(),
                 overlay
             )
-            
+
             # Draw selection border with theme colors
-            pen = QPen(QColor(33, 150, 243), 2)  # Primary blue
+            colors = theme_manager.colors
+            primary_color = QColor(colors['primary'])
+            pen = QPen(primary_color, 2)
             painter.setPen(pen)
             painter.drawRect(self._selection_rect)
 
             # Draw corner handles for better visual feedback
             corner_size = 8
-            corner_color = QColor(33, 150, 243)
+            corner_color = QColor(colors['primary'])
             corners = [
                 # Top-left
                 (self._selection_rect.topLeft(), 1, 1),
