@@ -1,0 +1,162 @@
+{
+  "name": "Timesheet Approval Workflow",
+  "description": "Automate employee timesheet processing and approval",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "timesheets_to_process": 25,
+    "current_timesheet": 0,
+    "approved_count": 0,
+    "rejected_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "timesheet_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize timesheet counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open HR system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "timesheet_loop",
+      "count": "{{timesheets_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start timesheet loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click timesheet"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/timesheet_{{timesheet_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture timesheet screenshot"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{timesheet_counter % 8 == 0}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check timesheet accuracy"
+    },
+    {
+      "id": 9,
+      "type": "click",
+      "x": 300,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Reject timesheet"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 13,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 11,
+      "type": "click",
+      "x": 350,
+      "y": 350,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Approve timesheet"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "approved_count",
+      "value": "{{approved_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment approved count"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "timesheet_counter",
+      "value": "{{timesheet_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment timesheet counter"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{timesheet_counter < timesheets_to_process}}",
+      "true_next": 15,
+      "false_next": 16,
+      "pre_delay": 0.1,
+      "comment": "Check if more timesheets"
+    },
+    {
+      "id": 15,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next timesheet"
+    },
+    {
+      "id": 16,
+      "type": "screenshot",
+      "save_path": "./screenshots/timesheet_approval_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
