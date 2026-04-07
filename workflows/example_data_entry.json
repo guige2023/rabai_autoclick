@@ -1,0 +1,174 @@
+{
+  "name": "Data Entry Automation Workflow",
+  "description": "Automated data entry from spreadsheet to web form",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "current_row": 1,
+    "total_rows": 10,
+    "first_name": "John",
+    "last_name": "Doe",
+    "email": "john.doe@example.com",
+    "phone": "123-456-7890",
+    "form_url": "https://example.com/form"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "row_counter",
+      "value": 1,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize row counter"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "data_entry_loop",
+      "count": "{{total_rows}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start loop for data entry"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 100,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.5,
+      "comment": "Click first name field"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "key": "ctrl+a",
+      "pre_delay": 0.1,
+      "comment": "Select all text"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "delete",
+      "pre_delay": 0.1,
+      "comment": "Clear field"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "{{first_name}}",
+      "enter_after": false,
+      "pre_delay": 0.1,
+      "comment": "Enter first name"
+    },
+    {
+      "id": 7,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to next field (last name)"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{last_name}}",
+      "enter_after": false,
+      "pre_delay": 0.1,
+      "comment": "Enter last name"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to email field"
+    },
+    {
+      "id": 10,
+      "type": "type_text",
+      "text": "{{email}}",
+      "enter_after": false,
+      "pre_delay": 0.1,
+      "comment": "Enter email"
+    },
+    {
+      "id": 11,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to phone field"
+    },
+    {
+      "id": 12,
+      "type": "type_text",
+      "text": "{{phone}}",
+      "enter_after": false,
+      "pre_delay": 0.1,
+      "comment": "Enter phone number"
+    },
+    {
+      "id": 13,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to submit area"
+    },
+    {
+      "id": 14,
+      "type": "key_press",
+      "key": "enter",
+      "pre_delay": 0.5,
+      "comment": "Submit form"
+    },
+    {
+      "id": 15,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for form submission"
+    },
+    {
+      "id": 16,
+      "type": "click",
+      "x": 100,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.5,
+      "comment": "Click form link again"
+    },
+    {
+      "id": 17,
+      "type": "set_variable",
+      "name": "row_counter",
+      "value": "{{row_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.1,
+      "comment": "Increment row counter"
+    },
+    {
+      "id": 18,
+      "type": "condition",
+      "condition": "{{row_counter <= total_rows}}",
+      "true_next": 3,
+      "false_next": 19,
+      "pre_delay": 0.1,
+      "comment": "Check if more rows to process"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Final delay after all entries complete"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}

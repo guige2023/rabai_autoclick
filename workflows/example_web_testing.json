@@ -1,0 +1,231 @@
+{
+  "name": "Web Application Testing Workflow",
+  "description": "Automated UI testing for web applications",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "test_passed": 0,
+    "test_failed": 0,
+    "total_tests": 5,
+    "base_url": "https://example.com",
+    "username": "testuser",
+    "password": "testpass123"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "screenshot",
+      "save_path": "./screenshots/test_start.png",
+      "pre_delay": 1.0,
+      "comment": "Capture test start state"
+    },
+    {
+      "id": 2,
+      "type": "comment",
+      "text": "=== Starting Web Application Tests ===",
+      "pre_delay": 0.5,
+      "comment": "Log test start"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.1,
+      "comment": "Select all in address bar"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "delete",
+      "pre_delay": 0.1,
+      "comment": "Clear address bar"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "{{base_url}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to test URL"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for page to load"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/page_loaded.png",
+      "pre_delay": 0.5,
+      "comment": "Capture page loaded state"
+    },
+    {
+      "id": 9,
+      "type": "click_image",
+      "template": "./templates/login_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click login button"
+    },
+    {
+      "id": 10,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for login form"
+    },
+    {
+      "id": 11,
+      "type": "click",
+      "x": 300,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.2,
+      "comment": "Click username field"
+    },
+    {
+      "id": 12,
+      "type": "type_text",
+      "text": "{{username}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter username"
+    },
+    {
+      "id": 13,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to password field"
+    },
+    {
+      "id": 14,
+      "type": "type_text",
+      "text": "{{password}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter password"
+    },
+    {
+      "id": 15,
+      "type": "key_press",
+      "key": "enter",
+      "pre_delay": 0.5,
+      "comment": "Submit login form"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for login to complete"
+    },
+    {
+      "id": 17,
+      "type": "screenshot",
+      "save_path": "./screenshots/after_login.png",
+      "pre_delay": 0.5,
+      "comment": "Capture post-login state"
+    },
+    {
+      "id": 18,
+      "type": "ocr",
+      "region": [0, 0, 400, 100],
+      "output_var": "page_content",
+      "pre_delay": 0.3,
+      "comment": "Check login result text"
+    },
+    {
+      "id": 19,
+      "type": "condition",
+      "condition": "{{page_content.includes('dashboard') OR page_content.includes('welcome')}}",
+      "true_next": 20,
+      "false_next": 21,
+      "pre_delay": 0.1,
+      "comment": "Test 1: Verify login success"
+    },
+    {
+      "id": 20,
+      "type": "set_variable",
+      "name": "test_passed",
+      "value": "{{test_passed + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.1,
+      "comment": "Increment passed tests"
+    },
+    {
+      "id": 21,
+      "type": "set_variable",
+      "name": "test_failed",
+      "value": "{{test_failed + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.1,
+      "comment": "Increment failed tests"
+    },
+    {
+      "id": 22,
+      "type": "click",
+      "x": 500,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.5,
+      "comment": "Click menu button"
+    },
+    {
+      "id": 23,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for menu"
+    },
+    {
+      "id": 24,
+      "type": "screenshot",
+      "save_path": "./screenshots/menu_open.png",
+      "pre_delay": 0.5,
+      "comment": "Capture menu state"
+    },
+    {
+      "id": 25,
+      "type": "key_press",
+      "key": "escape",
+      "pre_delay": 0.3,
+      "comment": "Close menu"
+    },
+    {
+      "id": 26,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay before test summary"
+    },
+    {
+      "id": 27,
+      "type": "comment",
+      "text": "=== Tests Complete: {{test_passed}} passed, {{test_failed}} failed ===",
+      "pre_delay": 0.5,
+      "comment": "Log test summary"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}

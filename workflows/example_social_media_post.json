@@ -1,0 +1,138 @@
+{
+  "name": "Social Media Auto-Post Workflow",
+  "description": "Automates posting content to social media with image upload",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "post_count": 0,
+    "max_posts": 5,
+    "image_path": "./screenshots/template.png",
+    "message": "Hello from RabAI AutoClick! 🚀"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 0.5,
+      "comment": "Initialize post counter"
+    },
+    {
+      "id": 2,
+      "type": "click_image",
+      "template": "./templates/new_post_button.png",
+      "confidence": 0.85,
+      "pre_delay": 1.0,
+      "comment": "Click new post button"
+    },
+    {
+      "id": 3,
+      "type": "click_image",
+      "template": "./templates/image_upload.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Open image upload dialog"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for dialog to open"
+    },
+    {
+      "id": 5,
+      "type": "type_text",
+      "text": "{{image_path}}",
+      "enter_after": true,
+      "pre_delay": 0.5,
+      "comment": "Enter image file path"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for image to upload"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 400,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click message area"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{message}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter post message"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.3,
+      "comment": "Brief pause before submit"
+    },
+    {
+      "id": 10,
+      "type": "click_image",
+      "template": "./templates/submit_button.png",
+      "confidence": 0.85,
+      "pre_delay": 0.5,
+      "comment": "Click submit button"
+    },
+    {
+      "id": 11,
+      "type": "set_variable",
+      "name": "counter",
+      "value": "{{counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment post counter"
+    },
+    {
+      "id": 12,
+      "type": "condition",
+      "condition": "{{counter < max_posts}}",
+      "true_next": 13,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more posts needed"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 5.0,
+      "pre_delay": 0.5,
+      "comment": "Wait between posts (rate limiting)"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Go back to create new post"
+    },
+    {
+      "id": 15,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Final delay after all posts complete"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

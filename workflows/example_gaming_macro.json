@@ -1,0 +1,137 @@
+{
+  "name": "Gaming Combo Macro Workflow",
+  "description": "Automates repetitive gaming combo sequences",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "combo_count": 0,
+    "max_combos": 10,
+    "combo_delay_ms": 150
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 2.0,
+      "comment": "Delay to let user get into game position"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "combo_loop",
+      "count": "{{max_combos}}",
+      "loop_start": 3,
+      "pre_delay": 0.1,
+      "comment": "Execute combo sequence repeatedly"
+    },
+    {
+      "id": 3,
+      "type": "key_press",
+      "keys": ["w"],
+      "pre_delay": 0.05,
+      "comment": "Move forward"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": "{{combo_delay_ms / 1000}}",
+      "pre_delay": 0.02,
+      "comment": "Brief input delay"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "keys": ["j"],
+      "pre_delay": 0.02,
+      "comment": "Attack 1"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": "{{combo_delay_ms / 1000}}",
+      "pre_delay": 0.02,
+      "comment": "Input delay"
+    },
+    {
+      "id": 7,
+      "type": "key_press",
+      "keys": ["k"],
+      "pre_delay": 0.02,
+      "comment": "Attack 2"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": "{{combo_delay_ms / 1000}}",
+      "pre_delay": 0.02,
+      "comment": "Input delay"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "keys": ["l"],
+      "pre_delay": 0.02,
+      "comment": "Attack 3"
+    },
+    {
+      "id": 10,
+      "type": "delay",
+      "seconds": "{{combo_delay_ms / 1000}}",
+      "pre_delay": 0.02,
+      "comment": "Input delay"
+    },
+    {
+      "id": 11,
+      "type": "key_press",
+      "keys": ["space"],
+      "pre_delay": 0.02,
+      "comment": "Special move"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.1,
+      "comment": "Wait for special move animation"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "counter",
+      "value": "{{counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.05,
+      "comment": "Increment combo counter"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{counter < max_combos}}",
+      "true_next": 15,
+      "false_next": 16,
+      "pre_delay": 0.1,
+      "comment": "Check if more combos needed"
+    },
+    {
+      "id": 15,
+      "type": "goto",
+      "step_id": 3,
+      "pre_delay": 0.2,
+      "comment": "Repeat combo sequence"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay after all combos complete"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": false
+  }
+}

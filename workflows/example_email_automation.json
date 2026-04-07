@@ -1,0 +1,168 @@
+{
+  "name": "Email Automation Workflow",
+  "description": "Automates email-based tasks like sending templated responses",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "email_count": 0,
+    "max_emails": 5,
+    "recipient": "support@example.com",
+    "subject": "Auto Reply - Your inquiry has been received",
+    "body": "Thank you for your message. Our team will respond within 24 hours.",
+    "attachment_path": "./documents/response.pdf"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "click_image",
+      "template": "./templates/compose_button.png",
+      "confidence": 0.85,
+      "pre_delay": 1.0,
+      "comment": "Click compose new email button"
+    },
+    {
+      "id": 2,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for compose window"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 200,
+      "y": 150,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.2,
+      "comment": "Click recipient field"
+    },
+    {
+      "id": 4,
+      "type": "type_text",
+      "text": "{{recipient}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter recipient email"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to subject field"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "{{subject}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter email subject"
+    },
+    {
+      "id": 7,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to body field"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{body}}",
+      "enter_after": false,
+      "pre_delay": 0.3,
+      "comment": "Enter email body"
+    },
+    {
+      "id": 9,
+      "type": "click_image",
+      "template": "./templates/attach_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click attach button"
+    },
+    {
+      "id": 10,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for file dialog"
+    },
+    {
+      "id": 11,
+      "type": "type_text",
+      "text": "{{attachment_path}}",
+      "enter_after": true,
+      "pre_delay": 0.5,
+      "comment": "Enter attachment path"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for attachment to upload"
+    },
+    {
+      "id": 13,
+      "type": "screenshot",
+      "save_path": "./screenshots/email_preview.png",
+      "pre_delay": 0.5,
+      "comment": "Take preview screenshot for verification"
+    },
+    {
+      "id": 14,
+      "type": "click_image",
+      "template": "./templates/send_button.png",
+      "confidence": 0.85,
+      "pre_delay": 0.5,
+      "comment": "Click send button"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "email_count",
+      "value": "{{email_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment email counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{email_count < max_emails}}",
+      "true_next": 17,
+      "false_next": 19,
+      "pre_delay": 0.1,
+      "comment": "Check if more emails to send"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait before sending next email (rate limiting)"
+    },
+    {
+      "id": 18,
+      "type": "goto",
+      "step_id": 1,
+      "pre_delay": 0.2,
+      "comment": "Go back to compose new email"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Final delay after all emails sent"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
