@@ -1,0 +1,117 @@
+{
+  "name": "Security Threat Detection Tuning Ops Workflow",
+  "description": "Automate threat detection operations tuning",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "detections_to_tune": 50,
+    "current_detection": 0,
+    "tuned_detections": 0,
+    "pending_tuning": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "detection_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize detection counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open detection tuning platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "detection_tuning_loop",
+      "count": "{{detections_to_tune}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start detection tuning loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select detection rule"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for rule tuning"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/detection_tuning_{{detection_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture tuning screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "detection_counter",
+      "value": "{{detection_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment detection counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{detection_counter < detections_to_tune}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more detections"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next detection"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_threat_detection_tuning_ops_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
