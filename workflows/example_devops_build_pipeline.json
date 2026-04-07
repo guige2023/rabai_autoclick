@@ -1,0 +1,117 @@
+{
+  "name": "DevOps Build Pipeline Workflow",
+  "description": "Automate CI/CD build pipeline execution",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "build_stages_to_execute": 48,
+    "current_stage": 0,
+    "completed_stages": 0,
+    "failed_stages": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "stage_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize stage counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open CI/CD pipeline dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "build_pipeline_loop",
+      "count": "{{build_stages_to_execute}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start build pipeline loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Execute build stage"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for stage completion"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/build_stage_{{stage_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture build stage screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "stage_counter",
+      "value": "{{stage_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment stage counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{stage_counter < build_stages_to_execute}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more stages"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next stage"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/devops_build_pipeline_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
