@@ -29,7 +29,17 @@ class ToastWidget(QWidget):
         'info': 'ℹ',
         'success': '✓',
         'warning': '⚠',
-        'error': '✗'
+        'error': '✗',
+        'debug': '🔍',
+    }
+
+    # Subtle patterns for different toast types
+    PATTERNS: Dict[str, str] = {
+        'info': '',
+        'success': '',
+        'warning': '',
+        'error': '',
+        'debug': '',
     }
 
     def __init__(
@@ -144,6 +154,7 @@ class ToastWidget(QWidget):
             'success': theme_manager.get_color('success'),
             'warning': theme_manager.get_color('warning'),
             'error': theme_manager.get_color('error'),
+            'debug': theme_manager.get_color('text_secondary'),
         }
         return color_map.get(level, theme_manager.get_color('primary'))
 
