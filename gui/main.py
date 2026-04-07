@@ -997,7 +997,13 @@ class ShareTab(BaseTab):
         self.export_result = scrolledtext.ScrolledText(frame, height=8, state='disabled')
         self.export_result.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _setup_list_tab(self, parent):
+    def _setup_list_tab(self, parent: Any) -> None:
+        """
+        Set up the share list subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="分享列表", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -1200,7 +1206,13 @@ class PipeTab(BaseTab):
         notebook.add(run_frame, text="运行管道")
         self._setup_run_tab(run_frame)
 
-    def _setup_list_tab(self, parent):
+    def _setup_list_tab(self, parent: Any) -> None:
+        """
+        Set up the pipeline list subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="管道链列表", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -1232,7 +1244,13 @@ class PipeTab(BaseTab):
         
         ttk.Button(add_frame, text="➕ 添加步骤", command=self._add_step).grid(row=0, column=4, padx=5)
 
-    def _setup_create_tab(self, parent):
+    def _setup_create_tab(self, parent: Any) -> None:
+        """
+        Set up the pipeline creation subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="创建管道链", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -1250,7 +1268,13 @@ class PipeTab(BaseTab):
 
         ttk.Button(frame, text="✅ 创建管道链", command=self._create_chain).grid(row=3, column=0, columnspan=2, pady=15)
 
-    def _setup_run_tab(self, parent):
+    def _setup_run_tab(self, parent: Any) -> None:
+        """
+        Set up the pipeline run subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="运行管道链", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
