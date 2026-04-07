@@ -46,8 +46,22 @@ from ui.hotkey_dialog import HotkeySettingsDialog
 from ui.region_selector import RegionSelector, PositionSelector
 from ui.message import message_manager, show_error, show_success, show_warning, show_toast
 from ui.stats_dialog import StatsDialog
+from ui.theme import theme_manager
 
 from src.predictive_engine import PredictiveAutomationEngine, create_predictive_engine
+
+import contextlib
+
+
+@contextlib.contextmanager
+def batch_updates(widget):
+    """Context manager to batch UI updates for performance."""
+    widget.setUpdatesEnabled(False)
+    try:
+        yield
+    finally:
+        widget.setUpdatesEnabled(True)
+        widget.update()
 from src.self_healing_system import SelfHealingSystem, create_self_healing_system
 from src.workflow_diagnostics import WorkflowDiagnosticsV2, create_diagnostics, HealthLevel
 from src.workflow_share import WorkflowShareSystem, create_share_system, ShareType
@@ -1232,19 +1246,20 @@ class RecordingWidget(QWidget):
             info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤")
             info_label.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(info_label)
-        
+
         btn_layout = QHBoxLayout()
-        
+        colors = theme_manager.colors
+
         self.record_btn = QPushButton("🔴 开始录制")
-        self.record_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
+        self.record_btn.setStyleSheet(f"background-color: {colors['error']}; color: white; font-weight: bold;")
         self.stop_btn = QPushButton("⏹ 停止录制")
         self.stop_btn.setEnabled(False)
         self.clear_btn = QPushButton("清空")
         self.optimize_btn = QPushButton("🔧 优化")
         self.optimize_btn.setToolTip("优化录制的操作：\n1. 合并连续的文本输入\n2. 移除过短的延时\n3. 整理按键组合顺序")
         self.add_to_workflow_btn = QPushButton("添加到工作流")
-        self.add_to_workflow_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
-        
+        self.add_to_workflow_btn.setStyleSheet(f"background-color: {colors['success']}; color: white; font-weight: bold;")
+
         btn_layout.addWidget(self.record_btn)
         btn_layout.addWidget(self.stop_btn)
         btn_layout.addWidget(self.clear_btn)
