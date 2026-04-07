@@ -1,0 +1,117 @@
+{
+  "name": "Network Flow Analysis Workflow",
+  "description": "Automate network flow pattern analysis",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "flows_to_analyze": 35,
+    "current_flow": 0,
+    "normal_count": 0,
+    "anomalous_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "flow_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize flow counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open network flow analyzer"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for analyzer"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "flow_analysis_loop",
+      "count": "{{flows_to_analyze}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start flow analysis loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select network flow"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for analysis"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/network_flow_{{flow_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture flow screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "flow_counter",
+      "value": "{{flow_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment flow counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{flow_counter < flows_to_analyze}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more flows"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next flow"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/network_flow_analysis_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
