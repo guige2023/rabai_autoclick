@@ -16,7 +16,6 @@ from utils.retry import (
     CircuitBreaker,
     CircuitState,
     RateLimiter,
-    circuit_breaker,
     rate_limit,
 )
 
@@ -94,7 +93,7 @@ class TestCircuitBreaker:
 
         for _ in range(3):
             with pytest.raises(Exception):
-                cb.call(lambda: (_ for _ in ()).throw(Exception("fail"))))
+                cb.call(lambda: (_ for _ in ()).throw(Exception("fail")))
 
         assert cb.state == CircuitState.OPEN
 
