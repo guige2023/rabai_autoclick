@@ -1096,39 +1096,40 @@ class VariablesWidget(QWidget):
         return variables
     
     def set_variables(self, variables: Dict[str, Any]) -> None:
-        self.table.setRowCount(0)
-        for name, var_data in variables.items():
-            if isinstance(var_data, dict):
-                row = self.table.rowCount()
-                self.table.insertRow(row)
-                self.table.setItem(row, 0, QTableWidgetItem(name))
-                
-                type_combo = QComboBox()
-                type_combo.addItems(["string", "integer", "float", "boolean", "coordinate", "region", "list", "dict"])
-                idx = type_combo.findText(var_data.get('type', 'string'))
-                type_combo.setCurrentIndex(idx if idx >= 0 else 0)
-                self.table.setCellWidget(row, 1, type_combo)
-                
-                default_val = var_data.get('default_value', '')
-                if isinstance(default_val, (tuple, list)):
-                    default_val = str(default_val)
-                elif isinstance(default_val, (dict, list)):
-                    default_val = json.dumps(default_val, ensure_ascii=False)
+        with batch_updates(self.table):
+            self.table.setRowCount(0)
+            for name, var_data in variables.items():
+                if isinstance(var_data, dict):
+                    row = self.table.rowCount()
+                    self.table.insertRow(row)
+                    self.table.setItem(row, 0, QTableWidgetItem(name))
+
+                    type_combo = QComboBox()
+                    type_combo.addItems(["string", "integer", "float", "boolean", "coordinate", "region", "list", "dict"])
+                    idx = type_combo.findText(var_data.get('type', 'string'))
+                    type_combo.setCurrentIndex(idx if idx >= 0 else 0)
+                    self.table.setCellWidget(row, 1, type_combo)
+
+                    default_val = var_data.get('default_value', '')
+                    if isinstance(default_val, (tuple, list)):
+                        default_val = str(default_val)
+                    elif isinstance(default_val, (dict, list)):
+                        default_val = json.dumps(default_val, ensure_ascii=False)
+                    else:
+                        default_val = str(default_val)
+                    self.table.setItem(row, 2, QTableWidgetItem(default_val))
+                    self.table.setItem(row, 3, QTableWidgetItem(var_data.get('description', '')))
                 else:
-                    default_val = str(default_val)
-                self.table.setItem(row, 2, QTableWidgetItem(default_val))
-                self.table.setItem(row, 3, QTableWidgetItem(var_data.get('description', '')))
-            else:
-                row = self.table.rowCount()
-                self.table.insertRow(row)
-                self.table.setItem(row, 0, QTableWidgetItem(name))
-                
-                type_combo = QComboBox()
-                type_combo.addItems(["string", "integer", "float", "boolean", "coordinate", "region", "list", "dict"])
-                self.table.setCellWidget(row, 1, type_combo)
-                
-                self.table.setItem(row, 2, QTableWidgetItem(str(var_data)))
-                self.table.setItem(row, 3, QTableWidgetItem(""))
+                    row = self.table.rowCount()
+                    self.table.insertRow(row)
+                    self.table.setItem(row, 0, QTableWidgetItem(name))
+
+                    type_combo = QComboBox()
+                    type_combo.addItems(["string", "integer", "float", "boolean", "coordinate", "region", "list", "dict"])
+                    self.table.setCellWidget(row, 1, type_combo)
+
+                    self.table.setItem(row, 2, QTableWidgetItem(str(var_data)))
+                    self.table.setItem(row, 3, QTableWidgetItem(""))
 
 
 class LogWidget(QWidget):
