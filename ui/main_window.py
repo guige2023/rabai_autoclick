@@ -608,46 +608,50 @@ class VariablesWidget(QWidget):
 class LogWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._log_colors = theme_manager.get_log_colors()
+        theme_manager.theme_changed.connect(self._on_theme_changed)
         self._init_ui()
-    
+
+    def _on_theme_changed(self, theme):
+        """Handle theme change to update log colors."""
+        self._log_colors = theme_manager.get_log_colors()
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.text_edit = QTextEdit()
         self.text_edit.setReadOnly(True)
-        self.text_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                font-family: Consolas, 'Microsoft YaHei';
-                font-size: 12px;
-            }
-        """)
+        self._apply_log_style()
         layout.addWidget(self.text_edit)
-        
+
         btn_layout = QHBoxLayout()
         clear_btn = QPushButton("清空日志")
         export_btn = QPushButton("导出日志")
         btn_layout.addWidget(clear_btn)
         btn_layout.addWidget(export_btn)
         layout.addLayout(btn_layout)
-        
+
         clear_btn.clicked.connect(self.clear)
         export_btn.clicked.connect(self._export_log)
-        
+
         app_logger.add_listener(self._on_log_entry)
-    
+
+    def _apply_log_style(self):
+        """Apply log widget style based on current theme."""
+        colors = theme_manager.colors
+        self.text_edit.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {colors['status_bar']};
+                color: {colors['status_text']};
+                font-family: Consolas, 'Microsoft YaHei';
+                font-size: 12px;
+                border: none;
+            }}
+        """)
+
     def _on_log_entry(self, entry):
-        colors = {
-            'DEBUG': '#888888',
-            'INFO': '#4fc3f7',
-            'SUCCESS': '#81c784',
-            'WARNING': '#ffb74d',
-            'ERROR': '#e57373',
-            'CRITICAL': '#f44336'
-        }
-        color = colors.get(entry.level, '#d4d4d4')
+        color = self._log_colors.get(entry.level, '#d4d4d4')
         timestamp = entry.timestamp.strftime("%H:%M:%S")
         html = f'<span style="color: #888;">[{timestamp}]</span> <span style="color: {color};">[{entry.level}]</span> {entry.message}'
         self.text_edit.append(html)
