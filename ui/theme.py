@@ -419,6 +419,7 @@ class ThemeManager(QObject):
                 QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: background-color 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['primary_hover']}; cursor: pointinghand; }}
                 QPushButton:pressed {{ background-color: {c['primary_active']}; }}
+                QPushButton:focus {{ outline: 2px solid {c['border_focus']}; outline-offset: 2px; }}
                 QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
                 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; transition: border-color 0.2s ease; }}
                 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {c['border_focus']}; }}
@@ -646,6 +647,7 @@ class ThemeManager(QObject):
                 QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: all 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['primary_hover']}; cursor: pointinghand; }}
                 QPushButton:pressed {{ background-color: {c['primary_active']}; }}
+                QPushButton:focus {{ outline: 2px solid {c['border_focus']}; outline-offset: 2px; }}
                 QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
                 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; transition: border-color 0.2s ease; }}
                 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {c['border_focus']}; }}
