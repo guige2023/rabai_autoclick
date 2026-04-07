@@ -1,279 +1,164 @@
-"""
-JWT utilities for token generation and validation.
-
-Provides JWT encoding/decoding, claims management, 
-refresh token handling, and token rotation.
-"""
+"""JWT utilities: token generation, validation, claims management."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
-import logging
+import hmac
+import json
 import time
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from typing import Any
 
-logger = logging.getLogger(__name__)
-
-
-class TokenType(Enum):
-    ACCESS = auto()
-    REFRESH = auto()
-    ID = auto()
-    API = auto()
+__all__ = [
+    "JWTConfig",
+    "JWTToken",
+    "create_token",
+    "validate_token",
+    "decode_token",
+]
 
 
 @dataclass
 class JWTConfig:
     """JWT configuration."""
-    secret_key: str
+
+    secret: str
     algorithm: str = "HS256"
-    issuer: Optional[str] = None
-    audience: Optional[str] = None
-    access_token_ttl: int = 900  # 15 minutes
-    refresh_token_ttl: int = 604800  # 7 days
-    id_token_ttl: int = 3600  # 1 hour
+    issuer: str = ""
+    audience: str = ""
+    expiry_seconds: int = 3600
 
 
 @dataclass
-class TokenClaims:
-    """JWT token claims."""
-    sub: str
-    type: TokenType = TokenType.ACCESS
-    iss: Optional[str] = None
-    aud: Optional[str] = None
-    exp: Optional[float] = None
-    iat: Optional[float] = None
-    nbf: Optional[float] = None
-    jti: Optional[str] = None
-    scope: str = ""
-    roles: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+class JWTToken:
+    """A decoded JWT token."""
 
-    def to_dict(self) -> dict[str, Any]:
-        """Convert claims to dictionary."""
-        result = {
-            "sub": self.sub,
-            "type": self.type.name,
-        }
-        if self.iss:
-            result["iss"] = self.iss
-        if self.aud:
-            result["aud"] = self.aud
-        if self.exp:
-            result["exp"] = self.exp
-        if self.iat:
-            result["iat"] = self.iat
-        if self.nbf:
-            result["nbf"] = self.nbf
-        if self.jti:
-            result["jti"] = self.jti
-        if self.scope:
-            result["scope"] = self.scope
-        if self.roles:
-            result["roles"] = self.roles
-        result.update(self.metadata)
-        return result
+    header: dict[str, Any]
+    payload: dict[str, Any]
+    signature: str
+    raw: str
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TokenClaims":
-        """Create claims from dictionary."""
-        return cls(
-            sub=data["sub"],
-            type=TokenType[data.get("type", "ACCESS")],
-            iss=data.get("iss"),
-            aud=data.get("aud"),
-            exp=data.get("exp"),
-            iat=data.get("iat"),
-            nbf=data.get("nbf"),
-            jti=data.get("jti"),
-            scope=data.get("scope", ""),
-            roles=data.get("roles", []),
-            metadata={k: v for k, v in data.items() if k not in ["sub", "type", "iss", "aud", "exp", "iat", "nbf", "jti", "scope", "roles"]},
-        )
+    @property
+    def subject(self) -> str | None:
+        return self.payload.get("sub")
+
+    @property
+    def is_expired(self) -> bool:
+        exp = self.payload.get("exp", 0)
+        return time.time() > exp
+
+    @property
+    def issued_at(self) -> float:
+        return self.payload.get("iat", 0)
 
 
-class JWTManager:
-    """Manages JWT token creation and validation."""
-
-    def __init__(self, config: JWTConfig) -> None:
-        self.config = config
-
-    def create_access_token(
-        self,
-        subject: str,
-        scope: str = "",
-        roles: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> str:
-        """Create an access token."""
-        now = time.time()
-        claims = TokenClaims(
-            sub=subject,
-            type=TokenType.ACCESS,
-            iss=self.config.issuer,
-            aud=self.config.audience,
-            iat=now,
-            nbf=now,
-            exp=now + self.config.access_token_ttl,
-            jti=self._generate_jti(),
-            scope=scope,
-            roles=roles or [],
-            metadata=metadata or {},
-        )
-        return self._encode(claims)
-
-    def create_refresh_token(self, subject: str, metadata: Optional[dict[str, Any]] = None) -> str:
-        """Create a refresh token."""
-        now = time.time()
-        claims = TokenClaims(
-            sub=subject,
-            type=TokenType.REFRESH,
-            iss=self.config.issuer,
-            iat=now,
-            exp=now + self.config.refresh_token_ttl,
-            jti=self._generate_jti(),
-            metadata=metadata or {},
-        )
-        return self._encode(claims)
-
-    def create_id_token(
-        self,
-        subject: str,
-        email: Optional[str] = None,
-        name: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> str:
-        """Create an OpenID Connect ID token."""
-        now = time.time()
-        claims = TokenClaims(
-            sub=subject,
-            type=TokenType.ID,
-            iss=self.config.issuer,
-            aud=self.config.audience,
-            iat=now,
-            exp=now + self.config.id_token_ttl,
-            jti=self._generate_jti(),
-            metadata=metadata or {},
-        )
-        return self._encode(claims)
-
-    def decode_token(self, token: str, verify: bool = True) -> Optional[TokenClaims]:
-        """Decode and validate a JWT token."""
-        try:
-            import jwt
-            options = {
-                "verify_signature": verify,
-                "verify_exp": verify,
-                "verify_nbf": verify,
-                "verify_iat": verify,
-                "verify_iss": verify,
-                "verify_aud": verify,
-            }
-            kwargs = {
-                "options": options,
-                "algorithms": [self.config.algorithm],
-            }
-            if not verify:
-                kwargs["algorithms"] = [self.config.algorithm]
-
-            payload = jwt.decode(token, self.config.secret_key, **kwargs)
-            return TokenClaims.from_dict(payload)
-        except ImportError:
-            return self._decode_without_validation(token)
-        except Exception as e:
-            logger.error("JWT decode failed: %s", e)
-            return None
-
-    def verify_token(self, token: str) -> tuple[bool, Optional[TokenClaims], str]:
-        """Verify a token and return status, claims, and error message."""
-        claims = self.decode_token(token, verify=True)
-        if not claims:
-            return False, None, "Invalid or expired token"
-
-        if claims.exp and time.time() > claims.exp:
-            return False, None, "Token has expired"
-
-        return True, claims, ""
-
-    def refresh_access_token(self, refresh_token: str) -> Optional[tuple[str, str]]:
-        """Create new access token from refresh token. Returns (access_token, new_refresh_token)."""
-        valid, claims, _ = self.verify_token(refresh_token)
-        if not valid or claims.type != TokenType.REFRESH:
-            return None
-
-        new_access = self.create_access_token(
-            subject=claims.sub,
-            metadata=claims.metadata,
-        )
-        new_refresh = self.create_refresh_token(
-            subject=claims.sub,
-            metadata=claims.metadata,
-        )
-        return new_access, new_refresh
-
-    def _encode(self, claims: TokenClaims) -> str:
-        """Encode claims to JWT."""
-        try:
-            import jwt
-            return jwt.encode(
-                claims.to_dict(),
-                self.config.secret_key,
-                algorithm=self.config.algorithm,
-            )
-        except ImportError:
-            import base64, json
-            header = base64.urlsafe_b64encode(json.dumps({"alg": self.config.algorithm, "typ": "JWT"}).encode()).decode().rstrip("=")
-            payload = base64.urlsafe_b64encode(json.dumps(claims.to_dict()).encode()).decode().rstrip("=")
-            signature = hashlib.sha256(f"{header}.{payload}".encode()).hexdigest()[:16]
-            return f"{header}.{payload}.{signature}"
-
-    def _decode_without_validation(self, token: str) -> Optional[TokenClaims]:
-        """Decode without signature verification (for debugging)."""
-        import base64, json
-        try:
-            parts = token.split(".")
-            if len(parts) != 3:
-                return None
-            payload = parts[1] + "=="
-            data = json.loads(base64.urlsafe_b64decode(payload))
-            return TokenClaims.from_dict(data)
-        except Exception:
-            return None
-
-    def _generate_jti(self) -> str:
-        """Generate a unique JWT ID."""
-        import uuid
-        return hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()[:16]
+def _b64_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
-class TokenBlacklist:
-    """Token blacklist for revocation."""
+def _b64_decode(data: str) -> bytes:
+    pad = 4 - (len(data) % 4)
+    if pad != 4:
+        data += "=" * pad
+    return base64.urlsafe_b64decode(data)
 
-    def __init__(self) -> None:
-        self._blacklist: set[str] = set()
-        self._expiry_times: dict[str, float] = {}
 
-    def add(self, jti: str, exp: float) -> None:
-        """Add a token ID to the blacklist."""
-        self._blacklist.add(jti)
-        self._expiry_times[jti] = exp
+def create_token(
+    payload: dict[str, Any],
+    secret: str,
+    algorithm: str = "HS256",
+    expiry_seconds: int = 3600,
+    issuer: str = "",
+    audience: str = "",
+) -> str:
+    """Create a new JWT token."""
+    header = {"alg": algorithm, "typ": "JWT"}
+    now = time.time()
 
-    def is_blacklisted(self, jti: str) -> bool:
-        """Check if a token ID is blacklisted."""
-        if jti not in self._blacklist:
-            return False
-        if time.time() > self._expiry_times.get(jti, 0):
-            self._blacklist.discard(jti)
-            return False
+    full_payload = {
+        **payload,
+        "iat": int(now),
+        "exp": int(now + expiry_seconds),
+    }
+    if issuer:
+        full_payload["iss"] = issuer
+    if audience:
+        full_payload["aud"] = audience
+
+    header_b64 = _b64_encode(json.dumps(header).encode())
+    payload_b64 = _b64_encode(json.dumps(full_payload).encode())
+
+    msg = f"{header_b64}.{payload_b64}".encode()
+    key = secret.encode()
+
+    if algorithm == "HS256":
+        sig = hmac.new(key, msg, hashlib.sha256).digest()
+    elif algorithm == "HS384":
+        sig = hmac.new(key, msg, hashlib.sha384).digest()
+    else:
+        sig = hmac.new(key, msg, hashlib.sha256).digest()
+
+    sig_b64 = _b64_encode(sig)
+    return f"{header_b64}.{payload_b64}.{sig_b64}"
+
+
+def validate_token(
+    token: str,
+    secret: str,
+    issuer: str = "",
+    audience: str = "",
+) -> bool:
+    """Validate a JWT token."""
+    try:
+        decode_token(token, secret, issuer, audience)
         return True
+    except Exception:
+        return False
 
-    def cleanup(self) -> int:
-        """Remove expired entries from blacklist."""
-        now = time.time()
-        expired = [jti for jti, exp in self._expiry_times.items() if exp < now]
-        for jti in expired:
-            self._blacklist.discard(jti)
-            del self._expiry_times[jti]
-        return len(expired)
+
+def decode_token(
+    token: str,
+    secret: str,
+    issuer: str = "",
+    audience: str = "",
+) -> JWTToken:
+    """Decode and verify a JWT token."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError("Invalid token format")
+
+    header_b64, payload_b64, sig_b64 = parts
+
+    msg = f"{header_b64}.{payload_b64}".encode()
+    key = secret.encode()
+    header = json.loads(_b64_decode(header_b64))
+
+    algorithm = header.get("alg", "HS256")
+    if algorithm == "HS256":
+        expected = hmac.new(key, msg, hashlib.sha256).digest()
+    elif algorithm == "HS384":
+        expected = hmac.new(key, msg, hashlib.sha384).digest()
+    else:
+        expected = hmac.new(key, msg, hashlib.sha256).digest()
+
+    if not hmac.compare_digest(sig_b64, _b64_encode(expected)):
+        raise ValueError("Invalid signature")
+
+    payload = json.loads(_b64_decode(payload_b64))
+
+    if "exp" in payload and payload["exp"] < time.time():
+        raise ValueError("Token expired")
+
+    if issuer and payload.get("iss") != issuer:
+        raise ValueError("Invalid issuer")
+
+    if audience and payload.get("aud") != audience:
+        raise ValueError("Invalid audience")
+
+    return JWTToken(
+        header=header,
+        payload=payload,
+        signature=sig_b64,
+        raw=token,
+    )
