@@ -1,375 +1,595 @@
-"""Pathlib action module for RabAI AutoClick.
+"""pathlib action extensions for rabai_autoclick.
 
-Provides pathlib extensions:
-- PathExistsAction: Check if path exists
-- PathIsFileAction: Check if path is file
-- PathIsDirAction: Check if path is directory
-- PathListDirAction: List directory contents
-- PathGlobAction: Glob pattern matching
-- PathResolveAction: Resolve path
-- PathParentsAction: Get parent directories
-- PathSuffixAction: Get file suffix
-- PathStemAction: Get file stem
-- PathCreateAction: Create file/directory
+Provides high-level utilities for common filesystem operations using pathlib.
+Includes file search, tree walking, size calculations, and path transformations.
 """
 
-from typing import Any, Dict, List, Optional, Union
-import sys
-import pathlib
+from __future__ import annotations
 
-_parent_dir = __import__('os').path.dirname(__import__('os').path.dirname(__import__('os').path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import hashlib
+import os
+import shutil
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Iterator, Sequence
 
-
-class PathExistsAction(BaseAction):
-    """Check if path exists."""
-    action_type = "pathlib_exists"
-    display_name = "路径存在"
-    description = "检查路径是否存在"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute exists check."""
-        path = params.get('path', '')
-        output_var = params.get('output_var', 'exists_result')
-
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            exists = p.exists()
-            context.set_variable(output_var, exists)
-            return ActionResult(success=True, message=f"exists: {exists}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"exists check failed: {e}")
-
-
-class PathIsFileAction(BaseAction):
-    """Check if path is file."""
-    action_type = "pathlib_is_file"
-    display_name = "是文件"
-    description = "检查路径是否是文件"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute is file check."""
-        path = params.get('path', '')
-        output_var = params.get('output_var', 'is_file_result')
-
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            is_file = p.is_file()
-            context.set_variable(output_var, is_file)
-            return ActionResult(success=True, message=f"is_file: {is_file}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"is_file check failed: {e}")
+__all__ = [
+    "ensure_dir",
+    "ensure_parent",
+    "copy_tree",
+    "move_tree",
+    "remove_tree",
+    "find_files",
+    "find_dirs",
+    "walk_tree",
+    "file_size",
+    "total_size",
+    "file_hash",
+    "file_modified_time",
+    "file_created_time",
+    "file_extension",
+    "change_extension",
+    "relative_to",
+    "glob_recurse",
+    "touch",
+    "make_executable",
+    "is_empty_dir",
+    "count_files",
+    "count_lines",
+    "read_text_lines",
+    "write_text_lines",
+    "expanduser",
+    "resolve_path",
+    "normalize_path",
+    "split_path",
+    "join_paths",
+    "PathContext",
+]
 
 
-class PathIsDirAction(BaseAction):
-    """Check if path is directory."""
-    action_type = "pathlib_is_dir"
-    display_name = "是目录"
-    description = "检查路径是否是目录"
+def ensure_dir(path: Path | str) -> Path:
+    """Ensure a directory exists, creating it if necessary.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute is dir check."""
-        path = params.get('path', '')
-        output_var = params.get('output_var', 'is_dir_result')
+    Args:
+        path: Directory path to ensure.
 
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            is_dir = p.is_dir()
-            context.set_variable(output_var, is_dir)
-            return ActionResult(success=True, message=f"is_dir: {is_dir}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"is_dir check failed: {e}")
+    Returns:
+        Path object of the ensured directory.
+
+    Raises:
+        OSError: If directory creation fails.
+    """
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
-class PathListDirAction(BaseAction):
-    """List directory contents."""
-    action_type = "pathlib_list_dir"
-    display_name = "列出目录"
-    description = "列出目录内容"
+def ensure_parent(path: Path | str) -> Path:
+    """Ensure the parent directory of a file path exists.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute list dir."""
-        path = params.get('path', '.')
-        pattern = params.get('pattern', '*')
-        recursive = params.get('recursive', False)
-        output_var = params.get('output_var', 'list_dir_result')
+    Args:
+        path: File path whose parent should be ensured.
 
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            
-            if not p.is_dir():
-                return ActionResult(success=False, message="path is not a directory")
-            
-            if recursive:
-                files = [str(f) for f in p.rglob(pattern)]
-            else:
-                files = [str(f) for f in p.glob(pattern)]
-            
-            context.set_variable(output_var, files)
-            return ActionResult(success=True, message=f"listed {len(files)} items")
-        except Exception as e:
-            return ActionResult(success=False, message=f"list_dir failed: {e}")
+    Returns:
+        Path object of the parent directory.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
-class PathGlobAction(BaseAction):
-    """Glob pattern matching."""
-    action_type = "pathlib_glob"
-    display_name = "通配符匹配"
-    description = "使用通配符模式匹配文件"
+def copy_tree(src: Path | str, dst: Path | str, ignore_patterns: Sequence[str] | None = None) -> Path:
+    """Copy an entire directory tree.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute glob."""
-        path = params.get('path', '.')
-        pattern = params.get('pattern', '*')
-        recursive = params.get('recursive', False)
-        output_var = params.get('output_var', 'glob_result')
+    Args:
+        src: Source directory path.
+        dst: Destination directory path.
+        ignore_patterns: Optional glob patterns to ignore (e.g., ["__pycache__", "*.pyc"]).
 
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            
-            if recursive:
-                matches = list(p.rglob(pattern))
-            else:
-                matches = list(p.glob(pattern))
-            
-            files = [str(m) for m in matches]
-            context.set_variable(output_var, files)
-            return ActionResult(success=True, message=f"glob matched {len(files)} files")
-        except Exception as e:
-            return ActionResult(success=False, message=f"glob failed: {e}")
+    Returns:
+        Destination path.
 
+    Raises:
+        FileNotFoundError: If source directory does not exist.
+    """
+    src_path = Path(src)
+    dst_path = Path(dst)
 
-class PathResolveAction(BaseAction):
-    """Resolve path."""
-    action_type = "pathlib_resolve"
-    display_name = "解析路径"
-    description = "解析绝对路径"
+    if not src_path.exists():
+        raise FileNotFoundError(f"Source directory not found: {src}")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute resolve."""
-        path = params.get('path', '')
-        output_var = params.get('output_var', 'resolve_result')
+    if ignore_patterns:
+        ignore = shutil.ignore_patterns(*ignore_patterns)
+    else:
+        ignore = None
 
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            resolved = p.resolve()
-            context.set_variable(output_var, str(resolved))
-            return ActionResult(success=True, message=f"resolved: {resolved}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"resolve failed: {e}")
+    shutil.copytree(src_path, dst_path, ignore=ignore, dirs_exist_ok=True)
+    return dst_path
 
 
-class PathParentsAction(BaseAction):
-    """Get parent directories."""
-    action_type = "pathlib_parents"
-    display_name = "父目录"
-    description = "获取路径的所有父目录"
+def move_tree(src: Path | str, dst: Path | str) -> Path:
+    """Move an entire directory tree.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute parents."""
-        path = params.get('path', '')
-        depth = params.get('depth', 1)
-        output_var = params.get('output_var', 'parents_result')
+    Args:
+        src: Source directory path.
+        dst: Destination path.
 
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            resolved_depth = context.resolve_value(depth) if isinstance(depth, str) else depth
-            
-            parents = []
-            current = p.parent
-            for _ in range(resolved_depth):
-                if str(current) == current:
-                    break
-                parents.append(str(current))
-                current = current.parent
-                if len(parents) >= resolved_depth:
-                    break
-            
-            context.set_variable(output_var, parents)
-            return ActionResult(success=True, message=f"got {len(parents)} parents")
-        except Exception as e:
-            return ActionResult(success=False, message=f"parents failed: {e}")
+    Returns:
+        Destination path.
+
+    Raises:
+        FileNotFoundError: If source does not exist.
+    """
+    src_path = Path(src)
+    dst_path = Path(dst)
+
+    if not src_path.exists():
+        raise FileNotFoundError(f"Source not found: {src}")
+
+    shutil.move(str(src_path), str(dst_path))
+    return dst_path
 
 
-class PathSuffixAction(BaseAction):
-    """Get file suffix."""
-    action_type = "pathlib_suffix"
-    display_name = "文件后缀"
-    description = "获取文件后缀名"
+def remove_tree(path: Path | str) -> None:
+    """Remove a directory tree and all its contents.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute suffix."""
-        path = params.get('path', '')
-        output_var = params.get('output_var', 'suffix_result')
-
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            suffix = p.suffix
-            context.set_variable(output_var, suffix)
-            return ActionResult(success=True, message=f"suffix: {suffix}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"suffix failed: {e}")
+    Args:
+        path: Directory path to remove.
+    """
+    p = Path(path)
+    if p.exists():
+        shutil.rmtree(p)
 
 
-class PathStemAction(BaseAction):
-    """Get file stem."""
-    action_type = "pathlib_stem"
-    display_name = "文件名主干"
-    description = "获取文件名（不含后缀）"
+def find_files(
+    root: Path | str,
+    pattern: str = "*",
+    recursive: bool = True,
+    include_hidden: bool = False,
+) -> list[Path]:
+    """Find files matching a glob pattern.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute stem."""
-        path = params.get('path', '')
-        output_var = params.get('output_var', 'stem_result')
+    Args:
+        root: Root directory to search from.
+        pattern: Glob pattern to match (default "*").
+        recursive: If True, search recursively.
+        include_hidden: If True, include hidden files/directories.
 
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            stem = p.stem
-            context.set_variable(output_var, stem)
-            return ActionResult(success=True, message=f"stem: {stem}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"stem failed: {e}")
+    Returns:
+        List of matching file paths.
+    """
+    root_path = Path(root)
+    if recursive:
+        matches = list(root_path.rglob(pattern))
+    else:
+        matches = list(root_path.glob(pattern))
 
+    result = []
+    for p in matches:
+        if not include_hidden and any(part.startswith(".") for part in p.parts):
+            continue
+        if p.is_file():
+            result.append(p)
 
-class PathCreateAction(BaseAction):
-    """Create file or directory."""
-    action_type = "pathlib_create"
-    display_name = "创建路径"
-    description = "创建文件或目录"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute create."""
-        path = params.get('path', '')
-        is_dir = params.get('is_dir', False)
-        parents = params.get('parents', True)
-        output_var = params.get('output_var', 'create_result')
-
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            resolved_is_dir = context.resolve_value(is_dir) if isinstance(is_dir, str) else is_dir
-            resolved_parents = context.resolve_value(parents) if isinstance(parents, str) else parents
-            
-            p = pathlib.Path(resolved_path)
-            
-            if resolved_is_dir:
-                p.mkdir(parents=resolved_parents, exist_ok=True)
-            else:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.touch()
-            
-            context.set_variable(output_var, str(p))
-            return ActionResult(success=True, message=f"created: {p}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"create failed: {e}")
+    return result
 
 
-class PathReadWriteAction(BaseAction):
-    """Read or write file."""
-    action_type = "pathlib_read_write"
-    display_name = "读写文件"
-    description = "读取或写入文件"
+def find_dirs(
+    root: Path | str,
+    pattern: str = "*",
+    recursive: bool = True,
+    include_hidden: bool = False,
+) -> list[Path]:
+    """Find directories matching a glob pattern.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute read/write."""
-        path = params.get('path', '')
-        mode = params.get('mode', 'read')
-        content = params.get('content', '')
-        encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'read_write_result')
+    Args:
+        root: Root directory to search from.
+        pattern: Glob pattern to match.
+        recursive: If True, search recursively.
+        include_hidden: If True, include hidden directories.
 
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            resolved_mode = context.resolve_value(mode) if isinstance(mode, str) else mode
-            resolved_content = context.resolve_value(content) if isinstance(content, str) else content
-            resolved_encoding = context.resolve_value(encoding) if isinstance(encoding, str) else encoding
-            
-            p = pathlib.Path(resolved_path)
-            
-            if resolved_mode == 'read':
-                result = p.read_text(encoding=resolved_encoding)
-                context.set_variable(output_var, result)
-                return ActionResult(success=True, message=f"read {len(result)} chars")
-            elif resolved_mode == 'write':
-                p.write_text(resolved_content, encoding=resolved_encoding)
-                context.set_variable(output_var, len(resolved_content))
-                return ActionResult(success=True, message=f"wrote {len(resolved_content)} chars")
-            elif resolved_mode == 'append':
-                p.append_text(resolved_content, encoding=resolved_encoding)
-                context.set_variable(output_var, len(resolved_content))
-                return ActionResult(success=True, message=f"appended {len(resolved_content)} chars")
-            else:
-                return ActionResult(success=False, message=f"unknown mode: {resolved_mode}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"read/write failed: {e}")
+    Returns:
+        List of matching directory paths.
+    """
+    root_path = Path(root)
+    if recursive:
+        matches = list(root_path.rglob(pattern))
+    else:
+        matches = list(root_path.glob(pattern))
+
+    result = []
+    for p in matches:
+        if not include_hidden and any(part.startswith(".") for part in p.parts):
+            continue
+        if p.is_dir():
+            result.append(p)
+
+    return result
 
 
-class PathInfoAction(BaseAction):
-    """Get path information."""
-    action_type = "pathlib_info"
-    display_name = "路径信息"
-    description = "获取路径详细信息"
+def walk_tree(
+    root: Path | str,
+    filter_func: Callable[[Path], bool] | None = None,
+    include_files: bool = True,
+    include_dirs: bool = True,
+) -> Iterator[Path]:
+    """Walk a directory tree with optional filtering.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute path info."""
-        path = params.get('path', '')
-        output_var = params.get('output_var', 'path_info_result')
+    Args:
+        root: Root directory to walk.
+        filter_func: Optional function that returns True to include a path.
+        include_files: If True, yield file paths.
+        include_dirs: If True, yield directory paths.
 
-        try:
-            resolved_path = context.resolve_value(path) if isinstance(path, str) else path
-            p = pathlib.Path(resolved_path)
-            
-            info = {
-                "path": str(p),
-                "name": p.name,
-                "stem": p.stem,
-                "suffix": p.suffix,
-                "exists": p.exists(),
-                "is_file": p.is_file() if p.exists() else False,
-                "is_dir": p.is_dir() if p.exists() else False,
-                "is_symlink": p.is_symlink(),
-                "parent": str(p.parent),
-            }
-            
-            if p.exists():
-                stat = p.stat()
-                info["size"] = stat.st_size
-                info["modified"] = stat.st_mtime
-            
-            context.set_variable(output_var, info)
-            return ActionResult(success=True, message=f"path info retrieved")
-        except Exception as e:
-            return ActionResult(success=False, message=f"path info failed: {e}")
+    Yields:
+        Path objects for each matching item.
+    """
+    root_path = Path(root)
+    for item in root_path.rglob("*"):
+        if filter_func and not filter_func(item):
+            continue
+        if item.is_file() and include_files:
+            yield item
+        elif item.is_dir() and include_dirs:
+            yield item
 
 
-class PathJoinAction(BaseAction):
-    """Join path components."""
-    action_type = "pathlib_join"
-    display_name = "连接路径"
-    description = "连接多个路径组件"
+def file_size(path: Path | str) -> int:
+    """Get the size of a file in bytes.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute join."""
-        parts = params.get('parts', [])
-        output_var = params.get('output_var', 'join_result')
+    Args:
+        path: File path.
 
-        try:
-            resolved_parts = context.resolve_value(parts) if isinstance(parts, str) else parts
-            
-            if isinstance(resolved_parts, str):
-                resolved_parts = resolved_parts.split('/')
-            
-            result = str(pathlib.Path(*resolved_parts))
-            context.set_variable(output_var, result)
-            return ActionResult(success=True, message=f"joined: {result}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"join failed: {e}")
+    Returns:
+        File size in bytes.
+
+    Raises:
+        FileNotFoundError: If file does not exist.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    return p.stat().st_size
+
+
+def total_size(paths: Sequence[Path | str]) -> int:
+    """Calculate total size of multiple files/directories.
+
+    Args:
+        paths: Sequence of file or directory paths.
+
+    Returns:
+        Total size in bytes.
+    """
+    total = 0
+    for p in paths:
+        pp = Path(p)
+        if pp.is_file():
+            total += pp.stat().st_size
+        elif pp.is_dir():
+            for f in pp.rglob("*"):
+                if f.is_file():
+                    total += f.stat().st_size
+    return total
+
+
+def file_hash(path: Path | str, algorithm: str = "sha256", chunk_size: int = 8192) -> str:
+    """Calculate hash of a file.
+
+    Args:
+        path: File path.
+        algorithm: Hash algorithm ("md5", "sha1", "sha256", "sha512").
+        chunk_size: Read chunk size in bytes.
+
+    Returns:
+        Hexadecimal hash string.
+
+    Raises:
+        FileNotFoundError: If file does not exist.
+        ValueError: If algorithm is unsupported.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    try:
+        hasher = hashlib.new(algorithm)
+    except ValueError:
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}")
+
+    with open(p, "rb") as f:
+        while chunk := f.read(chunk_size):
+            hasher.update(chunk)
+
+    return hasher.hexdigest()
+
+
+def file_modified_time(path: Path | str) -> datetime:
+    """Get the last modified time of a file.
+
+    Args:
+        path: File path.
+
+    Returns:
+        datetime object of last modification.
+    """
+    p = Path(path)
+    return datetime.fromtimestamp(p.stat().st_mtime)
+
+
+def file_created_time(path: Path | str) -> datetime:
+    """Get the creation time of a file.
+
+    Args:
+        path: File path.
+
+    Returns:
+        datetime object of creation time.
+    """
+    p = Path(path)
+    return datetime.fromtimestamp(p.stat().st_ctime)
+
+
+def file_extension(path: Path | str) -> str:
+    """Get the file extension (including the dot).
+
+    Args:
+        path: File path.
+
+    Returns:
+        File extension string (e.g., ".txt") or empty string.
+    """
+    return Path(path).suffix
+
+
+def change_extension(path: Path | str, new_ext: str) -> Path:
+    """Change the extension of a file path.
+
+    Args:
+        path: Original file path.
+        new_ext: New extension (with or without leading dot).
+
+    Returns:
+        Path with changed extension.
+    """
+    p = Path(path)
+    ext = new_ext if new_ext.startswith(".") else f".{new_ext}"
+    return p.with_suffix(ext)
+
+
+def relative_to(path: Path | str, base: Path | str) -> Path:
+    """Get relative path from base to path.
+
+    Args:
+        path: Target path.
+        base: Base path.
+
+    Returns:
+        Relative path.
+
+    Raises:
+        ValueError: If path is not relative to base.
+    """
+    return Path(path).relative_to(Path(base))
+
+
+def glob_recurse(root: Path | str, pattern: str, include_hidden: bool = False) -> list[Path]:
+    """Recursively glob files matching pattern.
+
+    Args:
+        root: Root directory.
+        pattern: Glob pattern.
+        include_hidden: Include hidden files.
+
+    Returns:
+        List of matching paths.
+    """
+    root_path = Path(root)
+    matches = list(root_path.rglob(pattern))
+    if not include_hidden:
+        matches = [p for p in matches if not any(part.startswith(".") for part in p.parts)]
+    return matches
+
+
+def touch(path: Path | str) -> Path:
+    """Create an empty file or update its timestamp.
+
+    Args:
+        path: File path to touch.
+
+    Returns:
+        Path object of the file.
+    """
+    p = Path(path)
+    p.touch()
+    return p
+
+
+def make_executable(path: Path | str) -> Path:
+    """Make a file executable (add user execute bit).
+
+    Args:
+        path: File path.
+
+    Returns:
+        Path object.
+    """
+    p = Path(path)
+    mode = p.stat().st_mode
+    import stat
+
+    p.chmod(mode | stat.S_IXUSR)
+    return p
+
+
+def is_empty_dir(path: Path | str) -> bool:
+    """Check if a directory is empty.
+
+    Args:
+        path: Directory path.
+
+    Returns:
+        True if directory is empty, False otherwise.
+    """
+    p = Path(path)
+    if not p.is_dir():
+        return False
+    return not any(p.iterdir())
+
+
+def count_files(path: Path | str, pattern: str = "*", recursive: bool = True) -> int:
+    """Count files matching pattern.
+
+    Args:
+        path: Directory path.
+        pattern: Glob pattern.
+        recursive: Search recursively.
+
+    Returns:
+        Number of matching files.
+    """
+    return len(find_files(path, pattern, recursive))
+
+
+def count_lines(path: Path | str) -> int:
+    """Count lines in a text file.
+
+    Args:
+        path: File path.
+
+    Returns:
+        Number of lines.
+    """
+    p = Path(path)
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        return sum(1 for _ in f)
+
+
+def read_text_lines(path: Path | str, strip: bool = True) -> list[str]:
+    """Read text file as list of lines.
+
+    Args:
+        path: File path.
+        strip: Strip whitespace from each line.
+
+    Returns:
+        List of lines.
+    """
+    p = Path(path)
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+    if strip:
+        return [line.rstrip("\n\r") for line in lines]
+    return lines
+
+
+def write_text_lines(path: Path | str, lines: Sequence[str]) -> Path:
+    """Write lines to a text file.
+
+    Args:
+        path: File path.
+        lines: Sequence of lines to write.
+
+    Returns:
+        Path object.
+    """
+    p = Path(path)
+    ensure_parent(p)
+    with open(p, "w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line)
+            if not line.endswith("\n"):
+                f.write("\n")
+    return p
+
+
+def expanduser(path: Path | str) -> Path:
+    """Expand ~ and ~user constructs.
+
+    Args:
+        path: Path with potential tilde.
+
+    Returns:
+        Expanded path.
+    """
+    return Path(path).expanduser()
+
+
+def resolve_path(path: Path | str) -> Path:
+    """Resolve path to absolute, resolving symlinks.
+
+    Args:
+        path: Path to resolve.
+
+    Returns:
+        Resolved absolute path.
+    """
+    return Path(path).resolve()
+
+
+def normalize_path(path: Path | str) -> str:
+    """Normalize a path to a canonical string.
+
+    Args:
+        path: Path to normalize.
+
+    Returns:
+        Normalized path string.
+    """
+    return os.path.normpath(str(path))
+
+
+def split_path(path: Path | str) -> tuple[list[str], str]:
+    """Split path into directory parts and the final name.
+
+    Args:
+        path: Path to split.
+
+    Returns:
+        Tuple of (list of directory parts, filename).
+    """
+    p = Path(path)
+    return list(p.parts[:-1]), p.parts[-1]
+
+
+def join_paths(*parts: Path | str) -> Path:
+    """Join multiple path parts.
+
+    Args:
+        *parts: Path parts to join.
+
+    Returns:
+        Joined path.
+    """
+    result = Path("")
+    for part in parts:
+        result = result / Path(part)
+    return result
+
+
+class PathContext:
+    """Context manager for temporary directory changes.
+
+    Example:
+        with PathContext("/tmp/work"):
+            # work in /tmp/work
+        # back to original directory
+    """
+
+    def __init__(self, path: Path | str | None = None):
+        self.path = Path(path) if path else None
+        self._original: Path | None = None
+
+    def __enter__(self) -> Path:
+        if self.path:
+            self._original = Path.cwd()
+            import os
+
+            os.chdir(self.path)
+        return self.path or Path.cwd()
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self._original:
+            import os
+
+            os.chdir(self._original)
