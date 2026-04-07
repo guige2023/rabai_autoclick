@@ -1,0 +1,117 @@
+{
+  "name": "Quality Assurance Defect Tracking Workflow",
+  "description": "Automate QA defect lifecycle management",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "defects_to_track": 50,
+    "current_defect": 0,
+    "tracked_defects": 0,
+    "critical_defects": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "defect_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize defect counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open defect tracking system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "defect_tracking_loop",
+      "count": "{{defects_to_track}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start defect tracking loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select defect for tracking"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for defect update"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/defect_tracking_{{defect_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture defect screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "defect_counter",
+      "value": "{{defect_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment defect counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{defect_counter < defects_to_track}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more defects"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next defect"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/quality_assurance_defect_tracking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
