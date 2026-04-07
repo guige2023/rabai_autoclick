@@ -1444,13 +1444,14 @@ class RecordingWidget(QWidget):
         show_error("录制错误", error_msg)
     
     def _refresh_action_list(self):
-        self.action_list.clear()
-        actions = self._recording_manager.get_actions()
-        for action in actions:
-            if isinstance(action, dict):
-                self.action_list.addItem(f"{action.get('action_type', 'unknown')}: {action.get('params', {})}")
-            else:
-                self.action_list.addItem(f"{action.action_type}: {action.params}")
+        with batch_updates(self.action_list):
+            self.action_list.clear()
+            actions = self._recording_manager.get_actions()
+            for action in actions:
+                if isinstance(action, dict):
+                    self.action_list.addItem(f"{action.get('action_type', 'unknown')}: {action.get('params', {})}")
+                else:
+                    self.action_list.addItem(f"{action.action_type}: {action.params}")
     
     def get_workflow(self) -> Dict[str, Any]:
         return self._recording_manager.to_workflow()
