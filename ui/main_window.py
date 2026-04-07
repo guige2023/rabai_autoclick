@@ -634,7 +634,7 @@ class LogWidget(QWidget):
         theme_manager.theme_changed.connect(self._on_theme_changed)
         self._init_ui()
 
-    def _on_theme_changed(self, theme):
+    def _on_theme_changed(self, theme) -> None:
         """Handle theme change to update log colors."""
         self._log_colors = theme_manager.get_log_colors()
         self._apply_log_style()

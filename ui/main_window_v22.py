@@ -1171,7 +1171,7 @@ class LogWidget(QWidget):
 
         app_logger.add_listener(self._on_log_entry)
 
-    def _on_theme_changed(self, theme):
+    def _on_theme_changed(self, theme) -> None:
         """Handle theme change to update log colors."""
         self._log_colors = theme_manager.get_log_colors()
 

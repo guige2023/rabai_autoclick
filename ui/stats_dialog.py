@@ -56,7 +56,7 @@ class StatsDialog(QDialog):
         self._init_ui()
         self._load_data()
 
-    def _on_theme_changed(self, theme):
+    def _on_theme_changed(self, theme) -> None:
         """Handle theme changes to update colors."""
         self._colors = theme_manager.colors
         self._apply_stylesheet()
