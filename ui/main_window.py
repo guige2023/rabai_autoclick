@@ -666,9 +666,10 @@ class LogWidget(QWidget):
         """)
 
     def _on_log_entry(self, entry):
-        color = self._log_colors.get(entry.level, '#d4d4d4')
+        color = self._log_colors.get(entry.level, theme_manager.get_color('text_secondary'))
         timestamp = entry.timestamp.strftime("%H:%M:%S")
-        html = f'<span style="color: #888;">[{timestamp}]</span> <span style="color: {color};">[{entry.level}]</span> {entry.message}'
+        timestamp_color = theme_manager.get_color('text_secondary')
+        html = f'<span style="color: {timestamp_color};">[{timestamp}]</span> <span style="color: {color};">[{entry.level}]</span> {entry.message}'
         self.text_edit.append(html)
     
     def append_log(self, message: str, level: str = "INFO"):

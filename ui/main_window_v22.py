@@ -1137,6 +1137,8 @@ class VariablesWidget(QWidget):
 class LogWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._log_colors = theme_manager.get_log_colors()
+        theme_manager.theme_changed.connect(self._on_theme_changed)
         self._init_ui()
 
     def _init_ui(self):
@@ -1168,11 +1170,15 @@ class LogWidget(QWidget):
 
         app_logger.add_listener(self._on_log_entry)
 
+    def _on_theme_changed(self, theme):
+        """Handle theme change to update log colors."""
+        self._log_colors = theme_manager.get_log_colors()
+
     def _on_log_entry(self, entry):
-        log_colors = theme_manager.get_log_colors()
-        color = log_colors.get(entry.level, '#d4d4d4')
+        color = self._log_colors.get(entry.level, theme_manager.get_color('text_secondary'))
         timestamp = entry.timestamp.strftime("%H:%M:%S")
-        html = f'<span style="color: #888;">[{timestamp}]</span> <span style="color: {color};">[{entry.level}]</span> {entry.message}'
+        timestamp_color = theme_manager.get_color('text_secondary')
+        html = f'<span style="color: {timestamp_color};">[{timestamp}]</span> <span style="color: {color};">[{entry.level}]</span> {entry.message}'
         self.text_edit.append(html)
     
     def append_log(self, message: str, level: str = "INFO"):
@@ -1481,14 +1487,15 @@ class PredictiveWidget(QWidget):
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        
+        colors = theme_manager.colors
+
         info_label = QLabel("🧠 预测性自动化引擎 - 基于历史行为预测下一步操作")
         info_label.setStyleSheet(f"font-weight: bold; font-size: 13px; color: {colors['primary']};")
         layout.addWidget(info_label)
-        
+
         self.prediction_label = QLabel("暂无足够数据进行预测，请先执行一些工作流")
         self.prediction_label.setWordWrap(True)
-        self.prediction_label.setStyleSheet("padding: 10px; background-color: #E3F2FD; border-radius: 5px;")
+        self.prediction_label.setStyleSheet(f"padding: 10px; background-color: {colors['bg_hover']}; border-radius: 5px;")
         layout.addWidget(self.prediction_label)
         
         self.alternatives_list = QListWidget()
