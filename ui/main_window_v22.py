@@ -2496,21 +2496,22 @@ class MainWindow(QMainWindow):
         self.current_workflow = workflow
         self.step_configs = {}
         self.next_step_id = 1
-        
-        self.step_list.clear()
-        
-        for step in self.current_workflow.get('steps', []):
-            step_id = step.get('id', self.next_step_id)
-            action_type = step.get('type', '')
-            
-            action_info = self.engine.get_action_info().get(action_type, {})
-            display_name = action_info.get('display_name', action_type)
-            
-            self.step_list.add_step(step_id, action_type, display_name)
-            self.step_configs[step_id] = step.copy()
-            
-            self.next_step_id = max(self.next_step_id, step_id + 1)
-        
+
+        with batch_updates(self.step_list):
+            self.step_list.clear()
+
+            for step in self.current_workflow.get('steps', []):
+                step_id = step.get('id', self.next_step_id)
+                action_type = step.get('type', '')
+
+                action_info = self.engine.get_action_info().get(action_type, {})
+                display_name = action_info.get('display_name', action_type)
+
+                self.step_list.add_step(step_id, action_type, display_name)
+                self.step_configs[step_id] = step.copy()
+
+                self.next_step_id = max(self.next_step_id, step_id + 1)
+
         self.variables_widget.set_variables(self.current_workflow.get('variables', {}))
         show_toast("已加载历史记录", 'success')
         app_logger.info("从历史记录加载工作流", "Workflow")
