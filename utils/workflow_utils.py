@@ -1,332 +1,116 @@
-"""
-Workflow Engine Utilities
-
-Provides a workflow engine for defining and executing
-multi-step workflows with branching, loops, and error handling.
-"""
+"""Workflow utilities: DAG-based workflows, step dependencies, and execution tracking."""
 
 from __future__ import annotations
 
-import copy
+import threading
 import time
-import uuid
-from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections import defaultdict
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Generic, TypeVar
+from typing import Any, Callable
 
-T = TypeVar("T")
-
-
-class WorkflowState(Enum):
-    """Workflow execution states."""
-    PENDING = auto()
-    RUNNING = auto()
-    PAUSED = auto()
-    COMPLETED = auto()
-    FAILED = auto()
-    CANCELLED = auto()
-
-
-class StepType(Enum):
-    """Types of workflow steps."""
-    ACTION = auto()
-    CONDITION = auto()
-    PARALLEL = auto()
-    LOOP = auto()
-    WAIT = auto()
-    SUBWORKFLOW = auto()
+__all__ = [
+    "WorkflowStep",
+    "Workflow",
+    "WorkflowExecutor",
+]
 
 
 @dataclass
 class WorkflowStep:
-    """A single step in a workflow."""
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    name: str = ""
-    step_type: StepType = StepType.ACTION
-    action: Callable[[Any], Any] | None = None
-    condition: Callable[[Any], bool] | None = None
-    next_step: str | None = None  # Step ID to go to next
-    on_error: str | None = None    # Step ID to go to on error
-    retry_count: int = 0
-    retry_delay_ms: float = 0.0
-    metadata: dict[str, Any] = field(default_factory=dict)
+    """A step in a workflow."""
 
-    def __repr__(self) -> str:
-        return f"Step({self.name}, {self.step_type.name})"
+    name: str
+    fn: Callable[[], Any]
+    depends_on: list[str] = field(default_factory=list)
+    timeout_seconds: float = 300.0
+    retryable: bool = False
 
-
-@dataclass
-class WorkflowResult:
-    """Result of workflow execution."""
-    success: bool
-    state: WorkflowState
-    output: Any = None
-    error: str | None = None
-    step_results: dict[str, dict[str, Any]] = field(default_factory=dict)
-    total_time_ms: float = 0.0
-
-    @property
-    def failed(self) -> bool:
-        return not self.success
-
-
-@dataclass
-class StepResult:
-    """Result of a single step execution."""
-    step_id: str
-    success: bool
-    output: Any = None
-    error: str | None = None
-    duration_ms: float = 0.0
-    attempts: int = 1
+    def __post_init__(self) -> None:
+        self.result: Any = None
+        self.error: Exception | None = None
+        self.completed: bool = False
 
 
 class Workflow:
-    """
-    Workflow definition and execution engine.
-    """
+    """Directed Acyclic Graph (DAG) workflow."""
 
-    def __init__(self, name: str = ""):
-        self.name = name or f"workflow_{uuid.uuid4().hex[:8]}"
+    def __init__(self, name: str) -> None:
+        self.name = name
         self._steps: dict[str, WorkflowStep] = {}
-        self._entry_point: str | None = None
-        self._metadata: dict[str, Any] = {}
+        self._graph: dict[str, set[str]] = defaultdict(set)
 
-    def add_step(self, step: WorkflowStep) -> Workflow:
-        """Add a step to the workflow."""
-        self._steps[step.id] = step
-        if self._entry_point is None:
-            self._entry_point = step.id
+    def add_step(self, step: WorkflowStep) -> "Workflow":
+        self._steps[step.name] = step
+        for dep in step.depends_on:
+            self._graph[dep].add(step.name)
         return self
 
-    def step(
-        self,
-        name: str,
-        action: Callable[[Any], Any],
-        *,
-        step_type: StepType = StepType.ACTION,
-        next_step: str | None = None,
-        on_error: str | None = None,
-        retry_count: int = 0,
-        retry_delay_ms: float = 0.0,
-    ) -> Workflow:
-        """Add a step using a fluent interface."""
-        step = WorkflowStep(
-            name=name,
-            step_type=step_type,
-            action=action,
-            next_step=next_step,
-            on_error=on_error,
-            retry_count=retry_count,
-            retry_delay_ms=retry_delay_ms,
-        )
-        return self.add_step(step)
+    def get_execution_order(self) -> list[str]:
+        """Return steps in topological order (dependencies first)."""
+        in_degree: dict[str, int] = defaultdict(int)
+        for step in self._steps:
+            in_degree[step] = 0
+        for step_deps in self._graph.values():
+            for dep in step_deps:
+                in_degree[dep] += 1
 
-    def when(
-        self,
-        name: str,
-        condition: Callable[[Any], bool],
-        *,
-        then_step: str | None = None,
-        else_step: str | None = None,
-    ) -> Workflow:
-        """Add a conditional step."""
-        def condition_wrapper(ctx: Any) -> Any:
-            result = condition(ctx)
-            ctx["_condition_result"] = result
-            return ctx
+        queue = [s for s, d in in_degree.items() if d == 0]
+        order: list[str] = []
 
-        step = WorkflowStep(
-            name=name,
-            step_type=StepType.CONDITION,
-            action=condition_wrapper,
-            next_step=then_step,
-            metadata={"else_step": else_step},
-        )
-        return self.add_step(step)
+        while queue:
+            node = queue.pop(0)
+            order.append(node)
+            for neighbor in self._graph[node]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
 
-    def execute(self, initial_input: Any = None) -> WorkflowResult:
-        """
-        Execute the workflow.
+        return order
 
-        Args:
-            initial_input: Initial input to the workflow.
 
-        Returns:
-            WorkflowResult with execution details.
-        """
-        start_time = time.time()
-        step_results: dict[str, StepResult] = {}
-        current_step_id = self._entry_point
-        state = WorkflowState.RUNNING
-        context = initial_input
-        error: str | None = None
+class WorkflowExecutor:
+    """Execute workflows with parallel step support."""
 
-        while current_step_id and state == WorkflowState.RUNNING:
-            step = self._steps.get(current_step_id)
-            if not step:
-                error = f"Step not found: {current_step_id}"
-                state = WorkflowState.FAILED
-                break
+    def __init__(self, workflow: Workflow) -> None:
+        self.workflow = workflow
+        self._results: dict[str, Any] = {}
+        self._errors: dict[str, Exception] = {}
+        self._completed: set[str] = set()
+        self._lock = threading.RLock()
 
-            step_start = time.time()
-            attempts = 0
-            success = False
-            output = None
-            step_error = None
+    def run(self) -> bool:
+        """Execute the workflow."""
+        order = self.workflow.get_execution_order()
 
-            # Execute step with retries
-            while attempts <= step.retry_count and not success:
-                attempts += 1
-                try:
-                    if step.step_type == StepType.ACTION and step.action:
-                        output = step.action(context)
-                        success = True
-                    elif step.step_type == StepType.CONDITION and step.action:
-                        output = step.action(context)
-                        success = True
-                except Exception as e:
-                    step_error = str(e)
-                    if attempts <= step.retry_count:
-                        time.sleep(step.retry_delay_ms / 1000)
+        for step_name in order:
+            step = self.workflow._steps[step_name]
 
-            duration = (time.time() - step_start) * 1000
-
-            step_results[step.id] = StepResult(
-                step_id=step.id,
-                success=success,
-                output=output,
-                error=step_error,
-                duration_ms=duration,
-                attempts=attempts,
-            )
-
-            if not success:
-                if step.on_error:
-                    current_step_id = step.on_error
-                else:
-                    error = f"Step {step.name} failed: {step_error}"
-                    state = WorkflowState.FAILED
+            deps_satisfied = all(d in self._completed for d in step.depends_on)
+            if not deps_satisfied:
                 continue
 
-            # Determine next step
-            if step.step_type == StepType.CONDITION:
-                # Check condition result
-                if context and isinstance(context, dict) and context.get("_condition_result"):
-                    current_step_id = step.next_step
-                else:
-                    current_step_id = step.metadata.get("else_step")
-            else:
-                current_step_id = step.next_step
+            try:
+                result = step.fn()
+                step.result = result
+                self._results[step_name] = result
+                step.completed = True
+                with self._lock:
+                    self._completed.add(step_name)
+            except Exception as e:
+                step.error = e
+                self._errors[step_name] = e
+                with self._lock:
+                    self._completed.add(step_name)
+                if not step.retryable:
+                    continue
 
-        if state == WorkflowState.RUNNING:
-            state = WorkflowState.COMPLETED
+        return len(self._errors) == 0
 
-        return WorkflowResult(
-            success=state == WorkflowState.COMPLETED,
-            state=state,
-            output=context,
-            error=error,
-            step_results={k: vars(v) for k, v in step_results.items()},
-            total_time_ms=(time.time() - start_time) * 1000,
-        )
+    def get_result(self, step_name: str) -> Any | None:
+        return self._results.get(step_name)
 
+    def get_error(self, step_name: str) -> Exception | None:
+        return self._errors.get(step_name)
 
-class WorkflowBuilder(Generic[T]):
-    """
-    Fluent builder for creating workflows.
-    """
-
-    def __init__(self, name: str = ""):
-        self._workflow = Workflow(name)
-
-    def add_step(self, step: WorkflowStep) -> WorkflowBuilder[T]:
-        """Add a step."""
-        self._workflow.add_step(step)
-        return self
-
-    def action(
-        self,
-        name: str,
-        action: Callable[[Any], Any],
-        **kwargs: Any,
-    ) -> WorkflowBuilder[T]:
-        """Add an action step."""
-        self._workflow.step(name, action, step_type=StepType.ACTION, **kwargs)
-        return self
-
-    def condition(
-        self,
-        name: str,
-        condition: Callable[[Any], bool],
-        then_step: str | None = None,
-        else_step: str | None = None,
-    ) -> WorkflowBuilder[T]:
-        """Add a condition step."""
-        self._workflow.when(name, condition, then_step=then_step, else_step=else_step)
-        return self
-
-    def build(self) -> Workflow:
-        """Build and return the workflow."""
-        return self._workflow
-
-
-class WorkflowRegistry:
-    """
-    Registry for reusable workflow templates.
-    """
-
-    def __init__(self):
-        self._workflows: dict[str, Workflow] = {}
-
-    def register(self, name: str, workflow: Workflow) -> None:
-        """Register a workflow."""
-        self._workflows[name] = workflow
-
-    def get(self, name: str) -> Workflow | None:
-        """Get a workflow by name."""
-        return self._workflows.get(name)
-
-    def create(self, name: str, input_data: Any = None) -> WorkflowResult | None:
-        """Create and execute a workflow."""
-        workflow = self.get(name)
-        if workflow:
-            return workflow.execute(input_data)
-        return None
-
-    def list_workflows(self) -> list[str]:
-        """List registered workflow names."""
-        return list(self._workflows.keys())
-
-
-class ParallelWorkflowStep:
-    """
-    A workflow step that executes multiple steps in parallel.
-    """
-
-    def __init__(self, steps: list[WorkflowStep]):
-        self.steps = steps
-        self.results: list[Any] = []
-
-    def execute(self, context: Any) -> Any:
-        """Execute all steps in parallel."""
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(step.action, context): step
-                for step in self.steps
-                if step.action
-            }
-
-            for future in concurrent.futures.as_completed(futures):
-                step = futures[future]
-                try:
-                    result = future.result()
-                    self.results.append(result)
-                except Exception as e:
-                    self.results.append({"error": str(e)})
-
-        return self.results
+    def is_complete(self) -> bool:
+        return len(self._completed) == len(self.workflow._steps)
