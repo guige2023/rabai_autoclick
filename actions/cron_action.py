@@ -1,529 +1,453 @@
-"""Cron action module for RabAI AutoClick.
-
-Provides cron/scheduling operations:
-- CronCreateAction: Create cron job
-- CronListAction: List cron jobs
-- CronDeleteAction: Delete cron job
-- CronNextRunAction: Calculate next run time
-- CronParseAction: Parse cron expression
-- CronValidateAction: Validate cron expression
 """
+Cron schedule parsing and manipulation actions.
+"""
+from __future__ import annotations
 
-import subprocess
-import os
 import re
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class CronCreateAction(BaseAction):
-    """Create cron job."""
-    action_type = "cron_create"
-    display_name = "创建定时任务"
-    description = "创建Cron定时任务"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute create.
-
-        Args:
-            context: Execution context.
-            params: Dict with expression, command, user.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        expression = params.get('expression', '')
-        command = params.get('command', '')
-        user = params.get('user', '')
-
-        valid, msg = self.validate_type(expression, str, 'expression')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(command, str, 'command')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_expr = context.resolve_value(expression)
-            resolved_cmd = context.resolve_value(command)
-            resolved_user = context.resolve_value(user) if user else None
-
-            # Validate expression
-            parts = resolved_expr.split()
-            if len(parts) < 5:
-                return ActionResult(
-                    success=False,
-                    message=f"Cron表达式无效: 需要5个字段 (分 时 日 月 周)"
-                )
-
-            # Read existing crontab
-            existing = ''
-            try:
-                result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    existing = result.stdout
-            except:
-                pass
-
-            # Build new crontab entry
-            new_entry = f"{resolved_expr} {resolved_cmd}\n"
-
-            if resolved_user:
-                new_entry = f"{resolved_expr} {resolved_user} {resolved_cmd}\n"
-
-            new_crontab = existing.rstrip('\n') + '\n' + new_entry
-
-            # Write new crontab
-            proc = subprocess.Popen(['crontab', '-'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, stderr = proc.communicate(new_crontab.encode('utf-8'))
-
-            if proc.returncode != 0:
-                return ActionResult(
-                    success=False,
-                    message=f"Cron创建失败: {stderr.decode('utf-8')}"
-                )
-
-            return ActionResult(
-                success=True,
-                message=f"Cron任务已创建: {resolved_expr} {resolved_cmd}",
-                data={'expression': resolved_expr, 'command': resolved_cmd}
-            )
-        except subprocess.TimeoutExpired:
-            return ActionResult(
-                success=False,
-                message="Crontab命令超时"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Cron创建失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['expression', 'command']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'user': ''}
-
-
-class CronListAction(BaseAction):
-    """List cron jobs."""
-    action_type = "cron_list"
-    display_name = "列出定时任务"
-    description = "列出所有Cron定时任务"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute list.
-
-        Args:
-            context: Execution context.
-            params: Dict with output_var.
-
-        Returns:
-            ActionResult with cron list.
-        """
-        output_var = params.get('output_var', 'cron_jobs')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=5)
-
-            if result.returncode != 0:
-                if 'no crontab' in result.stderr.lower():
-                    context.set(output_var, [])
-                    return ActionResult(
-                        success=True,
-                        message="无Cron任务",
-                        data={'jobs': [], 'output_var': output_var}
-                    )
-                return ActionResult(
-                    success=False,
-                    message=f"Cron列出失败: {result.stderr}"
-                )
-
-            lines = result.stdout.strip().split('\n')
-            jobs = []
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-
-                parts = line.split(None, 5)
-                if len(parts) >= 6:
-                    jobs.append({
-                        'expression': ' '.join(parts[:5]),
-                        'command': parts[5]
-                    })
-                elif len(parts) >= 1:
-                    jobs.append({
-                        'raw': line
-                    })
-
-            context.set(output_var, jobs)
-
-            return ActionResult(
-                success=True,
-                message=f"Cron任务: {len(jobs)} 个",
-                data={'count': len(jobs), 'jobs': jobs, 'output_var': output_var}
-            )
-        except subprocess.TimeoutExpired:
-            return ActionResult(
-                success=False,
-                message="Crontab命令超时"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Cron列出失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'cron_jobs'}
-
-
-class CronDeleteAction(BaseAction):
-    """Delete cron job."""
-    action_type = "cron_delete"
-    display_name = "删除定时任务"
-    description = "删除Cron定时任务"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute delete.
-
-        Args:
-            context: Execution context.
-            params: Dict with command_pattern.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        command_pattern = params.get('command_pattern', '')
-
-        valid, msg = self.validate_type(command_pattern, str, 'command_pattern')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_pattern = context.resolve_value(command_pattern)
-
-            # Get current crontab
-            result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=5)
-
-            if result.returncode != 0:
-                return ActionResult(
-                    success=False,
-                    message="无法读取当前Crontab"
-                )
-
-            lines = result.stdout.strip().split('\n')
-            new_lines = []
-            deleted = 0
-
-            for line in lines:
-                stripped = line.strip()
-                if not stripped or stripped.startswith('#'):
-                    new_lines.append(stripped)
-                    continue
-
-                if resolved_pattern in stripped:
-                    deleted += 1
-                    continue
-
-                new_lines.append(stripped)
-
-            new_crontab = '\n'.join(new_lines) + '\n'
-
-            proc = subprocess.Popen(['crontab', '-'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, stderr = proc.communicate(new_crontab.encode('utf-8'))
-
-            if proc.returncode != 0:
-                return ActionResult(
-                    success=False,
-                    message=f"Cron删除失败: {stderr.decode('utf-8')}"
-                )
-
-            return ActionResult(
-                success=True,
-                message=f"已删除 {deleted} 个Cron任务",
-                data={'deleted': deleted}
-            )
-        except subprocess.TimeoutExpired:
-            return ActionResult(
-                success=False,
-                message="Crontab命令超时"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Cron删除失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['command_pattern']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
-
-
-class CronNextRunAction(BaseAction):
-    """Calculate next run time."""
-    action_type = "cron_next_run"
-    display_name = "计算下次运行时间"
-    description = "计算Cron表达式的下次执行时间"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute next run.
-
-        Args:
-            context: Execution context.
-            params: Dict with expression, from_time, count, output_var.
-
-        Returns:
-            ActionResult with next run times.
-        """
-        expression = params.get('expression', '')
-        from_time = params.get('from_time', '')
-        count = params.get('count', 5)
-        output_var = params.get('output_var', 'cron_next_runs')
-
-        valid, msg = self.validate_type(expression, str, 'expression')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_expr = context.resolve_value(expression)
-            resolved_count = context.resolve_value(count)
-            resolved_from = context.resolve_value(from_time) if from_time else None
-
-            if resolved_from:
-                current = datetime.fromisoformat(resolved_from.replace('Z', '+00:00'))
-            else:
-                current = datetime.now()
-
-            parts = resolved_expr.split()
-            if len(parts) < 5:
-                return ActionResult(
-                    success=False,
-                    message=f"Cron表达式无效"
-                )
-
-            next_runs = []
-            for _ in range(int(resolved_count)):
-                current = self._next_run(current, parts)
-                next_runs.append(current.isoformat())
-                current += timedelta(minutes=1)
-
-            context.set(output_var, next_runs)
-
-            return ActionResult(
-                success=True,
-                message=f"下次运行: {next_runs[0]}",
-                data={'next_runs': next_runs, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"计算下次运行时间失败: {str(e)}"
-            )
-
-    def _next_run(self, dt: datetime, parts: List[str]) -> datetime:
-        """Calculate next run time from current time."""
-        minute, hour, day, month, dow = parts
-
-        # Simple next run - advance minute by 1 and find matching
-        for _ in range(60 * 24 * 31):
-            dt += timedelta(minutes=1)
-
-            if not self._match_field(dt.minute, minute):
-                continue
-            if not self._match_field(dt.hour, hour):
-                continue
-            if not self._match_field(dt.day, day):
-                continue
-            if not self._match_field(dt.month, month):
-                continue
-            if not self._match_field(dt.weekday(), dow):
+
+
+def parse_cron_expression(expression: str) -> Dict[str, Any]:
+    """
+    Parse a cron expression into components.
+
+    Args:
+        expression: Cron expression (e.g., '0 * * * *').
+
+    Returns:
+        Dictionary with parsed components.
+
+    Raises:
+        ValueError: If expression is invalid.
+    """
+    parts = expression.split()
+
+    if len(parts) != 5:
+        raise ValueError(f"Invalid cron expression: expected 5 fields, got {len(parts)}")
+
+    return {
+        'minute': parts[0],
+        'hour': parts[1],
+        'day_of_month': parts[2],
+        'month': parts[3],
+        'day_of_week': parts[4],
+        'raw': expression,
+    }
+
+
+def describe_cron_schedule(expression: str) -> str:
+    """
+    Describe a cron schedule in human-readable format.
+
+    Args:
+        expression: Cron expression.
+
+    Returns:
+        Human-readable description.
+    """
+    parsed = parse_cron_expression(expression)
+
+    minute = parsed['minute']
+    hour = parsed['hour']
+    dom = parsed['day_of_month']
+    month = parsed['month']
+    dow = parsed['day_of_week']
+
+    if minute == '*' and hour == '*':
+        return 'Every minute'
+    elif minute == '0' and hour == '*':
+        return 'Every hour at minute 0'
+    elif minute == '0' and hour == '0':
+        return 'Once daily at midnight'
+    elif minute == '0' and hour == '12':
+        return 'Once daily at noon'
+    elif dom == '*' and month == '*' and dow == '*':
+        return f'Every day at {hour}:{minute.zfill(2)}'
+    elif dow != '*' and dom == '*':
+        return f'Every {dow} at {hour}:{minute.zfill(2)}'
+    elif dom != '*' and month == '*' and dow == '*':
+        return f'On day {dom} of every month at {hour}:{minute.zfill(2)}'
+    elif minute != '*' and hour != '*':
+        return f'At {hour}:{minute.zfill(2)}'
+    elif minute == '*/5':
+        return 'Every 5 minutes'
+    elif minute == '*/15':
+        return 'Every 15 minutes'
+    elif minute == '*/30':
+        return 'Every 30 minutes'
+    elif hour == '*/2':
+        return 'Every 2 hours'
+    elif hour == '*/4':
+        return 'Every 4 hours'
+    elif hour == '*/6':
+        return 'Every 6 hours'
+    elif hour == '*/12':
+        return 'Every 12 hours'
+
+    return f'Custom schedule: {expression}'
+
+
+def get_next_run_times(
+    expression: str,
+    count: int = 5,
+    start_time: Optional[datetime] = None
+) -> List[datetime]:
+    """
+    Calculate next run times for a cron expression.
+
+    Args:
+        expression: Cron expression.
+        count: Number of run times to calculate.
+        start_time: Starting point for calculation.
+
+    Returns:
+        List of upcoming run times.
+    """
+    if start_time is None:
+        start_time = datetime.now()
+
+    parsed = parse_cron_expression(expression)
+
+    runs: List[datetime] = []
+    current = start_time.replace(second=0, microsecond=0)
+
+    minute = parsed['minute']
+    hour = parsed['hour']
+
+    if minute != '*' and not minute.startswith('*/'):
+        target_minute = int(minute)
+    else:
+        target_minute = None
+
+    if hour != '*' and not hour.startswith('*/'):
+        target_hour = int(hour)
+    else:
+        target_hour = None
+
+    max_iterations = 1000
+    iterations = 0
+
+    while len(runs) < count and iterations < max_iterations:
+        current += timedelta(minutes=1)
+        iterations += 1
+
+        if target_minute is not None and current.minute != target_minute:
+            continue
+
+        if target_hour is not None and current.hour != target_hour:
+            continue
+
+        if minute.startswith('*/'):
+            interval = int(minute[2:])
+            if current.minute % interval != 0:
                 continue
 
-            return dt
+        if hour.startswith('*/'):
+            interval = int(hour[2:])
+            if current.hour % interval != 0:
+                continue
 
-        return dt + timedelta(days=31)
+        runs.append(current)
 
-    def _match_field(self, value: int, field: str) -> bool:
-        """Check if value matches cron field."""
-        if field == '*':
-            return True
-
-        for part in field.split(','):
-            if '/' in part:
-                step_parts = part.split('/')
-                range_part = step_parts[0]
-                step = int(step_parts[1])
-
-                if range_part == '*':
-                    start, end = 0, 59 if value < 24 else 23
-                elif '-' in range_part:
-                    start, end = map(int, range_part.split('-'))
-                else:
-                    start = int(range_part)
-                    end = 59 if value < 24 else 23
-
-                if value >= start and value <= end and (value - start) % step == 0:
-                    return True
-            elif '-' in part:
-                start, end = map(int, part.split('-'))
-                if start <= value <= end:
-                    return True
-            elif int(part) == value:
-                return True
-
-        return False
-
-    def get_required_params(self) -> List[str]:
-        return ['expression']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'from_time': '', 'count': 5, 'output_var': 'cron_next_runs'}
+    return runs
 
 
-class CronValidateAction(BaseAction):
-    """Validate cron expression."""
-    action_type = "cron_validate"
-    display_name = "验证Cron表达式"
-    description = "验证Cron表达式是否有效"
-    version = "1.0"
+def build_cron_expression(
+    minute: str = '*',
+    hour: str = '*',
+    day_of_month: str = '*',
+    month: str = '*',
+    day_of_week: str = '*'
+) -> str:
+    """
+    Build a cron expression from components.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute validate.
+    Args:
+        minute: Minute field (0-59, *, */n).
+        hour: Hour field (0-23, *, */n).
+        day_of_month: Day of month field (1-31, *, */n).
+        month: Month field (1-12, *, */n).
+        day_of_week: Day of week field (0-6, *, */n).
 
-        Args:
-            context: Execution context.
-            params: Dict with expression, output_var.
+    Returns:
+        Cron expression string.
+    """
+    return f'{minute} {hour} {day_of_month} {month} {day_of_week}'
 
-        Returns:
-            ActionResult with validation result.
-        """
-        expression = params.get('expression', '')
-        output_var = params.get('output_var', 'cron_valid')
 
-        valid, msg = self.validate_type(expression, str, 'expression')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+def cron_to_seconds(expression: str) -> List[int]:
+    """
+    Convert cron to list of second offsets in an hour.
 
-        try:
-            resolved_expr = context.resolve_value(expression)
+    Args:
+        expression: Cron expression.
 
-            parts = resolved_expr.split()
-            if len(parts) < 5:
-                context.set(output_var, False)
-                return ActionResult(
-                    success=False,
-                    message=f"表达式无效: 需要5个字段",
-                    data={'valid': False, 'expression': resolved_expr, 'output_var': output_var}
-                )
+    Returns:
+        List of second offsets.
+    """
+    parsed = parse_cron_expression(expression)
 
-            # Validate each field
-            field_names = ['minute', 'hour', 'day', 'month', 'weekday']
-            field_ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 6)]
+    seconds: List[int] = []
 
-            errors = []
-            for i, (part, (min_v, max_v)) in enumerate(zip(parts[:5], field_ranges)):
-                if not self._validate_field(part, min_v, max_v):
-                    errors.append(f"{field_names[i]}: '{part}' 无效")
+    minute = parsed['minute']
 
-            context.set(output_var, len(errors) == 0)
+    if minute.startswith('*/'):
+        interval = int(minute[2:])
+        for m in range(0, 60, interval):
+            seconds.append(m * 60)
+    elif minute != '*':
+        m = int(minute)
+        seconds.append(m * 60)
 
-            return ActionResult(
-                success=len(errors) == 0,
-                message=f"Cron验证 {'通过' if len(errors) == 0 else '失败'}",
-                data={'valid': len(errors) == 0, 'errors': errors, 'expression': resolved_expr, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Cron验证失败: {str(e)}"
-            )
+    return seconds
 
-    def _validate_field(self, field: str, min_v: int, max_v: int) -> bool:
-        """Validate a single cron field."""
-        if field == '*':
-            return True
 
-        for part in field.split(','):
-            if '/' in part:
-                step_parts = part.split('/')
-                if len(step_parts) != 2:
-                    return False
-                range_part, step = step_parts
-                try:
-                    int(step)
-                    if range_part != '*':
-                        if '-' in range_part:
-                            s, e = map(int, range_part.split('-'))
-                            if s > e:
-                                return False
-                        else:
-                            v = int(range_part)
-                            if v < min_v or v > max_v:
-                                return False
-                except ValueError:
-                    return False
-            elif '-' in part:
-                try:
-                    s, e = map(int, part.split('-'))
-                    if s < min_v or e > max_v or s > e:
-                        return False
-                except ValueError:
-                    return False
-            else:
-                try:
-                    v = int(part)
-                    if v < min_v or v > max_v:
-                        return False
-                except ValueError:
-                    return False
+def validate_cron_expression(expression: str) -> bool:
+    """
+    Validate a cron expression.
+
+    Args:
+        expression: Cron expression to validate.
+
+    Returns:
+        True if valid.
+    """
+    try:
+        parts = expression.split()
+
+        if len(parts) != 5:
+            return False
+
+        minute, hour, dom, month, dow = parts
+
+        if not _validate_cron_field(minute, 0, 59):
+            return False
+        if not _validate_cron_field(hour, 0, 23):
+            return False
+        if not _validate_cron_field(dom, 1, 31):
+            return False
+        if not _validate_cron_field(month, 1, 12):
+            return False
+        if not _validate_cron_field(dow, 0, 6):
+            return False
 
         return True
+    except Exception:
+        return False
 
-    def get_required_params(self) -> List[str]:
-        return ['expression']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'cron_valid'}
+def _validate_cron_field(value: str, min_val: int, max_val: int) -> bool:
+    """Validate a single cron field."""
+    if value == '*':
+        return True
+
+    if value.startswith('*/'):
+        try:
+            interval = int(value[2:])
+            return interval > 0
+        except ValueError:
+            return False
+
+    if ',' in value:
+        for part in value.split(','):
+            if not _validate_cron_field(part, min_val, max_val):
+                return False
+        return True
+
+    if '-' in value:
+        parts = value.split('-')
+        if len(parts) != 2:
+            return False
+        try:
+            start = int(parts[0])
+            end = int(parts[1])
+            return min_val <= start <= end <= max_val
+        except ValueError:
+            return False
+
+    try:
+        num = int(value)
+        return min_val <= num <= max_val
+    except ValueError:
+        return False
+
+
+def create_daily_schedule(hour: int, minute: int = 0) -> str:
+    """
+    Create a daily cron schedule.
+
+    Args:
+        hour: Hour (0-23).
+        minute: Minute (0-59).
+
+    Returns:
+        Cron expression.
+    """
+    return f'{minute} {hour} * * *'
+
+
+def create_hourly_schedule(minute: int = 0) -> str:
+    """
+    Create an hourly cron schedule.
+
+    Args:
+        minute: Minute past the hour.
+
+    Returns:
+        Cron expression.
+    """
+    return f'{minute} * * * *'
+
+
+def create_minutely_schedule() -> str:
+    """
+    Create a minutely cron schedule.
+
+    Returns:
+        Cron expression.
+    """
+    return '* * * * *'
+
+
+def create_weekly_schedule(
+    day_of_week: int,
+    hour: int,
+    minute: int = 0
+) -> str:
+    """
+    Create a weekly cron schedule.
+
+    Args:
+        day_of_week: Day of week (0=Sunday, 6=Saturday).
+        hour: Hour (0-23).
+        minute: Minute (0-59).
+
+    Returns:
+        Cron expression.
+    """
+    return f'{minute} {hour} * * {day_of_week}'
+
+
+def create_monthly_schedule(
+    day_of_month: int,
+    hour: int,
+    minute: int = 0
+) -> str:
+    """
+    Create a monthly cron schedule.
+
+    Args:
+        day_of_month: Day of month (1-31).
+        hour: Hour (0-23).
+        minute: Minute (0-59).
+
+    Returns:
+        Cron expression.
+    """
+    return f'{minute} {hour} {day_of_month} * *'
+
+
+def get_cron_human_description(
+    minute: str,
+    hour: str,
+    day_of_month: str,
+    month: str,
+    day_of_week: str
+) -> str:
+    """
+    Get human description of cron fields.
+
+    Args:
+        minute: Minute field.
+        hour: Hour field.
+        day_of_month: Day of month field.
+        month: Month field.
+        day_of_week: Day of week field.
+
+    Returns:
+        Human-readable description.
+    """
+    expression = f'{minute} {hour} {day_of_month} {month} {day_of_week}'
+    return describe_cron_schedule(expression)
+
+
+def cron_matches(cron_expr: str, dt: datetime) -> bool:
+    """
+    Check if a datetime matches a cron expression.
+
+    Args:
+        cron_expr: Cron expression.
+        dt: Datetime to check.
+
+    Returns:
+        True if datetime matches.
+    """
+    parsed = parse_cron_expression(cron_expr)
+
+    if not _field_matches(parsed['minute'], dt.minute, 0, 59):
+        return False
+
+    if not _field_matches(parsed['hour'], dt.hour, 0, 23):
+        return False
+
+    if not _field_matches(parsed['day_of_month'], dt.day, 1, 31):
+        return False
+
+    if not _field_matches(parsed['month'], dt.month, 1, 12):
+        return False
+
+    if not _field_matches(parsed['day_of_week'], dt.weekday(), 0, 6):
+        return False
+
+    return True
+
+
+def _field_matches(field: str, value: int, min_val: int, max_val: int) -> bool:
+    """Check if a field value matches the field specification."""
+    if field == '*':
+        return True
+
+    if field.startswith('*/'):
+        interval = int(field[2:])
+        return value % interval == 0
+
+    if ',' in field:
+        return any(_field_matches(f, value, min_val, max_val) for f in field.split(','))
+
+    if '-' in field:
+        start, end = field.split('-')
+        return int(start) <= value <= int(end)
+
+    return int(field) == value
+
+
+def get_schedule_interval_seconds(cron_expr: str) -> Optional[int]:
+    """
+    Estimate the interval of a cron schedule in seconds.
+
+    Args:
+        cron_expr: Cron expression.
+
+    Returns:
+        Interval in seconds, or None if irregular.
+    """
+    intervals = [
+        ('* * * * *', 60),
+        ('*/5 * * * *', 300),
+        ('*/10 * * * *', 600),
+        ('*/15 * * * *', 900),
+        ('*/30 * * * *', 1800),
+        ('0 * * * *', 3600),
+        ('0 */2 * * *', 7200),
+        ('0 */4 * * *', 14400),
+        ('0 */6 * * *', 21600),
+        ('0 */12 * * *', 43200),
+        ('0 0 * * *', 86400),
+    ]
+
+    for pattern, seconds in intervals:
+        if cron_expr == pattern:
+            return seconds
+
+    return None
