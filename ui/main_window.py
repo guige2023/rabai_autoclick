@@ -850,11 +850,12 @@ class MainWindow(QMainWindow):
 
         colors = theme_manager.colors
         self.run_btn = QPushButton("▶ 运行")
-        self.run_btn.setStyleSheet(f"background-color: {colors['success']}; color: white; font-weight: bold; padding: 8px 16px;")
+        self.run_btn.setStyleSheet(theme_manager.get_button_stylesheet('success'))
         self.stop_btn = QPushButton("⏹ 停止")
-        self.stop_btn.setStyleSheet(f"background-color: {colors['error']}; color: white; padding: 8px 16px;")
+        self.stop_btn.setStyleSheet(theme_manager.get_button_stylesheet('danger'))
         self.pause_btn = QPushButton("⏸ 暂停")
-        
+        self.pause_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
+
         self.on_top_btn = QPushButton("📌 置顶")
         self.on_top_btn.setCheckable(True)
         self.teaching_btn = QPushButton("🎓 教学")
@@ -867,6 +868,7 @@ class MainWindow(QMainWindow):
         self.memory_btn = QPushButton("💾 内存")
         self.theme_btn = QPushButton("🌙 深色")
         self.theme_btn.setCheckable(True)
+        self.theme_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
 
         self.stop_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
@@ -1708,6 +1710,12 @@ class MainWindow(QMainWindow):
         """Apply the current theme to all UI components."""
         self.setStyleSheet(theme_manager.get_stylesheet("main_window"))
         self.log_widget.text_edit.setStyleSheet(theme_manager.get_stylesheet("log"))
+
+        # Update animated button styles
+        self.run_btn.setStyleSheet(theme_manager.get_button_stylesheet('success'))
+        self.stop_btn.setStyleSheet(theme_manager.get_button_stylesheet('danger'))
+        self.pause_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
+        self.theme_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
 
     def changeEvent(self, event):
         """Handle window state changes to optimize timer usage."""
