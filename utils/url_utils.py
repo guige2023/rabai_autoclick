@@ -1,310 +1,172 @@
-"""URL utilities for RabAI AutoClick.
+"""URL utilities: parsing, building, query parameter handling, and redirects."""
 
-Provides:
-- URL parsing and building
-- Query parameter handling
-- URL validation
-"""
+from __future__ import annotations
 
-import re
-import urllib.parse
+import urllib.parse as urlparse
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
+
+__all__ = [
+    "URLParser",
+    "URLBuilder",
+    "parse_query_params",
+    "build_query_string",
+    "extract_domain",
+    "normalize_url",
+]
+
+
+def parse_query_params(url: str) -> dict[str, str]:
+    """Parse query parameters from URL into a dict."""
+    parsed = urlparse.urlparse(url)
+    return dict(urlparse.parse_qsl(parsed.query))
+
+
+def build_query_string(params: dict[str, Any], doseq: bool = False) -> str:
+    """Build a query string from a dict."""
+    encoded = urlparse.urlencode(params, doseq=doseq)
+    return encoded
+
+
+def extract_domain(url: str) -> str:
+    """Extract domain from URL."""
+    parsed = urlparse.urlparse(url)
+    return parsed.netloc
+
+
+def normalize_url(url: str, trailing_slash: bool = False) -> str:
+    """Normalize URL: lowercase, remove fragments, optionally add/remove trailing slash."""
+    parsed = urlparse.urlparse(url.lower())
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc
+    path = parsed.path
+    if trailing_slash and not path.endswith("/"):
+        path += "/"
+    elif not trailing_slash and path.endswith("/"):
+        path = path.rstrip("/")
+    normalized = urlparse.urlunparse((scheme, netloc, path, "", "", ""))
+    return normalized
 
 
 @dataclass
-class URL:
-    """Represents a parsed URL.
+class URLParser:
+    """Parse a URL into its components."""
+    url: str
 
-    Provides easy access to URL components and query parameters.
-    """
-
-    scheme: str
-    host: str
-    port: Optional[int]
-    path: str
-    query: Dict[str, str]
-    fragment: str
+    @property
+    def scheme(self) -> str:
+        return urlparse.urlparse(self.url).scheme
 
     @property
     def netloc(self) -> str:
-        """Get network location (host:port)."""
-        if self.port:
-            return f"{self.host}:{self.port}"
-        return self.host
+        return urlparse.urlparse(self.url).netloc
 
     @property
-    def query_string(self) -> str:
-        """Get query string without leading '?'."""
-        return urllib.parse.urlencode(self.query)
-
-    def __str__(self) -> str:
-        """Get full URL string."""
-        url = f"{self.scheme}://{self.netloc}{self.path}"
-        if self.query:
-            url += f"?{self.query_string}"
-        if self.fragment:
-            url += f"#{self.fragment}"
-        return url
-
-    @classmethod
-    def parse(cls, url_str: str) -> 'URL':
-        """Parse URL string.
-
-        Args:
-            url_str: URL to parse.
-
-        Returns:
-            URL object.
-        """
-        parsed = urllib.parse.urlparse(url_str)
-
-        query_dict = dict(urllib.parse.parse_qsl(parsed.query))
-
-        port = None
-        if parsed.port:
-            port = parsed.port
-
-        return cls(
-            scheme=parsed.scheme,
-            host=parsed.hostname or "",
-            port=port,
-            path=parsed.path,
-            query=query_dict,
-            fragment=parsed.fragment,
-        )
-
-
-def build_url(
-    scheme: str = "https",
-    host: str = "",
-    port: Optional[int] = None,
-    path: str = "",
-    query: Optional[Dict[str, Any]] = None,
-    fragment: str = "",
-) -> str:
-    """Build URL from components.
-
-    Args:
-        scheme: URL scheme (http, https, etc.).
-        host: Hostname.
-        port: Optional port.
-        path: URL path.
-        query: Query parameters dict.
-        fragment: URL fragment.
-
-    Returns:
-        Built URL string.
-    """
-    url = f"{scheme}://{host}"
-    if port:
-        url += f":{port}"
-    url += path
-
-    if query:
-        url += "?" + urllib.parse.urlencode(query)
-
-    if fragment:
-        url += f"#{fragment}"
-
-    return url
-
-
-def get_query_params(url: str) -> Dict[str, str]:
-    """Extract query parameters from URL.
-
-    Args:
-        url: URL string.
-
-    Returns:
-        Dict of query parameters.
-    """
-    parsed = urllib.parse.urlparse(url)
-    return dict(urllib.parse.parse_qsl(parsed.query))
-
-
-def add_query_params(
-    url: str,
-    params: Dict[str, Any],
-) -> str:
-    """Add query parameters to URL.
-
-    Args:
-        url: Base URL.
-        params: Parameters to add.
-
-    Returns:
-        URL with added parameters.
-    """
-    parsed = urllib.parse.urlparse(url)
-    existing = dict(urllib.parse.parse_qsl(parsed.query))
-    existing.update(params)
-
-    new_query = urllib.parse.urlencode(existing)
-    return parsed._replace(query=new_query).geturl()
-
-
-def remove_query_params(url: str, *keys: str) -> str:
-    """Remove query parameters from URL.
-
-    Args:
-        url: URL with parameters.
-        *keys: Parameter names to remove.
-
-    Returns:
-        URL with parameters removed.
-    """
-    parsed = urllib.parse.urlparse(url)
-    existing = dict(urllib.parse.parse_qsl(parsed.query))
-
-    for key in keys:
-        existing.pop(key, None)
-
-    new_query = urllib.parse.urlencode(existing)
-    return parsed._replace(query=new_query).geturl()
-
-
-def is_valid_url(url: str) -> bool:
-    """Check if URL is valid.
-
-    Args:
-        url: URL string to validate.
-
-    Returns:
-        True if valid URL.
-    """
-    try:
-        result = urllib.parse.urlparse(url)
-        return all([result.scheme, result.netloc])
-    except Exception:
-        return False
-
-
-def is_absolute_url(url: str) -> bool:
-    """Check if URL is absolute.
-
-    Args:
-        url: URL to check.
-
-    Returns:
-        True if absolute URL.
-    """
-    return bool(urllib.parse.urlparse(url).netloc)
-
-
-def join_url(base: str, *parts: str) -> str:
-    """Join URL parts.
-
-    Args:
-        base: Base URL.
-        *parts: Path parts to join.
-
-    Returns:
-        Joined URL.
-    """
-    result = base.rstrip('/')
-
-    for part in parts:
-        if not part:
-            continue
-        part = part.strip('/')
-        result += '/' + part
-
-    return result
-
-
-def normalize_url(url: str) -> str:
-    """Normalize URL.
-
-    - Removes default ports
-    - Adds trailing slash to path if missing
-    - Lowercases scheme and host
-
-    Args:
-        url: URL to normalize.
-
-    Returns:
-        Normalized URL.
-    """
-    parsed = urllib.parse.urlparse(url)
-
-    # Remove default ports
-    netloc = parsed.netloc
-    if parsed.port and parsed.scheme in ('http', 'https'):
-        default_port = 443 if parsed.scheme == 'https' else 80
-        if parsed.port == default_port:
-            netloc = parsed.hostname or ''
-
-    # Lowercase scheme and host
-    netloc = netloc.lower()
-
-    # Add trailing slash to path if empty
-    path = parsed.path or '/'
-
-    return urllib.parse.urlunparse((
-        parsed.scheme.lower(),
-        netloc,
-        path,
-        parsed.params,
-        parsed.query,
-        parsed.fragment,
-    ))
-
-
-def encode_url_component(value: str) -> str:
-    """Encode URL component.
-
-    Args:
-        value: Value to encode.
-
-    Returns:
-        URL-encoded value.
-    """
-    return urllib.parse.quote_plus(value)
-
-
-def decode_url_component(value: str) -> str:
-    """Decode URL component.
-
-    Args:
-        value: Value to decode.
-
-    Returns:
-        URL-decoded value.
-    """
-    return urllib.parse.unquote_plus(value)
-
-
-def extract_domain(url: str) -> Optional[str]:
-    """Extract domain from URL.
-
-    Args:
-        url: URL to extract from.
-
-    Returns:
-        Domain or None.
-    """
-    try:
-        parsed = urllib.parse.urlparse(url)
-        return parsed.hostname
-    except Exception:
+    def domain(self) -> str:
+        netloc = self.netloc
+        parts = netloc.split(":")[0].split(".")
+        return ".".join(parts[-2:]) if len(parts) >= 2 else netloc
+
+    @property
+    def subdomain(self) -> str:
+        netloc = self.netloc.split(":")[0]
+        parts = netloc.split(".")
+        if len(parts) > 2:
+            return parts[0]
+        return ""
+
+    @property
+    def port(self) -> int | None:
+        netloc = self.netloc
+        if ":" in netloc:
+            try:
+                return int(netloc.split(":")[-1])
+            except ValueError:
+                return None
         return None
 
+    @property
+    def path(self) -> str:
+        return urlparse.urlparse(self.url).path
 
-def is_same_domain(url1: str, url2: str) -> bool:
-    """Check if URLs are from same domain.
+    @property
+    def query(self) -> dict[str, str]:
+        return parse_query_params(self.url)
 
-    Args:
-        url1: First URL.
-        url2: Second URL.
+    @property
+    def fragment(self) -> str:
+        return urlparse.urlparse(self.url).fragment
 
-    Returns:
-        True if same domain.
-    """
-    domain1 = extract_domain(url1)
-    domain2 = extract_domain(url2)
+    @property
+    def is_secure(self) -> bool:
+        return self.scheme == "https"
 
-    if not domain1 or not domain2:
-        return False
+    def with_scheme(self, scheme: str) -> str:
+        parsed = urlparse.urlparse(self.url)
+        return urlparse.urlunparse((scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
 
-    return domain1.lower() == domain2.lower()
+    def with_domain(self, domain: str) -> str:
+        parsed = urlparse.urlparse(self.url)
+        netloc = f"{domain}{':' + str(self.port) if self.port else ''}"
+        return urlparse.urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+    def with_path(self, path: str) -> str:
+        parsed = urlparse.urlparse(self.url)
+        return urlparse.urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, parsed.fragment))
+
+    def with_query(self, **params: Any) -> str:
+        parsed = urlparse.urlparse(self.url)
+        new_query = urlparse.urlencode(params)
+        return urlparse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+
+class URLBuilder:
+    """Build URLs with fluent interface."""
+
+    def __init__(self, base: str = "") -> None:
+        self._scheme = ""
+        self._netloc = ""
+        self._path = "/"
+        self._query: dict[str, Any] = {}
+        self._fragment = ""
+        if base:
+            self._parse(base)
+
+    def _parse(self, url: str) -> None:
+        parsed = urlparse.urlparse(url)
+        self._scheme = parsed.scheme
+        self._netloc = parsed.netloc
+        self._path = parsed.path or "/"
+        self._query = dict(urlparse.parse_qsl(parsed.query))
+        self._fragment = parsed.fragment
+
+    def scheme(self, scheme: str) -> "URLBuilder":
+        self._scheme = scheme
+        return self
+
+    def netloc(self, netloc: str) -> "URLBuilder":
+        self._netloc = netloc
+        return self
+
+    def path(self, path: str) -> "URLBuilder":
+        self._path = "/" + path.strip("/")
+        return self
+
+    def query(self, **params: Any) -> "URLBuilder":
+        self._query.update(params)
+        return self
+
+    def fragment(self, fragment: str) -> "URLBuilder":
+        self._fragment = fragment
+        return self
+
+    def build(self) -> str:
+        query = urlparse.urlencode(self._query) if self._query else ""
+        return urlparse.urlunparse((
+            self._scheme,
+            self._netloc,
+            self._path,
+            "",
+            query,
+            self._fragment,
+        ))
