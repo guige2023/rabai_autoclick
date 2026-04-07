@@ -1,0 +1,166 @@
+{
+  "name": "Newsletter Subscription Workflow",
+  "description": "Automate newsletter subscription across multiple sites",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "email": "user@example.com",
+    "first_name": "John",
+    "max_subscriptions": 10,
+    "current_subscription": 0,
+    "sites": [
+      "site1.com",
+      "site2.com",
+      "site3.com"
+    ]
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize subscription counter"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "subscription_loop",
+      "count": "{{max_subscriptions}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start subscription loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.1,
+      "comment": "Select all"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "delete",
+      "pre_delay": 0.1,
+      "comment": "Clear address bar"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "https://example.com/newsletter",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to newsletter signup page"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for page to load"
+    },
+    {
+      "id": 8,
+      "type": "click_image",
+      "template": "./templates/email_input.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click email input field"
+    },
+    {
+      "id": 9,
+      "type": "type_text",
+      "text": "{{email}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter email address"
+    },
+    {
+      "id": 10,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to name field"
+    },
+    {
+      "id": 11,
+      "type": "type_text",
+      "text": "{{first_name}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter first name"
+    },
+    {
+      "id": 12,
+      "type": "click_image",
+      "template": "./templates/subscribe_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click subscribe button"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.5,
+      "comment": "Wait for subscription to process"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/subscription_{{counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture confirmation screenshot"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "counter",
+      "value": "{{counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment subscription counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{counter < max_subscriptions}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more subscriptions needed"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 5.0,
+      "pre_delay": 0.5,
+      "comment": "Wait before next subscription (rate limiting)"
+    },
+    {
+      "id": 18,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay after all subscriptions complete"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

@@ -1,0 +1,180 @@
+{
+  "name": "Price Monitoring Workflow",
+  "description": "Monitor product prices across e-commerce sites",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "target_url": "https://example.com/product",
+    "check_interval": 3600,
+    "max_checks": 48,
+    "price_threshold": 100.00,
+    "current_price": 0,
+    "lowest_price": 999999
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "check_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize check counter"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "price_check_loop",
+      "count": "{{max_checks}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start price monitoring loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.1,
+      "comment": "Select all"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "delete",
+      "pre_delay": 0.1,
+      "comment": "Clear address bar"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "{{target_url}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to product page"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for page to load"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/price_check_{{check_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture product page screenshot"
+    },
+    {
+      "id": 9,
+      "type": "ocr",
+      "region": [200, 150, 400, 250],
+      "output_var": "price_text",
+      "pre_delay": 0.3,
+      "comment": "Extract price using OCR"
+    },
+    {
+      "id": 10,
+      "type": "condition",
+      "condition": "{{price_text.includes('$')}}",
+      "true_next": 11,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if price found"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Price detected"
+    },
+    {
+      "id": 12,
+      "type": "condition",
+      "condition": "{{current_price < lowest_price}}",
+      "true_next": 13,
+      "false_next": 14,
+      "pre_delay": 0.1,
+      "comment": "Check if new lowest price"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "lowest_price",
+      "value": "{{current_price}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Update lowest price"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 16,
+      "pre_delay": 0.1,
+      "comment": "Skip to next check"
+    },
+    {
+      "id": 15,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Price not found"
+    },
+    {
+      "id": 16,
+      "type": "set_variable",
+      "name": "check_counter",
+      "value": "{{check_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment check counter"
+    },
+    {
+      "id": 17,
+      "type": "condition",
+      "condition": "{{check_counter < max_checks}}",
+      "true_next": 18,
+      "false_next": 19,
+      "pre_delay": 0.1,
+      "comment": "Check if more checks needed"
+    },
+    {
+      "id": 18,
+      "type": "delay",
+      "seconds": "{{check_interval}}",
+      "pre_delay": 0.5,
+      "comment": "Wait before next price check"
+    },
+    {
+      "id": 19,
+      "type": "screenshot",
+      "save_path": "./screenshots/price_summary.png",
+      "pre_delay": 0.5,
+      "comment": "Capture final price summary"
+    },
+    {
+      "id": 20,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

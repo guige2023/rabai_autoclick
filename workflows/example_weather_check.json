@@ -1,0 +1,154 @@
+{
+  "name": "Weather Check Automation Workflow",
+  "description": "Automate checking weather and sending notifications",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "location": "New York",
+    "check_interval": 3600,
+    "max_checks": 24,
+    "temp_threshold": 30,
+    "alert_enabled": true
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "check_count",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize check counter"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "weather_check_loop",
+      "count": "{{max_checks}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start weather check loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.1,
+      "comment": "Select all"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "key": "delete",
+      "pre_delay": 0.1,
+      "comment": "Clear address bar"
+    },
+    {
+      "id": 6,
+      "type": "type_text",
+      "text": "https://weather.com/weather/today/l/{{location}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to weather site"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for page to load"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/weather_check_{{check_count}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture weather screenshot"
+    },
+    {
+      "id": 9,
+      "type": "ocr",
+      "region": [100, 100, 400, 200],
+      "output_var": "temperature_text",
+      "pre_delay": 0.3,
+      "comment": "Extract temperature"
+    },
+    {
+      "id": 10,
+      "type": "condition",
+      "condition": "{{temperature_text.includes('°')}}",
+      "true_next": 11,
+      "false_next": 13,
+      "pre_delay": 0.1,
+      "comment": "Check if temperature found"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Temperature captured"
+    },
+    {
+      "id": 12,
+      "type": "goto",
+      "step_id": 14,
+      "pre_delay": 0.1,
+      "comment": "Skip to next check"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Temperature not found"
+    },
+    {
+      "id": 14,
+      "type": "set_variable",
+      "name": "check_count",
+      "value": "{{check_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment check counter"
+    },
+    {
+      "id": 15,
+      "type": "condition",
+      "condition": "{{check_count < max_checks}}",
+      "true_next": 16,
+      "false_next": 17,
+      "pre_delay": 0.1,
+      "comment": "Check if more checks needed"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": "{{check_interval}}",
+      "pre_delay": 0.5,
+      "comment": "Wait before next check"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay after all checks complete"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
