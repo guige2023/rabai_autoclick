@@ -1,0 +1,154 @@
+{
+  "name": "API Testing Workflow",
+  "description": "Automated API endpoint testing and validation",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "api_base_url": "https://api.example.com",
+    "endpoints": [
+      "/users",
+      "/products",
+      "/orders"
+    ],
+    "current_endpoint": 0,
+    "tests_run": 0,
+    "tests_passed": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "endpoint_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize endpoint index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "endpoints_loop",
+      "count": 3,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Loop through endpoints"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "type_text",
+      "text": "{{api_base_url}}{{endpoints[endpoint_index]}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to API endpoint"
+    },
+    {
+      "id": 5,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for response"
+    },
+    {
+      "id": 6,
+      "type": "screenshot",
+      "save_path": "./screenshots/api_response_{{endpoint_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture API response"
+    },
+    {
+      "id": 7,
+      "type": "set_variable",
+      "name": "tests_run",
+      "value": "{{tests_run + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment tests run"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{tests_run > 0}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if test passed (simplified)"
+    },
+    {
+      "id": 9,
+      "type": "set_variable",
+      "name": "tests_passed",
+      "value": "{{tests_passed + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment passed count"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 13,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Test failed"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "endpoint_index",
+      "value": "{{endpoint_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment endpoint index"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{endpoint_index < 3}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more endpoints"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next endpoint"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/api_test_summary.png",
+      "pre_delay": 0.5,
+      "comment": "Capture test summary"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
