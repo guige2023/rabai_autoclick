@@ -1406,31 +1406,31 @@ class MainWindow(QMainWindow):
 
                 if step_id in self.step_configs:
                     widget.set_config(self.step_configs[step_id])
-    
-    def _on_config_changed(self):
+
+    def _on_config_changed(self) -> None:
         index = self.step_list.get_current_index()
         if index >= 0:
             item = self.step_list.list_widget.item(index)
             data = item.data(Qt.UserRole)
             step_id = data['id']
             action_type = data['type']
-            
+
             config_widget = self.config_widgets.get(action_type)
             if config_widget:
                 config = config_widget.get_config()
                 config['id'] = step_id
                 config['type'] = action_type
                 self.step_configs[step_id] = config
-    
-    def _on_engine_step_start(self, step):
+
+    def _on_engine_step_start(self, step: dict) -> None:
         try:
             app_logger.info(f"执行步骤 [{step.get('id')}]: {step.get('type')}", "Engine")
             current = self.progress_bar.value()
             self.progress_bar.setValue(current + 1)
         except Exception as e:
             logger.error(f"Step start error: {e}")
-    
-    def _on_engine_step_end(self, step, result):
+
+    def _on_engine_step_end(self, step: dict, result: Any) -> None:
         try:
             step_duration = getattr(result, 'duration', 0) or 0
             execution_stats.record_step(
