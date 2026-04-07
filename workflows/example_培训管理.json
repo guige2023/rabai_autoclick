@@ -1,0 +1,159 @@
+{
+  "name": "培训管理系统自动化",
+  "description": "自动化员工培训管理和课程分配",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "training_courses": ["安全培训", "技能培训", "管理培训"],
+    "current_course": 0,
+    "employees_to_enroll": 10,
+    "current_employee": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "course_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "初始化课程索引"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "course_loop",
+      "count": 3,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "开始课程循环"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "打开培训系统"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "等待系统加载"
+    },
+    {
+      "id": 5,
+      "type": "click_image",
+      "template": "./templates/course_{{training_courses[course_index]}}.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "选择课程"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "等待课程页面"
+    },
+    {
+      "id": 7,
+      "type": "set_variable",
+      "name": "employee_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 0.2,
+      "comment": "初始化员工计数器"
+    },
+    {
+      "id": 8,
+      "type": "loop",
+      "loop_id": "employee_loop",
+      "count": "{{employees_to_enroll}}",
+      "loop_start": 9,
+      "pre_delay": 0.3,
+      "comment": "开始员工循环"
+    },
+    {
+      "id": 9,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "点击员工"
+    },
+    {
+      "id": 10,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "等待处理"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/training_course{{course_index}}_emp{{employee_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "截图培训分配"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "employee_counter",
+      "value": "{{employee_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加员工计数"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "course_index",
+      "value": "{{course_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加课程索引"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{course_index < 3}}",
+      "true_next": 15,
+      "false_next": 16,
+      "pre_delay": 0.1,
+      "comment": "检查是否还有课程"
+    },
+    {
+      "id": 15,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "继续下一个课程"
+    },
+    {
+      "id": 16,
+      "type": "screenshot",
+      "save_path": "./screenshots/training_management_complete.png",
+      "pre_delay": 0.5,
+      "comment": "截图完成状态"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
