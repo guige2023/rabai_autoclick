@@ -1,0 +1,117 @@
+{
+  "name": "API Key Rotation Workflow",
+  "description": "Automate API key rotation monitoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "api_keys_to_check": 12,
+    "current_key": 0,
+    "recently_rotated": 0,
+    "due_for_rotation": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "key_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize key counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open API key management"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for management"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "key_rotation_loop",
+      "count": "{{api_keys_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start key rotation loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click API key"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for rotation check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/api_key_{{key_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture key screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "key_counter",
+      "value": "{{key_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment key counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{key_counter < api_keys_to_check}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more keys"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next key"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/api_key_rotation_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
