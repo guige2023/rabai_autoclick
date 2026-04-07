@@ -3,10 +3,15 @@
 Provides Base64 encoding/decoding operations:
 - Base64EncodeAction: Encode to Base64
 - Base64DecodeAction: Decode from Base64
+- Base64UrlEncodeAction: URL-safe Base64 encode
+- Base64UrlDecodeAction: URL-safe Base64 decode
+- Base64FileEncodeAction: Encode file to Base64
+- Base64FileDecodeAction: Decode Base64 to file
 """
 
 import base64
-from typing import Any, Dict, List, Optional
+import os
+from typing import Any, Dict, List
 
 import sys
 import os
@@ -19,136 +24,229 @@ class Base64EncodeAction(BaseAction):
     """Encode to Base64."""
     action_type = "base64_encode"
     display_name = "Base64编码"
-    description = "将字符串编码为Base64"
+    description = "字符串Base64编码"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute Base64 encoding.
+        """Execute encode.
 
         Args:
             context: Execution context.
-            params: Dict with value, output_var.
+            params: Dict with data, encoding, output_var.
 
         Returns:
-            ActionResult with encoded value.
+            ActionResult with encoded string.
         """
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'base64_result')
+        data = params.get('data', '')
+        encoding = params.get('encoding', 'utf-8')
+        output_var = params.get('output_var', 'base64_encoded')
+
+        valid, msg = self.validate_type(data, str, 'data')
+        if not valid:
+            return ActionResult(success=False, message=msg)
 
         try:
-            resolved = context.resolve_value(value)
+            resolved_data = context.resolve_value(data)
+            resolved_enc = context.resolve_value(encoding)
 
-            if isinstance(resolved, str):
-                result = base64.b64encode(resolved.encode()).decode()
-            elif isinstance(resolved, bytes):
-                result = base64.b64encode(resolved).decode()
-            else:
-                result = base64.b64encode(str(resolved).encode()).decode()
-
-            context.set(output_var, result)
+            encoded = base64.b64encode(resolved_data.encode(resolved_enc)).decode('ascii')
+            context.set(output_var, encoded)
 
             return ActionResult(
                 success=True,
-                message=f"Base64编码完成: {len(result)} 字符",
-                data={
-                    'result': result,
-                    'length': len(result),
-                    'output_var': output_var
-                }
+                message=f"Base64编码完成 ({len(encoded)} 字符)",
+                data={'encoded': encoded, 'output_var': output_var}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Base64编码失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Base64编码失败: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['value']
+        return ['data']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'base64_result'}
+        return {'encoding': 'utf-8', 'output_var': 'base64_encoded'}
 
 
 class Base64DecodeAction(BaseAction):
     """Decode from Base64."""
     action_type = "base64_decode"
     display_name = "Base64解码"
-    description = "将Base64字符串解码"
+    description = "Base64解码"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute Base64 decoding.
+        """Execute decode.
 
         Args:
             context: Execution context.
-            params: Dict with value, output_var.
+            params: Dict with data, encoding, output_var.
 
         Returns:
-            ActionResult with decoded value.
+            ActionResult with decoded string.
         """
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'base64_result')
+        data = params.get('data', '')
+        encoding = params.get('encoding', 'utf-8')
+        output_var = params.get('output_var', 'base64_decoded')
 
-        valid, msg = self.validate_type(value, str, 'value')
+        valid, msg = self.validate_type(data, str, 'data')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
-            resolved = context.resolve_value(value)
+            resolved_data = context.resolve_value(data)
+            resolved_enc = context.resolve_value(encoding)
 
-            decoded = base64.b64decode(resolved.encode()).decode()
+            decoded = base64.b64decode(resolved_data.encode('ascii')).decode(resolved_enc)
             context.set(output_var, decoded)
 
             return ActionResult(
                 success=True,
-                message=f"Base64解码完成: {len(decoded)} 字符",
-                data={
-                    'result': decoded,
-                    'length': len(decoded),
-                    'output_var': output_var
-                }
+                message=f"Base64解码完成 ({len(decoded)} 字符)",
+                data={'decoded': decoded, 'output_var': output_var}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Base64解码失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Base64解码失败: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['value']
+        return ['data']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'base64_result'}
+        return {'encoding': 'utf-8', 'output_var': 'base64_decoded'}
 
 
-class Base64EncodeFileAction(BaseAction):
-    """Encode file to Base64."""
-    action_type = "base64_encode_file"
-    display_name = "文件Base64编码"
-    description = "将文件编码为Base64"
+class Base64UrlEncodeAction(BaseAction):
+    """URL-safe Base64 encode."""
+    action_type = "base64_url_encode"
+    display_name = "Base64 URL编码"
+    description = "URL安全Base64编码"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute file Base64 encoding.
+        """Execute URL encode.
+
+        Args:
+            context: Execution context.
+            params: Dict with data, encoding, output_var.
+
+        Returns:
+            ActionResult with encoded string.
+        """
+        data = params.get('data', '')
+        encoding = params.get('encoding', 'utf-8')
+        output_var = params.get('output_var', 'base64_url_encoded')
+
+        valid, msg = self.validate_type(data, str, 'data')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        try:
+            resolved_data = context.resolve_value(data)
+            resolved_enc = context.resolve_value(encoding)
+
+            encoded = base64.urlsafe_b64encode(resolved_data.encode(resolved_enc)).decode('ascii')
+            context.set(output_var, encoded)
+
+            return ActionResult(
+                success=True,
+                message=f"Base64 URL编码完成 ({len(encoded)} 字符)",
+                data={'encoded': encoded, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Base64 URL编码失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['data']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'encoding': 'utf-8', 'output_var': 'base64_url_encoded'}
+
+
+class Base64UrlDecodeAction(BaseAction):
+    """URL-safe Base64 decode."""
+    action_type = "base64_url_decode"
+    display_name = "Base64 URL解码"
+    description = "URL安全Base64解码"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute URL decode.
+
+        Args:
+            context: Execution context.
+            params: Dict with data, encoding, output_var.
+
+        Returns:
+            ActionResult with decoded string.
+        """
+        data = params.get('data', '')
+        encoding = params.get('encoding', 'utf-8')
+        output_var = params.get('output_var', 'base64_url_decoded')
+
+        valid, msg = self.validate_type(data, str, 'data')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        try:
+            resolved_data = context.resolve_value(data)
+            resolved_enc = context.resolve_value(encoding)
+
+            decoded = base64.urlsafe_b64decode(resolved_data.encode('ascii')).decode(resolved_enc)
+            context.set(output_var, decoded)
+
+            return ActionResult(
+                success=True,
+                message=f"Base64 URL解码完成 ({len(decoded)} 字符)",
+                data={'decoded': decoded, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Base64 URL解码失败: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['data']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'encoding': 'utf-8', 'output_var': 'base64_url_decoded'}
+
+
+class Base64FileEncodeAction(BaseAction):
+    """Encode file to Base64."""
+    action_type = "base64_file_encode"
+    display_name = "Base64文件编码"
+    description = "文件Base64编码"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute file encode.
 
         Args:
             context: Execution context.
             params: Dict with file_path, output_var.
 
         Returns:
-            ActionResult with encoded file content.
+            ActionResult with encoded string.
         """
         file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'base64_result')
+        output_var = params.get('output_var', 'base64_file_encoded')
 
         valid, msg = self.validate_type(file_path, str, 'file_path')
         if not valid:
@@ -158,95 +256,79 @@ class Base64EncodeFileAction(BaseAction):
             resolved_path = context.resolve_value(file_path)
 
             if not os.path.exists(resolved_path):
-                return ActionResult(
-                    success=False,
-                    message=f"文件不存在: {resolved_path}"
-                )
+                return ActionResult(success=False, message=f"文件不存在: {resolved_path}")
 
             with open(resolved_path, 'rb') as f:
-                result = base64.b64encode(f.read()).decode()
+                encoded = base64.b64encode(f.read()).decode('ascii')
 
-            context.set(output_var, result)
+            context.set(output_var, encoded)
 
             return ActionResult(
                 success=True,
-                message=f"文件Base64编码完成: {len(result)} 字符",
-                data={
-                    'result': result,
-                    'length': len(result),
-                    'file_path': resolved_path,
-                    'output_var': output_var
-                }
+                message=f"文件Base64编码完成 ({len(encoded)} 字符)",
+                data={'size': len(encoded), 'output_var': output_var}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"文件Base64编码失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"文件Base64编码失败: {str(e)}")
 
     def get_required_params(self) -> List[str]:
         return ['file_path']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'base64_result'}
+        return {'output_var': 'base64_file_encoded'}
 
 
-class Base64DecodeToFileAction(BaseAction):
+class Base64FileDecodeAction(BaseAction):
     """Decode Base64 to file."""
-    action_type = "base64_decode_to_file"
-    display_name = "Base64解码到文件"
-    description = "将Base64数据解码并保存到文件"
+    action_type = "base64_file_decode"
+    display_name = "Base64文件解码"
+    description = "Base64解码到文件"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute Base64 decoding to file.
+        """Execute file decode.
 
         Args:
             context: Execution context.
-            params: Dict with value, output_path.
+            params: Dict with data, output_file.
 
         Returns:
             ActionResult indicating success.
         """
-        value = params.get('value', '')
-        output_path = params.get('output_path', '')
+        data = params.get('data', '')
+        output_file = params.get('output_file', '/tmp/decoded_file')
 
-        valid, msg = self.validate_type(value, str, 'value')
+        valid, msg = self.validate_type(data, str, 'data')
         if not valid:
             return ActionResult(success=False, message=msg)
 
-        valid, msg = self.validate_type(output_path, str, 'output_path')
+        valid, msg = self.validate_type(output_file, str, 'output_file')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
-            resolved_value = context.resolve_value(value)
-            resolved_output = context.resolve_value(output_path)
+            resolved_data = context.resolve_value(data)
+            resolved_output = context.resolve_value(output_file)
 
-            decoded = base64.b64decode(resolved_value.encode())
+            decoded = base64.b64decode(resolved_data.encode('ascii'))
 
             with open(resolved_output, 'wb') as f:
                 f.write(decoded)
 
             return ActionResult(
                 success=True,
-                message=f"Base64已解码到文件: {resolved_output}",
-                data={
-                    'output_path': resolved_output,
-                    'size': len(decoded)
-                }
+                message=f"Base64解码到文件: {resolved_output}",
+                data={'output_file': resolved_output, 'size': len(decoded)}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Base64解码到文件失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Base64文件解码失败: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['value', 'output_path']
+        return ['data', 'output_file']
 
     def get_optional_params(self) -> Dict[str, Any]:
         return {}
