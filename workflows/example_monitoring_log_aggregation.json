@@ -1,0 +1,117 @@
+{
+  "name": "Monitoring Log Aggregation Workflow",
+  "description": "Automate log aggregation process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "logs_to_aggregate": 50,
+    "current_log": 0,
+    "aggregated_logs": 0,
+    "failed_aggregations": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "log_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize log counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open log aggregation system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "log_aggregation_loop",
+      "count": "{{logs_to_aggregate}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start log aggregation loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select log for aggregation"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for aggregation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/log_aggregation_{{log_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture log screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "log_counter",
+      "value": "{{log_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment log counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{log_counter < logs_to_aggregate}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more logs"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next log"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/monitoring_log_aggregation_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
