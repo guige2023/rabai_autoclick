@@ -131,9 +131,26 @@ class ConfigManager:
         self._sources.append(source)
         self._sources.sort(key=lambda s: s.priority)
 
-        # Merge into main config
+        # Merge into main config, expanding dot-separated keys
         with self._lock:
-            self._deep_update(self._config, data)
+            expanded_data = self._expand_dot_keys(data)
+            self._deep_update(self._config, expanded_data)
+
+    def _expand_dot_keys(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Expand dot-separated keys into nested dicts."""
+        result: Dict[str, Any] = {}
+        for key, value in data.items():
+            if "." in key:
+                keys = key.split(".")
+                current = result
+                for k in keys[:-1]:
+                    if k not in current:
+                        current[k] = {}
+                    current = current[k]
+                current[keys[-1]] = value
+            else:
+                result[key] = value
+        return result
 
     def _load_json_file(self, path: Path, name: str, priority: int) -> None:
         """Load configuration from JSON file."""
