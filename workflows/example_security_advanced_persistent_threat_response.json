@@ -1,0 +1,117 @@
+{
+  "name": "Security Advanced Persistent Threat Response Workflow",
+  "description": "Automate APT detection and response",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "apt_indicators_to_investigate": 54,
+    "current_indicator": 0,
+    "confirmed_apt_activities": 0,
+    "false_positives": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "indicator_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize indicator counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open APT response platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "apt_response_loop",
+      "count": "{{apt_indicators_to_investigate}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start APT response loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select APT indicator"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for investigation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/apt_investigation_{{indicator_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture APT screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "indicator_counter",
+      "value": "{{indicator_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment indicator counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{indicator_counter < apt_indicators_to_investigate}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more indicators"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next indicator"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_advanced_persistent_threat_response_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
