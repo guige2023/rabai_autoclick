@@ -30,58 +30,114 @@ from core.context import ContextManager
 
 
 class PythonHighlighter(QSyntaxHighlighter):
-    """Python syntax highlighter for QTextEdit.
-    
+    """Python syntax highlighter for QTextEdit with theme-aware colors.
+
     Highlights Python keywords, strings, comments, numbers,
-    and builtin functions with distinct colors.
+    and builtin functions with distinct colors that adapt to theme.
     """
-    
+
+    # Theme-aware default colors (will be updated on theme change)
+    LIGHT_COLORS = {
+        'keyword': '#0000FF',
+        'string': '#008000',
+        'comment': '#808080',
+        'number': '#FF0000',
+        'builtin': '#800080',
+        'decorator': '#FF5500',
+        'self': '#880000',
+    }
+
+    DARK_COLORS = {
+        'keyword': '#569CD6',
+        'string': '#CE9178',
+        'comment': '#6A9955',
+        'number': '#B5CEA8',
+        'builtin': '#C586C0',
+        'decorator': '#DCDCAA',
+        'self': '#569CD6',
+    }
+
+    # Class-level keywords and builtins lists
+    KEYWORDS = [
+        'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
+        'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
+        'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
+        'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try',
+        'while', 'with', 'yield'
+    ]
+
+    BUILTINS = [
+        'print', 'len', 'int', 'str', 'float', 'list', 'dict',
+        'range', 'sum', 'min', 'max', 'abs', 'round', 'sorted',
+        'enumerate', 'zip', 'map', 'filter', 'open', 'input'
+    ]
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         """Initialize the syntax highlighter.
-        
+
         Args:
             parent: Optional parent QTextDocument.
         """
         super().__init__(parent)
-        
+
+        self._is_dark_theme = False
         self.formats: Dict[str, Any] = {}
-        
+        self._rebuild_formats()
+
+    def _rebuild_formats(self) -> None:
+        """Rebuild all format objects based on current theme."""
+        colors = self.DARK_COLORS if self._is_dark_theme else self.LIGHT_COLORS
+
         # Keyword highlighting (blue, bold)
         keyword_format = QTextCharFormat()
-        keyword_format.setForeground(QColor('#0000FF'))
+        keyword_format.setForeground(QColor(colors['keyword']))
         keyword_format.setFontWeight(QFont.Bold)
-        keywords: List[str] = [
-            'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
-            'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
-            'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
-            'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try',
-            'while', 'with', 'yield'
-        ]
-        self.formats['keyword'] = (keyword_format, keywords)
-        
+        self.formats['keyword'] = (keyword_format, self.KEYWORDS)
+
         # String highlighting (green)
         string_format = QTextCharFormat()
-        string_format.setForeground(QColor('#008000'))
+        string_format.setForeground(QColor(colors['string']))
         self.formats['string'] = string_format
-        
+
         # Comment highlighting (gray)
         comment_format = QTextCharFormat()
-        comment_format.setForeground(QColor('#808080'))
+        comment_format.setForeground(QColor(colors['comment']))
+        comment_format.setFontItalic(True)
         self.formats['comment'] = comment_format
-        
+
         # Number highlighting (red)
         number_format = QTextCharFormat()
-        number_format.setForeground(QColor('#FF0000'))
+        number_format.setForeground(QColor(colors['number']))
         self.formats['number'] = number_format
-        
+
         # Builtin function highlighting (purple)
         builtin_format = QTextCharFormat()
-        builtin_format.setForeground(QColor('#800080'))
-        builtins: List[str] = [
-            'print', 'len', 'int', 'str', 'float', 'list', 'dict',
-            'range', 'sum', 'min', 'max'
-        ]
-        self.formats['builtin'] = (builtin_format, builtins)
+        builtin_format.setForeground(QColor(colors['builtin']))
+        self.formats['builtin'] = (builtin_format, self.BUILTINS)
+
+        # Decorator highlighting
+        decorator_format = QTextCharFormat()
+        decorator_format.setForeground(QColor(colors['decorator']))
+        self.formats['decorator'] = decorator_format
+
+        # Self keyword
+        self_format = QTextCharFormat()
+        self_format.setForeground(QColor(colors['self']))
+        self_format.setFontItalic(True)
+        self.formats['self'] = self_format
+
+    def set_theme(self, is_dark: bool) -> None:
+        """Update colors when theme changes.
+
+        Args:
+            is_dark: True for dark theme, False for light.
+        """
+        if self._is_dark_theme != is_dark:
+            self._is_dark_theme = is_dark
+            self._rebuild_formats()
+            # Re-highlight entire document
+            if self.document():
+                self.rehighlight()
     
     def highlightBlock(self, text: str) -> None:
         """Apply syntax highlighting to a block of text.
