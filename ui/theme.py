@@ -433,6 +433,7 @@ class ThemeManager(QObject):
                 QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; alternate-background-color: {c['bg_hover']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QListWidget::item:hover {{ background-color: {c['bg_hover']}; }}
+                QListWidget::item:selected {{ background-color: {c['selection']}; }}
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
                 QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
@@ -658,6 +659,7 @@ class ThemeManager(QObject):
                 QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; alternate-background-color: {c['bg_hover']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QListWidget::item:hover {{ background-color: {c['bg_hover']}; }}
+                QListWidget::item:selected {{ background-color: {c['selection']}; }}
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
                 QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
