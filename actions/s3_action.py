@@ -1,517 +1,368 @@
+"""S3 storage action module for RabAI AutoClick.
+
+Provides S3 operations:
+- S3UploadAction: Upload file to S3
+- S3DownloadAction: Download file from S3
+- S3ListAction: List S3 objects
+- S3DeleteAction: Delete S3 object
+- S3PresignAction: Generate presigned URL
 """
-AWS S3 storage operations actions.
-"""
+
 from __future__ import annotations
 
-import boto3
-from botocore.exceptions import ClientError
-from typing import Dict, Any, Optional, List
+import sys
+import os
+import json
+from typing import Any, Dict, List, Optional
+
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-def create_s3_client(
-    aws_access_key_id: Optional[str] = None,
-    aws_secret_access_key: Optional[str] = None,
-    region_name: str = 'us-east-1',
-    endpoint_url: Optional[str] = None
-):
-    """
-    Create an S3 client.
+class S3UploadAction(BaseAction):
+    """Upload file to S3."""
+    action_type = "s3_upload"
+    display_name = "S3上传"
+    description = "上传文件到S3"
+    version = "1.0"
 
-    Args:
-        aws_access_key_id: AWS access key.
-        aws_secret_access_key: AWS secret key.
-        region_name: AWS region.
-        endpoint_url: Custom endpoint URL (for MinIO, LocalStack, etc.).
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute S3 upload."""
+        bucket = params.get('bucket', '')
+        key = params.get('key', '')
+        file_path = params.get('file_path', '')
+        content = params.get('content', None)
+        content_type = params.get('content_type', 'application/octet-stream')
+        acl = params.get('acl', 'private')
+        access_key = params.get('access_key', '')
+        secret_key = params.get('secret_key', '')
+        region = params.get('region', 'us-east-1')
+        endpoint = params.get('endpoint', None)  # for S3-compatible services
+        output_var = params.get('output_var', 's3_upload_result')
 
-    Returns:
-        S3 client.
-    """
-    kwargs: Dict[str, Any] = {
-        'region_name': region_name,
-    }
+        if not bucket or not key:
+            return ActionResult(success=False, message="bucket and key are required")
+        if not file_path and content is None:
+            return ActionResult(success=False, message="file_path or content is required")
 
-    if aws_access_key_id and aws_secret_access_key:
-        kwargs['aws_access_key_id'] = aws_access_key_id
-        kwargs['aws_secret_access_key'] = aws_secret_access_key
+        try:
+            import boto3
+            from botocore.config import Config
 
-    if endpoint_url:
-        kwargs['endpoint_url'] = endpoint_url
+            resolved_bucket = context.resolve_value(bucket) if context else bucket
+            resolved_key = context.resolve_value(key) if context else key
+            resolved_file = context.resolve_value(file_path) if context else file_path
+            resolved_content = context.resolve_value(content) if context else content
+            resolved_region = context.resolve_value(region) if context else region
+            resolved_endpoint = context.resolve_value(endpoint) if context else endpoint
+            resolved_acl = context.resolve_value(acl) if context else acl
 
-    return boto3.client('s3', **kwargs)
+            extra_args = {'ContentType': content_type, 'ACL': resolved_acl}
 
+            config = Config(region_name=resolved_region)
+            client_kwargs = {
+                'service_name': 's3',
+                'aws_access_key_id': access_key,
+                'aws_secret_access_key': secret_key,
+                'config': config,
+            }
+            if resolved_endpoint:
+                client_kwargs['endpoint_url'] = resolved_endpoint
 
-def list_buckets(s3_client) -> List[str]:
-    """
-    List all S3 buckets.
+            s3 = boto3.client(**client_kwargs)
 
-    Args:
-        s3_client: S3 client.
+            if resolved_file:
+                s3.upload_file(resolved_file, resolved_bucket, resolved_key, ExtraArgs=extra_args)
+                result = {'bucket': resolved_bucket, 'key': resolved_key, 'source': resolved_file}
+            else:
+                if isinstance(resolved_content, str):
+                    resolved_content = resolved_content.encode('utf-8')
+                s3.put_object(Bucket=resolved_bucket, Key=resolved_key, Body=resolved_content, **extra_args)
+                result = {'bucket': resolved_bucket, 'key': resolved_key, 'content': len(resolved_content)}
 
-    Returns:
-        List of bucket names.
-    """
-    try:
-        response = s3_client.list_buckets()
-        return [bucket['Name'] for bucket in response.get('Buckets', [])]
-    except ClientError as e:
-        raise RuntimeError(f"Failed to list buckets: {e}")
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Uploaded to s3://{resolved_bucket}/{resolved_key}", data=result)
+        except ImportError:
+            return ActionResult(success=False, message="boto3 not installed. Run: pip install boto3")
+        except Exception as e:
+            return ActionResult(success=False, message=f"S3 upload error: {str(e)}")
 
+    def get_required_params(self) -> List[str]:
+        return ['bucket', 'key']
 
-def list_objects(
-    s3_client,
-    bucket: str,
-    prefix: str = '',
-    max_keys: int = 1000
-) -> List[Dict[str, Any]]:
-    """
-    List objects in a bucket.
-
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
-        prefix: Object prefix filter.
-        max_keys: Maximum keys to return.
-
-    Returns:
-        List of object information.
-    """
-    try:
-        response = s3_client.list_objects_v2(
-            Bucket=bucket,
-            Prefix=prefix,
-            MaxKeys=max_keys
-        )
-
-        objects = []
-        for obj in response.get('Contents', []):
-            objects.append({
-                'key': obj['Key'],
-                'size': obj['Size'],
-                'last_modified': obj['LastModified'].isoformat(),
-                'etag': obj['ETag'].strip('"'),
-            })
-
-        return objects
-    except ClientError as e:
-        raise RuntimeError(f"Failed to list objects: {e}")
-
-
-def upload_file(
-    s3_client,
-    file_path: str,
-    bucket: str,
-    key: str,
-    extra_args: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
-    """
-    Upload a file to S3.
-
-    Args:
-        s3_client: S3 client.
-        file_path: Local file path.
-        bucket: Target bucket.
-        key: Object key.
-        extra_args: Extra arguments (ContentType, ACL, etc.).
-
-    Returns:
-        Upload result.
-    """
-    try:
-        extra = extra_args or {}
-
-        s3_client.upload_file(
-            file_path,
-            bucket,
-            key,
-            ExtraArgs=extra
-        )
-
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'success': True,
-            'bucket': bucket,
-            'key': key,
-        }
-    except ClientError as e:
-        return {
-            'success': False,
-            'error': str(e),
+            'file_path': '', 'content': None, 'content_type': 'application/octet-stream',
+            'acl': 'private', 'access_key': '', 'secret_key': '', 'region': 'us-east-1',
+            'endpoint': None, 'output_var': 's3_upload_result'
         }
 
 
-def download_file(
-    s3_client,
-    bucket: str,
-    key: str,
-    file_path: str
-) -> Dict[str, Any]:
-    """
-    Download a file from S3.
+class S3DownloadAction(BaseAction):
+    """Download file from S3."""
+    action_type = "s3_download"
+    display_name = "S3下载"
+    description = "从S3下载文件"
+    version = "1.0"
 
-    Args:
-        s3_client: S3 client.
-        bucket: Source bucket.
-        key: Object key.
-        file_path: Local destination path.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute S3 download."""
+        bucket = params.get('bucket', '')
+        key = params.get('key', '')
+        output_path = params.get('output_path', '')
+        access_key = params.get('access_key', '')
+        secret_key = params.get('secret_key', '')
+        region = params.get('region', 'us-east-1')
+        endpoint = params.get('endpoint', None)
+        output_var = params.get('output_var', 's3_download_result')
 
-    Returns:
-        Download result.
-    """
-    try:
-        import os
-        os.makedirs(os.path.dirname(file_path) or '.', exist_ok=True)
+        if not bucket or not key:
+            return ActionResult(success=False, message="bucket and key are required")
 
-        s3_client.download_file(bucket, key, file_path)
+        try:
+            import boto3
+            from botocore.config import Config
 
+            resolved_bucket = context.resolve_value(bucket) if context else bucket
+            resolved_key = context.resolve_value(key) if context else key
+            resolved_output = context.resolve_value(output_path) if context else output_path
+            resolved_region = context.resolve_value(region) if context else region
+            resolved_endpoint = context.resolve_value(endpoint) if context else endpoint
+
+            config = Config(region_name=resolved_region)
+            client_kwargs = {
+                'service_name': 's3',
+                'aws_access_key_id': access_key,
+                'aws_secret_access_key': secret_key,
+                'config': config,
+            }
+            if resolved_endpoint:
+                client_kwargs['endpoint_url'] = resolved_endpoint
+
+            s3 = boto3.client(**client_kwargs)
+
+            if resolved_output:
+                _os.makedirs(_os.path.dirname(resolved_output) or '.', exist_ok=True)
+                s3.download_file(resolved_bucket, resolved_key, resolved_output)
+                result = {'output_path': resolved_output, 'bucket': resolved_bucket, 'key': resolved_key}
+            else:
+                obj = s3.get_object(Bucket=resolved_bucket, Key=resolved_key)
+                data = obj['Body'].read()
+                result = {'data': data, 'bucket': resolved_bucket, 'key': resolved_key, 'size': len(data)}
+
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Downloaded s3://{resolved_bucket}/{resolved_key}", data=result)
+        except ImportError:
+            return ActionResult(success=False, message="boto3 not installed")
+        except Exception as e:
+            return ActionResult(success=False, message=f"S3 download error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['bucket', 'key']
+
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'success': True,
-            'bucket': bucket,
-            'key': key,
-            'file_path': file_path,
-        }
-    except ClientError as e:
-        return {
-            'success': False,
-            'error': str(e),
-        }
-
-
-def delete_object(
-    s3_client,
-    bucket: str,
-    key: str
-) -> Dict[str, Any]:
-    """
-    Delete an object from S3.
-
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
-        key: Object key.
-
-    Returns:
-        Deletion result.
-    """
-    try:
-        s3_client.delete_object(Bucket=bucket, Key=key)
-
-        return {
-            'success': True,
-            'bucket': bucket,
-            'key': key,
-        }
-    except ClientError as e:
-        return {
-            'success': False,
-            'error': str(e),
-        }
-
-
-def delete_objects_batch(
-    s3_client,
-    bucket: str,
-    keys: List[str]
-) -> Dict[str, Any]:
-    """
-    Delete multiple objects from S3.
-
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
-        keys: List of object keys.
-
-    Returns:
-        Deletion result.
-    """
-    try:
-        objects = [{'Key': key} for key in keys]
-
-        response = s3_client.delete_objects(
-            Bucket=bucket,
-            Delete={'Objects': objects}
-        )
-
-        deleted = response.get('Deleted', [])
-        errors = response.get('Errors', [])
-
-        return {
-            'success': len(errors) == 0,
-            'deleted': len(deleted),
-            'errors': len(errors),
-            'error_details': errors,
-        }
-    except ClientError as e:
-        return {
-            'success': False,
-            'error': str(e),
+            'output_path': '', 'access_key': '', 'secret_key': '', 'region': 'us-east-1',
+            'endpoint': None, 'output_var': 's3_download_result'
         }
 
 
-def copy_object(
-    s3_client,
-    source_bucket: str,
-    source_key: str,
-    dest_bucket: str,
-    dest_key: str
-) -> Dict[str, Any]:
-    """
-    Copy an object within S3.
+class S3ListAction(BaseAction):
+    """List S3 objects."""
+    action_type = "s3_list"
+    display_name = "S3列表"
+    description = "列出S3对象"
+    version = "1.0"
 
-    Args:
-        s3_client: S3 client.
-        source_bucket: Source bucket.
-        source_key: Source object key.
-        dest_bucket: Destination bucket.
-        dest_key: Destination object key.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute S3 list."""
+        bucket = params.get('bucket', '')
+        prefix = params.get('prefix', '')
+        max_keys = params.get('max_keys', 100)
+        access_key = params.get('access_key', '')
+        secret_key = params.get('secret_key', '')
+        region = params.get('region', 'us-east-1')
+        endpoint = params.get('endpoint', None)
+        output_var = params.get('output_var', 's3_list_result')
 
-    Returns:
-        Copy result.
-    """
-    try:
-        copy_source = {'Bucket': source_bucket, 'Key': source_key}
+        if not bucket:
+            return ActionResult(success=False, message="bucket is required")
 
-        s3_client.copy_object(
-            CopySource=copy_source,
-            Bucket=dest_bucket,
-            Key=dest_key
-        )
+        try:
+            import boto3
+            from botocore.config import Config
 
-        return {
-            'success': True,
-            'source': f'{source_bucket}/{source_key}',
-            'destination': f'{dest_bucket}/{dest_key}',
-        }
-    except ClientError as e:
-        return {
-            'success': False,
-            'error': str(e),
-        }
+            resolved_bucket = context.resolve_value(bucket) if context else bucket
+            resolved_prefix = context.resolve_value(prefix) if context else prefix
+            resolved_max = context.resolve_value(max_keys) if context else max_keys
+            resolved_region = context.resolve_value(region) if context else region
+            resolved_endpoint = context.resolve_value(endpoint) if context else endpoint
 
+            config = Config(region_name=resolved_region)
+            client_kwargs = {
+                'service_name': 's3',
+                'aws_access_key_id': access_key,
+                'aws_secret_access_key': secret_key,
+                'config': config,
+            }
+            if resolved_endpoint:
+                client_kwargs['endpoint_url'] = resolved_endpoint
 
-def get_object_metadata(
-    s3_client,
-    bucket: str,
-    key: str
-) -> Optional[Dict[str, Any]]:
-    """
-    Get metadata for an S3 object.
+            s3 = boto3.client(**client_kwargs)
 
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
-        key: Object key.
+            kwargs = {'Bucket': resolved_bucket, 'MaxKeys': int(resolved_max)}
+            if resolved_prefix:
+                kwargs['Prefix'] = resolved_prefix
 
-    Returns:
-        Object metadata or None.
-    """
-    try:
-        response = s3_client.head_object(Bucket=bucket, Key=key)
-
-        return {
-            'key': key,
-            'size': response.get('ContentLength'),
-            'content_type': response.get('ContentType'),
-            'last_modified': response.get('LastModified').isoformat() if response.get('LastModified') else None,
-            'etag': response.get('ETag', '').strip('"'),
-            'metadata': response.get('Metadata', {}),
-        }
-    except ClientError:
-        return None
-
-
-def generate_presigned_url(
-    s3_client,
-    bucket: str,
-    key: str,
-    expiration: int = 3600
-) -> Optional[str]:
-    """
-    Generate a presigned URL for an object.
-
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
-        key: Object key.
-        expiration: URL expiration in seconds.
-
-    Returns:
-        Presigned URL or None.
-    """
-    try:
-        url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': bucket, 'Key': key},
-            ExpiresIn=expiration
-        )
-        return url
-    except ClientError:
-        return None
-
-
-def create_bucket(
-    s3_client,
-    bucket: str,
-    region: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Create an S3 bucket.
-
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
-        region: AWS region.
-
-    Returns:
-        Creation result.
-    """
-    try:
-        kwargs: Dict[str, Any] = {'Bucket': bucket}
-
-        if region:
-            kwargs['CreateBucketConfiguration'] = {
-                'LocationConstraint': region
+            response = s3.list_objects_v2(**kwargs)
+            objects = response.get('Contents', [])
+            result = {
+                'objects': [{'key': o['Key'], 'size': o['Size'], 'last_modified': str(o.get('LastModified', ''))} for o in objects],
+                'count': len(objects),
+                'bucket': resolved_bucket,
             }
 
-        s3_client.create_bucket(**kwargs)
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Listed {len(objects)} objects", data=result)
+        except ImportError:
+            return ActionResult(success=False, message="boto3 not installed")
+        except Exception as e:
+            return ActionResult(success=False, message=f"S3 list error: {str(e)}")
 
+    def get_required_params(self) -> List[str]:
+        return ['bucket']
+
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'success': True,
-            'bucket': bucket,
-        }
-    except ClientError as e:
-        return {
-            'success': False,
-            'error': str(e),
-        }
-
-
-def bucket_exists(s3_client, bucket: str) -> bool:
-    """
-    Check if a bucket exists.
-
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
-
-    Returns:
-        True if bucket exists.
-    """
-    try:
-        s3_client.head_bucket(Bucket=bucket)
-        return True
-    except ClientError:
-        return False
-
-
-def sync_directory(
-    s3_client,
-    local_path: str,
-    bucket: str,
-    prefix: str = ''
-) -> Dict[str, Any]:
-    """
-    Sync a local directory to S3.
-
-    Args:
-        s3_client: S3 client.
-        local_path: Local directory path.
-        bucket: Target bucket.
-        prefix: S3 key prefix.
-
-    Returns:
-        Sync result.
-    """
-    import os
-
-    uploaded = 0
-    errors = 0
-
-    for root, dirs, files in os.walk(local_path):
-        for file in files:
-            local_file = os.path.join(root, file)
-            relative_path = os.path.relpath(local_file, local_path)
-
-            if prefix:
-                key = f'{prefix}/{relative_path}'
-            else:
-                key = relative_path
-
-            result = upload_file(s3_client, local_file, bucket, key)
-
-            if result['success']:
-                uploaded += 1
-            else:
-                errors += 1
-
-    return {
-        'success': errors == 0,
-        'uploaded': uploaded,
-        'errors': errors,
-    }
-
-
-def empty_bucket(s3_client, bucket: str) -> Dict[str, Any]:
-    """
-    Delete all objects from a bucket.
-
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
-
-    Returns:
-        Empty result.
-    """
-    try:
-        response = s3_client.list_objects_v2(Bucket=bucket)
-
-        objects = response.get('Contents', [])
-
-        if not objects:
-            return {'success': True, 'deleted': 0}
-
-        result = delete_objects_batch(
-            s3_client,
-            bucket,
-            [obj['Key'] for obj in objects]
-        )
-
-        return result
-    except ClientError as e:
-        return {
-            'success': False,
-            'error': str(e),
+            'prefix': '', 'max_keys': 100, 'access_key': '', 'secret_key': '', 'region': 'us-east-1',
+            'endpoint': None, 'output_var': 's3_list_result'
         }
 
 
-def get_bucket_size(s3_client, bucket: str) -> Dict[str, Any]:
-    """
-    Calculate total size of objects in a bucket.
+class S3DeleteAction(BaseAction):
+    """Delete S3 object."""
+    action_type = "s3_delete"
+    display_name = "S3删除"
+    description = "删除S3对象"
+    version = "1.0"
 
-    Args:
-        s3_client: S3 client.
-        bucket: Bucket name.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute S3 delete."""
+        bucket = params.get('bucket', '')
+        key = params.get('key', '')
+        access_key = params.get('access_key', '')
+        secret_key = params.get('secret_key', '')
+        region = params.get('region', 'us-east-1')
+        endpoint = params.get('endpoint', None)
+        output_var = params.get('output_var', 's3_delete_result')
 
-    Returns:
-        Size information.
-    """
-    total_size = 0
-    total_objects = 0
+        if not bucket or not key:
+            return ActionResult(success=False, message="bucket and key are required")
 
-    paginator = s3_client.get_paginator('list_objects_v2')
+        try:
+            import boto3
+            from botocore.config import Config
 
-    try:
-        for page in paginator.paginate(Bucket=bucket):
-            for obj in page.get('Contents', []):
-                total_size += obj['Size']
-                total_objects += 1
+            resolved_bucket = context.resolve_value(bucket) if context else bucket
+            resolved_key = context.resolve_value(key) if context else key
+            resolved_region = context.resolve_value(region) if context else region
+            resolved_endpoint = context.resolve_value(endpoint) if context else endpoint
 
+            config = Config(region_name=resolved_region)
+            client_kwargs = {
+                'service_name': 's3',
+                'aws_access_key_id': access_key,
+                'aws_secret_access_key': secret_key,
+                'config': config,
+            }
+            if resolved_endpoint:
+                client_kwargs['endpoint_url'] = resolved_endpoint
+
+            s3 = boto3.client(**client_kwargs)
+            s3.delete_object(Bucket=resolved_bucket, Key=resolved_key)
+
+            result = {'deleted': True, 'bucket': resolved_bucket, 'key': resolved_key}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Deleted s3://{resolved_bucket}/{resolved_key}", data=result)
+        except ImportError:
+            return ActionResult(success=False, message="boto3 not installed")
+        except Exception as e:
+            return ActionResult(success=False, message=f"S3 delete error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['bucket', 'key']
+
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'bucket': bucket,
-            'total_bytes': total_size,
-            'total_mb': round(total_size / (1024 * 1024), 2),
-            'total_gb': round(total_size / (1024 * 1024 * 1024), 4),
-            'object_count': total_objects,
+            'access_key': '', 'secret_key': '', 'region': 'us-east-1',
+            'endpoint': None, 'output_var': 's3_delete_result'
         }
-    except ClientError as e:
+
+
+class S3PresignAction(BaseAction):
+    """Generate S3 presigned URL."""
+    action_type = "s3_presign"
+    display_name = "S3预签名URL"
+    description = "生成S3预签名URL"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute S3 presign."""
+        bucket = params.get('bucket', '')
+        key = params.get('key', '')
+        expiration = params.get('expiration', 3600)
+        access_key = params.get('access_key', '')
+        secret_key = params.get('secret_key', '')
+        region = params.get('region', 'us-east-1')
+        endpoint = params.get('endpoint', None)
+        output_var = params.get('output_var', 's3_presign_result')
+
+        if not bucket or not key:
+            return ActionResult(success=False, message="bucket and key are required")
+
+        try:
+            import boto3
+            from botocore.config import Config
+
+            resolved_bucket = context.resolve_value(bucket) if context else bucket
+            resolved_key = context.resolve_value(key) if context else key
+            resolved_exp = context.resolve_value(expiration) if context else expiration
+            resolved_region = context.resolve_value(region) if context else region
+            resolved_endpoint = context.resolve_value(endpoint) if context else endpoint
+
+            config = Config(region_name=resolved_region)
+            client_kwargs = {
+                'service_name': 's3',
+                'aws_access_key_id': access_key,
+                'aws_secret_access_key': secret_key,
+                'config': config,
+            }
+            if resolved_endpoint:
+                client_kwargs['endpoint_url'] = resolved_endpoint
+
+            s3 = boto3.client(**client_kwargs)
+            url = s3.generate_presigned_url('get_object', Params={'Bucket': resolved_bucket, 'Key': resolved_key}, ExpiresIn=int(resolved_exp))
+
+            result = {'url': url, 'bucket': resolved_bucket, 'key': resolved_key, 'expires_in': resolved_exp}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Presigned URL generated (expires in {resolved_exp}s)", data=result)
+        except ImportError:
+            return ActionResult(success=False, message="boto3 not installed")
+        except Exception as e:
+            return ActionResult(success=False, message=f"S3 presign error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['bucket', 'key']
+
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'error': str(e),
+            'expiration': 3600, 'access_key': '', 'secret_key': '', 'region': 'us-east-1',
+            'endpoint': None, 'output_var': 's3_presign_result'
         }

@@ -1,404 +1,278 @@
+"""SMTP email action module for RabAI AutoClick.
+
+Provides email operations:
+- SmtpSendAction: Send email via SMTP
+- SmtpSendHtmlAction: Send HTML email
+- SmtpSendAttachmentAction: Send email with attachment
+- SmtpTestConnectionAction: Test SMTP connection
 """
-SMTP email sending and management actions.
-"""
+
 from __future__ import annotations
 
 import smtplib
-import ssl
-from email.mime.text import MIMEText
+import sys
+import os
+import base64
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-def send_email(
-    to_address: str,
-    subject: str,
-    body: str,
-    from_address: Optional[str] = None,
-    smtp_host: str = 'localhost',
-    smtp_port: int = 587,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-    use_tls: bool = True,
-    use_ssl: bool = False,
-    html: bool = False,
-    attachments: Optional[List[str]] = None,
-    cc: Optional[List[str]] = None,
-    bcc: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """
-    Send an email via SMTP.
+class SmtpSendAction(BaseAction):
+    """Send email via SMTP."""
+    action_type = "smtp_send"
+    display_name = "发送邮件"
+    description = "通过SMTP发送邮件"
+    version = "1.0"
 
-    Args:
-        to_address: Recipient email address.
-        subject: Email subject.
-        body: Email body.
-        from_address: Sender email address.
-        smtp_host: SMTP server hostname.
-        smtp_port: SMTP port.
-        username: SMTP username.
-        password: SMTP password.
-        use_tls: Use STARTTLS.
-        use_ssl: Use SSL wrapper.
-        html: Body is HTML.
-        attachments: List of file paths to attach.
-        cc: CC recipients.
-        bcc: BCC recipients.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute SMTP send."""
+        host = params.get('host', 'localhost')
+        port = params.get('port', 25)
+        username = params.get('username', '')
+        password = params.get('password', '')
+        use_tls = params.get('use_tls', True)
+        from_addr = params.get('from_addr', '')
+        to_addrs = params.get('to_addrs', '')
+        subject = params.get('subject', '')
+        body = params.get('body', '')
+        output_var = params.get('output_var', 'smtp_result')
 
-    Returns:
-        Send result.
-    """
-    if not from_address:
-        from_address = username
+        if not to_addrs or not subject:
+            return ActionResult(success=False, message="to_addrs and subject are required")
 
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = from_address
-    msg['To'] = to_address
+        try:
+            resolved_host = context.resolve_value(host) if context else host
+            resolved_port = context.resolve_value(port) if context else port
+            resolved_username = context.resolve_value(username) if context else username
+            resolved_password = context.resolve_value(password) if context else password
+            resolved_from = context.resolve_value(from_addr) if context else from_addr
+            resolved_to = context.resolve_value(to_addrs) if context else to_addrs
+            resolved_subject = context.resolve_value(subject) if context else subject
+            resolved_body = context.resolve_value(body) if context else body
 
-    if cc:
-        msg['Cc'] = ', '.join(cc)
+            msg = MIMEMultipart()
+            msg['From'] = resolved_from
+            msg['To'] = resolved_to
+            msg['Subject'] = resolved_subject
+            msg.attach(MIMEText(resolved_body, 'plain'))
 
-    if bcc:
-        msg['Bcc'] = ', '.join(bcc)
+            with smtplib.SMTP(resolved_host, int(resolved_port), timeout=30) as server:
+                if use_tls:
+                    server.starttls()
+                if resolved_username and resolved_password:
+                    server.login(resolved_username, resolved_password)
+                server.send_message(msg)
 
-    content_type = 'html' if html else 'plain'
-    msg.attach(MIMEText(body, content_type))
+            result = {'sent': True, 'to': resolved_to, 'subject': resolved_subject}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Email sent to {resolved_to}", data=result)
+        except smtplib.SMTPAuthenticationError:
+            return ActionResult(success=False, message="SMTP authentication failed")
+        except smtplib.SMTPException as e:
+            return ActionResult(success=False, message=f"SMTP error: {str(e)}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"SMTP send error: {str(e)}")
 
-    if attachments:
-        for filepath in attachments:
-            with open(filepath, 'rb') as f:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(f.read())
+    def get_required_params(self) -> List[str]:
+        return ['to_addrs', 'subject']
 
-            encoders.encode_base64(part)
-            part.add_header(
-                'Content-Disposition',
-                f'attachment; filename="{filepath.split("/")[-1]}"'
-            )
-            msg.attach(part)
-
-    recipients = [to_address]
-    if cc:
-        recipients.extend(cc)
-    if bcc:
-        recipients.extend(bcc)
-
-    try:
-        if use_ssl:
-            context = ssl.create_default_context()
-            server = smtplib.SMTP_SSL(smtp_host, smtp_port, context=context)
-        else:
-            server = smtplib.SMTP(smtp_host, smtp_port)
-
-            if use_tls:
-                server.starttls()
-
-        if username and password:
-            server.login(username, password)
-
-        server.sendmail(from_address, recipients, msg.as_string())
-        server.quit()
-
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'success': True,
-            'to': to_address,
-            'subject': subject,
-        }
-    except smtplib.SMTPException as e:
-        return {
-            'success': False,
-            'error': str(e),
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e),
+            'host': 'localhost', 'port': 25, 'username': '', 'password': '',
+            'use_tls': True, 'from_addr': '', 'body': '', 'output_var': 'smtp_result'
         }
 
 
-def send_html_email(
-    to_address: str,
-    subject: str,
-    html_body: str,
-    from_address: Optional[str] = None,
-    smtp_host: str = 'localhost',
-    smtp_port: int = 587,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-    plain_body: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Send an HTML email with plain text alternative.
+class SmtpSendHtmlAction(BaseAction):
+    """Send HTML email via SMTP."""
+    action_type = "smtp_send_html"
+    display_name = "发送HTML邮件"
+    description = "通过SMTP发送HTML邮件"
+    version = "1.0"
 
-    Args:
-        to_address: Recipient.
-        subject: Subject.
-        html_body: HTML body.
-        from_address: Sender.
-        smtp_host: SMTP host.
-        smtp_port: SMTP port.
-        username: SMTP username.
-        password: SMTP password.
-        plain_body: Plain text alternative.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute HTML email send."""
+        host = params.get('host', 'localhost')
+        port = params.get('port', 25)
+        username = params.get('username', '')
+        password = params.get('password', '')
+        use_tls = params.get('use_tls', True)
+        from_addr = params.get('from_addr', '')
+        to_addrs = params.get('to_addrs', '')
+        subject = params.get('subject', '')
+        html_body = params.get('html_body', '')
+        text_body = params.get('text_body', '')  # plain text alternative
+        output_var = params.get('output_var', 'smtp_html_result')
 
-    Returns:
-        Send result.
-    """
-    if not from_address:
-        from_address = username
+        if not to_addrs or not subject:
+            return ActionResult(success=False, message="to_addrs and subject are required")
 
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = from_address
-    msg['To'] = to_address
+        try:
+            resolved_host = context.resolve_value(host) if context else host
+            resolved_port = context.resolve_value(port) if context else port
+            resolved_username = context.resolve_value(username) if context else username
+            resolved_password = context.resolve_value(password) if context else password
+            resolved_from = context.resolve_value(from_addr) if context else from_addr
+            resolved_to = context.resolve_value(to_addrs) if context else to_addrs
+            resolved_subject = context.resolve_value(subject) if context else subject
+            resolved_html = context.resolve_value(html_body) if context else html_body
+            resolved_text = context.resolve_value(text_body) if context else text_body
 
-    if plain_body is None:
-        import re
-        plain_body = re.sub(r'<[^>]+>', '', html_body)
+            msg = MIMEMultipart('alternative')
+            msg['From'] = resolved_from
+            msg['To'] = resolved_to
+            msg['Subject'] = resolved_subject
+            if resolved_text:
+                msg.attach(MIMEText(resolved_text, 'plain'))
+            msg.attach(MIMEText(resolved_html, 'html'))
 
-    msg.attach(MIMEText(plain_body, 'plain'))
-    msg.attach(MIMEText(html_body, 'html'))
+            with smtplib.SMTP(resolved_host, int(resolved_port), timeout=30) as server:
+                if use_tls:
+                    server.starttls()
+                if resolved_username and resolved_password:
+                    server.login(resolved_username, resolved_password)
+                server.send_message(msg)
 
-    try:
-        server = smtplib.SMTP(smtp_host, smtp_port)
-        server.starttls()
-        server.login(username, password)
-        server.sendmail(from_address, [to_address], msg.as_string())
-        server.quit()
+            result = {'sent': True, 'to': resolved_to, 'subject': resolved_subject}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"HTML email sent to {resolved_to}", data=result)
+        except Exception as e:
+            return ActionResult(success=False, message=f"HTML email error: {str(e)}")
 
-        return {'success': True, 'to': to_address}
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
+    def get_required_params(self) -> List[str]:
+        return ['to_addrs', 'subject', 'html_body']
 
-
-def create_email_html(
-    title: str,
-    heading: str,
-    body: str,
-    footer: Optional[str] = None,
-    accent_color: str = '#0078D4'
-) -> str:
-    """
-    Create a styled HTML email template.
-
-    Args:
-        title: Page title.
-        heading: Main heading.
-        body: Body content.
-        footer: Footer text.
-        accent_color: Accent color hex.
-
-    Returns:
-        HTML email template.
-    """
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>{title}</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }}
-            .header {{ background-color: {accent_color}; color: white; padding: 20px; text-align: center; }}
-            .content {{ padding: 20px; background-color: #f9f9f9; }}
-            .footer {{ padding: 10px; text-align: center; font-size: 12px; color: #666; }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>{heading}</h1>
-        </div>
-        <div class="content">
-            {body}
-        </div>
-        <div class="footer">
-            {footer or ''}
-        </div>
-    </body>
-    </html>
-    """
-    return html
-
-
-def batch_send_email(
-    recipients: List[str],
-    subject: str,
-    body: str,
-    smtp_host: str = 'localhost',
-    smtp_port: int = 587,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-    from_address: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Send the same email to multiple recipients.
-
-    Args:
-        recipients: List of email addresses.
-        subject: Email subject.
-        body: Email body.
-        smtp_host: SMTP host.
-        smtp_port: SMTP port.
-        username: SMTP username.
-        password: SMTP password.
-        from_address: Sender address.
-
-    Returns:
-        Summary of results.
-    """
-    results = []
-
-    for recipient in recipients:
-        result = send_email(
-            to_address=recipient,
-            subject=subject,
-            body=body,
-            from_address=from_address,
-            smtp_host=smtp_host,
-            smtp_port=smtp_port,
-            username=username,
-            password=password
-        )
-        results.append({
-            'recipient': recipient,
-            'success': result['success'],
-        })
-
-    return {
-        'total': len(recipients),
-        'successful': sum(1 for r in results if r['success']),
-        'failed': sum(1 for r in results if not r['success']),
-        'results': results,
-    }
-
-
-def validate_email(email: str) -> bool:
-    """
-    Validate an email address format.
-
-    Args:
-        email: Email address to validate.
-
-    Returns:
-        True if valid format.
-    """
-    import re
-
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, email))
-
-
-def parse_email_address(email: str) -> Dict[str, str]:
-    """
-    Parse an email address into name and address.
-
-    Args:
-        email: Email address (possibly with display name).
-
-    Returns:
-        Dictionary with 'name' and 'address'.
-    """
-    import re
-
-    match = re.match(r'^(.+?) <(.+)>$', email)
-    if match:
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'name': match.group(1).strip(),
-            'address': match.group(2).strip(),
+            'host': 'localhost', 'port': 25, 'username': '', 'password': '',
+            'use_tls': True, 'from_addr': '', 'text_body': '', 'output_var': 'smtp_html_result'
         }
 
-    return {
-        'name': '',
-        'address': email.strip(),
-    }
 
+class SmtpSendAttachmentAction(BaseAction):
+    """Send email with attachment via SMTP."""
+    action_type = "smtp_send_attachment"
+    display_name = "发送带附件邮件"
+    description = "发送带附件的邮件"
+    version = "1.0"
 
-def create_mime_message(
-    subject: str,
-    from_address: str,
-    to_address: str,
-    body: str,
-    body_type: str = 'plain',
-    headers: Optional[Dict[str, str]] = None
-) -> MIMEMultipart:
-    """
-    Create a MIMEMultipart message.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute attachment email send."""
+        host = params.get('host', 'localhost')
+        port = params.get('port', 25)
+        username = params.get('username', '')
+        password = params.get('password', '')
+        use_tls = params.get('use_tls', True)
+        from_addr = params.get('from_addr', '')
+        to_addrs = params.get('to_addrs', '')
+        subject = params.get('subject', '')
+        body = params.get('body', '')
+        attachments = params.get('attachments', [])  # list of file paths
+        output_var = params.get('output_var', 'smtp_attachment_result')
 
-    Args:
-        subject: Email subject.
-        from_address: From address.
-        to_address: To address.
-        body: Message body.
-        body_type: Content type ('plain' or 'html').
-        headers: Additional headers.
+        if not to_addrs or not subject:
+            return ActionResult(success=False, message="to_addrs and subject are required")
 
-    Returns:
-        MIMEMultipart message.
-    """
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = from_address
-    msg['To'] = to_address
+        try:
+            resolved_host = context.resolve_value(host) if context else host
+            resolved_port = context.resolve_value(port) if context else port
+            resolved_username = context.resolve_value(username) if context else username
+            resolved_password = context.resolve_value(password) if context else password
+            resolved_from = context.resolve_value(from_addr) if context else from_addr
+            resolved_to = context.resolve_value(to_addrs) if context else to_addrs
+            resolved_subject = context.resolve_value(subject) if context else subject
+            resolved_body = context.resolve_value(body) if context else body
+            resolved_attachments = context.resolve_value(attachments) if context else attachments
 
-    if headers:
-        for key, value in headers.items():
-            msg[key] = value
+            msg = MIMEMultipart()
+            msg['From'] = resolved_from
+            msg['To'] = resolved_to
+            msg['Subject'] = resolved_subject
+            msg.attach(MIMEText(resolved_body, 'plain'))
 
-    msg.attach(MIMEText(body, body_type))
+            for file_path in resolved_attachments:
+                with open(file_path, 'rb') as f:
+                    part = MIMEBase('application', 'octet-stream')
+                    part.set_payload(f.read())
+                encoders.encode_base64(part)
+                filename = _os.path.basename(file_path)
+                part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+                msg.attach(part)
 
-    return msg
+            with smtplib.SMTP(resolved_host, int(resolved_port), timeout=30) as server:
+                if use_tls:
+                    server.starttls()
+                if resolved_username and resolved_password:
+                    server.login(resolved_username, resolved_password)
+                server.send_message(msg)
 
+            result = {'sent': True, 'to': resolved_to, 'attachments': len(resolved_attachments)}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Email with {len(resolved_attachments)} attachments sent", data=result)
+        except Exception as e:
+            return ActionResult(success=False, message=f"Attachment email error: {str(e)}")
 
-def test_smtp_connection(
-    smtp_host: str,
-    smtp_port: int = 587,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-    use_tls: bool = True
-) -> Dict[str, Any]:
-    """
-    Test SMTP server connectivity.
+    def get_required_params(self) -> List[str]:
+        return ['to_addrs', 'subject']
 
-    Args:
-        smtp_host: SMTP server hostname.
-        smtp_port: SMTP port.
-        username: SMTP username.
-        password: SMTP password.
-        use_tls: Use STARTTLS.
-
-    Returns:
-        Connection test result.
-    """
-    try:
-        server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
-
-        if use_tls:
-            server.starttls()
-
-        if username and password:
-            server.login(username, password)
-
-        server.quit()
-
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            'success': True,
-            'host': smtp_host,
-            'port': smtp_port,
+            'host': 'localhost', 'port': 25, 'username': '', 'password': '',
+            'use_tls': True, 'from_addr': '', 'body': '', 'attachments': [], 'output_var': 'smtp_attachment_result'
         }
-    except smtplib.SMTPException as e:
-        return {
-            'success': False,
-            'error': str(e),
-            'host': smtp_host,
-            'port': smtp_port,
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e),
-            'host': smtp_host,
-            'port': smtp_port,
-        }
+
+
+class SmtpTestConnectionAction(BaseAction):
+    """Test SMTP connection."""
+    action_type = "smtp_test_connection"
+    display_name = "测试SMTP连接"
+    description = "测试SMTP服务器连接"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute SMTP test."""
+        host = params.get('host', 'localhost')
+        port = params.get('port', 25)
+        username = params.get('username', '')
+        password = params.get('password', '')
+        use_tls = params.get('use_tls', True)
+        output_var = params.get('output_var', 'smtp_test_result')
+
+        try:
+            resolved_host = context.resolve_value(host) if context else host
+            resolved_port = context.resolve_value(port) if context else port
+            resolved_username = context.resolve_value(username) if context else username
+            resolved_password = context.resolve_value(password) if context else password
+
+            with smtplib.SMTP(resolved_host, int(resolved_port), timeout=10) as server:
+                if use_tls:
+                    server.starttls()
+                if resolved_username and resolved_password:
+                    server.login(resolved_username, resolved_password)
+                result = {'connected': True, 'host': resolved_host, 'port': resolved_port}
+                if context:
+                    context.set(output_var, result)
+                return ActionResult(success=True, message=f"Connected to {resolved_host}:{resolved_port}", data=result)
+        except smtplib.SMTPConnectError:
+            return ActionResult(success=False, message=f"Could not connect to {resolved_host}:{resolved_port}")
+        except smtplib.SMTPAuthenticationError:
+            return ActionResult(success=False, message="Authentication failed")
+        except Exception as e:
+            return ActionResult(success=False, message=f"SMTP test error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return []
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'host': 'localhost', 'port': 25, 'username': '', 'password': '', 'use_tls': True, 'output_var': 'smtp_test_result'}

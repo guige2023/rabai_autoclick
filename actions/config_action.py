@@ -1,368 +1,309 @@
-"""config_action module for rabai_autoclick.
+"""Configuration management action module for RabAI AutoClick.
 
-Provides configuration management utilities: config file parsing,
-environment variable support, schema validation, and config merging.
+Provides configuration operations:
+- ConfigLoadAction: Load configuration file
+- ConfigSaveAction: Save configuration
+- ConfigGetAction: Get config value
+- ConfigSetAction: Set config value
+- ConfigMergeAction: Merge configurations
 """
 
 from __future__ import annotations
 
+import sys
 import os
-from collections import defaultdict
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+import json
+from typing import Any, Dict, List, Optional
 
-__all__ = [
-    "Config",
-    "ConfigSource",
-    "ConfigManager",
-    "ConfigSchema",
-    "load_config",
-    "load_json_config",
-    "load_yaml_config",
-    "load_env_config",
-    "merge_configs",
-    "ConfigError",
-    "ValidationError",
-]
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class ConfigError(Exception):
-    """Raised when config operations fail."""
-    pass
+class ConfigLoadAction(BaseAction):
+    """Load configuration file."""
+    action_type = "config_load"
+    display_name = "配置加载"
+    description = "加载配置文件"
+    version = "1.0"
 
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute config load."""
+        file_path = params.get('file_path', '')
+        format_type = params.get('format', 'auto')  # auto, json, yaml, ini, env
+        output_var = params.get('output_var', 'config_data')
 
-class ValidationError(Exception):
-    """Raised when config validation fails."""
-    pass
+        if not file_path:
+            return ActionResult(success=False, message="file_path is required")
 
-
-class ConfigSource(Enum):
-    """Configuration source priority."""
-    DEFAULT = 0
-    FILE = 1
-    ENV = 2
-    CLI = 3
-
-
-@dataclass
-class Config:
-    """Configuration container."""
-    data: Dict[str, Any] = field(default_factory=dict)
-    source: ConfigSource = ConfigSource.DEFAULT
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Get config value using dot notation.
-
-        Args:
-            key: Key to get (e.g., "database.host").
-            default: Default value if not found.
-
-        Returns:
-            Config value or default.
-        """
-        keys = key.split(".")
-        value = self.data
-        for k in keys:
-            if isinstance(value, dict) and k in value:
-                value = value[k]
-            else:
-                return default
-        return value
-
-    def set(self, key: str, value: Any) -> None:
-        """Set config value using dot notation.
-
-        Args:
-            key: Key to set (e.g., "database.host").
-            value: Value to set.
-        """
-        keys = key.split(".")
-        data = self.data
-        for k in keys[:-1]:
-            if k not in data:
-                data[k] = {}
-            data = data[k]
-        data[keys[-1]] = value
-
-    def has(self, key: str) -> bool:
-        """Check if key exists."""
-        return self.get(key) is not None
-
-    def merge(self, other: "Config", overwrite: bool = True) -> "Config":
-        """Merge another config into this one.
-
-        Args:
-            other: Config to merge.
-            overwrite: Overwrite existing values if True.
-
-        Returns:
-            Self for chaining.
-        """
-        self._deep_merge(self.data, other.data, overwrite=overwrite)
-        return self
-
-    def _deep_merge(self, target: dict, source: dict, overwrite: bool = True) -> None:
-        """Deep merge source into target."""
-        for key, value in source.items():
-            if key in target and isinstance(target[key], dict) and isinstance(value, dict):
-                self._deep_merge(target[key], value, overwrite=overwrite)
-            elif overwrite or key not in target:
-                target[key] = value
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Return config as dictionary."""
-        return dict(self.data)
-
-    def __getitem__(self, key: str) -> Any:
-        """Dict-style access."""
-        result = self.get(key)
-        if result is None:
-            raise KeyError(key)
-        return result
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        """Dict-style setting."""
-        self.set(key, value)
-
-    def __contains__(self, key: str) -> bool:
-        """Check if key exists."""
-        return self.has(key)
-
-
-class ConfigSchema:
-    """Schema validator for configuration."""
-
-    def __init__(self, schema: Dict[str, Any]) -> None:
-        self._schema = schema
-
-    def validate(self, config: Config) -> List[str]:
-        """Validate config against schema.
-
-        Args:
-            config: Config to validate.
-
-        Returns:
-            List of validation error messages (empty if valid).
-        """
-        errors: List[str] = []
-        for key, spec in self._schema.items():
-            value = config.get(key)
-            errs = self._validate_value(key, value, spec)
-            errors.extend(errs)
-        return errors
-
-    def _validate_value(
-        self,
-        key: str,
-        value: Any,
-        spec: Dict[str, Any],
-    ) -> List[str]:
-        """Validate a single value against spec."""
-        errors: List[str] = []
-
-        required = spec.get("required", False)
-        if required and value is None:
-            errors.append(f"Required key missing: {key}")
-            return errors
-
-        if value is None:
-            return errors
-
-        vtype = spec.get("type")
-        if vtype and not isinstance(value, vtype):
-            errors.append(f"Type mismatch for {key}: expected {vtype.__name__}, got {type(value).__name__}")
-            return errors
-
-        choices = spec.get("choices")
-        if choices and value not in choices:
-            errors.append(f"Invalid choice for {key}: {value} (must be one of {choices})")
-
-        min_val = spec.get("min")
-        max_val = spec.get("max")
-        if min_val is not None and value < min_val:
-            errors.append(f"Value for {key} too small: {value} < {min_val}")
-        if max_val is not None and value > max_val:
-            errors.append(f"Value for {key} too large: {value} > {max_val}")
-
-        validator = spec.get("validate")
-        if validator and not validator(value):
-            errors.append(f"Custom validation failed for {key}")
-
-        return errors
-
-
-class ConfigManager:
-    """Central configuration manager with multiple sources."""
-
-    def __init__(self) -> None:
-        self._configs: Dict[ConfigSource, Config] = {}
-        self._merged: Optional[Config] = None
-        self._lock = __import__("threading").RLock()
-
-    def add_config(self, config: Config, source: ConfigSource) -> None:
-        """Add configuration from a source.
-
-        Args:
-            config: Config to add.
-            source: Source priority.
-        """
-        with self._lock:
-            self._configs[source] = config
-            self._merged = None
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Get value from merged config."""
-        return self.merged.get(key, default)
-
-    def set(self, key: str, value: Any, source: ConfigSource = ConfigSource.CLI) -> None:
-        """Set value in specific source."""
-        with self._lock:
-            if source not in self._configs:
-                self._configs[source] = Config(source=source)
-            self._configs[source].set(key, value)
-            self._merged = None
-
-    @property
-    def merged(self) -> Config:
-        """Get merged configuration (highest priority wins)."""
-        with self._lock:
-            if self._merged is None:
-                self._merged = Config()
-                for source in sorted(self._configs.keys(), key=lambda s: s.value):
-                    self._merged.merge(self._configs[source])
-            return self._merged
-
-    def reload(self) -> None:
-        """Force reload of merged config."""
-        with self._lock:
-            self._merged = None
-
-
-def load_config(
-    path: str,
-    format: Optional[str] = None,
-) -> Config:
-    """Load config from file.
-
-    Args:
-        path: Path to config file.
-        format: File format ("json", "yaml", "ini"). Auto-detected if None.
-
-    Returns:
-        Loaded Config.
-
-    Raises:
-        ConfigError: If loading fails.
-    """
-    p = Path(path)
-    if not p.exists():
-        raise ConfigError(f"Config file not found: {path}")
-
-    fmt = format or p.suffix.lstrip(".")
-
-    if fmt == "json":
-        return load_json_config(path)
-    elif fmt in ("yaml", "yml"):
         try:
-            import yaml
-            data = yaml.safe_load(p.read_text())
-            return Config(data=data or {}, source=ConfigSource.FILE)
-        except ImportError:
-            raise ConfigError("PyYAML not installed")
-    elif fmt == "ini":
-        import configparser
-        parser = configparser.ConfigParser()
-        parser.read(path)
-        data = {s: dict(parser[s]) for s in parser.sections()}
-        return Config(data=data, source=ConfigSource.FILE)
-    else:
-        raise ConfigError(f"Unsupported config format: {format}")
+            import json
+
+            resolved_path = context.resolve_value(file_path) if context else file_path
+
+            if format_type == 'auto':
+                ext = resolved_path.lower().split('.')[-1]
+                if ext in ('json',):
+                    format_type = 'json'
+                elif ext in ('yaml', 'yml'):
+                    format_type = 'yaml'
+                elif ext in ('ini',):
+                    format_type = 'ini'
+                else:
+                    format_type = 'json'
+
+            if format_type == 'json':
+                with open(resolved_path, 'r') as f:
+                    data = json.load(f)
+            elif format_type == 'yaml':
+                try:
+                    import yaml
+                    with open(resolved_path, 'r') as f:
+                        data = yaml.safe_load(f)
+                except ImportError:
+                    return ActionResult(success=False, message="PyYAML not installed")
+            elif format_type == 'ini':
+                import configparser
+                parser = configparser.ConfigParser()
+                parser.read(resolved_path)
+                data = {s: dict(parser[s]) for s in parser.sections()}
+            elif format_type == 'env':
+                data = {}
+                with open(resolved_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            k, v = line.split('=', 1)
+                            data[k.strip()] = v.strip().strip('"').strip("'")
+            else:
+                return ActionResult(success=False, message=f"Unsupported format: {format_type}")
+
+            if context:
+                context.set(output_var, data)
+            return ActionResult(success=True, message=f"Config loaded: {len(str(data))} chars", data={'keys': list(data.keys()) if isinstance(data, dict) else 'N/A'})
+        except FileNotFoundError:
+            return ActionResult(success=False, message=f"Config file not found: {resolved_path}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Config load error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['file_path']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'format': 'auto', 'output_var': 'config_data'}
 
 
-def load_json_config(path: str) -> Config:
-    """Load config from JSON file.
+class ConfigSaveAction(BaseAction):
+    """Save configuration file."""
+    action_type = "config_save"
+    display_name = "配置保存"
+    description = "保存配置文件"
+    version = "1.0"
 
-    Args:
-        path: Path to JSON file.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute config save."""
+        file_path = params.get('file_path', '')
+        data = params.get('data', {})
+        format_type = params.get('format', 'json')  # json, yaml
+        output_var = params.get('output_var', 'config_save_result')
 
-    Returns:
-        Loaded Config.
-    """
-    import json
-    try:
-        data = json.loads(Path(path).read_text())
-        return Config(data=data or {}, source=ConfigSource.FILE)
-    except json.JSONDecodeError as e:
-        raise ConfigError(f"Invalid JSON in {path}: {e}")
+        if not file_path:
+            return ActionResult(success=False, message="file_path is required")
 
+        try:
+            import json
 
-def load_yaml_config(path: str) -> Config:
-    """Load config from YAML file.
+            resolved_path = context.resolve_value(file_path) if context else file_path
+            resolved_data = context.resolve_value(data) if context else data
 
-    Args:
-        path: Path to YAML file.
+            _os.makedirs(_os.path.dirname(resolved_path) or '.', exist_ok=True)
 
-    Returns:
-        Loaded Config.
-    """
-    try:
-        import yaml
-        data = yaml.safe_load(Path(path).read_text())
-        return Config(data=data or {}, source=ConfigSource.FILE)
-    except ImportError:
-        raise ConfigError("PyYAML not installed")
+            if format_type == 'json':
+                with open(resolved_path, 'w') as f:
+                    json.dump(resolved_data, f, indent=2, ensure_ascii=False)
+            elif format_type == 'yaml':
+                try:
+                    import yaml
+                    with open(resolved_path, 'w') as f:
+                        yaml.dump(resolved_data, f, default_flow_style=False, allow_unicode=True)
+                except ImportError:
+                    return ActionResult(success=False, message="PyYAML not installed")
+            else:
+                return ActionResult(success=False, message=f"Unsupported format: {format_type}")
 
+            result = {'saved': True, 'path': resolved_path, 'format': format_type}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Config saved to {resolved_path}", data=result)
+        except Exception as e:
+            return ActionResult(success=False, message=f"Config save error: {str(e)}")
 
-def load_env_config(prefix: str = "", separator: str = "_") -> Config:
-    """Load config from environment variables.
+    def get_required_params(self) -> List[str]:
+        return ['file_path', 'data']
 
-    Args:
-        prefix: Only load vars starting with this prefix.
-        separator: Separator for nested keys (e.g., PREFIX_DB_HOST -> {db: {host: ...}}).
-
-    Returns:
-        Config from environment.
-    """
-    data: Dict[str, Any] = defaultdict(dict)
-    for key, value in os.environ.items():
-        if prefix and not key.startswith(prefix):
-            continue
-        parts = key[len(prefix):].lstrip(separator).lower().split(separator)
-        target = data
-        for part in parts[:-1]:
-            target = target.setdefault(part, {})
-        target[parts[-1]] = _parse_env_value(value)
-    return Config(data=dict(data), source=ConfigSource.ENV)
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'format': 'json', 'output_var': 'config_save_result'}
 
 
-def _parse_env_value(value: str) -> Union[str, int, float, bool]:
-    """Parse environment variable value to appropriate type."""
-    if value.lower() in ("true", "yes", "1", "on"):
-        return True
-    if value.lower() in ("false", "no", "0", "off"):
-        return False
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    try:
-        return float(value)
-    except ValueError:
-        pass
-    return value
+class ConfigGetAction(BaseAction):
+    """Get config value by key."""
+    action_type = "config_get"
+    display_name = "配置获取"
+    description = "获取配置值"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute config get."""
+        config_var = params.get('config_var', 'config_data')
+        key = params.get('key', '')
+        default = params.get('default', None)
+        separator = params.get('separator', '.')  # for nested keys like "db.host"
+        output_var = params.get('output_var', 'config_value')
+
+        if not key:
+            return ActionResult(success=False, message="key is required")
+
+        try:
+            resolved_key = context.resolve_value(key) if context else key
+            resolved_sep = context.resolve_value(separator) if context else separator
+
+            config = context.resolve_value(config_var) if context else None
+            if config is None:
+                config = context.resolve_value(config_var)
+
+            if isinstance(config, str):
+                config = json.loads(config)
+
+            keys = resolved_key.split(resolved_sep)
+            value = config
+            for k in keys:
+                if isinstance(value, dict) and k in value:
+                    value = value[k]
+                else:
+                    value = default
+                    break
+
+            result = {'value': value, 'key': resolved_key, 'found': value != default}
+            if context:
+                context.set(output_var, value)
+            return ActionResult(success=True, message=f"{resolved_key} = {value}", data=result)
+        except Exception as e:
+            return ActionResult(success=False, message=f"Config get error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['key']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'config_var': 'config_data', 'default': None, 'separator': '.', 'output_var': 'config_value'}
 
 
-def merge_configs(*configs: Config) -> Config:
-    """Merge multiple configs (later ones override earlier).
+class ConfigSetAction(BaseAction):
+    """Set config value by key."""
+    action_type = "config_set"
+    display_name = "配置设置"
+    description = "设置配置值"
+    version = "1.0"
 
-    Args:
-        *configs: Configs to merge.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute config set."""
+        config_var = params.get('config_var', 'config_data')
+        key = params.get('key', '')
+        value = params.get('value', None)
+        separator = params.get('separator', '.')
+        output_var = params.get('output_var', 'config_set_result')
 
-    Returns:
-        Merged Config.
-    """
-    result = Config()
-    for config in configs:
-        result.merge(config)
-    return result
+        if not key:
+            return ActionResult(success=False, message="key is required")
+
+        try:
+            import copy
+
+            resolved_key = context.resolve_value(key) if context else key
+            resolved_value = context.resolve_value(value) if context else value
+            resolved_sep = context.resolve_value(separator) if context else separator
+
+            config = context.resolve_value(config_var) if context else None
+            if config is None or not isinstance(config, dict):
+                config = {}
+
+            keys = resolved_key.split(resolved_sep)
+            current = config
+            for k in keys[:-1]:
+                if k not in current:
+                    current[k] = {}
+                current = current[k]
+            current[keys[-1]] = resolved_value
+
+            result = {'key': resolved_key, 'value': resolved_value}
+            if context:
+                context.set(config_var, config)
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Set {resolved_key} = {resolved_value}", data=result)
+        except Exception as e:
+            return ActionResult(success=False, message=f"Config set error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['key', 'value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'config_var': 'config_data', 'separator': '.', 'output_var': 'config_set_result'}
+
+
+class ConfigMergeAction(BaseAction):
+    """Merge configurations."""
+    action_type = "config_merge"
+    display_name = "配置合并"
+    description = "合并配置"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute config merge."""
+        configs = params.get('configs', [])  # list of config dicts
+        strategy = params.get('strategy', 'override')  # override, keep, deep
+        output_var = params.get('output_var', 'merged_config')
+
+        if not configs:
+            return ActionResult(success=False, message="configs is required")
+
+        try:
+            import copy
+
+            resolved_configs = context.resolve_value(configs) if context else configs
+            resolved_strategy = context.resolve_value(strategy) if context else strategy
+
+            if resolved_strategy == 'deep':
+                def deep_merge(base, overlay):
+                    result = copy.deepcopy(base)
+                    for k, v in overlay.items():
+                        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                            result[k] = deep_merge(result[k], v)
+                        else:
+                            result[k] = copy.deepcopy(v)
+                    return result
+
+                merged = {}
+                for cfg in resolved_configs:
+                    merged = deep_merge(merged, cfg)
+            elif resolved_strategy == 'keep':
+                merged = {}
+                for cfg in resolved_configs:
+                    for k, v in cfg.items():
+                        if k not in merged:
+                            merged[k] = copy.deepcopy(v)
+            else:  # override
+                merged = {}
+                for cfg in resolved_configs:
+                    merged.update(copy.deepcopy(cfg))
+
+            if context:
+                context.set(output_var, merged)
+            return ActionResult(success=True, message=f"Merged {len(resolved_configs)} configs", data={'keys': list(merged.keys())})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Config merge error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['configs']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'strategy': 'override', 'output_var': 'merged_config'}

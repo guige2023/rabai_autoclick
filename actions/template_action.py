@@ -1,144 +1,197 @@
-"""Template action module for RabAI AutoClick.
+"""Template rendering action module for RabAI AutoClick.
 
 Provides template operations:
-- TemplateRenderAction: Render template with variables
-- TemplateFormatAction: Format string with values
+- TemplateRenderAction: Render template with data
+- TemplateCompileAction: Pre-compile template
+- TemplateFilterAction: Apply filters to template
 """
 
-import string
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
 import sys
 import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from typing import Any, Dict, List, Optional
+
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
 class TemplateRenderAction(BaseAction):
-    """Render template with variables."""
+    """Render template with data."""
     action_type = "template_render"
-    display_name = "渲染模板"
-    description = "使用变量渲染模板字符串"
+    display_name = "模板渲染"
+    description = "渲染模板"
+    version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute template rendering.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute template render."""
+        template_str = params.get('template', '')
+        template_file = params.get('template_file', None)
+        data = params.get('data', {})
+        engine = params.get('engine', 'jinja2')  # jinja2, string
+        output_var = params.get('output_var', 'rendered_template')
 
-        Args:
-            context: Execution context.
-            params: Dict with template, variables, output_var.
-
-        Returns:
-            ActionResult with rendered string.
-        """
-        template = params.get('template', '')
-        variables = params.get('variables', {})
-        output_var = params.get('output_var', 'template_result')
-
-        valid, msg = self.validate_type(template, str, 'template')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(variables, dict, 'variables')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not template_str and not template_file:
+            return ActionResult(success=False, message="template or template_file is required")
 
         try:
-            resolved_template = context.resolve_value(template)
-            resolved_vars = context.resolve_value(variables)
+            resolved_template = context.resolve_value(template_str) if context else template_str
+            resolved_data = context.resolve_value(data) if context else data
 
-            # Create template and render
-            tmpl = string.Template(resolved_template)
-            result = tmpl.safe_substitute(resolved_vars)
-            context.set(output_var, result)
+            if template_file:
+                resolved_file = context.resolve_value(template_file) if context else template_file
+                with open(resolved_file, 'r') as f:
+                    resolved_template = f.read()
 
-            return ActionResult(
-                success=True,
-                message=f"模板渲染完成: {len(result)} 字符",
-                data={
-                    'result': result,
-                    'length': len(result),
-                    'output_var': output_var
-                }
-            )
+            if engine.lower() == 'jinja2':
+                try:
+                    from jinja2 import Template
+                    t = Template(resolved_template)
+                    rendered = t.render(**(resolved_data or {}))
+                except ImportError:
+                    return ActionResult(success=False, message="jinja2 not installed. Run: pip install jinja2")
+            else:
+                # Simple string template with {{var}} syntax
+                rendered = resolved_template
+                for key, val in (resolved_data or {}).items():
+                    placeholder = '{{' + key + '}}'
+                    rendered = rendered.replace(placeholder, str(val))
+
+            if context:
+                context.set(output_var, rendered)
+            return ActionResult(success=True, message=f"Template rendered ({len(rendered)} chars)", data={'output': rendered})
+        except FileNotFoundError:
+            return ActionResult(success=False, message=f"Template file not found")
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"模板渲染失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Template render error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['template']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'variables': {}, 'output_var': 'template_result'}
+        return {'template': '', 'template_file': None, 'data': {}, 'engine': 'jinja2', 'output_var': 'rendered_template'}
 
 
-class TemplateFormatAction(BaseAction):
-    """Format string with values."""
-    action_type = "template_format"
-    display_name = "格式化字符串"
-    description = "使用.format()格式化字符串"
+class TemplateCompileAction(BaseAction):
+    """Pre-compile template."""
+    action_type = "template_compile"
+    display_name = "模板编译"
+    description = "预编译模板"
+    version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute string formatting.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute template compile."""
+        template_str = params.get('template', '')
+        template_file = params.get('template_file', None)
+        engine = params.get('engine', 'jinja2')
+        output_var = params.get('output_var', 'compiled_template')
 
-        Args:
-            context: Execution context.
-            params: Dict with template, values, output_var.
-
-        Returns:
-            ActionResult with formatted string.
-        """
-        template = params.get('template', '')
-        values = params.get('values', {})
-        output_var = params.get('output_var', 'template_result')
-
-        valid, msg = self.validate_type(template, str, 'template')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(values, dict, 'values')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not template_str and not template_file:
+            return ActionResult(success=False, message="template or template_file is required")
 
         try:
-            resolved_template = context.resolve_value(template)
-            resolved_values = context.resolve_value(values)
+            resolved_template = context.resolve_value(template_str) if context else template_str
 
-            result = resolved_template.format(**resolved_values)
-            context.set(output_var, result)
+            if template_file:
+                resolved_file = context.resolve_value(template_file) if context else template_file
+                with open(resolved_file, 'r') as f:
+                    resolved_template = f.read()
 
-            return ActionResult(
-                success=True,
-                message=f"格式化完成: {len(result)} 字符",
-                data={
-                    'result': result,
-                    'length': len(result),
-                    'output_var': output_var
-                }
-            )
-        except KeyError as e:
-            return ActionResult(
-                success=False,
-                message=f"格式化失败: 缺少键 {str(e)}"
-            )
+            if engine.lower() == 'jinja2':
+                from jinja2 import Template
+                compiled = Template(resolved_template)
+                compiled_str = str(compiled)
+            else:
+                compiled_str = resolved_template
+
+            if context:
+                context.set(output_var, compiled_str)
+            return ActionResult(success=True, message="Template compiled", data={'compiled': compiled_str[:100]})
+        except ImportError:
+            return ActionResult(success=False, message="jinja2 not installed")
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"格式化失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Template compile error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['template', 'values']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'template_result'}
+        return {'template': '', 'template_file': None, 'engine': 'jinja2', 'output_var': 'compiled_template'}
+
+
+class TemplateFilterAction(BaseAction):
+    """Apply template filters."""
+    action_type = "template_filter"
+    display_name = "模板过滤器"
+    description = "应用模板过滤器"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute template filter."""
+        value = params.get('value', '')
+        filters = params.get('filters', [])  # ['upper', 'trim', 'length', etc]
+        output_var = params.get('output_var', 'filtered_value')
+
+        if not value:
+            return ActionResult(success=False, message="value is required")
+
+        try:
+            resolved_value = context.resolve_value(value) if context else value
+            resolved_filters = context.resolve_value(filters) if context else filters
+
+            result = str(resolved_value)
+            for f in resolved_filters:
+                f_lower = f.lower()
+                if f_lower == 'upper':
+                    result = result.upper()
+                elif f_lower == 'lower':
+                    result = result.lower()
+                elif f_lower == 'trim' or f_lower == 'strip':
+                    result = result.strip()
+                elif f_lower == 'length' or f_lower == 'len':
+                    result = str(len(result))
+                elif f_lower == 'capitalize':
+                    result = result.capitalize()
+                elif f_lower == 'title':
+                    result = result.title()
+                elif f_lower == 'reverse':
+                    result = result[::-1]
+                elif f_lower == 'md5':
+                    import hashlib
+                    result = hashlib.md5(result.encode()).hexdigest()
+                elif f_lower == 'sha256':
+                    import hashlib
+                    result = hashlib.sha256(result.encode()).hexdigest()
+                elif f_lower == 'base64_encode':
+                    import base64
+                    result = base64.b64encode(result.encode()).decode()
+                elif f_lower == 'base64_decode':
+                    import base64
+                    result = base64.b64decode(result.encode()).decode()
+                elif f_lower == 'url_encode':
+                    from urllib.parse import quote
+                    result = quote(result)
+                elif f_lower == 'url_decode':
+                    from urllib.parse import unquote
+                    result = unquote(result)
+                elif f_lower == 'json_dumps':
+                    import json
+                    result = json.dumps(result)
+                elif f_lower == 'int':
+                    result = str(int(result))
+                elif f_lower == 'float':
+                    result = str(float(result))
+
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Filtered: {result[:50]}", data={'output': result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Template filter error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['value']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'filters': [], 'output_var': 'filtered_value'}

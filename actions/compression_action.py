@@ -1,792 +1,349 @@
-"""Compression action module for RabAI AutoClick.
+"""Compression and archive action module for RabAI AutoClick.
 
-Provides advanced compression operations:
-- CompressionZipAction: Create zip archive with options
-- CompressionUnzipAction: Extract zip with options
-- CompressionTarAction: Create tar archive
-- CompressionuntarAction: Extract tar archive
-- CompressionGzipAction: Gzip compress file
-- CompressionGunzipAction: Gunzip decompress file
-- CompressionBzip2Action: Bzip2 compress file
-- CompressionSevenZipAction: Create 7z archive
-- CompressionListAction: List archive contents
-- CompressionInfoAction: Get archive info
+Provides compression/decompression operations:
+- GzipCompressAction: Gzip compress data
+- GzipDecompressAction: Gzip decompress data
+- ZipCreateAction: Create ZIP archive
+- ZipExtractAction: Extract ZIP archive
+- TarCompressAction: Create tar archive
+- TarExtractAction: Extract tar archive
+- Bz2CompressAction: BZ2 compress
+-Lz4CompressAction: LZ4 compress
 """
 
-import os
-import subprocess
-import tarfile
-import zipfile
+from __future__ import annotations
+
 import gzip
 import bz2
-from typing import Any, Dict, List, Optional
-
+import zipfile
+import tarfile
 import sys
 import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from typing import Any, Dict, List, Optional
+
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class CompressionZipAction(BaseAction):
-    """Create zip archive with options."""
-    action_type = "compression_zip"
-    display_name = "创建ZIP压缩包"
-    description = "创建带选项的ZIP压缩包"
+class GzipCompressAction(BaseAction):
+    """Gzip compress data."""
+    action_type = "gzip_compress"
+    display_name = "Gzip压缩"
+    description = "Gzip压缩数据"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute zip.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute gzip compress."""
+        data = params.get('data', '')
+        output_path = params.get('output_path', '')
+        compression_level = params.get('compression_level', 9)
 
-        Args:
-            context: Execution context.
-            params: Dict with source, output, compression_level, include_hidden.
-
-        Returns:
-            ActionResult with output path.
-        """
-        source = params.get('source', '')
-        output = params.get('output', '')
-        compression_level = params.get('compression_level', 6)
-        include_hidden = params.get('include_hidden', False)
-
-        valid, msg = self.validate_type(source, str, 'source')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(output, str, 'output')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not data and not output_path:
+            return ActionResult(success=False, message="data or output_path is required")
 
         try:
-            resolved_source = context.resolve_value(source)
-            resolved_output = context.resolve_value(output)
-            resolved_level = context.resolve_value(compression_level)
-            resolved_hidden = context.resolve_value(include_hidden)
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_output = context.resolve_value(output_path) if context else output_path
+            resolved_level = context.resolve_value(compression_level) if context else compression_level
 
-            if not os.path.exists(resolved_source):
-                return ActionResult(
-                    success=False,
-                    message=f"源路径不存在: {resolved_source}"
-                )
+            if isinstance(resolved_data, str):
+                resolved_data = resolved_data.encode('utf-8')
 
-            is_dir = os.path.isdir(resolved_source)
-
-            if is_dir:
-                with zipfile.ZipFile(resolved_output, 'w', zipfile.ZIP_DEFLATED, compresslevel=int(resolved_level)) as zf:
-                    for root, dirs, files in os.walk(resolved_source):
-                        if not resolved_hidden:
-                            dirs[:] = [d for d in dirs if not d.startswith('.')]
-                            files = [f for f in files if not f.startswith('.')]
-
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, os.path.dirname(resolved_source))
-                            zf.write(file_path, arcname)
+            if resolved_output:
+                _os.makedirs(_os.path.dirname(resolved_output) or '.', exist_ok=True)
+                with gzip.open(resolved_output, 'wb', compresslevel=resolved_level) as f:
+                    f.write(resolved_data)
+                return ActionResult(success=True, message=f"Compressed to {resolved_output}", data={'output_path': resolved_output})
             else:
-                with zipfile.ZipFile(resolved_output, 'w', zipfile.ZIP_DEFLATED, compresslevel=int(resolved_level)) as zf:
-                    zf.write(resolved_source, os.path.basename(resolved_source))
-
-            size = os.path.getsize(resolved_output)
-
-            return ActionResult(
-                success=True,
-                message=f"ZIP已创建: {resolved_output} ({size} bytes)",
-                data={'path': resolved_output, 'size': size}
-            )
+                compressed = gzip.compress(resolved_data, compresslevel=resolved_level)
+                import base64
+                encoded = base64.b64encode(compressed).decode('ascii')
+                return ActionResult(success=True, message=f"Compressed {len(resolved_data)} -> {len(compressed)} bytes", data={'data': encoded})
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"创建ZIP失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Gzip compress error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['source', 'output']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'compression_level': 6, 'include_hidden': False}
+        return {'data': '', 'output_path': '', 'compression_level': 9}
 
 
-class CompressionUnzipAction(BaseAction):
-    """Extract zip with options."""
-    action_type = "compression_unzip"
-    display_name = "解压ZIP文件"
-    description = "解压ZIP文件到目录"
+class GzipDecompressAction(BaseAction):
+    """Gzip decompress data."""
+    action_type = "gzip_decompress"
+    display_name = "Gzip解压"
+    description = "Gzip解压数据"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute unzip.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute gzip decompress."""
+        data = params.get('data', '')
+        input_path = params.get('input_path', '')
+        output_var = params.get('output_var', 'decompressed_data')
 
-        Args:
-            context: Execution context.
-            params: Dict with archive, output_dir, pattern.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        archive = params.get('archive', '')
-        output_dir = params.get('output_dir', '')
-        pattern = params.get('pattern', '')
-
-        valid, msg = self.validate_type(archive, str, 'archive')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not data and not input_path:
+            return ActionResult(success=False, message="data or input_path is required")
 
         try:
-            resolved_archive = context.resolve_value(archive)
-            resolved_output = context.resolve_value(output_dir) if output_dir else os.path.splitext(resolved_archive)[0]
+            if input_path:
+                resolved_path = context.resolve_value(input_path) if context else input_path
+                with gzip.open(resolved_path, 'rb') as f:
+                    decompressed = f.read()
+            else:
+                resolved_data = context.resolve_value(data) if context else data
+                if isinstance(resolved_data, str):
+                    import base64
+                    resolved_data = base64.b64decode(resolved_data)
+                decompressed = gzip.decompress(resolved_data)
 
-            if not os.path.exists(resolved_archive):
-                return ActionResult(
-                    success=False,
-                    message=f"压缩包不存在: {resolved_archive}"
-                )
+            try:
+                text_result = decompressed.decode('utf-8')
+            except UnicodeDecodeError:
+                text_result = decompressed.hex()
 
-            os.makedirs(resolved_output, exist_ok=True)
-
-            with zipfile.ZipFile(resolved_archive, 'r') as zf:
-                if pattern:
-                    names = [n for n in zf.namelist() if pattern in n]
-                else:
-                    names = zf.namelist()
-
-                zf.extractall(resolved_output)
-
-            return ActionResult(
-                success=True,
-                message=f"已解压 {len(names)} 个文件到 {resolved_output}",
-                data={'output_dir': resolved_output, 'files': len(names)}
-            )
+            if context:
+                context.set(output_var, text_result)
+            return ActionResult(success=True, message=f"Decompressed {len(decompressed)} bytes", data={'data': text_result, 'bytes': len(decompressed)})
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"解压失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Gzip decompress error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['archive']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_dir': '', 'pattern': ''}
+        return {'data': '', 'input_path': '', 'output_var': 'decompressed_data'}
 
 
-class CompressionTarAction(BaseAction):
+class ZipCreateAction(BaseAction):
+    """Create ZIP archive."""
+    action_type = "zip_create"
+    display_name = "创建ZIP"
+    description = "创建ZIP压缩包"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute ZIP create."""
+        output_path = params.get('output_path', '')
+        files = params.get('files', [])  # list of {path, arcname} or just paths
+        compression = params.get('compression', 'deflated')
+
+        if not output_path or not files:
+            return ActionResult(success=False, message="output_path and files are required")
+
+        try:
+            resolved_output = context.resolve_value(output_path) if context else output_path
+            resolved_files = context.resolve_value(files) if context else files
+
+            _os.makedirs(_os.path.dirname(resolved_output) or '.', exist_ok=True)
+
+            comp_map = {'stored': zipfile.ZIP_STORED, 'deflated': zipfile.ZIP_DEFLATED, 'bzip2': zipfile.ZIP_BZIP2}
+            comp_type = comp_map.get(compression.lower(), zipfile.ZIP_DEFLATED)
+
+            with zipfile.ZipFile(resolved_output, 'w', compression=comp_type) as zf:
+                for item in resolved_files:
+                    if isinstance(item, dict):
+                        file_path = item.get('path', '')
+                        arcname = item.get('arcname', _os.path.basename(file_path))
+                    else:
+                        file_path = item
+                        arcname = _os.path.basename(file_path)
+                    zf.write(file_path, arcname=arcname)
+
+            return ActionResult(success=True, message=f"Created {resolved_output} with {len(resolved_files)} files", data={'output_path': resolved_output, 'files_count': len(resolved_files)})
+        except Exception as e:
+            return ActionResult(success=False, message=f"ZIP create error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['output_path', 'files']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'compression': 'deflated'}
+
+
+class ZipExtractAction(BaseAction):
+    """Extract ZIP archive."""
+    action_type = "zip_extract"
+    display_name = "解压ZIP"
+    description = "解压ZIP压缩包"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute ZIP extract."""
+        input_path = params.get('input_path', '')
+        output_dir = params.get('output_dir', '.')
+        filter_ext = params.get('filter_ext', None)  # e.g. '.txt' to extract only those
+
+        if not input_path:
+            return ActionResult(success=False, message="input_path is required")
+
+        try:
+            resolved_path = context.resolve_value(input_path) if context else input_path
+            resolved_output = context.resolve_value(output_dir) if context else output_dir
+            resolved_filter = context.resolve_value(filter_ext) if context else filter_ext
+
+            _os.makedirs(resolved_output, exist_ok=True)
+            extracted_count = 0
+
+            with zipfile.ZipFile(resolved_path, 'r') as zf:
+                for info in zf.infolist():
+                    if resolved_filter and not info.filename.endswith(resolved_filter):
+                        continue
+                    zf.extract(info, path=resolved_output)
+                    extracted_count += 1
+
+            return ActionResult(success=True, message=f"Extracted {extracted_count} files to {resolved_output}", data={'extracted_count': extracted_count, 'output_dir': resolved_output})
+        except Exception as e:
+            return ActionResult(success=False, message=f"ZIP extract error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ['input_path']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_dir': '.', 'filter_ext': None}
+
+
+class TarCompressAction(BaseAction):
     """Create tar archive."""
-    action_type = "compression_tar"
-    display_name = "创建TAR压缩包"
-    description = "创建tar归档文件"
+    action_type = "tar_compress"
+    display_name = "创建tar"
+    description = "创建tar归档"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute tar.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute tar create."""
+        output_path = params.get('output_path', '')
+        files = params.get('files', [])
+        mode = params.get('mode', 'w:gz')  # w:gz, w:bz2, w:
+        output_var = params.get('output_var', 'tar_result')
 
-        Args:
-            context: Execution context.
-            params: Dict with source, output, compression, include_hidden.
-
-        Returns:
-            ActionResult with output path.
-        """
-        source = params.get('source', '')
-        output = params.get('output', '')
-        compression = params.get('compression', 'none')
-        include_hidden = params.get('include_hidden', False)
-
-        valid, msg = self.validate_type(source, str, 'source')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(output, str, 'output')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not output_path or not files:
+            return ActionResult(success=False, message="output_path and files are required")
 
         try:
-            resolved_source = context.resolve_value(source)
-            resolved_output = context.resolve_value(output)
-            resolved_compression = context.resolve_value(compression)
-            resolved_hidden = context.resolve_value(include_hidden)
+            resolved_output = context.resolve_value(output_path) if context else output_path
+            resolved_files = context.resolve_value(files) if context else files
 
-            if not os.path.exists(resolved_source):
-                return ActionResult(
-                    success=False,
-                    message=f"源路径不存在: {resolved_source}"
-                )
+            _os.makedirs(_os.path.dirname(resolved_output) or '.', exist_ok=True)
 
-            mode_map = {
-                'none': 'w',
-                'gz': 'w:gz',
-                'gzip': 'w:gz',
-                'bz2': 'w:bz2',
-                'xz': 'w:xz'
-            }
-            mode = mode_map.get(resolved_compression, 'w')
+            mode_map = {'w': 'w', 'w:gz': 'w:gz', 'w:bz2': 'w:bz2', 'w:xz': 'w:xz', 'w:zst': 'w:zst'}
+            tar_mode = mode_map.get(mode, 'w:gz')
 
-            with tarfile.open(resolved_output, mode) as tf:
-                if os.path.isdir(resolved_source):
-                    for root, dirs, files in os.walk(resolved_source):
-                        if not resolved_hidden:
-                            dirs[:] = [d for d in dirs if not d.startswith('.')]
-                            files = [f for f in files if not f.startswith('.')]
+            with tarfile.open(resolved_output, tar_mode) as tf:
+                for item in resolved_files:
+                    if isinstance(item, dict):
+                        file_path = item.get('path', '')
+                        arcname = item.get('arcname', None)
+                    else:
+                        file_path = item
+                        arcname = None
+                    tf.add(file_path, arcname=arcname)
 
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, os.path.dirname(resolved_source))
-                            tf.add(file_path, arcname)
-                else:
-                    tf.add(resolved_source, os.path.basename(resolved_source))
-
-            size = os.path.getsize(resolved_output)
-
-            return ActionResult(
-                success=True,
-                message=f"TAR已创建: {resolved_output} ({size} bytes)",
-                data={'path': resolved_output, 'size': size}
-            )
+            result = {'output_path': resolved_output, 'files_count': len(resolved_files), 'mode': tar_mode}
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Created {resolved_output}", data=result)
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"创建TAR失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"tar create error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['source', 'output']
+        return ['output_path', 'files']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'compression': 'none', 'include_hidden': False}
+        return {'mode': 'w:gz', 'output_var': 'tar_result'}
 
 
-class CompressionUntarAction(BaseAction):
+class TarExtractAction(BaseAction):
     """Extract tar archive."""
-    action_type = "compression_untar"
-    display_name = "解压TAR文件"
-    description = "解压tar归档文件"
+    action_type = "tar_extract"
+    display_name = "解压tar"
+    description = "解压tar归档"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute untar.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute tar extract."""
+        input_path = params.get('input_path', '')
+        output_dir = params.get('output_dir', '.')
 
-        Args:
-            context: Execution context.
-            params: Dict with archive, output_dir.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        archive = params.get('archive', '')
-        output_dir = params.get('output_dir', '')
-
-        valid, msg = self.validate_type(archive, str, 'archive')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not input_path:
+            return ActionResult(success=False, message="input_path is required")
 
         try:
-            resolved_archive = context.resolve_value(archive)
-            resolved_output = context.resolve_value(output_dir) if output_dir else '.'
+            resolved_path = context.resolve_value(input_path) if context else input_path
+            resolved_output = context.resolve_value(output_dir) if context else output_dir
 
-            if not os.path.exists(resolved_archive):
-                return ActionResult(
-                    success=False,
-                    message=f"压缩包不存在: {resolved_archive}"
-                )
-
-            os.makedirs(resolved_output, exist_ok=True)
-
-            with tarfile.open(resolved_archive, 'r:*') as tf:
+            _os.makedirs(resolved_output, exist_ok=True)
+            with tarfile.open(resolved_path, 'r:*') as tf:
                 members = tf.getmembers()
-                tf.extractall(resolved_output)
+                tf.extractall(path=resolved_output)
 
-            return ActionResult(
-                success=True,
-                message=f"已解压 {len(members)} 个文件到 {resolved_output}",
-                data={'output_dir': resolved_output, 'files': len(members)}
-            )
+            return ActionResult(success=True, message=f"Extracted {len(members)} files to {resolved_output}", data={'extracted_count': len(members), 'output_dir': resolved_output})
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"解压TAR失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"tar extract error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['archive']
+        return ['input_path']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_dir': ''}
+        return {'output_dir': '.'}
 
 
-class CompressionGzipAction(BaseAction):
-    """Gzip compress file."""
-    action_type = "compression_gzip"
-    display_name = "GZIP压缩"
-    description = "使用GZIP压缩文件"
+class Bz2CompressAction(BaseAction):
+    """BZ2 compress/decompress."""
+    action_type = "bz2_compress"
+    display_name = "BZ2压缩"
+    description = "BZ2压缩数据"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute gzip.
-
-        Args:
-            context: Execution context.
-            params: Dict with file_path, output_path.
-
-        Returns:
-            ActionResult with output path.
-        """
-        file_path = params.get('file_path', '')
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute BZ2 compress."""
+        data = params.get('data', '')
         output_path = params.get('output_path', '')
+        decompress = params.get('decompress', False)
+        output_var = params.get('output_var', 'bz2_result')
 
-        valid, msg = self.validate_type(file_path, str, 'file_path')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_input = context.resolve_value(file_path)
-            resolved_output = context.resolve_value(output_path) if output_path else f"{resolved_input}.gz"
-
-            if not os.path.exists(resolved_input):
-                return ActionResult(
-                    success=False,
-                    message=f"文件不存在: {resolved_input}"
-                )
-
-            with open(resolved_input, 'rb') as f_in:
-                with gzip.open(resolved_output, 'wb') as f_out:
-                    f_out.writelines(f_in)
-
-            orig_size = os.path.getsize(resolved_input)
-            comp_size = os.path.getsize(resolved_output)
-            ratio = (1 - comp_size / orig_size) * 100 if orig_size > 0 else 0
-
-            return ActionResult(
-                success=True,
-                message=f"GZIP压缩: {orig_size} -> {comp_size} bytes ({ratio:.1f}% 压缩)",
-                data={'output': resolved_output, 'orig_size': orig_size, 'comp_size': comp_size}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"GZIP压缩失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['file_path']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_path': ''}
-
-
-class CompressionGunzipAction(BaseAction):
-    """Gunzip decompress file."""
-    action_type = "compression_gunzip"
-    display_name = "GZIP解压"
-    description = "解压GZIP文件"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute gunzip.
-
-        Args:
-            context: Execution context.
-            params: Dict with file_path, output_path.
-
-        Returns:
-            ActionResult with output path.
-        """
-        file_path = params.get('file_path', '')
-        output_path = params.get('output_path', '')
-
-        valid, msg = self.validate_type(file_path, str, 'file_path')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not data and not output_path:
+            return ActionResult(success=False, message="data or output_path is required")
 
         try:
-            resolved_input = context.resolve_value(file_path)
-            base_name = resolved_input
-            if resolved_input.endswith('.gz'):
-                base_name = resolved_input[:-3]
-            resolved_output = context.resolve_value(output_path) if output_path else base_name
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_output = context.resolve_value(output_path) if context else output_path
+            resolved_decompress = context.resolve_value(decompress) if context else decompress
 
-            if not os.path.exists(resolved_input):
-                return ActionResult(
-                    success=False,
-                    message=f"文件不存在: {resolved_input}"
-                )
+            if isinstance(resolved_data, str):
+                resolved_data = resolved_data.encode('utf-8')
 
-            with gzip.open(resolved_input, 'rb') as f_in:
-                with open(resolved_output, 'wb') as f_out:
-                    f_out.writelines(f_in)
-
-            size = os.path.getsize(resolved_output)
-
-            return ActionResult(
-                success=True,
-                message=f"GZIP解压: {resolved_output} ({size} bytes)",
-                data={'output': resolved_output, 'size': size}
-            )
+            if resolved_decompress:
+                if resolved_output:
+                    with bz2.open(resolved_output, 'rb') as f:
+                        result = f.read()
+                    return ActionResult(success=True, message=f"Decompressed to {resolved_output}", data={'output_path': resolved_output})
+                else:
+                    decompressed = bz2.decompress(resolved_data)
+                    try:
+                        text = decompressed.decode('utf-8')
+                    except UnicodeDecodeError:
+                        text = decompressed.hex()
+                    if context:
+                        context.set(output_var, text)
+                    return ActionResult(success=True, message=f"Decompressed {len(decompressed)} bytes", data={'data': text})
+            else:
+                compressed = bz2.compress(resolved_data)
+                if resolved_output:
+                    with bz2.open(resolved_output, 'wb') as f:
+                        f.write(resolved_data)
+                    return ActionResult(success=True, message=f"Compressed to {resolved_output}", data={'output_path': resolved_output})
+                else:
+                    import base64
+                    encoded = base64.b64encode(compressed).decode('ascii')
+                    return ActionResult(success=True, message=f"Compressed {len(resolved_data)} -> {len(compressed)} bytes", data={'data': encoded})
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"GZIP解压失败: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"BZ2 error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['file_path']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_path': ''}
-
-
-class CompressionBzip2Action(BaseAction):
-    """Bzip2 compress file."""
-    action_type = "compression_bzip2"
-    display_name = "BZIP2压缩"
-    description = "使用BZIP2压缩文件"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute bzip2.
-
-        Args:
-            context: Execution context.
-            params: Dict with file_path, output_path.
-
-        Returns:
-            ActionResult with output path.
-        """
-        file_path = params.get('file_path', '')
-        output_path = params.get('output_path', '')
-
-        valid, msg = self.validate_type(file_path, str, 'file_path')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_input = context.resolve_value(file_path)
-            resolved_output = context.resolve_value(output_path) if output_path else f"{resolved_input}.bz2"
-
-            if not os.path.exists(resolved_input):
-                return ActionResult(
-                    success=False,
-                    message=f"文件不存在: {resolved_input}"
-                )
-
-            with open(resolved_input, 'rb') as f_in:
-                with bz2.open(resolved_output, 'wb') as f_out:
-                    f_out.writelines(f_in)
-
-            orig_size = os.path.getsize(resolved_input)
-            comp_size = os.path.getsize(resolved_output)
-            ratio = (1 - comp_size / orig_size) * 100 if orig_size > 0 else 0
-
-            return ActionResult(
-                success=True,
-                message=f"BZIP2压缩: {orig_size} -> {comp_size} bytes ({ratio:.1f}% 压缩)",
-                data={'output': resolved_output, 'orig_size': orig_size, 'comp_size': comp_size}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"BZIP2压缩失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['file_path']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_path': ''}
-
-
-class CompressionSevenZipAction(BaseAction):
-    """Create 7z archive."""
-    action_type = "compression_seven_zip"
-    display_name = "创建7z压缩包"
-    description = "创建7z压缩包"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute 7z.
-
-        Args:
-            context: Execution context.
-            params: Dict with source, output, compression_level, password.
-
-        Returns:
-            ActionResult with output path.
-        """
-        source = params.get('source', '')
-        output = params.get('output', '')
-        compression_level = params.get('compression_level', 5)
-        password = params.get('password', '')
-
-        valid, msg = self.validate_type(source, str, 'source')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(output, str, 'output')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_source = context.resolve_value(source)
-            resolved_output = context.resolve_value(output)
-            resolved_level = context.resolve_value(compression_level)
-            resolved_pwd = context.resolve_value(password) if password else ''
-
-            if not os.path.exists(resolved_source):
-                return ActionResult(
-                    success=False,
-                    message=f"源路径不存在: {resolved_source}"
-                )
-
-            cmd = ['7z', 'a', '-y']
-
-            if resolved_pwd:
-                cmd.append(f'-p{resolved_pwd}')
-
-            cmd.extend([f'-mx={resolved_level}', resolved_output, resolved_source])
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-
-            if result.returncode != 0:
-                return ActionResult(
-                    success=False,
-                    message=f"7z创建失败: {result.stderr}"
-                )
-
-            size = os.path.getsize(resolved_output)
-
-            return ActionResult(
-                success=True,
-                message=f"7z已创建: {resolved_output} ({size} bytes)",
-                data={'path': resolved_output, 'size': size}
-            )
-        except FileNotFoundError:
-            return ActionResult(
-                success=False,
-                message="7z未安装: brew install p7zip"
-            )
-        except subprocess.TimeoutExpired:
-            return ActionResult(
-                success=False,
-                message="7z创建超时"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"7z创建失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['source', 'output']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'compression_level': 5, 'password': ''}
-
-
-class CompressionListAction(BaseAction):
-    """List archive contents."""
-    action_type = "compression_list"
-    display_name = "列出压缩包内容"
-    description = "列出压缩包内的文件"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute list.
-
-        Args:
-            context: Execution context.
-            params: Dict with archive, output_var.
-
-        Returns:
-            ActionResult with file list.
-        """
-        archive = params.get('archive', '')
-        output_var = params.get('output_var', 'archive_contents')
-
-        valid, msg = self.validate_type(archive, str, 'archive')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_archive = context.resolve_value(archive)
-
-            if not os.path.exists(resolved_archive):
-                return ActionResult(
-                    success=False,
-                    message=f"压缩包不存在: {resolved_archive}"
-                )
-
-            files = []
-            ext = os.path.splitext(resolved_archive)[1].lower()
-
-            if ext == '.zip':
-                with zipfile.ZipFile(resolved_archive, 'r') as zf:
-                    for info in zf.infolist():
-                        files.append({
-                            'name': info.filename,
-                            'size': info.file_size,
-                            'compressed_size': info.compress_size,
-                            'date_time': info.date_time
-                        })
-
-            elif ext in ('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz'):
-                mode = 'r:*'
-                if ext.endswith('.gz'):
-                    mode = 'r:gz'
-                elif ext.endswith('.bz2'):
-                    mode = 'r:bz2'
-
-                with tarfile.open(resolved_archive, mode) as tf:
-                    for info in tf.getmembers():
-                        files.append({
-                            'name': info.name,
-                            'size': info.size,
-                            'type': 'dir' if info.isdir() else 'file',
-                            'mtime': info.mtime
-                        })
-
-            elif ext == '.gz':
-                return ActionResult(
-                    success=True,
-                    message="GZIP单文件压缩包",
-                    data={'files': [{'name': resolved_archive, 'type': 'gzip'}]}
-                )
-
-            context.set(output_var, files)
-
-            return ActionResult(
-                success=True,
-                message=f"列出 {len(files)} 个文件",
-                data={'count': len(files), 'files': files, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"列出压缩包内容失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['archive']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'archive_contents'}
-
-
-class CompressionInfoAction(BaseAction):
-    """Get archive info."""
-    action_type = "compression_info"
-    display_name = "获取压缩包信息"
-    description = "获取压缩包的详细信息"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute info.
-
-        Args:
-            context: Execution context.
-            params: Dict with archive, output_var.
-
-        Returns:
-            ActionResult with archive info.
-        """
-        archive = params.get('archive', '')
-        output_var = params.get('output_var', 'archive_info')
-
-        valid, msg = self.validate_type(archive, str, 'archive')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_archive = context.resolve_value(archive)
-
-            if not os.path.exists(resolved_archive):
-                return ActionResult(
-                    success=False,
-                    message=f"压缩包不存在: {resolved_archive}"
-                )
-
-            stat = os.stat(resolved_archive)
-            ext = os.path.splitext(resolved_archive)[1].lower()
-
-            info = {
-                'path': resolved_archive,
-                'size': stat.st_size,
-                'modified': stat.st_mtime,
-                'format': ext.lstrip('.'),
-                'is_archive': True
-            }
-
-            # Count files
-            if ext == '.zip':
-                with zipfile.ZipFile(resolved_archive, 'r') as zf:
-                    info['file_count'] = len(zf.namelist())
-                    info['total_size'] = sum(i.file_size for i in zf.infolist())
-
-            elif ext.startswith('.tar'):
-                mode = 'r:*'
-                if 'gz' in ext:
-                    mode = 'r:gz'
-                elif 'bz2' in ext:
-                    mode = 'r:bz2'
-
-                with tarfile.open(resolved_archive, mode) as tf:
-                    members = tf.getmembers()
-                    info['file_count'] = len(members)
-                    info['total_size'] = sum(m.size for m in members if not m.isdir())
-
-            context.set(output_var, info)
-
-            return ActionResult(
-                success=True,
-                message=f"压缩包信息: {info['size']} bytes, {info.get('file_count', '?')} files",
-                data=info
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取压缩包信息失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['archive']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'archive_info'}
+        return {'data': '', 'output_path': '', 'decompress': False, 'output_var': 'bz2_result'}
