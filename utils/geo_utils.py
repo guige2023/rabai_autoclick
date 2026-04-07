@@ -175,3 +175,139 @@ def bounding_box(
     """
     bearings = [360 / points * i for i in range(points)]
     return [destination_point(coord, b, radius_km, "km") for b in bearings]
+
+
+def parse_coordinate(text: str) -> Optional[Coordinate]:
+    """
+    Parse a coordinate string in various formats.
+
+    Supported formats:
+        - "40.7128,-74.0060" (decimal degrees)
+        - "40.7128, -74.0060"
+        - "40°42'46.08\"N, 74°0'21.6\"W"
+        - "40.7128N, 74.0060W"
+
+    Args:
+        text: Coordinate string
+
+    Returns:
+        Coordinate or None if parsing fails
+    """
+    import re
+    text = text.strip()
+
+    # Decimal degrees: "40.7128,-74.0060"
+    match = re.match(r'^(-?\d+\.?\d*)[°]?\s*[,/]\s*(-?\d+\.?\d*)[°]?', text)
+    if match:
+        try:
+            return Coordinate(
+                latitude=float(match.group(1)),
+                longitude=float(match.group(2))
+            )
+        except ValueError:
+            pass
+
+    return None
+
+
+def format_coordinate(
+    coord: Coordinate,
+    format_type: str = "decimal",
+    precision: int = 6
+) -> str:
+    """
+    Format a coordinate as a string.
+
+    Args:
+        coord: Coordinate to format
+        format_type: "decimal", "dms" (degrees/minutes/seconds), "geohash"
+        precision: Decimal precision for decimal format
+
+    Returns:
+        Formatted coordinate string
+    """
+    if format_type == "decimal":
+        return f"{coord.latitude:.{precision}f}, {coord.longitude:.{precision}f}"
+    elif format_type == "dms":
+        return (
+            f"{abs(coord.latitude):.0f}°{abs((coord.latitude % 1) * 60):.0f}'"
+            f"{abs((coord.latitude * 60) % 1 * 60):.2f}\" "
+            f"{'S' if coord.latitude < 0 else 'N'}, "
+            f"{abs(coord.longitude):.0f}°{abs((coord.longitude % 1) * 60):.0f}'"
+            f"{abs((coord.longitude * 60) % 1 * 60):.2f}\" "
+            f"{'W' if coord.longitude < 0 else 'E'}"
+        )
+    elif format_type == "geohash":
+        return _encode_geohash(coord.latitude, coord.longitude, precision)
+    return str(coord)
+
+
+def _encode_geohash(lat: float, lon: float, precision: int = 9) -> str:
+    """Encode lat/lon to geohash string."""
+    BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+    lat_range, lon_range = (-90.0, 90.0), (-180.0, 180.0)
+    hash_bits, index = 0, 0
+    geohash = []
+
+    while len(geohash) < precision:
+        hash_bits += 1
+        if hash_bits % 2 == 1:
+            mid = (lon_range[0] + lon_range[1]) / 2
+            if lon >= mid:
+                index = index * 2 + 1
+                lon_range = (mid, lon_range[1])
+            else:
+                index = index * 2
+                lon_range = (lon_range[0], mid)
+        else:
+            mid = (lat_range[0] + lat_range[1]) / 2
+            if lat >= mid:
+                index = index * 2 + 1
+                lat_range = (mid, lat_range[1])
+            else:
+                index = index * 2
+                lat_range = (lat_range[0], mid)
+
+        if hash_bits % 5 == 0:
+            geohash.append(BASE32[index])
+            index = 0
+
+    return "".join(geohash)
+
+
+def grid_cells_in_bbox(
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+    cell_size_km: float = 1.0
+) -> List[Tuple[Coordinate, Coordinate]]:
+    """
+    Generate a grid of cells within a bounding box.
+
+    Args:
+        min_lat, min_lon: Southwest corner
+        max_lat, max_lon: Northeast corner
+        cell_size_km: Size of each grid cell in km
+
+    Returns:
+        List of (sw_corner, ne_corner) tuples
+    """
+    lat_step = cell_size_km / 111.0
+    lon_step = lat_step / math.cos(math.radians((min_lat + max_lat) / 2))
+
+    cells = []
+    lat = min_lat
+    while lat < max_lat:
+        next_lat = min(lat + lat_step, max_lat)
+        lon = min_lon
+        while lon < max_lon:
+            next_lon = min(lon + lon_step, max_lon)
+            cells.append((
+                Coordinate(latitude=lat, longitude=lon),
+                Coordinate(latitude=next_lat, longitude=next_lon)
+            ))
+            lon = next_lon
+        lat = next_lat
+
+    return cells
