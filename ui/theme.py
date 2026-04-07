@@ -419,12 +419,16 @@ class ThemeManager(QObject):
                 QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
                 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; transition: border-color 0.2s ease; }}
                 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {c['border_focus']}; }}
+                QComboBox:hover {{ border-color: {c['border_focus']}; }}
+                QComboBox::drop-down {{ width: 20px; border: none; }}
+                QComboBox::down-arrow {{ image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid {c['text_secondary']}; margin-right: 8px; }}
                 QGroupBox {{ font-weight: bold; margin-top: 8px; padding-top: 8px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
                 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
                 QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
                 QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; alternate-background-color: {c['bg_hover']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QListWidget::item:hover {{ background-color: {c['bg_hover']}; }}
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
                 QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
@@ -634,12 +638,16 @@ class ThemeManager(QObject):
                 QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
                 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; transition: border-color 0.2s ease; }}
                 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {c['border_focus']}; }}
+                QComboBox:hover {{ border-color: {c['border_focus']}; }}
+                QComboBox::drop-down {{ width: 20px; border: none; }}
+                QComboBox::down-arrow {{ image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid {c['text_secondary']}; margin-right: 8px; }}
                 QGroupBox {{ font-weight: bold; margin-top: 8px; padding-top: 8px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
                 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
                 QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
                 QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; alternate-background-color: {c['bg_hover']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
+                QListWidget::item:hover {{ background-color: {c['bg_hover']}; }}
                 QMenuBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QMenuBar::item:selected {{ background-color: {c['bg_hover']}; }}
                 QMenu {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
