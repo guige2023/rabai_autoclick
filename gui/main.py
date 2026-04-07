@@ -1762,9 +1762,9 @@ class RabAIGUI:
         Initialize the RabAI GUI application.
         """
         self.root = tk.Tk()
-        self.root.title("RabAI AutoClick v22 - 智能自动化工具")
-        self.root.geometry("1000x700")
-        self.root.minsize(800, 600)
+        self.root.title(APP_TITLE)
+        self.root.geometry(APP_GEOMETRY)
+        self.root.minsize(*APP_MIN_SIZE)
 
         self._setup_styles()
         self._setup_menu()
