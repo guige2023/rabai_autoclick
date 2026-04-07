@@ -51,6 +51,7 @@ class ThemeColors:
         "bg_panel": "#fafafa",
         "bg_hover": "#e8e8e8",
         "bg_active": "#d8d8d8",
+        "bg_tooltip": "#ffffde",
 
         # Dark theme specific backgrounds
         "bg_dark_main": "#2d2d2d",
@@ -122,6 +123,7 @@ class ThemeColors:
         "bg_panel": "#333333",
         "bg_hover": "#3d3d3d",
         "bg_active": "#4d4d4d",
+        "bg_tooltip": "#4d4d4d",
 
         # Dark theme specific backgrounds (same as bg_* for dark)
         "bg_dark_main": "#2d2d2d",
@@ -247,6 +249,7 @@ class AccentColors:
         "bg_panel": "#333333",
         "bg_hover": "#3d3d3d",
         "bg_active": "#4d4d4d",
+        "bg_tooltip": "#4d4d4d",
 
         # Dark theme specific backgrounds (same as bg_* for dark)
         "bg_dark_main": "#2d2d2d",
@@ -445,6 +448,7 @@ class ThemeManager(QObject):
                 QScrollBar::handle:horizontal {{ background: {c['border']}; border-radius: 4px; min-width: 20px; }}
                 QScrollBar::handle:horizontal:hover {{ background: {c['text_secondary']}; }}
                 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+                QToolTip {{ background-color: {c['bg_tooltip']}; color: {c['text_primary']}; border: 1px solid {c['border']}; border-radius: 4px; padding: 4px 8px; }}
             """,
             "mini_toolbar": f"""
                 QWidget {{ background-color: {c['bg_dark_main']}; border-radius: 8px; }}
@@ -665,6 +669,7 @@ class ThemeManager(QObject):
                 QScrollBar::handle:horizontal {{ background: {c['border']}; border-radius: 4px; min-width: 20px; }}
                 QScrollBar::handle:horizontal:hover {{ background: {c['text_secondary']}; }}
                 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+                QToolTip {{ background-color: {c['bg_tooltip']}; color: {c['text_primary']}; border: 1px solid {c['border']}; border-radius: 4px; padding: 4px 8px; }}
             """,
             "mini_toolbar": f"""
                 QWidget {{ background-color: {c['bg_dark_main']}; border-radius: 8px; }}
