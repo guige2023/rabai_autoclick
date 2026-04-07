@@ -1,218 +1,156 @@
-"""String manipulation action module for RabAI AutoClick.
+"""String operations action module for RabAI AutoClick.
 
 Provides string operations:
-- StringUpperAction: Convert to uppercase
-- StringLowerAction: Convert to lowercase
-- StringStripAction: Strip whitespace
-- StringReplaceAction: Replace substring
-- StringSplitAction: Split string
+- StringCaseAction: Case conversion
+- StringTrimAction: Trim whitespace
+- StringReplaceAction: Find and replace
+- StringSplitAction: Split strings
 - StringJoinAction: Join strings
-- StringRegexAction: Regex replace
-- StringContainsAction: Check if contains
+- StringPadAction: Padding strings
 """
 
-from __future__ import annotations
-
 import re
-import sys
 from typing import Any, Dict, List, Optional
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class StringUpperAction(BaseAction):
-    """Convert string to uppercase."""
-    action_type = "string_upper"
-    display_name = "字符串大写"
-    description = "转换为大写"
-    version = "1.0"
+class StringCaseAction(BaseAction):
+    """Case conversion."""
+    action_type = "string_case"
+    display_name = "大小写转换"
+    description = "字符串大小写转换"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute uppercase."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'upper_result')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
         try:
-            resolved = context.resolve_value(value) if context else value
-            result = str(resolved).upper()
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=result, data={'result': result})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Upper error: {str(e)}")
+            text = params.get("text", "")
+            operation = params.get("operation", "lower")
 
-    def get_required_params(self) -> List[str]:
-        return ['value']
+            if not text:
+                return ActionResult(success=False, message="text is required")
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'upper_result'}
-
-
-class StringLowerAction(BaseAction):
-    """Convert string to lowercase."""
-    action_type = "string_lower"
-    display_name = "字符串小写"
-    description = "转换为小写"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute lowercase."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'lower_result')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            result = str(resolved).lower()
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=result, data={'result': result})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Lower error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'lower_result'}
-
-
-class StringStripAction(BaseAction):
-    """Strip whitespace."""
-    action_type = "string_strip"
-    display_name = "字符串去空格"
-    description = "去除首尾空格"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute strip."""
-        value = params.get('value', '')
-        chars = params.get('chars', None)
-        side = params.get('side', 'both')  # both, left, right
-        output_var = params.get('output_var', 'strip_result')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            resolved_chars = context.resolve_value(chars) if context else chars
-            resolved_side = context.resolve_value(side) if context else side
-
-            if resolved_chars:
-                if resolved_side == 'left':
-                    result = str(resolved).lstrip(resolved_chars)
-                elif resolved_side == 'right':
-                    result = str(resolved).rstrip(resolved_chars)
-                else:
-                    result = str(resolved).strip(resolved_chars)
+            if operation == "lower":
+                result = text.lower()
+            elif operation == "upper":
+                result = text.upper()
+            elif operation == "title":
+                result = text.title()
+            elif operation == "capitalize":
+                result = text.capitalize()
+            elif operation == "swapcase":
+                result = text.swapcase()
+            elif operation == "casefold":
+                result = text.casefold()
             else:
-                if resolved_side == 'left':
-                    result = str(resolved).lstrip()
-                elif resolved_side == 'right':
-                    result = str(resolved).rstrip()
-                else:
-                    result = str(resolved).strip()
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=result[:100], data={'result': result})
+            return ActionResult(success=True, message=f"Converted to {operation}", data={"result": result})
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Strip error: {str(e)}")
+            return ActionResult(success=False, message=f"Case error: {str(e)}")
 
-    def get_required_params(self) -> List[str]:
-        return ['value']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'chars': None, 'side': 'both', 'output_var': 'strip_result'}
+class StringTrimAction(BaseAction):
+    """Trim whitespace."""
+    action_type = "string_trim"
+    display_name = "去除空白"
+    description = "去除字符串空白"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            text = params.get("text", "")
+            operation = params.get("operation", "both")
+
+            if not text:
+                return ActionResult(success=False, message="text is required")
+
+            if operation == "both":
+                result = text.strip()
+            elif operation == "left":
+                result = text.lstrip()
+            elif operation == "right":
+                result = text.rstrip()
+            elif operation == "normalize":
+                result = " ".join(text.split())
+            elif operation == "remove_all":
+                result = text.replace(" ", "")
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+            return ActionResult(success=True, message=f"Trimmed with {operation}", data={"result": result})
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Trim error: {str(e)}")
 
 
 class StringReplaceAction(BaseAction):
-    """Replace substring."""
+    """Find and replace."""
     action_type = "string_replace"
     display_name = "字符串替换"
-    description = "替换字符串"
-    version = "1.0"
+    description = "查找替换字符串"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute replace."""
-        value = params.get('value', '')
-        old = params.get('old', '')
-        new = params.get('new', '')
-        count = params.get('count', -1)
-        output_var = params.get('output_var', 'replace_result')
-
-        if not value or not old:
-            return ActionResult(success=False, message="value and old are required")
-
         try:
-            resolved = context.resolve_value(value) if context else value
-            resolved_old = context.resolve_value(old) if context else old
-            resolved_new = context.resolve_value(new) if context else new
-            resolved_count = context.resolve_value(count) if context else count
+            text = params.get("text", "")
+            old = params.get("old", "")
+            new = params.get("new", "")
+            count = params.get("count", -1)
+            case_sensitive = params.get("case_sensitive", True)
 
-            result = str(resolved).replace(resolved_old, resolved_new, resolved_count)
+            if not text:
+                return ActionResult(success=False, message="text is required")
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Replaced {resolved_old} -> {resolved_new}", data={'result': result})
+            if count == -1:
+                if case_sensitive:
+                    result = text.replace(old, new)
+                else:
+                    result = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
+            else:
+                if case_sensitive:
+                    result = text.replace(old, new, count)
+                else:
+                    result = re.sub(re.escape(old), new, text, count=count, flags=re.IGNORECASE)
+
+            return ActionResult(success=True, message=f"Replaced", data={"result": result, "original": text})
+
         except Exception as e:
             return ActionResult(success=False, message=f"Replace error: {str(e)}")
 
-    def get_required_params(self) -> List[str]:
-        return ['value', 'old']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'new': '', 'count': -1, 'output_var': 'replace_result'}
-
 
 class StringSplitAction(BaseAction):
-    """Split string."""
+    """Split strings."""
     action_type = "string_split"
     display_name = "字符串分割"
     description = "分割字符串"
-    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute split."""
-        value = params.get('value', '')
-        separator = params.get('separator', ' ')
-        maxsplit = params.get('maxsplit', -1)
-        output_var = params.get('output_var', 'split_result')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
         try:
-            resolved = context.resolve_value(value) if context else value
-            resolved_sep = context.resolve_value(separator) if context else separator
-            resolved_max = context.resolve_value(maxsplit) if context else maxsplit
+            text = params.get("text", "")
+            delimiter = params.get("delimiter", None)
+            max_split = params.get("max_split", 0)
 
-            if resolved_max >= 0:
-                parts = str(resolved).split(resolved_sep, resolved_max)
+            if not text:
+                return ActionResult(success=False, message="text is required")
+
+            if delimiter is None:
+                parts = text.split()
+            elif delimiter == "":
+                parts = list(text)
             else:
-                parts = str(resolved).split(resolved_sep)
+                if max_split > 0:
+                    parts = text.split(delimiter, max_split)
+                else:
+                    parts = text.split(delimiter)
 
-            result = {'parts': parts, 'count': len(parts)}
-            if context:
-                context.set(output_var, parts)
-            return ActionResult(success=True, message=f"Split into {len(parts)} parts", data=result)
+            return ActionResult(success=True, message=f"Split into {len(parts)} parts", data={"parts": parts, "count": len(parts)})
+
         except Exception as e:
             return ActionResult(success=False, message=f"Split error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'separator': ' ', 'maxsplit': -1, 'output_var': 'split_result'}
 
 
 class StringJoinAction(BaseAction):
@@ -220,121 +158,59 @@ class StringJoinAction(BaseAction):
     action_type = "string_join"
     display_name = "字符串连接"
     description = "连接字符串"
-    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute join."""
-        strings = params.get('strings', [])
-        separator = params.get('separator', '')
-        output_var = params.get('output_var', 'join_result')
-
-        if not strings:
-            return ActionResult(success=False, message="strings is required")
-
         try:
-            resolved_strings = context.resolve_value(strings) if context else strings
-            resolved_sep = context.resolve_value(separator) if context else separator
+            strings = params.get("strings", [])
+            delimiter = params.get("delimiter", "")
+            prefix = params.get("prefix", "")
+            suffix = params.get("suffix", "")
 
-            result = resolved_sep.join(str(s) for s in resolved_strings)
+            if not strings:
+                return ActionResult(success=False, message="strings list is required")
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=result[:100], data={'result': result})
+            if prefix or suffix:
+                strings = [f"{prefix}{s}{suffix}" for s in strings]
+
+            result = delimiter.join(strings)
+
+            return ActionResult(success=True, message=f"Joined {len(strings)} strings", data={"result": result, "count": len(strings)})
+
         except Exception as e:
             return ActionResult(success=False, message=f"Join error: {str(e)}")
 
-    def get_required_params(self) -> List[str]:
-        return ['strings']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'separator': '', 'output_var': 'join_result'}
-
-
-class StringRegexAction(BaseAction):
-    """Regex replace."""
-    action_type = "string_regex"
-    display_name = "正则替换"
-    description = "正则表达式替换"
-    version = "1.0"
+class StringPadAction(BaseAction):
+    """Padding strings."""
+    action_type = "string_pad"
+    display_name = "字符串填充"
+    description = "填充字符串"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute regex replace."""
-        value = params.get('value', '')
-        pattern = params.get('pattern', '')
-        replacement = params.get('replacement', '')
-        flags = params.get('flags', 0)  # 0=none, 1=IGNORECASE, 2=MULTILINE
-        output_var = params.get('output_var', 'regex_result')
-
-        if not value or not pattern:
-            return ActionResult(success=False, message="value and pattern are required")
-
         try:
-            import re as re_module
+            text = params.get("text", "")
+            width = params.get("width", 10)
+            fill_char = params.get("fill_char", " ")
+            operation = params.get("operation", "left")
 
-            resolved = context.resolve_value(value) if context else value
-            resolved_pattern = context.resolve_value(pattern) if context else pattern
-            resolved_replacement = context.resolve_value(replacement) if context else replacement
-            resolved_flags = context.resolve_value(flags) if context else flags
+            if not text:
+                return ActionResult(success=False, message="text is required")
 
-            flags_int = 0
-            if resolved_flags == 1:
-                flags_int = re_module.IGNORECASE
-            elif resolved_flags == 2:
-                flags_int = re_module.MULTILINE
+            if len(text) >= width:
+                return ActionResult(success=True, message="Text already meets width", data={"result": text})
 
-            result = re_module.sub(resolved_pattern, resolved_replacement, str(resolved), flags=flags_int)
-
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Regex replaced", data={'result': result})
-        except re_module.error as e:
-            return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Regex error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value', 'pattern']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'replacement': '', 'flags': 0, 'output_var': 'regex_result'}
-
-
-class StringContainsAction(BaseAction):
-    """Check if string contains substring."""
-    action_type = "string_contains"
-    display_name = "字符串包含检查"
-    description = "检查字符串是否包含"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute contains check."""
-        value = params.get('value', '')
-        substring = params.get('substring', '')
-        case_sensitive = params.get('case_sensitive', True)
-        output_var = params.get('output_var', 'contains_result')
-
-        if not value or not substring:
-            return ActionResult(success=False, message="value and substring are required")
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            resolved_sub = context.resolve_value(substring) if context else substring
-            resolved_cs = context.resolve_value(case_sensitive) if context else case_sensitive
-
-            if resolved_cs:
-                result = resolved_sub in str(resolved)
+            if operation == "left":
+                result = text.rjust(width, fill_char)
+            elif operation == "right":
+                result = text.ljust(width, fill_char)
+            elif operation == "center":
+                result = text.center(width, fill_char)
+            elif operation == "zfill":
+                result = text.zfill(width)
             else:
-                result = resolved_sub.lower() in str(resolved).lower()
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-            result_data = {'contains': result, 'substring': resolved_sub, 'case_sensitive': resolved_cs}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Contains: {result}", data=result_data)
+            return ActionResult(success=True, message=f"Padded to width {width}", data={"result": result})
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Contains error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value', 'substring']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'case_sensitive': True, 'output_var': 'contains_result'}
+            return ActionResult(success=False, message=f"Pad error: {str(e)}")
