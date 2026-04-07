@@ -1,0 +1,150 @@
+{
+  "name": "社交媒体监控工作流",
+  "description": "监控社交媒体平台上的品牌提及和评论",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "platform": "twitter",
+    "brand_name": "品牌名称",
+    "check_interval": 1800,
+    "max_checks": 24,
+    "current_check": 0,
+    "mentions_found": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "check_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "初始化检查计数器"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "monitor_loop",
+      "count": "{{max_checks}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "开始监控循环"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "点击地址栏"
+    },
+    {
+      "id": 4,
+      "type": "type_text",
+      "text": "https://{{platform}}.com/search?q={{brand_name}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "打开搜索页面"
+    },
+    {
+      "id": 5,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "等待页面加载"
+    },
+    {
+      "id": 6,
+      "type": "screenshot",
+      "save_path": "./screenshots/social_check_{{check_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "截图搜索结果"
+    },
+    {
+      "id": 7,
+      "type": "ocr",
+      "region": [100, 150, 700, 500],
+      "output_var": "search_results",
+      "pre_delay": 0.3,
+      "comment": "读取搜索结果"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{search_results.includes('mentions')}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "检查是否有提及"
+    },
+    {
+      "id": 9,
+      "type": "set_variable",
+      "name": "mentions_found",
+      "value": "{{mentions_found + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加提及计数"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 14,
+      "pre_delay": 0.1,
+      "comment": "跳转到下一步"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "没有提及"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "check_counter",
+      "value": "{{check_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加检查计数"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{check_counter < max_checks}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "检查是否继续"
+    },
+    {
+      "id": 14,
+      "type": "delay",
+      "seconds": "{{check_interval}}",
+      "pre_delay": 0.5,
+      "comment": "等待下次检查"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/social_summary.png",
+      "pre_delay": 0.5,
+      "comment": "截图总结"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
