@@ -1,0 +1,152 @@
+{
+  "name": "Compliance Check Workflow",
+  "description": "Automate compliance verification across documents",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "documents_to_check": 20,
+    "current_document": 0,
+    "compliant_count": 0,
+    "violations_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "doc_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize document counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open compliance system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "compliance_loop",
+      "count": "{{documents_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start compliance loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on document"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for document"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/compliance_{{doc_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture document screenshot"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{doc_counter % 4 == 0}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check for violations"
+    },
+    {
+      "id": 9,
+      "type": "set_variable",
+      "name": "violations_count",
+      "value": "{{violations_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment violations"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 14,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 11,
+      "type": "set_variable",
+      "name": "compliant_count",
+      "value": "{{compliant_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment compliant count"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "doc_counter",
+      "value": "{{doc_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment document counter"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{doc_counter < documents_to_check}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more documents"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next document"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/compliance_check_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}
