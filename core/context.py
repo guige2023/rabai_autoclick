@@ -266,8 +266,160 @@ class ContextManager:
     
     def from_json(self, json_str: str) -> None:
         """Import variables from JSON string.
-        
+
         Args:
             json_str: JSON string to parse and import.
         """
         self._variables.update(json.loads(json_str))
+
+    def has(self, key: str) -> bool:
+        """Check if a variable exists in context.
+
+        Args:
+            key: Variable name to check.
+
+        Returns:
+            True if variable exists, False otherwise.
+        """
+        return key in self._variables
+
+    def keys(self) -> List[str]:
+        """Get list of all variable names.
+
+        Returns:
+            List of variable names.
+        """
+        return list(self._variables.keys())
+
+    def values(self) -> List[Any]:
+        """Get list of all variable values.
+
+        Returns:
+            List of variable values.
+        """
+        return list(self._variables.values())
+
+    def items(self) -> List[Tuple[str, Any]]:
+        """Get list of all variable name-value pairs.
+
+        Returns:
+            List of (name, value) tuples.
+        """
+        return list(self._variables.items())
+
+    def update(self, variables: Dict[str, Any]) -> None:
+        """Update multiple variables at once (alias for set_all).
+
+        Args:
+            variables: Dictionary of variables to update.
+        """
+        self._variables.update(variables)
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        """Remove and return a variable value.
+
+        Args:
+            key: Variable name to pop.
+            default: Default value if key not found.
+
+        Returns:
+            Variable value or default.
+        """
+        value = self._variables.pop(key, default)
+        self._add_history(f"POP {key} = {repr(value)[:100]}")
+        return value
+
+    def copy(self) -> Dict[str, Any]:
+        """Get a shallow copy of all variables.
+
+        Returns:
+            Dictionary copy of all variables.
+        """
+        return self._variables.copy()
+
+    def merge(self, other: Dict[str, Any], overwrite: bool = True) -> None:
+        """Merge another dictionary into context.
+
+        Args:
+            other: Dictionary to merge.
+            overwrite: If True, overwrite existing variables.
+        """
+        if overwrite:
+            self._variables.update(other)
+        else:
+            for key, value in other.items():
+                if key not in self._variables:
+                    self._variables[key] = value
+        self._add_history(f"MERGE {len(other)} variables (overwrite={overwrite})")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export variables as a dictionary.
+
+        Returns:
+            Dictionary representation of all variables.
+        """
+        return self._variables.copy()
+
+    def get_nested(self, key_path: str, default: Any = None) -> Any:
+        """Get a nested value using dot notation.
+
+        Args:
+            key_path: Dot-separated path (e.g., 'user.profile.name').
+            default: Default value if path not found.
+
+        Returns:
+            Nested value or default.
+        """
+        keys = key_path.split('.')
+        value = self._variables
+
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key)
+            elif hasattr(value, key):
+                value = getattr(value, key)
+            else:
+                return default
+
+            if value is None:
+                return default
+
+        return value
+
+    def set_nested(self, key_path: str, value: Any) -> bool:
+        """Set a nested value using dot notation.
+
+        Args:
+            key_path: Dot-separated path (e.g., 'user.profile.name').
+            value: Value to set.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        keys = key_path.split('.')
+        current = self._variables
+
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+            current = current[key]
+
+        current[keys[-1]] = value
+        self._add_history(f"SET_NESTED {key_path} = {repr(value)[:100]}")
+        return True
+
+    def size(self) -> int:
+        """Get the number of variables.
+
+        Returns:
+            Number of variables in context.
+        """
+        return len(self._variables)
+
+    def is_empty(self) -> bool:
+        """Check if context is empty.
+
+        Returns:
+            True if no variables, False otherwise.
+        """
+        return len(self._variables) == 0
