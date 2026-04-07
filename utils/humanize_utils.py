@@ -120,3 +120,97 @@ def time_ago(
     if total_seconds < 60:
         return "just now"
     return format_duration(total_seconds, "long", 2) + " ago"
+
+
+import math
+
+
+def format_number(
+    num: float,
+    precision: int = 2,
+    thousand_sep: str = ",",
+    decimal_sep: str = "."
+) -> str:
+    """Format a number with thousand separators."""
+    if math.isnan(num) or math.isinf(num):
+        return str(num)
+    negative = num < 0
+    num = abs(num)
+    int_part = int(num)
+    dec_part = num - int_part
+    int_str = f"{int_part:,}".replace(",", thousand_sep)
+    if precision > 0:
+        dec_str = f"{dec_part:.{precision}f}"[2:]
+        return f"{'-' if negative else ''}{int_str}{decimal_sep}{dec_str}"
+    return f"{'-' if negative else ''}{int_str}"
+
+
+def format_currency(
+    amount: float,
+    currency: str = "USD",
+    show_symbol: bool = True,
+    precision: int = 2
+) -> str:
+    """Format a number as currency."""
+    symbols = {
+        "USD": "$", "EUR": "€", "GBP": "£",
+        "CNY": "¥", "JPY": "¥", "KRW": "₩",
+    }
+    symbol = symbols.get(currency.upper(), currency + " ")
+    formatted = format_number(amount, precision)
+    if not show_symbol:
+        return formatted
+    after_symbol = currency.upper() in ("EUR", "GBP")
+    return f"{formatted} {symbol}" if after_symbol else f"{symbol}{formatted}"
+
+
+def pluralize(
+    count: int,
+    singular: str,
+    plural: Optional[str] = None,
+    include_count: bool = True
+) -> str:
+    """Pluralize a word based on count."""
+    if plural is None:
+        if singular.endswith("y") and singular[-2] not in "aeiou":
+            plural = singular[:-1] + "ies"
+        elif singular.endswith(("s", "x", "z", "ch", "sh")):
+            plural = singular + "es"
+        else:
+            plural = singular + "s"
+    word = singular if count == 1 else plural
+    return f"{count} {word}" if include_count else word
+
+
+def ordinal(n: int) -> str:
+    """Return ordinal string (1st, 2nd, 3rd, etc.)."""
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def abbreviate_number(num: float, precision: int = 1) -> str:
+    """Abbreviate large numbers (1.2K, 3.5M, etc.)."""
+    if num < 1000:
+        return str(int(num)) if num == int(num) else f"{num:.{precision}f}"
+    elif num < 1_000_000:
+        return f"{num / 1000:.{precision}f}K"
+    elif num < 1_000_000_000:
+        return f"{num / 1_000_000:.{precision}f}M"
+    elif num < 1_000_000_000_000:
+        return f"{num / 1_000_000_000:.{precision}f}B"
+    else:
+        return f"{num / 1_000_000_000_000:.{precision}f}T"
+
+
+def natural_join(items: list, separator: str = ", ", last_separator: str = " and ") -> str:
+    """Join items with natural language separators."""
+    if len(items) == 0:
+        return ""
+    if len(items) == 1:
+        return str(items[0])
+    if len(items) == 2:
+        return f"{items[0]}{last_separator}{items[1]}"
+    return separator.join(str(i) for i in items[:-1]) + f"{last_separator}{items[-1]}"
