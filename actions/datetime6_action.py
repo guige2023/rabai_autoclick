@@ -1,346 +1,538 @@
-"""Datetime6 action module for RabAI AutoClick.
-
-Provides additional datetime operations:
-- DatetimeAddDaysAction: Add days to datetime
-- DatetimeSubtractDaysAction: Subtract days from datetime
-- DatetimeAddHoursAction: Add hours to datetime
-- DatetimeSubtractHoursAction: Subtract hours from datetime
-- DatetimeCombineDateTimeAction: Combine date and time
 """
+Datetime validation and conversion actions.
+"""
+from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Any, Dict, List
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union
 
 
-class DatetimeAddDaysAction(BaseAction):
-    """Add days to datetime."""
-    action_type = "datetime6_add_days"
-    display_name = "日期加天数"
-    description = "向日期添加天数"
-    version = "6.0"
+def validate_date_format(
+    date_string: str,
+    format_string: str
+) -> bool:
+    """
+    Validate a date string against a format.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute add days.
+    Args:
+        date_string: Date string to validate.
+        format_string: Expected format string.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, days, format, output_var.
+    Returns:
+        True if valid.
+    """
+    try:
+        datetime.strptime(date_string, format_string)
+        return True
+    except ValueError:
+        return False
 
-        Returns:
-            ActionResult with new datetime.
-        """
-        datetime_str = params.get('datetime_str', '')
-        days = params.get('days', 0)
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'new_datetime')
 
-        valid, msg = self.validate_type(datetime_str, str, 'datetime_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+def validate_iso_date(date_string: str) -> bool:
+    """
+    Validate an ISO format date string.
 
+    Args:
+        date_string: ISO date string.
+
+    Returns:
+        True if valid ISO date.
+    """
+    try:
+        datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+        return True
+    except ValueError:
+        return False
+
+
+def validate_date_range(
+    dt: Union[datetime, str],
+    min_date: Optional[Union[datetime, str]] = None,
+    max_date: Optional[Union[datetime, str]] = None
+) -> Dict[str, Any]:
+    """
+    Validate if date is within a range.
+
+    Args:
+        dt: Datetime to validate.
+        min_date: Minimum allowed date.
+        max_date: Maximum allowed date.
+
+    Returns:
+        Validation result.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    result = {'valid': True, 'errors': []}
+
+    if min_date:
+        if isinstance(min_date, str):
+            min_date = datetime.fromisoformat(min_date.replace('Z', '+00:00'))
+
+        if dt < min_date:
+            result['valid'] = False
+            result['errors'].append(f'Date is before minimum: {min_date}')
+
+    if max_date:
+        if isinstance(max_date, str):
+            max_date = datetime.fromisoformat(max_date.replace('Z', '+00:00'))
+
+        if dt > max_date:
+            result['valid'] = False
+            result['errors'].append(f'Date is after maximum: {max_date}')
+
+    return result
+
+
+def parse_multi_date(date_string: str) -> List[datetime]:
+    """
+    Parse multiple dates from a string.
+
+    Args:
+        date_string: String with dates separated by comma or 'and'.
+
+    Returns:
+        List of parsed datetimes.
+    """
+    import re
+
+    parts = re.split(r'[,;]+| and ', date_string)
+
+    dates = []
+    for part in parts:
+        part = part.strip()
         try:
-            resolved_dt = context.resolve_value(datetime_str)
-            resolved_days = int(context.resolve_value(days))
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
+            dt = datetime.fromisoformat(part.replace('Z', '+00:00'))
+            dates.append(dt)
+        except ValueError:
+            pass
 
-            dt = datetime.strptime(resolved_dt, resolved_format)
-            new_dt = dt + timedelta(days=resolved_days)
-            result = new_dt.strftime(resolved_format)
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"日期加天数: {result}",
-                data={
-                    'original': resolved_dt,
-                    'days_added': resolved_days,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期加天数失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime_str', 'days']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'new_datetime'}
+    return dates
 
 
-class DatetimeSubtractDaysAction(BaseAction):
-    """Subtract days from datetime."""
-    action_type = "datetime6_subtract_days"
-    display_name = "日期减天数"
-    description = "从日期减去天数"
-    version = "6.0"
+def convert_to_utc(
+    dt: Union[datetime, str],
+    source_tz: Optional[str] = None
+) -> datetime:
+    """
+    Convert datetime to UTC.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute subtract days.
+    Args:
+        dt: Datetime to convert.
+        source_tz: Source timezone name.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, days, format, output_var.
+    Returns:
+        UTC datetime.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with new datetime.
-        """
-        datetime_str = params.get('datetime_str', '')
-        days = params.get('days', 0)
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'new_datetime')
+    if dt.tzinfo is None:
+        if source_tz:
+            from dateutil import tz
+            source = tz.gettz(source_tz)
+            dt = dt.replace(tzinfo=source)
 
-        valid, msg = self.validate_type(datetime_str, str, 'datetime_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_dt = context.resolve_value(datetime_str)
-            resolved_days = int(context.resolve_value(days))
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
-
-            dt = datetime.strptime(resolved_dt, resolved_format)
-            new_dt = dt - timedelta(days=resolved_days)
-            result = new_dt.strftime(resolved_format)
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"日期减天数: {result}",
-                data={
-                    'original': resolved_dt,
-                    'days_subtracted': resolved_days,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期减天数失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime_str', 'days']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'new_datetime'}
+    return dt.astimezone(timezone.utc)
 
 
-class DatetimeAddHoursAction(BaseAction):
-    """Add hours to datetime."""
-    action_type = "datetime6_add_hours"
-    display_name = "时间加小时"
-    description = "向时间添加小时"
-    version = "6.0"
+def convert_from_utc(
+    dt: Union[datetime, str],
+    target_tz: str
+) -> datetime:
+    """
+    Convert UTC datetime to target timezone.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute add hours.
+    Args:
+        dt: UTC datetime.
+        target_tz: Target timezone name.
 
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, hours, format, output_var.
+    Returns:
+        Target timezone datetime.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with new datetime.
-        """
-        datetime_str = params.get('datetime_str', '')
-        hours = params.get('hours', 0)
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'new_datetime')
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
 
-        valid, msg = self.validate_type(datetime_str, str, 'datetime_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    from dateutil import tz
+    target = tz.gettz(target_tz)
 
-        try:
-            resolved_dt = context.resolve_value(datetime_str)
-            resolved_hours = int(context.resolve_value(hours))
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
-
-            dt = datetime.strptime(resolved_dt, resolved_format)
-            new_dt = dt + timedelta(hours=resolved_hours)
-            result = new_dt.strftime(resolved_format)
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"时间加小时: {result}",
-                data={
-                    'original': resolved_dt,
-                    'hours_added': resolved_hours,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"时间加小时失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime_str', 'hours']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'new_datetime'}
+    return dt.astimezone(target)
 
 
-class DatetimeSubtractHoursAction(BaseAction):
-    """Subtract hours from datetime."""
-    action_type = "datetime6_subtract_hours"
-    display_name = "时间减小时"
-    description = "从时间减去小时"
-    version = "6.0"
+def get_timezone_name_list() -> List[str]:
+    """
+    Get list of common timezone names.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute subtract hours.
-
-        Args:
-            context: Execution context.
-            params: Dict with datetime_str, hours, format, output_var.
-
-        Returns:
-            ActionResult with new datetime.
-        """
-        datetime_str = params.get('datetime_str', '')
-        hours = params.get('hours', 0)
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'new_datetime')
-
-        valid, msg = self.validate_type(datetime_str, str, 'datetime_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_dt = context.resolve_value(datetime_str)
-            resolved_hours = int(context.resolve_value(hours))
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
-
-            dt = datetime.strptime(resolved_dt, resolved_format)
-            new_dt = dt - timedelta(hours=resolved_hours)
-            result = new_dt.strftime(resolved_format)
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"时间减小时: {result}",
-                data={
-                    'original': resolved_dt,
-                    'hours_subtracted': resolved_hours,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"时间减小时失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime_str', 'hours']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'new_datetime'}
+    Returns:
+        List of timezone names.
+    """
+    return [
+        'UTC',
+        'America/New_York',
+        'America/Chicago',
+        'America/Denver',
+        'America/Los_Angeles',
+        'America/Toronto',
+        'America/Vancouver',
+        'America/Sao_Paulo',
+        'Europe/London',
+        'Europe/Paris',
+        'Europe/Berlin',
+        'Europe/Moscow',
+        'Asia/Tokyo',
+        'Asia/Shanghai',
+        'Asia/Hong_Kong',
+        'Asia/Singapore',
+        'Asia/Seoul',
+        'Asia/Kolkata',
+        'Asia/Dubai',
+        'Australia/Sydney',
+        'Australia/Melbourne',
+        'Pacific/Auckland',
+        'Pacific/Honolulu',
+    ]
 
 
-class DatetimeCombineDateTimeAction(BaseAction):
-    """Combine date and time."""
-    action_type = "datetime6_combine"
-    display_name = "日期时间组合"
-    description = "组合日期和时间"
-    version = "6.0"
+def is_dst_time(dt: Union[datetime, str], tz_name: str) -> bool:
+    """
+    Check if datetime is in DST for timezone.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute combine.
+    Args:
+        dt: Datetime to check.
+        tz_name: Timezone name.
 
-        Args:
-            context: Execution context.
-            params: Dict with date_str, time_str, date_format, time_format, output_var.
+    Returns:
+        True if in DST.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
 
-        Returns:
-            ActionResult with combined datetime.
-        """
-        date_str = params.get('date_str', '')
-        time_str = params.get('time_str', '')
-        date_format = params.get('date_format', '%Y-%m-%d')
-        time_format = params.get('time_format', '%H:%M:%S')
-        output_var = params.get('output_var', 'combined_datetime')
+    try:
+        from dateutil import tz
+        tz_obj = tz.gettz(tz_name)
 
-        valid, msg = self.validate_type(date_str, str, 'date_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz_obj)
 
-        valid, msg = self.validate_type(time_str, str, 'time_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        return bool(dt.dst())
+    except ImportError:
+        return False
 
-        try:
-            resolved_date = context.resolve_value(date_str)
-            resolved_time = context.resolve_value(time_str)
-            resolved_date_format = context.resolve_value(date_format) if date_format else '%Y-%m-%d'
-            resolved_time_format = context.resolve_value(time_format) if time_format else '%H:%M:%S'
 
-            date_obj = datetime.strptime(resolved_date, resolved_date_format).date()
-            time_obj = datetime.strptime(resolved_time, resolved_time_format).time()
+def get_dst_transition_dates(year: int, tz_name: str) -> Dict[str, Any]:
+    """
+    Get DST transition dates for a timezone in a year.
 
-            combined = datetime.combine(date_obj, time_obj)
-            result = combined.strftime('%Y-%m-%d %H:%M:%S')
+    Args:
+        year: Year.
+        tz_name: Timezone name.
 
-            context.set(output_var, result)
+    Returns:
+        Dictionary with DST start and end dates.
+    """
+    try:
+        from dateutil import tz
+        import datetime as dt_module
 
-            return ActionResult(
-                success=True,
-                message=f"日期时间组合: {result}",
-                data={
-                    'date': resolved_date,
-                    'time': resolved_time,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期时间组合失败: {str(e)}"
-            )
+        tz_obj = tz.gettz(tz_name)
 
-    def get_required_params(self) -> List[str]:
-        return ['date_str', 'time_str']
+        jan1 = dt_module.datetime(year, 1, 1, tzinfo=tz_obj)
+        jul1 = dt_module.datetime(year, 7, 1, tzinfo=tz_obj)
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'date_format': '%Y-%m-%d', 'time_format': '%H:%M:%S', 'output_var': 'combined_datetime'}
+        jan_dst = jan1.dst()
+        jul_dst = jul1.dst()
+
+        if jan_dst is None or jul_dst is None:
+            return {'has_dst': False}
+
+        if jan_dst == jul_dst:
+            return {'has_dst': False}
+
+        if jan_dst > jul_dst:
+            dst_start = jul1
+            dst_end = jan1
+        else:
+            dst_start = jan1
+            dst_end = jul1
+
+        return {
+            'has_dst': True,
+            'dst_start': dst_start,
+            'dst_end': dst_end,
+        }
+    except ImportError:
+        return {'has_dst': False}
+
+
+def get_age_in_days(birth_date: Union[datetime, str]) -> int:
+    """
+    Get age in days from birth date.
+
+    Args:
+        birth_date: Birth date.
+
+    Returns:
+        Age in days.
+    """
+    if isinstance(birth_date, str):
+        birth_date = datetime.fromisoformat(birth_date.replace('Z', '+00:00'))
+
+    today = datetime.now()
+    delta = today - birth_date
+    return delta.days
+
+
+def get_age_in_years(birth_date: Union[datetime, str]) -> int:
+    """
+    Get age in years from birth date.
+
+    Args:
+        birth_date: Birth date.
+
+    Returns:
+        Age in years.
+    """
+    if isinstance(birth_date, str):
+        birth_date = datetime.fromisoformat(birth_date.replace('Z', '+00:00'))
+
+    today = datetime.now()
+    age = today.year - birth_date.year
+
+    if (today.month, today.day) < (birth_date.month, birth_date.day):
+        age -= 1
+
+    return age
+
+
+def is_past(dt: Union[datetime, str]) -> bool:
+    """
+    Check if datetime is in the past.
+
+    Args:
+        dt: Datetime to check.
+
+    Returns:
+        True if past.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    return dt < datetime.now()
+
+
+def is_future(dt: Union[datetime, str]) -> bool:
+    """
+    Check if datetime is in the future.
+
+    Args:
+        dt: Datetime to check.
+
+    Returns:
+        True if future.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    return dt > datetime.now()
+
+
+def is_today(dt: Union[datetime, str]) -> bool:
+    """
+    Check if datetime is today.
+
+    Args:
+        dt: Datetime to check.
+
+    Returns:
+        True if today.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    today = datetime.now()
+    return (dt.year, dt.month, dt.day) == (today.year, today.month, today.day)
+
+
+def is_tomorrow(dt: Union[datetime, str]) -> bool:
+    """
+    Check if datetime is tomorrow.
+
+    Args:
+        dt: Datetime to check.
+
+    Returns:
+        True if tomorrow.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    tomorrow = datetime.now() + timedelta(days=1)
+    return (dt.year, dt.month, dt.day) == (tomorrow.year, tomorrow.month, tomorrow.day)
+
+
+def is_yesterday(dt: Union[datetime, str]) -> bool:
+    """
+    Check if datetime is yesterday.
+
+    Args:
+        dt: Datetime to check.
+
+    Returns:
+        True if yesterday.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    yesterday = datetime.now() - timedelta(days=1)
+    return (dt.year, dt.month, dt.day) == (yesterday.year, yesterday.month, yesterday.day)
+
+
+def format_date_custom(
+    dt: Union[datetime, str],
+    format_type: str = 'default'
+) -> str:
+    """
+    Format datetime with custom style presets.
+
+    Args:
+        dt: Datetime object or ISO string.
+        format_type: Format type ('default', 'us', 'eu', 'iso', 'friendly').
+
+    Returns:
+        Formatted date string.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    if format_type == 'us':
+        return dt.strftime('%m/%d/%Y')
+
+    if format_type == 'eu':
+        return dt.strftime('%d/%m/%Y')
+
+    if format_type == 'iso':
+        return dt.isoformat()
+
+    if format_type == 'friendly':
+        return dt.strftime('%B %d, %Y')
+
+    if format_type == 'short':
+        return dt.strftime('%b %d, %y')
+
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def parse_american_date(date_string: str) -> Optional[datetime]:
+    """
+    Parse American date format (MM/DD/YYYY).
+
+    Args:
+        date_string: American format date string.
+
+    Returns:
+        Datetime or None.
+    """
+    try:
+        return datetime.strptime(date_string, '%m/%d/%Y')
+    except ValueError:
+        pass
+
+    try:
+        return datetime.strptime(date_string, '%m/%d/%y')
+    except ValueError:
+        return None
+
+
+def parse_european_date(date_string: str) -> Optional[datetime]:
+    """
+    Parse European date format (DD/MM/YYYY).
+
+    Args:
+        date_string: European format date string.
+
+    Returns:
+        Datetime or None.
+    """
+    try:
+        return datetime.strptime(date_string, '%d/%m/%Y')
+    except ValueError:
+        pass
+
+    try:
+        return datetime.strptime(date_string, '%d/%m/%y')
+    except ValueError:
+        return None
+
+
+def get_time_until(dt: Union[datetime, str]) -> Dict[str, int]:
+    """
+    Get time until a future datetime.
+
+    Args:
+        dt: Future datetime.
+
+    Returns:
+        Dictionary with time components.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    now = datetime.now()
+
+    if dt < now:
+        return {'days': 0, 'hours': 0, 'minutes': 0, 'seconds': 0, 'is_past': True}
+
+    delta = dt - now
+    total_seconds = int(delta.total_seconds())
+
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+
+    return {
+        'days': days,
+        'hours': hours,
+        'minutes': minutes,
+        'seconds': seconds,
+        'is_past': False,
+    }
+
+
+def get_time_since(dt: Union[datetime, str]) -> Dict[str, int]:
+    """
+    Get time since a past datetime.
+
+    Args:
+        dt: Past datetime.
+
+    Returns:
+        Dictionary with time components.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    now = datetime.now()
+
+    if dt > now:
+        return {'days': 0, 'hours': 0, 'minutes': 0, 'seconds': 0, 'is_future': True}
+
+    delta = now - dt
+    total_seconds = int(delta.total_seconds())
+
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+
+    return {
+        'days': days,
+        'hours': hours,
+        'minutes': minutes,
+        'seconds': seconds,
+        'is_future': False,
+    }
