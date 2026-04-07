@@ -224,10 +224,10 @@ class ActionConfigWidget(QWidget):
                     if example:
                         help_text += f"\n{example}"
                     help_label = QLabel(help_text)
-                    help_label.setStyleSheet("color: #666; font-size: 10px;")
+                    help_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 10px;")
                     help_label.setWordWrap(True)
                     row_layout.addWidget(help_label)
-                
+
                 required_layout.addRow(f"{param}:", row_widget)
             
             required_group.setLayout(required_layout)
@@ -266,7 +266,7 @@ class ActionConfigWidget(QWidget):
                             desc = PARAM_DESCRIPTIONS.get(p, '')
                             if desc:
                                 help_label = QLabel(desc)
-                                help_label.setStyleSheet("color: #666; font-size: 10px;")
+                                help_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 10px;")
                                 help_label.setWordWrap(True)
                                 row_layout.addWidget(help_label)
                             
@@ -293,10 +293,10 @@ class ActionConfigWidget(QWidget):
                     if example:
                         help_text += f"\n{example}"
                     help_label = QLabel(help_text)
-                    help_label.setStyleSheet("color: #666; font-size: 10px;")
+                    help_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 10px;")
                     help_label.setWordWrap(True)
                     row_layout.addWidget(help_label)
-                
+
                 optional_layout.addRow(f"{param}:", row_widget)
             
             optional_group.setLayout(optional_layout)
@@ -1238,7 +1238,7 @@ class RecordingWidget(QWidget):
         
         if self._use_mac_manager:
             info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤\n✅ 已启用 Mac 进程隔离模式")
-            info_label.setStyleSheet("color: #1976D2; font-size: 11px;")
+            info_label.setStyleSheet(f"color: {colors['primary']}; font-size: 11px;")
         else:
             info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤")
             info_label.setStyleSheet("color: gray; font-size: 11px;")
@@ -1278,7 +1278,7 @@ class RecordingWidget(QWidget):
             "💡 提示：录制时主窗口会自动最小化，方便操作"
         )
         help_label = QLabel(help_text)
-        help_label.setStyleSheet("color: #666; font-size: 10px;")
+        help_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 10px;")
         layout.addWidget(help_label)
         
         if not PYNPUT_AVAILABLE:
@@ -1483,7 +1483,7 @@ class PredictiveWidget(QWidget):
         layout = QVBoxLayout(self)
         
         info_label = QLabel("🧠 预测性自动化引擎 - 基于历史行为预测下一步操作")
-        info_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #1976D2;")
+        info_label.setStyleSheet(f"font-weight: bold; font-size: 13px; color: {colors['primary']};")
         layout.addWidget(info_label)
         
         self.prediction_label = QLabel("暂无足够数据进行预测，请先执行一些工作流")
@@ -1509,7 +1509,7 @@ class PredictiveWidget(QWidget):
         layout.addLayout(btn_layout)
         
         self.stats_label = QLabel("历史动作: 0 | 成功率: 0%")
-        self.stats_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.stats_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 11px;")
         layout.addWidget(self.stats_label)
         
         layout.addStretch()
@@ -2518,7 +2518,7 @@ class MainWindow(QMainWindow):
         
         if self._teaching_mode:
             self.teaching_btn.setChecked(True)
-            self.teaching_btn.setStyleSheet("background-color: #9C27B0; color: white;")
+            self.teaching_btn.setStyleSheet(f"background-color: {colors['primary']}; color: white;")
             show_toast("按键显示已开启 - 屏幕显示鼠标位置，按 ESC 关闭", 'success')
         else:
             self.teaching_btn.setChecked(False)
@@ -2933,9 +2933,10 @@ class MainWindow(QMainWindow):
         form.addRow("循环间隔(秒):", interval_spin)
         
         layout.addLayout(form)
-        
+
+        colors = theme_manager.colors
         info_label = QLabel("提示: 循环次数>1时，工作流将重复执行")
-        info_label.setStyleSheet("color: #666; font-size: 11px;")
+        info_label.setStyleSheet(f"color: {colors['text_secondary']}; font-size: 11px;")
         layout.addWidget(info_label)
         
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -2946,7 +2947,6 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             self._loop_count = loop_spin.value()
             self._loop_interval = interval_spin.value()
-            colors = theme_manager.colors
 
             if self._loop_count > 1:
                 self.loop_btn.setText(f"🔄 x{self._loop_count}")
