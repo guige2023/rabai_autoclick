@@ -293,3 +293,120 @@ class BaseAction(ABC):
         full_params = self.get_optional_params().copy()
         full_params.update(self.params)
         return full_params
+
+    def handle_error(
+        self,
+        error: Exception,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Handle an error that occurred during execution.
+
+        This method can be overridden by subclasses to implement
+        custom error recovery strategies.
+
+        Args:
+            error: The exception that occurred.
+            context: Execution context.
+            params: Parameters that were passed to execute.
+
+        Returns:
+            ActionResult representing the error handling outcome.
+        """
+        logger.error(
+            f"Action '{self.action_type}' failed: {error}",
+            exc_info=True
+        )
+        return ActionResult(
+            success=False,
+            message=f"执行失败: {str(error)}"
+        )
+
+    def on_success(
+        self,
+        context: Any,
+        params: Dict[str, Any],
+        result: ActionResult
+    ) -> ActionResult:
+        """Hook called after successful execution.
+
+        This method can be overridden by subclasses to perform
+        post-execution tasks like cleanup or notification.
+
+        Args:
+            context: Execution context.
+            params: Parameters that were passed to execute.
+            result: The successful ActionResult.
+
+        Returns:
+            The ActionResult (possibly modified).
+        """
+        return result
+
+    def on_failure(
+        self,
+        context: Any,
+        params: Dict[str, Any],
+        result: ActionResult
+    ) -> ActionResult:
+        """Hook called after failed execution.
+
+        This method can be overridden by subclasses to perform
+        error recovery or cleanup tasks.
+
+        Args:
+            context: Execution context.
+            params: Parameters that were passed to execute.
+            result: The failed ActionResult.
+
+        Returns:
+            The ActionResult (possibly modified).
+        """
+        return result
+
+    def before_execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> None:
+        """Hook called before execution.
+
+        This method can be overridden by subclasses to perform
+        pre-execution setup tasks.
+
+        Args:
+            context: Execution context.
+            params: Parameters that were passed to execute.
+        """
+        pass
+
+    def safe_execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Safely execute the action with error handling hooks.
+
+        This method wraps execute() with before/after hooks
+        and error handling.
+
+        Args:
+            context: Execution context.
+            params: Parameters for the action.
+
+        Returns:
+            ActionResult from execution or error handling.
+        """
+        try:
+            self.before_execute(context, params)
+
+            result = self.execute(context, params)
+
+            if result.success:
+                return self.on_success(context, params, result)
+            else:
+                return self.on_failure(context, params, result)
+
+        except Exception as e:
+            error_result = self.handle_error(e, context, params)
+            return self.on_failure(context, params, error_result)
