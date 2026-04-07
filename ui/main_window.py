@@ -630,6 +630,7 @@ class LogWidget(QWidget):
     def _on_theme_changed(self, theme):
         """Handle theme change to update log colors."""
         self._log_colors = theme_manager.get_log_colors()
+        self._apply_log_style()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -642,7 +643,9 @@ class LogWidget(QWidget):
 
         btn_layout = QHBoxLayout()
         clear_btn = QPushButton("清空日志")
+        clear_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         export_btn = QPushButton("导出日志")
+        export_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         btn_layout.addWidget(clear_btn)
         btn_layout.addWidget(export_btn)
         layout.addLayout(btn_layout)
@@ -659,9 +662,10 @@ class LogWidget(QWidget):
             QTextEdit {{
                 background-color: {colors['status_bar']};
                 color: {colors['status_text']};
-                font-family: Consolas, 'Microsoft YaHei';
+                font-family: Consolas, 'Microsoft YaHei', monospace;
                 font-size: 12px;
                 border: none;
+                padding: 4px;
             }}
         """)
 
@@ -710,11 +714,14 @@ class RecordingWidget(QWidget):
         btn_layout = QHBoxLayout()
 
         self.record_btn = QPushButton("🔴 开始录制")
-        self.record_btn.setStyleSheet(f"background-color: {colors['error']}; color: white; font-weight: bold;")
+        self.record_btn.setStyleSheet(theme_manager.get_button_stylesheet('danger'))
         self.stop_btn = QPushButton("⏹ 停止录制")
         self.stop_btn.setEnabled(False)
+        self.stop_btn.setStyleSheet(theme_manager.get_button_stylesheet('danger'))
         self.clear_btn = QPushButton("清空")
+        self.clear_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         self.optimize_btn = QPushButton("优化")
+        self.optimize_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
 
         btn_layout.addWidget(self.record_btn)
         btn_layout.addWidget(self.stop_btn)
