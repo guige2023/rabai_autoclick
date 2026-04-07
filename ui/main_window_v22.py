@@ -2787,7 +2787,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Engine error: {e}")
     
-    def _on_hotkey_settings(self):
+    def _on_hotkey_settings(self) -> None:
         try:
             dialog = HotkeySettingsDialog(self.current_hotkeys, self)
             if dialog.exec_() == QDialog.Accepted:
