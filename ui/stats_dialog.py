@@ -23,23 +23,30 @@ sys.path.insert(0, os.path.dirname(
 ))
 
 from utils.execution_stats import execution_stats
+from ui.theme import theme_manager
 
 
 class StatsDialog(QDialog):
     """Dialog displaying execution statistics and performance metrics."""
-    
+
     def __init__(self, parent: Optional[QDialog] = None) -> None:
         """Initialize the stats dialog.
-        
+
         Args:
             parent: Optional parent widget.
         """
         super().__init__(parent)
         self.setWindowTitle("执行统计分析")
         self.setMinimumSize(800, 600)
-        
+        self._colors = theme_manager.colors
+        theme_manager.theme_changed.connect(self._on_theme_changed)
+
         self._init_ui()
         self._load_data()
+
+    def _on_theme_changed(self, theme):
+        """Handle theme changes to update colors."""
+        self._colors = theme_manager.colors
     
     def _init_ui(self) -> None:
         """Initialize the dialog UI components."""
@@ -197,15 +204,15 @@ class StatsDialog(QDialog):
         self.success_rate_label.setText(f"{rate:.1f}%")
         if rate >= 90:
             self.success_rate_label.setStyleSheet(
-                "color: #4CAF50; font-weight: bold;"
+                f"color: {self._colors['success']}; font-weight: bold;"
             )
         elif rate >= 70:
             self.success_rate_label.setStyleSheet(
-                "color: #FF9800; font-weight: bold;"
+                f"color: {self._colors['warning']}; font-weight: bold;"
             )
         else:
             self.success_rate_label.setStyleSheet(
-                "color: #f44336; font-weight: bold;"
+                f"color: {self._colors['error']}; font-weight: bold;"
             )
         
         # Populate step statistics table
@@ -300,9 +307,9 @@ class StatsDialog(QDialog):
             status = "✓ 成功" if session.get('success', False) else "✗ 失败"
             status_item = QTableWidgetItem(status)
             if session.get('success', False):
-                status_item.setForeground(QColor('#4CAF50'))
+                status_item.setForeground(QColor(self._colors['success']))
             else:
-                status_item.setForeground(QColor('#f44336'))
+                status_item.setForeground(QColor(self._colors['error']))
             self.history_table.setItem(row, 5, status_item)
     
     def _clear_history(self) -> None:
