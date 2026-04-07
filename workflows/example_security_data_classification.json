@@ -1,0 +1,117 @@
+{
+  "name": "Security Data Classification Workflow",
+  "description": "Automate data classification and labeling",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "data_items_to_classify": 54,
+    "current_item": 0,
+    "classified_items": 0,
+    "unclassified_items": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "item_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize item counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open data classification tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "classification_loop",
+      "count": "{{data_items_to_classify}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start data classification loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select data item"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for classification"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/data_classification_{{item_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture classification screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "item_counter",
+      "value": "{{item_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment item counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{item_counter < data_items_to_classify}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more items"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next item"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_data_classification_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
