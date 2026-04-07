@@ -34,6 +34,7 @@ from ui.hotkey_dialog import HotkeySettingsDialog
 from ui.region_selector import RegionSelector, PositionSelector
 from ui.message import message_manager, show_error, show_success, show_warning, show_toast
 from ui.stats_dialog import StatsDialog
+from ui.theme import theme_manager, ThemeType
 
 logger = logging.getLogger(__name__)
 
@@ -841,7 +842,9 @@ class MainWindow(QMainWindow):
         self.loop_btn = QPushButton("🔄 循环")
         self.stats_btn = QPushButton("📊 统计")
         self.memory_btn = QPushButton("💾 内存")
-        
+        self.theme_btn = QPushButton("🌙 深色")
+        self.theme_btn.setCheckable(True)
+
         self.stop_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
         
@@ -862,6 +865,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.loop_btn)
         toolbar.addWidget(self.stats_btn)
         toolbar.addWidget(self.memory_btn)
+        toolbar.addWidget(self.theme_btn)
         toolbar.addStretch()
         
         self.memory_label = QLabel()
@@ -989,7 +993,8 @@ class MainWindow(QMainWindow):
         self.loop_btn.clicked.connect(self._on_loop_settings)
         self.stats_btn.clicked.connect(self._on_show_stats)
         self.memory_btn.clicked.connect(self._on_memory_optimize)
-        
+        self.theme_btn.clicked.connect(self._toggle_theme)
+
         self.action_list.currentRowChanged.connect(self._on_action_selected)
         
         self.step_list.add_btn.clicked.connect(self._on_add_step)
@@ -1623,6 +1628,26 @@ class MainWindow(QMainWindow):
                 f"物理内存 (RSS): {usage['rss']} MB\n"
                 f"虚拟内存 (VMS): {usage['vms']} MB\n"
                 f"缓存数量: {usage['cache_size']}")
+
+    def _toggle_theme(self):
+        """Toggle between light and dark themes."""
+        new_theme = theme_manager.toggle_theme()
+
+        if new_theme == ThemeType.DARK:
+            self.theme_btn.setText("☀️ 浅色")
+            self.theme_btn.setChecked(True)
+        else:
+            self.theme_btn.setText("🌙 深色")
+            self.theme_btn.setChecked(False)
+
+        self._apply_theme()
+        show_toast(f"主题已切换为{'深色' if new_theme == ThemeType.DARK else '浅色'}模式", 'info')
+        app_logger.info(f"主题切换: {new_theme.value}", "UI")
+
+    def _apply_theme(self):
+        """Apply the current theme to all UI components."""
+        self.setStyleSheet(theme_manager.get_stylesheet("main_window"))
+        self.log_widget.text_edit.setStyleSheet(theme_manager.get_stylesheet("log"))
 
     def changeEvent(self, event):
         """Handle window state changes to optimize timer usage."""
