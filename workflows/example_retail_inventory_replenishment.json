@@ -1,0 +1,117 @@
+{
+  "name": "Retail Inventory Replenishment Workflow",
+  "description": "Automate inventory replenishment",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "items_to_replenish": 47,
+    "current_item": 0,
+    "replenished_items": 0,
+    "low_stock_items": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "replenish_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize replenish counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open inventory replenishment system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "inventory_replenishment_loop",
+      "count": "{{items_to_replenish}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start inventory replenishment loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select item for replenishment"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for replenishment"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/inventory_replenishment_{{replenish_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture replenishment screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "replenish_counter",
+      "value": "{{replenish_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment replenish counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{replenish_counter < items_to_replenish}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more items"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next item"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/retail_inventory_replenishment_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}

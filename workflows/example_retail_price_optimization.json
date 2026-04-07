@@ -1,0 +1,117 @@
+{
+  "name": "Retail Price Optimization Workflow",
+  "description": "Automate price optimization",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "prices_to_optimize": 48,
+    "current_price": 0,
+    "optimized_prices": 0,
+    "competitor_adjustments": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "price_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize price counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open price optimization tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "price_optimization_loop",
+      "count": "{{prices_to_optimize}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start price optimization loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select price for optimization"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for optimization"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/price_optimization_{{price_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture optimization screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "price_counter",
+      "value": "{{price_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment price counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{price_counter < prices_to_optimize}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more prices"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next price"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/retail_price_optimization_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
