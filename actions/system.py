@@ -11,10 +11,7 @@ import io
 import base64
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from ..core.base_action import BaseAction, ActionResult
 
 
 # Valid alert types
