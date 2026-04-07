@@ -108,10 +108,33 @@ class RegionSelector(QWidget):
                 overlay
             )
             
-            # Draw selection border
-            pen = QPen(QColor(0, 120, 215), 2)
+            # Draw selection border with theme colors
+            pen = QPen(QColor(33, 150, 243), 2)  # Primary blue
             painter.setPen(pen)
             painter.drawRect(self._selection_rect)
+
+            # Draw corner handles for better visual feedback
+            corner_size = 8
+            corner_color = QColor(33, 150, 243)
+            corners = [
+                # Top-left
+                (self._selection_rect.topLeft(), 1, 1),
+                # Top-right
+                (self._selection_rect.topRight(), -1, 1),
+                # Bottom-left
+                (self._selection_rect.bottomLeft(), 1, -1),
+                # Bottom-right
+                (self._selection_rect.bottomRight(), -1, -1),
+            ]
+            painter.setPen(corner_color)
+            painter.setBrush(corner_color)
+            for corner_pos, dx, dy in corners:
+                painter.drawRect(
+                    corner_pos.x() + (dx * corner_size) - corner_size // 2,
+                    corner_pos.y() + (dy * corner_size) - corner_size // 2,
+                    corner_size,
+                    corner_size
+                )
         
         self._draw_info(painter)
     
@@ -128,14 +151,14 @@ class RegionSelector(QWidget):
             info_text = "拖拽选择区域 | Enter确认 | Esc取消"
         else:
             info_text = "点击选择位置 | Esc取消"
-        
+
         text_rect = painter.fontMetrics().boundingRect(info_text)
         x = (self.width() - text_rect.width()) // 2
         y = 30
-        
+
         painter.fillRect(
             x - 10, y - 5, text_rect.width() + 20,
-            text_rect.height() + 10, QColor(0, 0, 0, 180)
+            text_rect.height() + 10, QColor(33, 33, 33, 200)
         )
         painter.drawText(x, y + text_rect.height() - 5, info_text)
         
@@ -162,7 +185,7 @@ class RegionSelector(QWidget):
             
             painter.fillRect(
                 x2 - 5, y2 - 3, text_rect2.width() + 10,
-                text_rect2.height() + 6, QColor(0, 0, 0, 180)
+                text_rect2.height() + 6, QColor(33, 33, 33, 200)
             )
             painter.drawText(
                 x2, y2 + text_rect2.height() - 3, rect_info
@@ -319,15 +342,15 @@ class PositionSelector(QWidget):
         y = 30
         painter.fillRect(
             x - 10, y - 5, text_rect.width() + 20,
-            text_rect.height() + 10, QColor(0, 0, 0, 180)
+            text_rect.height() + 10, QColor(33, 33, 33, 200)
         )
         painter.drawText(x, y + text_rect.height() - 5, info_text)
-        
+
         cursor_pos = self.mapFromGlobal(QCursor.pos())
         pos_text = f"位置: ({cursor_pos.x()}, {cursor_pos.y()})"
         painter.fillRect(
             cursor_pos.x() + 15, cursor_pos.y() - 20,
-            150, 25, QColor(0, 0, 0, 180)
+            150, 25, QColor(33, 33, 33, 200)
         )
         painter.drawText(cursor_pos.x() + 20, cursor_pos.y() - 3, pos_text)
     
