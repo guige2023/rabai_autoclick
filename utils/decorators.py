@@ -90,6 +90,7 @@ def cached(func: Callable[..., T]) -> Callable[..., T]:
         return cache[key]
 
     wrapper.cache_clear = lambda: cache.clear()
+    wrapper.cache = cache
     return wrapper
 
 

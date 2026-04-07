@@ -105,9 +105,11 @@ class TestCached:
             return x * 2
 
         cached_func(5)
+        assert cached_func.cache == {((5,), ()): 10}
         cached_func.cache_clear()
-        cached_func(5)
         assert cached_func.cache == {}
+        cached_func(5)
+        assert cached_func.cache == {((5,), ()): 10}
 
 
 class TestRateLimit:
