@@ -1231,6 +1231,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, len(self.current_workflow['steps']))
         self.progress_bar.setValue(0)
+        self.progress_bar.setStyleSheet(theme_manager.get_stylesheet("progress_animated"))
         
         if self._current_loop == 1:
             self.showMinimized()
@@ -1247,6 +1248,7 @@ class MainWindow(QMainWindow):
         self.pause_btn.setEnabled(False)
         self.pause_btn.setText("⏸ 暂停")
         self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet("")
         self.showNormal()
         self.activateWindow()
         app_logger.warning("停止工作流", "Workflow")
@@ -1474,7 +1476,8 @@ class MainWindow(QMainWindow):
             self.pause_btn.setEnabled(False)
             self.pause_btn.setText("⏸ 暂停")
             self.progress_bar.setVisible(False)
-            
+            self.progress_bar.setStyleSheet("")
+
             self.showNormal()
             self.activateWindow()
             
