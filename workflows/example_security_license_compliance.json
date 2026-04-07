@@ -1,0 +1,117 @@
+{
+  "name": "Security License Compliance Workflow",
+  "description": "Automate security software license tracking",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "software_licenses_to_track": 72,
+    "current_license": 0,
+    "compliant_licenses": 0,
+    "violation_licenses": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "license_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize license counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open license management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "license_compliance_loop",
+      "count": "{{software_licenses_to_track}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start license compliance loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select software license"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for license check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/license_compliance_{{license_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture license screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "license_counter",
+      "value": "{{license_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment license counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{license_counter < software_licenses_to_track}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more licenses"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next license"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_license_compliance_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
