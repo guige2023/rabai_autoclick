@@ -1,326 +1,244 @@
 """Encoding/decoding action module for RabAI AutoClick.
 
 Provides encoding operations:
-- Base64EncodeAction: Base64 encode
-- Base64DecodeAction: Base64 decode
-- HexEncodeAction: Hex encode
-- HexDecodeAction: Hex decode
-- UrlEncodeAction: URL encode
-- UrlDecodeAction: URL decode
-- HtmlEncodeAction: HTML entity encode
-- HtmlDecodeAction: HTML entity decode
+- EncodeBase64Action: Base64 encode/decode
+- EncodeHexAction: Hex encode/decode
+- EncodeUrlAction: URL encode/decode
+- EncodeHtmlAction: HTML encode/decode
+- EncodeJsonAction: JSON encode/decode
+- EncodeUnicodeAction: Unicode normalization
 """
 
-from __future__ import annotations
-
 import base64
-import sys
+import urllib.parse
 import html
+import unicodedata
+import json
 from typing import Any, Dict, List, Optional
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class Base64EncodeAction(BaseAction):
-    """Base64 encode."""
-    action_type = "base64_encode"
+class EncodeBase64Action(BaseAction):
+    """Base64 encode/decode."""
+    action_type = "encode_base64"
     display_name = "Base64编码"
-    description = "Base64编码"
-    version = "1.0"
+    description = "Base64编码/解码"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute base64 encode."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'base64_result')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
         try:
-            resolved = context.resolve_value(value) if context else value
-            if isinstance(resolved, str):
-                data = resolved.encode('utf-8')
-            else:
-                data = resolved
+            text = params.get("text", "")
+            action = params.get("action", "encode")
 
-            result = base64.b64encode(data).decode('ascii')
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Base64 encoded", data={'encoded': result})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Base64 encode error: {str(e)}")
+            if not text:
+                return ActionResult(success=False, message="text is required")
 
-    def get_required_params(self) -> List[str]:
-        return ['value']
+            if action == "encode":
+                encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+                return ActionResult(success=True, message="Base64 encoded", data={"result": encoded})
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'base64_result'}
-
-
-class Base64DecodeAction(BaseAction):
-    """Base64 decode."""
-    action_type = "base64_decode"
-    display_name = "Base64解码"
-    description = "Base64解码"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute base64 decode."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'base64_decoded')
-        as_string = params.get('as_string', True)
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            data = base64.b64decode(str(resolved))
-
-            if as_string:
+            elif action == "decode":
                 try:
-                    result = data.decode('utf-8')
-                except UnicodeDecodeError:
-                    result = data.hex()
+                    decoded = base64.b64decode(text.encode("ascii")).decode("utf-8")
+                    return ActionResult(success=True, message="Base64 decoded", data={"result": decoded})
+                except Exception as e:
+                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+
             else:
-                result = data
+                return ActionResult(success=False, message=f"Unknown action: {action}")
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Base64 decoded", data={'decoded': result})
         except Exception as e:
-            return ActionResult(success=False, message=f"Base64 decode error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'as_string': True, 'output_var': 'base64_decoded'}
+            return ActionResult(success=False, message=f"Base64 error: {str(e)}")
 
 
-class HexEncodeAction(BaseAction):
-    """Hex encode."""
-    action_type = "hex_encode"
+class EncodeHexAction(BaseAction):
+    """Hex encode/decode."""
+    action_type = "encode_hex"
     display_name = "Hex编码"
-    description = "Hex编码"
-    version = "1.0"
+    description = "Hex编码/解码"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute hex encode."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'hex_result')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
         try:
-            resolved = context.resolve_value(value) if context else value
-            if isinstance(resolved, str):
-                data = resolved.encode('utf-8')
-            else:
-                data = resolved
+            text = params.get("text", "")
+            action = params.get("action", "encode")
+            separator = params.get("separator", "")
 
-            result = data.hex()
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Hex encoded", data={'encoded': result})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hex encode error: {str(e)}")
+            if not text:
+                return ActionResult(success=False, message="text is required")
 
-    def get_required_params(self) -> List[str]:
-        return ['value']
+            if action == "encode":
+                if separator:
+                    hex_str = separator.join(f"{ord(c):02x}" for c in text)
+                else:
+                    hex_str = text.encode("utf-8").hex()
+                return ActionResult(success=True, message="Hex encoded", data={"result": hex_str})
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'hex_result'}
-
-
-class HexDecodeAction(BaseAction):
-    """Hex decode."""
-    action_type = "hex_decode"
-    display_name = "Hex解码"
-    description = "Hex解码"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute hex decode."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'hex_decoded')
-        as_string = params.get('as_string', True)
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            data = bytes.fromhex(str(resolved))
-
-            if as_string:
+            elif action == "decode":
                 try:
-                    result = data.decode('utf-8')
-                except UnicodeDecodeError:
-                    result = data.hex()
+                    clean_hex = text.replace(separator, "") if separator else text
+                    decoded = bytes.fromhex(clean_hex).decode("utf-8")
+                    return ActionResult(success=True, message="Hex decoded", data={"result": decoded})
+                except Exception as e:
+                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+
             else:
-                result = data
+                return ActionResult(success=False, message=f"Unknown action: {action}")
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Hex decoded", data={'decoded': result})
         except Exception as e:
-            return ActionResult(success=False, message=f"Hex decode error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'as_string': True, 'output_var': 'hex_decoded'}
+            return ActionResult(success=False, message=f"Hex error: {str(e)}")
 
 
-class HtmlEncodeAction(BaseAction):
-    """HTML entity encode."""
-    action_type = "html_encode"
-    display_name = "HTML编码"
-    description = "HTML实体编码"
-    version = "1.0"
+class EncodeUrlAction(BaseAction):
+    """URL encode/decode."""
+    action_type = "encode_url"
+    display_name = "URL编码"
+    description = "URL编码/解码"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute HTML encode."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'html_encoded')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
         try:
-            resolved = context.resolve_value(value) if context else value
-            result = html.escape(str(resolved))
+            text = params.get("text", "")
+            action = params.get("action", "encode")
+            safe_chars = params.get("safe_chars", "")
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"HTML encoded", data={'encoded': result})
+            if not text:
+                return ActionResult(success=False, message="text is required")
+
+            if action == "encode":
+                encoded = urllib.parse.quote(text, safe=safe_chars)
+                return ActionResult(success=True, message="URL encoded", data={"result": encoded})
+
+            elif action == "decode":
+                try:
+                    decoded = urllib.parse.unquote(text)
+                    return ActionResult(success=True, message="URL decoded", data={"result": decoded})
+                except Exception as e:
+                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+
+            elif action == "encode_component":
+                encoded = urllib.parse.quote_plus(text)
+                return ActionResult(success=True, message="URL component encoded", data={"result": encoded})
+
+            elif action == "decode_component":
+                try:
+                    decoded = urllib.parse.unquote_plus(text)
+                    return ActionResult(success=True, message="URL component decoded", data={"result": decoded})
+                except Exception as e:
+                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"URL encode error: {str(e)}")
+
+
+class EncodeHtmlAction(BaseAction):
+    """HTML encode/decode."""
+    action_type = "encode_html"
+    display_name = "HTML编码"
+    description = "HTML编码/解码"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            text = params.get("text", "")
+            action = params.get("action", "encode")
+
+            if not text:
+                return ActionResult(success=False, message="text is required")
+
+            if action == "encode":
+                encoded = html.escape(text)
+                return ActionResult(success=True, message="HTML encoded", data={"result": encoded})
+
+            elif action == "decode":
+                try:
+                    decoded = html.unescape(text)
+                    return ActionResult(success=True, message="HTML decoded", data={"result": decoded})
+                except Exception as e:
+                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+
         except Exception as e:
             return ActionResult(success=False, message=f"HTML encode error: {str(e)}")
 
-    def get_required_params(self) -> List[str]:
-        return ['value']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'html_encoded'}
-
-
-class HtmlDecodeAction(BaseAction):
-    """HTML entity decode."""
-    action_type = "html_decode"
-    display_name = "HTML解码"
-    description = "HTML实体解码"
-    version = "1.0"
+class EncodeJsonAction(BaseAction):
+    """JSON encode/decode."""
+    action_type = "encode_json"
+    display_name = "JSON编码"
+    description = "JSON编码/解码"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute HTML decode."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'html_decoded')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
         try:
-            resolved = context.resolve_value(value) if context else value
-            result = html.unescape(str(resolved))
+            data = params.get("data", "")
+            action = params.get("action", "encode")
+            indent = params.get("indent", 2)
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"HTML decoded", data={'decoded': result})
-        except Exception as e:
-            return ActionResult(success=False, message=f"HTML decode error: {str(e)}")
+            if action == "encode":
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except:
+                        return ActionResult(success=False, message="Invalid JSON string")
 
-    def get_required_params(self) -> List[str]:
-        return ['value']
+                encoded = json.dumps(data, indent=indent, ensure_ascii=False)
+                return ActionResult(success=True, message="JSON encoded", data={"result": encoded})
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'html_decoded'}
+            elif action == "decode":
+                if not isinstance(data, str):
+                    data = str(data)
 
+                try:
+                    decoded = json.loads(data)
+                    return ActionResult(success=True, message="JSON decoded", data={"result": decoded})
+                except json.JSONDecodeError as e:
+                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
 
-class QuotedPrintableAction(BaseAction):
-    """Quoted-printable encode/decode."""
-    action_type = "quoted_printable"
-    display_name = "QuotedPrintable编码"
-    description = "QuotedPrintable编码解码"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute quoted-printable."""
-        value = params.get('value', '')
-        decode = params.get('decode', False)
-        output_var = params.get('output_var', 'qp_result')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
-        try:
-            import quopri
-
-            resolved = context.resolve_value(value) if context else value
-            resolved_decode = context.resolve_value(decode) if context else decode
-
-            if isinstance(resolved, str):
-                data = resolved.encode('utf-8')
             else:
-                data = resolved
+                return ActionResult(success=False, message=f"Unknown action: {action}")
 
-            if resolved_decode:
-                result = quopri.decodestring(data).decode('utf-8')
-            else:
-                result = quopri.encodestring(data).decode('utf-8')
-
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Quoted-printable {'decoded' if resolved_decode else 'encoded'}", data={'result': result})
-        except ImportError:
-            return ActionResult(success=False, message="quopri not available")
         except Exception as e:
-            return ActionResult(success=False, message=f"Quoted-printable error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'decode': False, 'output_var': 'qp_result'}
+            return ActionResult(success=False, message=f"JSON encode error: {str(e)}")
 
 
-class PercentEncodeAction(BaseAction):
-    """Percent encoding (UTF-8)."""
-    action_type = "percent_encode"
-    display_name = "Percent编码"
-    description = "Percent编码(UTF-8)"
-    version = "1.0"
+class EncodeUnicodeAction(BaseAction):
+    """Unicode normalization."""
+    action_type = "encode_unicode"
+    display_name = "Unicode规范化"
+    description = "Unicode规范化"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute percent encode."""
-        value = params.get('value', '')
-        safe = params.get('safe', '/')
-        output_var = params.get('output_var', 'percent_encoded')
-
-        if not value:
-            return ActionResult(success=False, message="value is required")
-
         try:
-            from urllib.parse import quote
+            text = params.get("text", "")
+            form = params.get("form", "NFC")
 
-            resolved = context.resolve_value(value) if context else value
-            resolved_safe = context.resolve_value(safe) if context else safe
+            if not text:
+                return ActionResult(success=False, message="text is required")
 
-            result = quote(str(resolved), safe=resolved_safe)
+            form_map = {
+                "NFC": unicodedata.normalize("NFC", text),
+                "NFD": unicodedata.normalize("NFD", text),
+                "NFKC": unicodedata.normalize("NFKC", text),
+                "NFKD": unicodedata.normalize("NFKD", text)
+            }
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Percent encoded", data={'encoded': result})
+            if form not in form_map:
+                return ActionResult(success=False, message=f"Unknown form: {form}")
+
+            normalized = form_map[form]
+
+            return ActionResult(
+                success=True,
+                message=f"Unicode normalized to {form}",
+                data={"result": normalized, "form": form}
+            )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Percent encode error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'safe': '/', 'output_var': 'percent_encoded'}
+            return ActionResult(success=False, message=f"Unicode error: {str(e)}")
