@@ -1,0 +1,175 @@
+{
+  "name": "Contract Review Workflow",
+  "description": "Automate contract review and approval process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "contracts_to_review": 10,
+    "current_contract": 0,
+    "approved_count": 0,
+    "revision_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "contract_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize contract counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open contract management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "contract_loop",
+      "count": "{{contracts_to_review}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start contract loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on contract"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for contract to load"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/contract_{{contract_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture contract screenshot"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{contract_counter % 3 == 0}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if needs revision"
+    },
+    {
+      "id": 9,
+      "type": "click_image",
+      "template": "./templates/request_revision.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click request revision"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 15,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 11,
+      "type": "click_image",
+      "template": "./templates/approve_contract.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click approve button"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "approved_count",
+      "value": "{{approved_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment approved count"
+    },
+    {
+      "id": 13,
+      "type": "goto",
+      "step_id": 15,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 14,
+      "type": "set_variable",
+      "name": "revision_count",
+      "value": "{{revision_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment revision count"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "contract_counter",
+      "value": "{{contract_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment contract counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{contract_counter < contracts_to_review}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more contracts"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next contract"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/contract_review_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}
