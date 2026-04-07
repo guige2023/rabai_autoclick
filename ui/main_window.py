@@ -1377,22 +1377,22 @@ class MainWindow(QMainWindow):
             
             self.step_list.remove_step(index)
             app_logger.info(f"删除步骤 [{step_id}]", "Editor")
-    
-    def _on_move_up(self):
+
+    def _on_move_up(self) -> None:
         index = self.step_list.get_current_index()
         if index > 0:
             item = self.step_list.list_widget.takeItem(index)
             self.step_list.list_widget.insertItem(index - 1, item)
             self.step_list.set_current_index(index - 1)
-    
-    def _on_move_down(self):
+
+    def _on_move_down(self) -> None:
         index = self.step_list.get_current_index()
         if index < self.step_list.get_step_count() - 1:
             item = self.step_list.list_widget.takeItem(index)
             self.step_list.list_widget.insertItem(index + 1, item)
             self.step_list.set_current_index(index + 1)
-    
-    def _on_step_selected(self, index):
+
+    def _on_step_selected(self, index: int) -> None:
         if index >= 0:
             item = self.step_list.list_widget.item(index)
             data = item.data(Qt.UserRole)
