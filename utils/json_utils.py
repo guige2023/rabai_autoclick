@@ -37,10 +37,7 @@ class ExtendedJSONEncoder(json.JSONEncoder):
             return obj.decode('utf-8', errors='replace')
         if hasattr(obj, 'to_dict'):
             return obj.to_dict()
-        try:
-            return super().default(obj)
-        except TypeError:
-            return str(obj)
+        return super().default(obj)
 
 
 def safe_json_loads(
