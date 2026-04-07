@@ -1,0 +1,117 @@
+{
+  "name": "Application Feature Flag Management Workflow",
+  "description": "Automate feature flag configuration management",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "feature_flags_to_manage": 48,
+    "current_flag": 0,
+    "managed_flags": 0,
+    "flag_errors": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "flag_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize flag counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open feature flag management console"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for console"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "feature_flag_loop",
+      "count": "{{feature_flags_to_manage}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start feature flag loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select feature flag"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for flag update"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/feature_flag_{{flag_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture flag screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "flag_counter",
+      "value": "{{flag_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment flag counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{flag_counter < feature_flags_to_manage}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more flags"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next flag"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/application_feature_flag_management_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
