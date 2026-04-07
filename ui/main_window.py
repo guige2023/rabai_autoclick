@@ -1678,18 +1678,18 @@ class MainWindow(QMainWindow):
 
             show_toast(f"循环设置: {self._loop_count}次, 间隔{self._loop_interval}秒", 'success')
             app_logger.info(f"循环设置: {self._loop_count}次, 间隔{self._loop_interval}秒", "UI")
-    
-    def _on_show_stats(self):
+
+    def _on_show_stats(self) -> None:
         dialog = StatsDialog(self)
         dialog.exec_()
-    
-    def _on_memory_optimize(self):
+
+    def _on_memory_optimize(self) -> None:
         """内存优化"""
         menu = QMenu(self)
         optimize_action = menu.addAction("🧹 立即优化")
         clear_cache_action = menu.addAction("🗑 清除缓存")
         status_action = menu.addAction("📊 内存状态")
-        
+
         action = menu.exec_(QCursor.pos())
         
         if action == optimize_action:
