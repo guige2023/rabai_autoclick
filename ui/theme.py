@@ -38,6 +38,12 @@ class ThemeColors:
         "error": "#f44336",
         "error_hover": "#da190b",
 
+        # Accent colors
+        "accent": "#00BCD4",
+        "accent_hover": "#00ACC1",
+        "info": "#03A9F4",
+        "info_hover": "#039BE5",
+
         # Background colors
         "bg_main": "#f5f5f5",
         "bg_widget": "#ffffff",
@@ -78,6 +84,148 @@ class ThemeColors:
         "log_critical": "#f44336",
 
         # Status bar / dark widgets
+        "status_bar": "#1e1e1e",
+        "status_text": "#d4d4d4",
+
+        # Selection highlight
+        "selection": "#bbdefb",
+        "selection_hover": "#90caf9",
+
+        # Shadow
+        "shadow": "rgba(0, 0, 0, 0.15)",
+        "shadow_dark": "rgba(0, 0, 0, 0.3)",
+    }
+
+    # Dark theme colors (same keys, different values)
+    DARK = {
+        # Primary colors - slightly brighter for dark mode
+        "primary": "#64B5F6",
+        "primary_hover": "#90CAF9",
+        "primary_active": "#42A5F5",
+        "success": "#81C784",
+        "success_hover": "#A5D6A7",
+        "warning": "#FFB74D",
+        "warning_hover": "#FFCC80",
+        "error": "#EF9A9A",
+        "error_hover": "#FFABAB",
+
+        # Accent colors
+        "accent": "#4DD0E1",
+        "accent_hover": "#80DEEA",
+        "info": "#29B6F6",
+        "info_hover": "#4FC3F7",
+
+        # Background colors - dark
+        "bg_main": "#1e1e1e",
+        "bg_widget": "#2d2d2d",
+        "bg_toolbar": "#252525",
+        "bg_panel": "#333333",
+        "bg_hover": "#3d3d3d",
+        "bg_active": "#4d4d4d",
+
+        # Dark theme specific backgrounds (same as bg_* for dark)
+        "bg_dark_main": "#2d2d2d",
+        "bg_dark_widget": "#3d3d3d",
+        "bg_dark_toolbar": "#252525",
+        "bg_dark_hover": "#4d4d4d",
+        "bg_dark_active": "#5d5d5d",
+
+        # Text colors - inverted for dark mode
+        "text_primary": "#ffffff",
+        "text_secondary": "#d4d4d4",
+        "text_disabled": "#888888",
+        "text_on_primary": "#ffffff",
+
+        # Dark theme text
+        "text_dark_primary": "#ffffff",
+        "text_dark_secondary": "#d4d4d4",
+        "text_dark_disabled": "#888888",
+
+        # Border colors
+        "border": "#555555",
+        "border_focus": "#64B5F6",
+        "border_dark": "#555",
+
+        # Log colors - brighter for dark mode
+        "log_debug": "#888888",
+        "log_info": "#4fc3f7",
+        "log_success": "#81c784",
+        "log_warning": "#ffb74d",
+        "log_error": "#e57373",
+        "log_critical": "#f44336",
+
+        # Status bar / dark widgets
+        "status_bar": "#1e1e1e",
+        "status_text": "#d4d4d4",
+
+        # Selection highlight
+        "selection": "#1e3a5f",
+        "selection_hover": "#2e5a8f",
+
+        # Shadow
+        "shadow": "rgba(0, 0, 0, 0.4)",
+        "shadow_dark": "rgba(0, 0, 0, 0.6)",
+    }
+
+
+class AccentColors:
+    """Additional accent color presets for customization."""
+
+    # Ocean Blue
+    OCEAN = {
+        "primary": "#0077B6",
+        "primary_hover": "#00A8E8",
+        "primary_active": "#005F8A",
+    }
+
+    # Forest Green
+    FOREST = {
+        "primary": "#2D6A4F",
+        "primary_hover": "#40916C",
+        "primary_active": "#1B4332",
+    }
+
+    # Sunset Orange
+    SUNSET = {
+        "primary": "#FF6B35",
+        "primary_hover": "#FF8C5A",
+        "primary_active": "#E55A2B",
+    }
+
+    # Purple Rain
+    PURPLE = {
+        "primary": "#7B2CBF",
+        "primary_hover": "#9D4EDD",
+        "primary_active": "#5A189A",
+    }
+
+    # Rose Pink
+    ROSE = {
+        "primary": "#E91E63",
+        "primary_hover": "#F06292",
+        "primary_active": "#C2185B",
+    }
+
+    # Midnight
+    MIDNIGHT = {
+        "primary": "#311B92",
+        "primary_hover": "#512DA8",
+        "primary_active": "#1A0A6B",
+    }
+
+    # Teal
+    TEAL = {
+        "primary": "#00897B",
+        "primary_hover": "#26A69A",
+        "primary_active": "#00695C",
+    }
+
+    # Amber
+    AMBER = {
+        "primary": "#FF8F00",
+        "primary_hover": "#FFA726",
+        "primary_active": "#E65100",
+    }
         "status_bar": "#1e1e1e",
         "status_text": "#d4d4d4",
     }
