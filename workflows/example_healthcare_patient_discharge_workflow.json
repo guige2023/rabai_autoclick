@@ -1,0 +1,192 @@
+{
+  "name": "Healthcare Patient Discharge Workflow",
+  "description": "Automate patient discharge process including discharge summary, medication reconciliation, and follow-up scheduling",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "patients_to_discharge": 30,
+    "current_patient": 0,
+    "discharged_patients": 0,
+    "pending_signatures": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "patient_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize patient counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open EHR discharge module"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for EHR to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "discharge_loop",
+      "count": "{{patients_to_discharge}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start discharge loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 180,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select patient for discharge"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for patient record"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/patient_record_{{patient_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture patient record"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 350,
+      "y": 250,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Review discharge checklist"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for checklist"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 450,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Complete medication reconciliation"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for reconciliation"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 500,
+      "y": 350,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Generate discharge summary"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for summary generation"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/discharge_summary_{{patient_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture discharge summary"
+    },
+    {
+      "id": 15,
+      "type": "click",
+      "x": 550,
+      "y": 400,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Schedule follow-up appointment"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for scheduling"
+    },
+    {
+      "id": 17,
+      "type": "set_variable",
+      "name": "patient_counter",
+      "value": "{{patient_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment patient counter"
+    },
+    {
+      "id": 18,
+      "type": "condition",
+      "condition": "{{patient_counter < patients_to_discharge}}",
+      "true_next": 19,
+      "false_next": 20,
+      "pre_delay": 0.1,
+      "comment": "Check if more patients"
+    },
+    {
+      "id": 19,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next patient"
+    },
+    {
+      "id": 20,
+      "type": "screenshot",
+      "save_path": "./screenshots/discharge_batch_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture batch completion"
+    },
+    {
+      "id": 21,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}

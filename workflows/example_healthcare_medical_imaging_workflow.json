@@ -1,0 +1,192 @@
+{
+  "name": "Healthcare Medical Imaging Workflow",
+  "description": "Automate medical imaging workflow from order to results distribution",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "imaging_orders": 40,
+    "current_order": 0,
+    "completed_studies": 0,
+    "pending_radiologist_review": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "order_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize order counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open PACS imaging system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for PACS to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "imaging_workflow_loop",
+      "count": "{{imaging_orders}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start imaging workflow loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 150,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Open imaging order"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for order details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/imaging_order_{{order_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture order details"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 300,
+      "y": 220,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Verify patient safety checklist"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for checklist"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 400,
+      "y": 280,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Schedule imaging appointment"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for scheduling"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 500,
+      "y": 340,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Process imaging results"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for processing"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/imaging_results_{{order_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture imaging results"
+    },
+    {
+      "id": 15,
+      "type": "click",
+      "x": 600,
+      "y": 400,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Distribute results to ordering physician"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for distribution"
+    },
+    {
+      "id": 17,
+      "type": "set_variable",
+      "name": "order_counter",
+      "value": "{{order_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment order counter"
+    },
+    {
+      "id": 18,
+      "type": "condition",
+      "condition": "{{order_counter < imaging_orders}}",
+      "true_next": 19,
+      "false_next": 20,
+      "pre_delay": 0.1,
+      "comment": "Check if more orders"
+    },
+    {
+      "id": 19,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next order"
+    },
+    {
+      "id": 20,
+      "type": "screenshot",
+      "save_path": "./screenshots/imaging_batch_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture batch completion"
+    },
+    {
+      "id": 21,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
