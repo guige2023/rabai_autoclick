@@ -1,22 +1,19 @@
-"""Hashing and encryption action module for RabAI AutoClick.
+"""Hash action module for RabAI AutoClick.
 
-Provides cryptographic operations:
-- HashMd5Action: MD5 hash
-- HashSha1Action: SHA-1 hash
-- HashSha256Action: SHA-256 hash
-- HashSha512Action: SHA-512 hash
-- HashHmacAction: HMAC authentication
-- HashBcryptAction: Bcrypt password hash
-- HashAesEncryptAction: AES encryption
-- HashAesDecryptAction: AES decryption
-- HashBase64EncodeAction: Base64 encoding
-- HashBase64DecodeAction: Base64 decoding
-- HashHexEncodeAction: Hex encoding
-- HashHexDecodeAction: Hex decoding
-- HashUuidAction: Generate UUID
-- HashCRC32Action: CRC32 checksum
+Provides cryptographic hash operations:
+- HashMd5Action: Calculate MD5 hash
+- HashSha256Action: Calculate SHA256 hash
+- HashSha512Action: Calculate SHA512 hash
+- HashHmacAction: Calculate HMAC
+- HashBlake2Action: Calculate BLAKE2 hash
+- HashPasswordAction: Hash password
+- HashVerifyAction: Verify hash
+- HashFileAction: Calculate file hash
 """
 
+import hashlib
+import hmac
+import os
 from typing import Any, Dict, List, Optional
 
 import sys
@@ -26,823 +23,514 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-try:
-    import hashlib
-    import hmac
-    import base64
-    import uuid as uuid_module
-    import zlib
-    HASH_AVAILABLE = True
-except ImportError:
-    HASH_AVAILABLE = False
-
-
 class HashMd5Action(BaseAction):
-    """MD5 hash."""
+    """Calculate MD5 hash."""
     action_type = "hash_md5"
     display_name = "MD5哈希"
     description = "计算MD5哈希值"
+    version = "1.0"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute MD5 hash.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, encoding, output_var.
-
-        Returns:
-            ActionResult with hash value.
-        """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="哈希库不可用")
-
-        data = params.get('data', '')
-        encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'hash_result')
-
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
-
-        try:
-            if isinstance(data, str):
-                data_bytes = data.encode(encoding)
-            else:
-                data_bytes = data
-
-            hash_value = hashlib.md5(data_bytes).hexdigest()
-
-            context.set(output_var, hash_value)
-
-            return ActionResult(
-                success=True,
-                message=f"MD5哈希成功: {hash_value}",
-                data={'hash': hash_value, 'algorithm': 'md5'}
-            )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"MD5哈希失败: {str(e)}"
-            )
-
-
-class HashSha1Action(BaseAction):
-    """SHA-1 hash."""
-    action_type = "hash_sha1"
-    display_name = "SHA1哈希"
-    description = "计算SHA-1哈希值"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute SHA-1 hash.
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute MD5.
 
         Args:
             context: Execution context.
             params: Dict with data, encoding, output_var.
 
         Returns:
-            ActionResult with hash value.
+            ActionResult with hash.
         """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="哈希库不可用")
-
         data = params.get('data', '')
         encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'hash_result')
+        output_var = params.get('output_var', 'hash_md5')
 
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
+        valid, msg = self.validate_type(data, str, 'data')
+        if not valid:
+            return ActionResult(success=False, message=msg)
 
         try:
-            if isinstance(data, str):
-                data_bytes = data.encode(encoding)
-            else:
-                data_bytes = data
+            resolved_data = context.resolve_value(data)
+            resolved_enc = context.resolve_value(encoding)
 
-            hash_value = hashlib.sha1(data_bytes).hexdigest()
-
-            context.set(output_var, hash_value)
+            hash_val = hashlib.md5(str(resolved_data).encode(resolved_enc)).hexdigest()
+            context.set(output_var, hash_val)
 
             return ActionResult(
                 success=True,
-                message=f"SHA1哈希成功: {hash_value}",
-                data={'hash': hash_value, 'algorithm': 'sha1'}
+                message=f"MD5: {hash_val}",
+                data={'hash': hash_val, 'algorithm': 'md5', 'output_var': output_var}
             )
-
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"SHA1哈希失败: {str(e)}"
+                message=f"MD5计算失败: {str(e)}"
             )
+
+    def get_required_params(self) -> List[str]:
+        return ['data']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'encoding': 'utf-8', 'output_var': 'hash_md5'}
 
 
 class HashSha256Action(BaseAction):
-    """SHA-256 hash."""
+    """Calculate SHA256 hash."""
     action_type = "hash_sha256"
     display_name = "SHA256哈希"
-    description = "计算SHA-256哈希值"
+    description = "计算SHA256哈希值"
+    version = "1.0"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute SHA-256 hash.
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute SHA256.
 
         Args:
             context: Execution context.
             params: Dict with data, encoding, output_var.
 
         Returns:
-            ActionResult with hash value.
+            ActionResult with hash.
         """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="哈希库不可用")
-
         data = params.get('data', '')
         encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'hash_result')
+        output_var = params.get('output_var', 'hash_sha256')
 
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
+        valid, msg = self.validate_type(data, str, 'data')
+        if not valid:
+            return ActionResult(success=False, message=msg)
 
         try:
-            if isinstance(data, str):
-                data_bytes = data.encode(encoding)
-            else:
-                data_bytes = data
+            resolved_data = context.resolve_value(data)
+            resolved_enc = context.resolve_value(encoding)
 
-            hash_value = hashlib.sha256(data_bytes).hexdigest()
-
-            context.set(output_var, hash_value)
+            hash_val = hashlib.sha256(str(resolved_data).encode(resolved_enc)).hexdigest()
+            context.set(output_var, hash_val)
 
             return ActionResult(
                 success=True,
-                message=f"SHA256哈希成功: {hash_value}",
-                data={'hash': hash_value, 'algorithm': 'sha256'}
+                message=f"SHA256: {hash_val[:16]}...",
+                data={'hash': hash_val, 'algorithm': 'sha256', 'output_var': output_var}
             )
-
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"SHA256哈希失败: {str(e)}"
+                message=f"SHA256计算失败: {str(e)}"
             )
+
+    def get_required_params(self) -> List[str]:
+        return ['data']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'encoding': 'utf-8', 'output_var': 'hash_sha256'}
 
 
 class HashSha512Action(BaseAction):
-    """SHA-512 hash."""
+    """Calculate SHA512 hash."""
     action_type = "hash_sha512"
     display_name = "SHA512哈希"
-    description = "计算SHA-512哈希值"
+    description = "计算SHA512哈希值"
+    version = "1.0"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute SHA-512 hash.
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute SHA512.
 
         Args:
             context: Execution context.
             params: Dict with data, encoding, output_var.
 
         Returns:
-            ActionResult with hash value.
+            ActionResult with hash.
         """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="哈希库不可用")
-
         data = params.get('data', '')
         encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'hash_result')
+        output_var = params.get('output_var', 'hash_sha512')
 
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
+        valid, msg = self.validate_type(data, str, 'data')
+        if not valid:
+            return ActionResult(success=False, message=msg)
 
         try:
-            if isinstance(data, str):
-                data_bytes = data.encode(encoding)
-            else:
-                data_bytes = data
+            resolved_data = context.resolve_value(data)
+            resolved_enc = context.resolve_value(encoding)
 
-            hash_value = hashlib.sha512(data_bytes).hexdigest()
-
-            context.set(output_var, hash_value)
+            hash_val = hashlib.sha512(str(resolved_data).encode(resolved_enc)).hexdigest()
+            context.set(output_var, hash_val)
 
             return ActionResult(
                 success=True,
-                message=f"SHA512哈希成功: {hash_value}",
-                data={'hash': hash_value, 'algorithm': 'sha512'}
+                message=f"SHA512: {hash_val[:16]}...",
+                data={'hash': hash_val, 'algorithm': 'sha512', 'output_var': output_var}
             )
-
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"SHA512哈希失败: {str(e)}"
+                message=f"SHA512计算失败: {str(e)}"
             )
+
+    def get_required_params(self) -> List[str]:
+        return ['data']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'encoding': 'utf-8', 'output_var': 'hash_sha512'}
 
 
 class HashHmacAction(BaseAction):
-    """HMAC authentication."""
+    """Calculate HMAC."""
     action_type = "hash_hmac"
     display_name = "HMAC哈希"
-    description = "计算HMAC认证码"
+    description = "计算HMAC"
+    version = "1.0"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute HMAC hash.
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute HMAC.
 
         Args:
             context: Execution context.
             params: Dict with data, key, algorithm, encoding, output_var.
 
         Returns:
-            ActionResult with HMAC value.
+            ActionResult with HMAC.
         """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="哈希库不可用")
-
         data = params.get('data', '')
         key = params.get('key', '')
         algorithm = params.get('algorithm', 'sha256')
         encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'hmac_result')
+        output_var = params.get('output_var', 'hash_hmac')
 
-        if not data or not key:
-            return ActionResult(success=False, message="数据和密钥都不能为空")
+        valid, msg = self.validate_type(data, str, 'data')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        valid, msg = self.validate_type(key, str, 'key')
+        if not valid:
+            return ActionResult(success=False, message=msg)
 
         try:
-            if isinstance(data, str):
-                data_bytes = data.encode(encoding)
-            else:
-                data_bytes = data
+            resolved_data = context.resolve_value(data)
+            resolved_key = context.resolve_value(key)
+            resolved_algo = context.resolve_value(algorithm)
+            resolved_enc = context.resolve_value(encoding)
 
-            if isinstance(key, str):
-                key_bytes = key.encode(encoding)
-            else:
-                key_bytes = key
+            algo_map = {
+                'md5': 'md5', 'sha1': 'sha1', 'sha256': 'sha256',
+                'sha384': 'sha384', 'sha512': 'sha512'
+            }
+            algo = algo_map.get(resolved_algo, 'sha256')
 
-            hash_func = getattr(hashlib, algorithm, hashlib.sha256)
-            hmac_value = hmac.new(key_bytes, data_bytes, hash_func).hexdigest()
+            hash_val = hmac.new(
+                resolved_key.encode(resolved_enc),
+                str(resolved_data).encode(resolved_enc),
+                getattr(hashlib, algo)
+            ).hexdigest()
 
-            context.set(output_var, hmac_value)
+            context.set(output_var, hash_val)
 
             return ActionResult(
                 success=True,
-                message=f"HMAC哈希成功: {hmac_value}",
-                data={'hmac': hmac_value, 'algorithm': algorithm}
+                message=f"HMAC-{resolved_algo.upper()}: {hash_val[:16]}...",
+                data={'hash': hash_val, 'algorithm': resolved_algo, 'output_var': output_var}
             )
-
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"HMAC哈希失败: {str(e)}"
+                message=f"HMAC计算失败: {str(e)}"
             )
 
+    def get_required_params(self) -> List[str]:
+        return ['data', 'key']
 
-class HashBase64EncodeAction(BaseAction):
-    """Base64 encoding."""
-    action_type = "hash_base64_encode"
-    display_name = "Base64编码"
-    description = "Base64编码数据"
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'algorithm': 'sha256', 'encoding': 'utf-8', 'output_var': 'hash_hmac'}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute Base64 encoding.
+
+class HashBlake2Action(BaseAction):
+    """Calculate BLAKE2 hash."""
+    action_type = "hash_blake2"
+    display_name = "BLAKE2哈希"
+    description = "计算BLAKE2哈希值"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute BLAKE2.
 
         Args:
             context: Execution context.
-            params: Dict with data, encoding, output_var.
+            params: Dict with data, digest_size, key, encoding, output_var.
 
         Returns:
-            ActionResult with encoded string.
+            ActionResult with hash.
         """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="Base64库不可用")
-
         data = params.get('data', '')
+        digest_size = params.get('digest_size', 32)
+        key = params.get('key', '')
         encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'base64_result')
-
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
-
-        try:
-            if isinstance(data, str):
-                data_bytes = data.encode(encoding)
-            else:
-                data_bytes = data
-
-            encoded = base64.b64encode(data_bytes).decode(encoding)
-
-            context.set(output_var, encoded)
-
-            return ActionResult(
-                success=True,
-                message=f"Base64编码成功: {encoded}",
-                data={'encoded': encoded}
-            )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Base64编码失败: {str(e)}"
-            )
-
-
-class HashBase64DecodeAction(BaseAction):
-    """Base64 decoding."""
-    action_type = "hash_base64_decode"
-    display_name = "Base64解码"
-    description = "Base64解码数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute Base64 decoding.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, encoding, output_var.
-
-        Returns:
-            ActionResult with decoded string.
-        """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="Base64库不可用")
-
-        data = params.get('data', '')
-        encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'base64_result')
-
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
+        output_var = params.get('output_var', 'hash_blake2')
 
         valid, msg = self.validate_type(data, str, 'data')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
-            decoded_bytes = base64.b64decode(data)
-            decoded = decoded_bytes.decode(encoding, errors='replace')
+            resolved_data = context.resolve_value(data)
+            resolved_size = context.resolve_value(digest_size)
+            resolved_key = context.resolve_value(key) if key else None
+            resolved_enc = context.resolve_value(encoding)
 
-            context.set(output_var, decoded)
-
-            return ActionResult(
-                success=True,
-                message="Base64解码成功",
-                data={'decoded': decoded}
-            )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Base64解码失败: {str(e)}"
-            )
-
-
-class HashHexEncodeAction(BaseAction):
-    """Hex encoding."""
-    action_type = "hash_hex_encode"
-    display_name = "Hex编码"
-    description = "十六进制编码数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute Hex encoding.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, output_var.
-
-        Returns:
-            ActionResult with hex string.
-        """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="哈希库不可用")
-
-        data = params.get('data', '')
-        output_var = params.get('output_var', 'hex_result')
-
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
-
-        try:
-            if isinstance(data, str):
-                data_bytes = data.encode('utf-8')
+            if resolved_key:
+                hash_val = hashlib.blake2b(
+                    str(resolved_data).encode(resolved_enc),
+                    key=resolved_key.encode(resolved_enc),
+                    digest_size=int(resolved_size)
+                ).hexdigest()
             else:
-                data_bytes = data
+                hash_val = hashlib.blake2b(
+                    str(resolved_data).encode(resolved_enc),
+                    digest_size=int(resolved_size)
+                ).hexdigest()
 
-            hex_value = data_bytes.hex()
-
-            context.set(output_var, hex_value)
+            context.set(output_var, hash_val)
 
             return ActionResult(
                 success=True,
-                message=f"Hex编码成功: {hex_value}",
-                data={'hex': hex_value}
+                message=f"BLAKE2b: {hash_val[:16]}...",
+                data={'hash': hash_val, 'algorithm': 'blake2b', 'output_var': output_var}
             )
-
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"Hex编码失败: {str(e)}"
+                message=f"BLAKE2计算失败: {str(e)}"
             )
 
+    def get_required_params(self) -> List[str]:
+        return ['data']
 
-class HashHexDecodeAction(BaseAction):
-    """Hex decoding."""
-    action_type = "hash_hex_decode"
-    display_name = "Hex解码"
-    description = "十六进制解码数据"
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'digest_size': 32, 'key': '', 'encoding': 'utf-8', 'output_var': 'hash_blake2'}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute Hex decoding.
+
+class HashPasswordAction(BaseAction):
+    """Hash password."""
+    action_type = "hash_password"
+    display_name = "密码哈希"
+    description = "使用bcrypt哈希密码"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute password hash.
 
         Args:
             context: Execution context.
-            params: Dict with data, encoding, output_var.
+            params: Dict with password, rounds, output_var.
 
         Returns:
-            ActionResult with decoded string.
+            ActionResult with hash.
         """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="哈希库不可用")
+        password = params.get('password', '')
+        rounds = params.get('rounds', 12)
+        output_var = params.get('output_var', 'password_hash')
 
-        data = params.get('data', '')
-        encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'hex_result')
-
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
-
-        valid, msg = self.validate_type(data, str, 'data')
+        valid, msg = self.validate_type(password, str, 'password')
         if not valid:
             return ActionResult(success=False, message=msg)
 
-        try:
-            decoded_bytes = bytes.fromhex(data)
-            decoded = decoded_bytes.decode(encoding, errors='replace')
-
-            context.set(output_var, decoded)
-
-            return ActionResult(
-                success=True,
-                message="Hex解码成功",
-                data={'decoded': decoded}
-            )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Hex解码失败: {str(e)}"
-            )
-
-
-class HashUuidAction(BaseAction):
-    """Generate UUID."""
-    action_type = "hash_uuid"
-    display_name = "生成UUID"
-    description = "生成通用唯一标识符"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute UUID generation.
-
-        Args:
-            context: Execution context.
-            params: Dict with version, output_var.
-
-        Returns:
-            ActionResult with UUID.
-        """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="UUID库不可用")
-
-        version = params.get('version', 4)
-        output_var = params.get('output_var', 'uuid_result')
-
-        try:
-            if version == 1:
-                uuid_value = uuid_module.uuid1()
-            elif version == 4:
-                uuid_value = uuid_module.uuid4()
-            else:
-                uuid_value = uuid_module.uuid4()
-
-            uuid_str = str(uuid_value)
-
-            context.set(output_var, uuid_str)
-
-            return ActionResult(
-                success=True,
-                message=f"UUID生成成功: {uuid_str}",
-                data={'uuid': uuid_str, 'version': version}
-            )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"UUID生成失败: {str(e)}"
-            )
-
-
-class HashCRC32Action(BaseAction):
-    """CRC32 checksum."""
-    action_type = "hash_crc32"
-    display_name = "CRC32校验"
-    description = "计算CRC32校验和"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute CRC32 checksum.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, encoding, output_var.
-
-        Returns:
-            ActionResult with CRC32 value.
-        """
-        if not HASH_AVAILABLE:
-            return ActionResult(success=False, message="zlib库不可用")
-
-        data = params.get('data', '')
-        encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'crc32_result')
-
-        if not data:
-            return ActionResult(success=False, message="数据不能为空")
-
-        try:
-            if isinstance(data, str):
-                data_bytes = data.encode(encoding)
-            else:
-                data_bytes = data
-
-            crc = zlib.crc32(data_bytes) & 0xffffffff
-            crc_hex = format(crc, '08x')
-
-            context.set(output_var, crc)
-
-            return ActionResult(
-                success=True,
-                message=f"CRC32校验成功: {crc} ({crc_hex})",
-                data={'crc32': crc, 'crc32_hex': crc_hex}
-            )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"CRC32校验失败: {str(e)}"
-            )
-
-
-class HashBcryptAction(BaseAction):
-    """Bcrypt password hash."""
-    action_type = "hash_bcrypt"
-    display_name = "Bcrypt哈希"
-    description = "Bcrypt密码哈希"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute Bcrypt hash.
-
-        Args:
-            context: Execution context.
-            params: Dict with password, salt_rounds, output_var.
-
-        Returns:
-            ActionResult with hashed password.
-        """
         try:
             import bcrypt
-        except ImportError:
-            return ActionResult(success=False, message="bcrypt库不可用，请安装: pip install bcrypt")
 
-        password = params.get('password', '')
-        salt_rounds = params.get('salt_rounds', 12)
-        output_var = params.get('output_var', 'bcrypt_result')
+            resolved_pwd = context.resolve_value(password)
+            resolved_rounds = context.resolve_value(rounds)
 
-        if not password:
-            return ActionResult(success=False, message="密码不能为空")
-
-        try:
-            password_bytes = password.encode('utf-8')
-            salt = bcrypt.gensalt(rounds=salt_rounds)
-            hashed = bcrypt.hashpw(password_bytes, salt).decode('utf-8')
+            salt = bcrypt.gensalt(rounds=int(resolved_rounds))
+            hashed = bcrypt.hashpw(resolved_pwd.encode('utf-8'), salt).decode('utf-8')
 
             context.set(output_var, hashed)
 
             return ActionResult(
                 success=True,
-                message="Bcrypt哈希成功",
-                data={'hashed': hashed}
+                message=f"密码已哈希",
+                data={'hash': hashed, 'output_var': output_var}
             )
-
+        except ImportError:
+            return ActionResult(
+                success=False,
+                message="bcrypt未安装: pip install bcrypt"
+            )
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"Bcrypt哈希失败: {str(e)}"
+                message=f"密码哈希失败: {str(e)}"
             )
 
+    def get_required_params(self) -> List[str]:
+        return ['password']
 
-class HashBcryptVerifyAction(BaseAction):
-    """Bcrypt password verify."""
-    action_type = "hash_bcrypt_verify"
-    display_name = "Bcrypt验证"
-    description = "验证Bcrypt密码哈希"
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'rounds': 12, 'output_var': 'password_hash'}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute Bcrypt verify.
+
+class HashVerifyAction(BaseAction):
+    """Verify hash."""
+    action_type = "hash_verify"
+    display_name = "验证哈希"
+    description = "验证密码哈希"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute verify.
 
         Args:
             context: Execution context.
-            params: Dict with password, hashed, output_var.
+            params: Dict with password, hash, output_var.
 
         Returns:
             ActionResult with verification result.
         """
+        password = params.get('password', '')
+        hash_val = params.get('hash', '')
+        output_var = params.get('output_var', 'hash_valid')
+
+        valid, msg = self.validate_type(password, str, 'password')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        valid, msg = self.validate_type(hash_val, str, 'hash')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
         try:
             import bcrypt
-        except ImportError:
-            return ActionResult(success=False, message="bcrypt库不可用，请安装: pip install bcrypt")
 
-        password = params.get('password', '')
-        hashed = params.get('hashed', '')
-        output_var = params.get('output_var', 'verify_result')
+            resolved_pwd = context.resolve_value(password)
+            resolved_hash = context.resolve_value(hash_val)
 
-        if not password or not hashed:
-            return ActionResult(success=False, message="密码和哈希值都不能为空")
-
-        try:
-            password_bytes = password.encode('utf-8')
-            hashed_bytes = hashed.encode('utf-8')
-            matches = bcrypt.checkpw(password_bytes, hashed_bytes)
-
-            context.set(output_var, matches)
+            valid = bcrypt.checkpw(resolved_pwd.encode('utf-8'), resolved_hash.encode('utf-8'))
+            context.set(output_var, valid)
 
             return ActionResult(
                 success=True,
-                message="密码验证" + ("成功" if matches else "失败"),
-                data={'matches': matches}
+                message=f"密码验证: {'通过' if valid else '失败'}",
+                data={'valid': valid, 'output_var': output_var}
             )
-
-        except Exception as e:
+        except ImportError:
             return ActionResult(
                 success=False,
-                message=f"密码验证失败: {str(e)}"
+                message="bcrypt未安装"
+            )
+        except Exception as e:
+            context.set(output_var, False)
+            return ActionResult(
+                success=False,
+                message=f"密码验证失败: {str(e)}",
+                data={'valid': False, 'output_var': output_var}
             )
 
+    def get_required_params(self) -> List[str]:
+        return ['password', 'hash']
 
-class HashAesEncryptAction(BaseAction):
-    """AES encryption."""
-    action_type = "hash_aes_encrypt"
-    display_name = "AES加密"
-    description = "AES对称加密"
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'output_var': 'hash_valid'}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute AES encryption.
+
+class HashFileAction(BaseAction):
+    """Calculate file hash."""
+    action_type = "hash_file"
+    display_name = "文件哈希"
+    description = "计算文件哈希值"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute file hash.
 
         Args:
             context: Execution context.
-            params: Dict with data, key, iv, mode, encoding, output_var.
+            params: Dict with file_path, algorithm, output_var.
 
         Returns:
-            ActionResult with encrypted data.
+            ActionResult with hash.
         """
-        try:
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.backends import default_backend
-            from cryptography.hazmat.primitives import padding
-        except ImportError:
-            return ActionResult(success=False, message="cryptography库不可用，请安装: pip install cryptography")
+        file_path = params.get('file_path', '')
+        algorithm = params.get('algorithm', 'sha256')
+        output_var = params.get('output_var', 'file_hash')
 
-        data = params.get('data', '')
-        key = params.get('key', '')
-        iv = params.get('iv', None)
-        mode = params.get('mode', 'cbc')
-        encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'aes_result')
-
-        if not data or not key:
-            return ActionResult(success=False, message="数据和密钥都不能为空")
+        valid, msg = self.validate_type(file_path, str, 'file_path')
+        if not valid:
+            return ActionResult(success=False, message=msg)
 
         try:
-            if isinstance(data, str):
-                data_bytes = data.encode(encoding)
-            else:
-                data_bytes = data
+            import hashlib
 
-            if isinstance(key, str):
-                key_bytes = key.encode(encoding)
-            else:
-                key_bytes = key
+            resolved_path = context.resolve_value(file_path)
+            resolved_algo = context.resolve_value(algorithm)
 
-            if len(key_bytes) not in [16, 24, 32]:
-                return ActionResult(success=False, message="密钥长度必须是16/24/32字节")
+            if not os.path.exists(resolved_path):
+                return ActionResult(
+                    success=False,
+                    message=f"文件不存在: {resolved_path}"
+                )
 
-            if iv is None:
-                import os
-                iv_bytes = os.urandom(16)
-            elif isinstance(iv, str):
-                iv_bytes = iv.encode(encoding)
-            else:
-                iv_bytes = iv
-
-            padder = padding.PKCS7(128).padder()
-            padded_data = padder.update(data_bytes) + padder.finalize()
-
-            if mode == 'cbc':
-                cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv_bytes), backend=default_backend())
-            else:
-                cipher = Cipher(algorithms.AES(key_bytes), modes.ECB(), backend=default_backend())
-                iv_bytes = None
-
-            encryptor = cipher.encryptor()
-            encrypted = encryptor.update(padded_data) + encryptor.finalize()
-
-            import base64
-            encrypted_b64 = base64.b64encode(encrypted).decode(encoding)
-
-            result = {
-                'encrypted': encrypted_b64,
-                'iv': base64.b64encode(iv_bytes).decode(encoding) if iv_bytes else None
+            algo_map = {
+                'md5': hashlib.md5, 'sha1': hashlib.sha1,
+                'sha256': hashlib.sha256, 'sha512': hashlib.sha512
             }
 
-            context.set(output_var, result)
+            if resolved_algo not in algo_map:
+                return ActionResult(
+                    success=False,
+                    message=f"不支持的算法: {resolved_algo}"
+                )
+
+            hasher = algo_map[resolved_algo]()
+
+            with open(resolved_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(8192), b''):
+                    hasher.update(chunk)
+
+            hash_val = hasher.hexdigest()
+            context.set(output_var, hash_val)
 
             return ActionResult(
                 success=True,
-                message="AES加密成功",
-                data=result
+                message=f"文件{resolved_algo}: {hash_val[:16]}...",
+                data={'hash': hash_val, 'algorithm': resolved_algo, 'output_var': output_var}
             )
-
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"AES加密失败: {str(e)}"
+                message=f"文件哈希计算失败: {str(e)}"
             )
 
+    def get_required_params(self) -> List[str]:
+        return ['file_path']
 
-class HashAesDecryptAction(BaseAction):
-    """AES decryption."""
-    action_type = "hash_aes_decrypt"
-    display_name = "AES解密"
-    description = "AES对称解密"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute AES decryption.
-
-        Args:
-            context: Execution context.
-            params: Dict with encrypted_b64, key, iv, mode, encoding, output_var.
-
-        Returns:
-            ActionResult with decrypted data.
-        """
-        try:
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.backends import default_backend
-            from cryptography.hazmat.primitives import padding
-        except ImportError:
-            return ActionResult(success=False, message="cryptography库不可用，请安装: pip install cryptography")
-
-        encrypted_b64 = params.get('encrypted_b64', '')
-        key = params.get('key', '')
-        iv = params.get('iv', None)
-        mode = params.get('mode', 'cbc')
-        encoding = params.get('encoding', 'utf-8')
-        output_var = params.get('output_var', 'aes_result')
-
-        if not encrypted_b64 or not key:
-            return ActionResult(success=False, message="加密数据和密钥都不能为空")
-
-        try:
-            import base64
-            encrypted = base64.b64decode(encrypted_b64)
-
-            if isinstance(key, str):
-                key_bytes = key.encode(encoding)
-            else:
-                key_bytes = key
-
-            if len(key_bytes) not in [16, 24, 32]:
-                return ActionResult(success=False, message="密钥长度必须是16/24/32字节")
-
-            if iv is not None:
-                if isinstance(iv, str):
-                    iv_bytes = base64.b64decode(iv)
-                else:
-                    iv_bytes = iv
-            else:
-                iv_bytes = None
-
-            if mode == 'cbc' and iv_bytes:
-                cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv_bytes), backend=default_backend())
-            else:
-                cipher = Cipher(algorithms.AES(key_bytes), modes.ECB(), backend=default_backend())
-
-            decryptor = cipher.decryptor()
-            decrypted_padded = decryptor.update(encrypted) + decryptor.finalize()
-
-            unpadder = padding.PKCS7(128).unpadder()
-            decrypted = unpadder.update(decrypted_padded) + unpadder.finalize()
-            decrypted_str = decrypted.decode(encoding, errors='replace')
-
-            context.set(output_var, decrypted_str)
-
-            return ActionResult(
-                success=True,
-                message="AES解密成功",
-                data={'decrypted': decrypted_str}
-            )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"AES解密失败: {str(e)}"
-            )
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'algorithm': 'sha256', 'output_var': 'file_hash'}
