@@ -174,18 +174,18 @@ class HotkeyEdit(QLineEdit):
 
 class HotkeySettingsDialog(QDialog):
     """Dialog for configuring global hotkeys.
-    
+
     Allows users to set hotkeys for workflow control (start/stop/pause),
     recording control, and display settings.
     """
-    
+
     def __init__(
         self,
         current_hotkeys: Dict[str, str],
         parent: Optional[QDialog] = None
     ) -> None:
         """Initialize the hotkey settings dialog.
-        
+
         Args:
             current_hotkeys: Dictionary of current hotkey assignments.
             parent: Optional parent widget.
@@ -194,11 +194,64 @@ class HotkeySettingsDialog(QDialog):
         self.setWindowTitle("快捷键设置")
         self.setMinimumWidth(400)
         self.hotkeys: Dict[str, str] = current_hotkeys.copy()
+        theme_manager.theme_changed.connect(self._on_theme_changed)
         self._init_ui()
-    
+
+    def _on_theme_changed(self, theme) -> None:
+        """Handle theme changes to update styling."""
+        self._apply_stylesheet()
+
+    def _apply_stylesheet(self) -> None:
+        """Apply themed stylesheet to the dialog."""
+        colors = theme_manager.colors
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {colors['bg_widget']};
+            }}
+            QLabel {{
+                color: {colors['text_primary']};
+            }}
+            QGroupBox {{
+                font-weight: bold;
+                border: 1px solid {colors['border']};
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: {colors['text_primary']};
+            }}
+            QFormLayout {{
+                spacing: 10;
+            }}
+            QFormLayout::item {{
+                padding: 5px 0;
+            }}
+        """)
+
+        # Apply styles to HotkeyEdit widgets
+        for edit in self.findChildren(HotkeyEdit):
+            edit.setStyleSheet(f"""
+                QLineEdit {{
+                    padding: 8px 12px;
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                    background-color: {colors['bg_widget']};
+                    color: {colors['text_primary']};
+                    font-size: 13px;
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid {colors['primary']};
+                }}
+            """)
+
     def _init_ui(self) -> None:
         """Initialize the dialog UI components."""
         layout = QVBoxLayout(self)
+        self._apply_stylesheet()
         
         info_label = QLabel(
             "点击输入框后按下新的快捷键进行设置\n"
