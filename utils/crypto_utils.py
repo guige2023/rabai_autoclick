@@ -1,194 +1,350 @@
 """
-Cryptographic utilities for hashing, HMAC, secure random, and encryption helpers.
+Cryptography and encoding utilities.
+
+Provides XOR cipher, Caesar cipher, substitution cipher,
+Base64 encoding/decoding, and simple hash functions.
 """
 
-import hashlib
-import hmac
-import secrets
+from __future__ import annotations
+
 import base64
-import string
-from typing import Union, Optional, Tuple
+import hashlib
+import math
 
 
-BytesOrStr = Union[bytes, str]
-
-
-def _to_bytes(data: BytesOrStr, encoding: str = "utf-8") -> bytes:
-    """Convert input to bytes."""
-    if isinstance(data, str):
-        return data.encode(encoding)
-    return data
-
-
-# === Hashing Functions ===
-
-def hash_sha256(data: BytesOrStr, raw: bool = False) -> Union[bytes, str]:
-    """Compute SHA-256 hash."""
-    h = hashlib.sha256(_to_bytes(data)).digest()
-    return h if raw else h.hex()
-
-
-def hash_sha512(data: BytesOrStr, raw: bool = False) -> Union[bytes, str]:
-    """Compute SHA-512 hash."""
-    h = hashlib.sha512(_to_bytes(data)).digest()
-    return h if raw else h.hex()
-
-
-def hash_blake2b(data: BytesOrStr, digest_size: int = 32, raw: bool = False) -> Union[bytes, str]:
-    """Compute BLAKE2b hash."""
-    h = hashlib.blake2b(_to_bytes(data), digest_size=digest_size).digest()
-    return h if raw else h.hex()
-
-
-# === Password Hashing ===
-
-def hash_password(
-    password: str,
-    salt: Optional[bytes] = None,
-    iterations: int = 100000,
-    digest_size: int = 32
-) -> Tuple[str, str]:
+def caesar_cipher(text: str, shift: int, decrypt: bool = False) -> str:
     """
-    Hash a password using PBKDF2-HMAC-SHA256.
+    Caesar cipher encryption/decryption.
+
+    Args:
+        text: Plain text
+        shift: Shift amount (positive for right)
+        decrypt: If True, decrypt instead of encrypt
 
     Returns:
-        (hex_hash, hex_salt) tuple
+        Encrypted/decrypted text.
     """
-    if salt is None:
-        salt = secrets.token_bytes(16)
-    elif isinstance(salt, str):
-        salt = salt.encode()
-
-    key = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode(),
-        salt,
-        iterations,
-        dklen=digest_size
-    )
-    return key.hex(), salt.hex()
+    if decrypt:
+        shift = -shift
+    result = []
+    for ch in text:
+        if 'a' <= ch <= 'z':
+            result.append(chr((ord(ch) - ord('a') + shift) % 26 + ord('a')))
+        elif 'A' <= ch <= 'Z':
+            result.append(chr((ord(ch) - ord('A') + shift) % 26 + ord('A')))
+        else:
+            result.append(ch)
+    return ''.join(result)
 
 
-def verify_password(
-    password: str,
-    hashed: str,
-    salt: Union[bytes, str],
-    iterations: int = 100000
-) -> bool:
-    """Verify a password against a stored hash."""
-    if isinstance(salt, str):
-        salt = bytes.fromhex(salt)
-    computed, _ = hash_password(password, salt, iterations)
-    return secrets.compare_digest(computed, hashed)
+def vigenere_cipher(text: str, key: str, decrypt: bool = False) -> str:
+    """
+    Vigenere cipher encryption/decryption.
+
+    Args:
+        text: Plain text
+        key: Keyword
+        decrypt: If True, decrypt
+
+    Returns:
+        Encrypted/decrypted text.
+    """
+    if not key:
+        return text
+    result = []
+    key_bytes = [ord(c.lower()) - ord('a') for c in key if c.isalpha()]
+    if not key_bytes:
+        return text
+    ki = 0
+    for ch in text:
+        if ch.isalpha():
+            base = ord('a') if ch.islower() else ord('A')
+            shift = key_bytes[ki % len(key_bytes)]
+            if decrypt:
+                shift = -shift
+            result.append(chr((ord(ch) - base + shift) % 26 + base))
+            ki += 1
+        else:
+            result.append(ch)
+    return ''.join(result)
 
 
-# === HMAC ===
+def xor_cipher(data: bytes, key: bytes) -> bytes:
+    """
+    XOR cipher (single-byte key or repeating key).
 
-def hmac_sha256(key: BytesOrStr, data: BytesOrStr, raw: bool = False) -> Union[bytes, str]:
-    """Compute HMAC-SHA256."""
-    h = hmac.new(_to_bytes(key), _to_bytes(data), hashlib.sha256).digest()
-    return h if raw else h.hex()
+    Args:
+        data: Data to encrypt/decrypt
+        key: Encryption key
 
-
-def hmac_sha512(key: BytesOrStr, data: BytesOrStr, raw: bool = False) -> Union[bytes, str]:
-    """Compute HMAC-SHA512."""
-    h = hmac.new(_to_bytes(key), _to_bytes(data), hashlib.sha512).digest()
-    return h if raw else h.hex()
-
-
-def hmac_verify(
-    key: BytesOrStr,
-    data: BytesOrStr,
-    signature: BytesOrStr
-) -> bool:
-    """Verify HMAC signature using constant-time comparison."""
-    if isinstance(signature, str):
-        signature = bytes.fromhex(signature)
-    expected = hmac.new(_to_bytes(key), _to_bytes(data), hashlib.sha256).digest()
-    return hmac.compare_digest(expected, signature)
+    Returns:
+        XOR'd data.
+    """
+    if not key:
+        return data
+    result = bytearray(data)
+    for i in range(len(result)):
+        result[i] ^= key[i % len(key)]
+    return bytes(result)
 
 
-# === Secure Random ===
+def rail_fence_cipher(text: str, rails: int, decrypt: bool = False) -> str:
+    """
+    Rail fence cipher (zigzag).
 
-def generate_random_bytes(n: int) -> bytes:
-    """Generate n cryptographically secure random bytes."""
-    return secrets.token_bytes(n)
+    Args:
+        text: Plain text
+        rails: Number of rails
+        decrypt: If True, decrypt
 
-
-def generate_random_hex(n: int) -> str:
-    """Generate n cryptographically secure random hex digits."""
-    return secrets.token_hex(n)
-
-
-def generate_random_urlsafe(n: int) -> str:
-    """Generate n cryptographically secure URL-safe random bytes."""
-    return secrets.token_urlsafe(n)
-
-
-def generate_password(
-    length: int = 16,
-    uppercase: bool = True,
-    lowercase: bool = True,
-    digits: bool = True,
-    punctuation: bool = True
-) -> str:
-    """Generate a secure random password."""
-    chars = ""
-    if uppercase:
-        chars += string.ascii_uppercase
-    if lowercase:
-        chars += string.ascii_lowercase
-    if digits:
-        chars += string.digits
-    if punctuation:
-        chars += string.punctuation
-    if not chars:
-        chars = string.ascii_letters + string.digits
-    return "".join(secrets.choice(chars) for _ in range(length))
-
-
-def generate_apikey(prefix: str = "sk", total_length: int = 32) -> str:
-    """Generate an API key with a prefix."""
-    random_part = secrets.token_hex(total_length // 2)
-    return f"{prefix}_{random_part}"
-
-
-# === Base64 ===
-
-def base64_encode(data: BytesOrStr, url_safe: bool = False) -> str:
-    """Encode data to base64 string."""
-    b = _to_bytes(data)
-    encoded = base64.urlsafe_b64encode(b) if url_safe else base64.b64encode(b)
-    return encoded.decode().rstrip("=")
+    Returns:
+        Encrypted/decrypted text.
+    """
+    if rails < 2:
+        return text
+    if decrypt:
+        # Compute pattern
+        fence = [[] for _ in range(rails)]
+        pattern = []
+        direction = -1
+        row = 0
+        for _ in text:
+            pattern.append(row)
+            if row == 0 or row == rails - 1:
+                direction *= -1
+            row += direction
+        # Fill
+        idx = 0
+        for r in range(rails):
+            for i, p in enumerate(pattern):
+                if p == r:
+                    fence[r].append(text[idx])
+                    idx += 1
+        # Read
+        result = []
+        for r in range(rails):
+            result.extend(fence[r])
+        return ''.join(result)
+    else:
+        fence = [[] for _ in range(rails)]
+        direction = -1
+        row = 0
+        for ch in text:
+            fence[row].append(ch)
+            if row == 0 or row == rails - 1:
+                direction *= -1
+            row += direction
+        return ''.join(''.join(rail) for rail in fence)
 
 
-def base64_decode(data: str, url_safe: bool = False) -> bytes:
-    """Decode base64 string to bytes."""
+def atbash_cipher(text: str) -> str:
+    """Atbash cipher: alphabet reversed."""
+    result = []
+    for ch in text:
+        if 'a' <= ch <= 'z':
+            result.append(chr(ord('z') - (ord(ch) - ord('a'))))
+        elif 'A' <= ch <= 'Z':
+            result.append(chr(ord('Z') - (ord(ch) - ord('A'))))
+        else:
+            result.append(ch)
+    return ''.join(result)
+
+
+def base64_encode(data: bytes | str) -> str:
+    """Base64 encoding."""
+    if isinstance(data, str):
+        data = data.encode()
+    return base64.b64encode(data).decode()
+
+
+def base64_decode(data: str) -> bytes:
+    """Base64 decoding."""
+    return base64.b64decode(data)
+
+
+def url_safe_base64_encode(data: bytes | str) -> str:
+    """URL-safe Base64 encoding."""
+    if isinstance(data, str):
+        data = data.encode()
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
+
+
+def url_safe_base64_decode(data: str) -> bytes:
+    """URL-safe Base64 decoding."""
     padding = 4 - len(data) % 4
     if padding != 4:
-        data += "=" * padding
-    return base64.urlsafe_b64decode(data) if url_safe else base64.b64decode(data)
+        data += '=' * padding
+    return base64.urlsafe_b64decode(data)
 
 
-# === Key Derivation ===
+def md5_hash(data: str | bytes) -> str:
+    """MD5 hash."""
+    if isinstance(data, str):
+        data = data.encode()
+    return hashlib.md5(data).hexdigest()
 
-def derive_key(
-    password: BytesOrStr,
-    salt: Optional[bytes] = None,
+
+def sha256_hash(data: str | bytes) -> str:
+    """SHA-256 hash."""
+    if isinstance(data, str):
+        data = data.encode()
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha1_hash(data: str | bytes) -> str:
+    """SHA-1 hash."""
+    if isinstance(data, str):
+        data = data.encode()
+    return hashlib.sha1(data).hexdigest()
+
+
+def sha512_hash(data: str | bytes) -> str:
+    """SHA-512 hash."""
+    if isinstance(data, str):
+        data = data.encode()
+    return hashlib.sha512(data).hexdigest()
+
+
+def hmac_sha256(key: str | bytes, message: str | bytes) -> str:
+    """HMAC-SHA256."""
+    import hmac as _hmac
+    if isinstance(key, str):
+        key = key.encode()
+    if isinstance(message, str):
+        message = message.encode()
+    return _hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
+def bcrypt_hash(password: str, rounds: int = 12) -> str:
+    """
+    Simple bcrypt-like hash (simplified implementation).
+
+    For production, use the bcrypt library.
+    """
+    salt = hashlib.sha512(str(hashlib.md5(password.encode()).hexdigest()).encode()).hexdigest()[:22]
+    key = password + salt
+    for _ in range(2 ** rounds):
+        key = hashlib.sha512((key + salt).encode()).hexdigest()
+    return f"$2b${rounds}${salt}${key}"
+
+
+def pbkdf2(
+    password: str,
+    salt: str,
+    iterations: int = 100000,
     key_length: int = 32,
-    iterations: int = 100000
-) -> Tuple[bytes, str]:
-    """Derive a key from password using PBKDF2."""
-    if salt is None:
-        salt = secrets.token_bytes(16)
-    elif isinstance(salt, str):
-        salt = salt.encode()
-    key = hashlib.pbkdf2_hmac(
-        "sha256", _to_bytes(password), salt, iterations, dklen=key_length
-    )
-    return key, salt.hex()
+) -> str:
+    """
+    PBKDF2-HMAC-SHA256.
+
+    Args:
+        password: Password
+        salt: Salt
+        iterations: Number of iterations
+        key_length: Desired key length in bytes
+
+    Returns:
+        Hex-encoded derived key.
+    """
+    import hmac as _hmac
+    block = password + salt
+    result = block
+    for i in range(iterations):
+        result = _hmac.new(result.encode(), block.encode(), hashlib.sha256).hexdigest()
+    return result[:key_length * 2]
 
 
-def secure_compare(a: BytesOrStr, b: BytesOrStr) -> bool:
-    """Constant-time string comparison to prevent timing attacks."""
-    return hmac.compare_digest(_to_bytes(a), _to_bytes(b))
+def rot13(text: str) -> str:
+    """ROT13 cipher (Caesar with shift 13)."""
+    return caesar_cipher(text, 13)
+
+
+def affine_cipher(text: str, a: int, b: int, decrypt: bool = False) -> str:
+    """
+    Affine cipher: f(x) = ax + b (mod 26).
+
+    Args:
+        text: Plain text
+        a: Multiplier (must be coprime with 26)
+        b: Shift
+        decrypt: If True, decrypt
+    """
+    # Find modular inverse of a
+    def modinv(a: int, m: int) -> int:
+        for x in range(1, m):
+            if (a * x) % m == 1:
+                return x
+        return 0
+
+    if decrypt:
+        a_inv = modinv(a, 26)
+        if a_inv == 0:
+            return text
+        a = a_inv
+        b = -b * a_inv % 26
+
+    result = []
+    for ch in text:
+        if 'a' <= ch <= 'z':
+            x = ord(ch) - ord('a')
+            x = (a * x + b) % 26
+            result.append(chr(x + ord('a')))
+        elif 'A' <= ch <= 'Z':
+            x = ord(ch) - ord('A')
+            x = (a * x + b) % 26
+            result.append(chr(x + ord('A')))
+        else:
+            result.append(ch)
+    return ''.join(result)
+
+
+def frequency_analysis(text: str) -> dict[str, float]:
+    """
+    Letter frequency analysis.
+
+    Returns:
+        Dictionary of letter -> frequency.
+    """
+    counts: dict[str, int] = {}
+    total = 0
+    for ch in text.lower():
+        if 'a' <= ch <= 'z':
+            counts[ch] = counts.get(ch, 0) + 1
+            total += 1
+    if total == 0:
+        return {}
+    return {ch: count / total for ch, count in counts.items()}
+
+
+def crack_substitution(cipher_text: str) -> str:
+    """
+    Simple substitution cipher cracking using frequency analysis.
+
+    Returns:
+        Attempted plain text.
+    """
+    import english_frequencies
+    freq = frequency_analysis(cipher_text)
+    sorted_cipher = sorted(freq, key=freq.get, reverse=True)
+    sorted_english = english_frequencies.LETTER_FREQ
+    sorted_english_chars = sorted(sorted_english, key=sorted_english.get, reverse=True)
+    mapping = dict(zip(sorted_cipher, sorted_english_chars))
+    result = []
+    for ch in cipher_text.lower():
+        if ch in mapping:
+            result.append(mapping[ch])
+        else:
+            result.append(ch)
+    return ''.join(result)
+
+
+class english_frequencies:
+    """English letter frequency data."""
+    LETTER_FREQ = {
+        'e': 0.1270, 't': 0.0906, 'a': 0.0817, 'o': 0.0751, 'i': 0.0697,
+        'n': 0.0675, 's': 0.0633, 'h': 0.0609, 'r': 0.0599, 'd': 0.0425,
+        'l': 0.0403, 'c': 0.0278, 'u': 0.0276, 'm': 0.0241, 'w': 0.0236,
+        'f': 0.0223, 'g': 0.0202, 'y': 0.0197, 'p': 0.0193, 'b': 0.0129,
+        'v': 0.0098, 'k': 0.0077, 'j': 0.0015, 'x': 0.0015, 'q': 0.0010,
+        'z': 0.0007,
+    }
