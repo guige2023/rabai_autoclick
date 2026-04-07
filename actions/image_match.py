@@ -12,11 +12,8 @@ import pyautogui
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
-from utils.mouse_utils import macos_click
+from ..core.base_action import BaseAction, ActionResult
+from ..utils.mouse_utils import macos_click
 
 
 # Confidence range bounds
