@@ -1,0 +1,117 @@
+{
+  "name": "Infrastructure Datacenter Management Workflow",
+  "description": "Automate datacenter infrastructure management",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "rack_units_to_manage": 50,
+    "current_unit": 0,
+    "managed_units": 0,
+    "alerts_triggered": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "rack_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize rack counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open datacenter management console"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for console"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "datacenter_management_loop",
+      "count": "{{rack_units_to_manage}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start datacenter management loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select rack unit"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for management action"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/datacenter_{{rack_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture datacenter screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "rack_counter",
+      "value": "{{rack_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment rack counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{rack_counter < rack_units_to_manage}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more units"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next unit"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/infrastructure_datacenter_management_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
