@@ -1501,8 +1501,8 @@ class MainWindow(QMainWindow):
             execution_stats.record_error(step.get('type', 'unknown'), message)
         except Exception as e:
             logger.error(f"Engine error: {e}")
-    
-    def _on_hotkey_settings(self):
+
+    def _on_hotkey_settings(self) -> None:
         dialog = HotkeySettingsDialog(self.current_hotkeys, self)
         if dialog.exec_() == QDialog.Accepted:
             new_hotkeys = dialog.get_hotkeys()
