@@ -7,12 +7,9 @@ Provides keyboard automation actions:
 
 import pyautogui
 import time
-import sys
-import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from ..core.base_action import BaseAction, ActionResult
 
 
 class TypeAction(BaseAction):
