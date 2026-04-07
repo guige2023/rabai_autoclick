@@ -1,0 +1,166 @@
+{
+  "name": "Survey Distribution Workflow",
+  "description": "Automate survey distribution to respondents",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "survey_link": "https://survey.example.com/feedback",
+    "respondent_groups": ["customers", "employees", "partners"],
+    "current_group": 0,
+    "emails_per_group": 5
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "group_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize group index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "groups_loop",
+      "count": 3,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Start groups loop"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open email platform"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 5,
+      "type": "set_variable",
+      "name": "email_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 0.2,
+      "comment": "Initialize email counter"
+    },
+    {
+      "id": 6,
+      "type": "loop",
+      "loop_id": "emails_loop",
+      "count": "{{emails_per_group}}",
+      "loop_start": 7,
+      "pre_delay": 0.3,
+      "comment": "Start emails loop"
+    },
+    {
+      "id": 7,
+      "type": "click_image",
+      "template": "./templates/compose.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click compose"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for compose"
+    },
+    {
+      "id": 9,
+      "type": "type_text",
+      "text": "{{respondent_groups[group_index]}}{{email_counter}}@example.com",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter recipient"
+    },
+    {
+      "id": 10,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to subject"
+    },
+    {
+      "id": 11,
+      "type": "type_text",
+      "text": "Please complete our survey",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter subject"
+    },
+    {
+      "id": 12,
+      "type": "type_text",
+      "text": "{{survey_link}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter survey link"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "email_counter",
+      "value": "{{email_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment email counter"
+    },
+    {
+      "id": 14,
+      "type": "set_variable",
+      "name": "group_index",
+      "value": "{{group_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment group index"
+    },
+    {
+      "id": 15,
+      "type": "condition",
+      "condition": "{{group_index < 3}}",
+      "true_next": 16,
+      "false_next": 17,
+      "pre_delay": 0.1,
+      "comment": "Check if more groups"
+    },
+    {
+      "id": 16,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next group"
+    },
+    {
+      "id": 17,
+      "type": "screenshot",
+      "save_path": "./screenshots/survey_distribution_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 18,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
