@@ -139,6 +139,7 @@ class MiniToolbar(QWidget):
             }}
             QMenu::item:selected {{
                 background-color: {dark_colors['bg_dark_hover']};
+                cursor: pointinghand;
             }}
         """)
 
