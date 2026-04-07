@@ -1604,8 +1604,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.showNormal()
             show_error("错误", f"创建区域选择器失败: {str(e)}")
-    
-    def _on_region_selected(self, x, y, w, h):
+
+    def _on_region_selected(self, x: int, y: int, w: int, h: int) -> None:
         """区域选择完成"""
         colors = theme_manager.colors
         self._target_region = (x, y, w, h)
@@ -1618,20 +1618,20 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         show_toast(f"已选择区域: ({x}, {y}, {w}x{h})", 'success')
         app_logger.info(f"设置OCR区域: ({x}, {y}, {w}x{h})", "UI")
-    
-    def _on_region_cancelled(self):
+
+    def _on_region_cancelled(self) -> None:
         """区域选择取消"""
         self.showNormal()
         self.activateWindow()
-    
-    def _clear_region(self):
+
+    def _clear_region(self) -> None:
         """清除区域"""
         self._target_region = None
         self.region_btn.setText("📐 区域")
         self.region_btn.setStyleSheet("")
         show_toast("已清除识别区域", 'info')
-    
-    def _on_loop_settings(self):
+
+    def _on_loop_settings(self) -> None:
         """循环执行设置"""
         from PyQt5.QtWidgets import QSpinBox, QDoubleSpinBox, QFormLayout
         
