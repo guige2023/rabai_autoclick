@@ -410,3 +410,137 @@ class BaseAction(ABC):
         except Exception as e:
             error_result = self.handle_error(e, context, params)
             return self.on_failure(context, params, error_result)
+
+    def validate_list(
+        self,
+        value: Any,
+        element_type: Union[type, Tuple[type, ...]],
+        param_name: str,
+        min_length: Optional[int] = None,
+        max_length: Optional[int] = None
+    ) -> Tuple[bool, str]:
+        """Validate a list/tuple parameter.
+
+        Args:
+            value: The value to validate.
+            element_type: Expected type for list elements.
+            param_name: Name of the parameter for error messages.
+            min_length: Minimum length (inclusive).
+            max_length: Maximum length (inclusive).
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
+        if not isinstance(value, (list, tuple)):
+            return False, f"Parameter '{param_name}' must be a list, got {type(value).__name__}"
+
+        if min_length is not None and len(value) < min_length:
+            return False, f"Parameter '{param_name}' must have at least {min_length} elements, got {len(value)}"
+
+        if max_length is not None and len(value) > max_length:
+            return False, f"Parameter '{param_name}' must have at most {max_length} elements, got {len(value)}"
+
+        for i, item in enumerate(value):
+            if not isinstance(item, element_type):
+                type_names = (
+                    element_type.__name__
+                    if isinstance(element_type, type)
+                    else ' or '.join(t.__name__ for t in element_type)
+                )
+                return False, f"Parameter '{param_name}[{i}]' must be of type {type_names}, got {type(item).__name__}"
+
+        return True, ""
+
+    def validate_dict(
+        self,
+        value: Any,
+        param_name: str,
+        required_keys: Optional[List[str]] = None,
+        value_types: Optional[Dict[str, Union[type, Tuple[type, ...]]]] = None
+    ) -> Tuple[bool, str]:
+        """Validate a dictionary parameter.
+
+        Args:
+            value: The value to validate.
+            param_name: Name of the parameter for error messages.
+            required_keys: List of required keys.
+            value_types: Dict mapping keys to expected types.
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
+        if not isinstance(value, dict):
+            return False, f"Parameter '{param_name}' must be a dict, got {type(value).__name__}"
+
+        if required_keys:
+            missing = [k for k in required_keys if k not in value]
+            if missing:
+                return False, f"Parameter '{param_name}' is missing required keys: {', '.join(missing)}"
+
+        if value_types:
+            for key, expected_type in value_types.items():
+                if key in value:
+                    if not isinstance(value[key], expected_type):
+                        type_names = (
+                            expected_type.__name__
+                            if isinstance(expected_type, type)
+                            else ' or '.join(t.__name__ for t in expected_type)
+                        )
+                        return False, f"Parameter '{param_name}['{key}']' must be of type {type_names}, got {type(value[key]).__name__}"
+
+        return True, ""
+
+    def validate_length(
+        self,
+        value: str,
+        param_name: str,
+        min_length: Optional[int] = None,
+        max_length: Optional[int] = None
+    ) -> Tuple[bool, str]:
+        """Validate a string length.
+
+        Args:
+            value: The string to validate.
+            param_name: Name of the parameter for error messages.
+            min_length: Minimum length (inclusive).
+            max_length: Maximum length (inclusive).
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
+        if not isinstance(value, str):
+            return False, f"Parameter '{param_name}' must be a string, got {type(value).__name__}"
+
+        if min_length is not None and len(value) < min_length:
+            return False, f"Parameter '{param_name}' must be at least {min_length} characters, got {len(value)}"
+
+        if max_length is not None and len(value) > max_length:
+            return False, f"Parameter '{param_name}' must be at most {max_length} characters, got {len(value)}"
+
+        return True, ""
+
+    def validate_pattern(
+        self,
+        value: str,
+        pattern: str,
+        param_name: str
+    ) -> Tuple[bool, str]:
+        """Validate a string against a regex pattern.
+
+        Args:
+            value: The string to validate.
+            pattern: Regex pattern to match.
+            param_name: Name of the parameter for error messages.
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
+        import re
+
+        if not isinstance(value, str):
+            return False, f"Parameter '{param_name}' must be a string, got {type(value).__name__}"
+
+        if not re.match(pattern, value):
+            return False, f"Parameter '{param_name}' does not match pattern: {pattern}"
+
+        return True, ""
