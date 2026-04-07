@@ -58,22 +58,6 @@ class MiniToolbar(QWidget):
         )
         self.setFixedHeight(40)
         self.setMinimumWidth(400)
-        self.setStyleSheet("background: transparent;")
-
-        self._apply_stylesheet()
-
-    def _init_ui(self) -> None:
-        """Initialize the toolbar UI."""
-        self.setWindowFlags(
-            Qt.WindowType.Window |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.FramelessWindowHint
-        )
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True
-        )
-        self.setFixedHeight(40)
-        self.setMinimumWidth(400)
 
         self._apply_stylesheet()
 
@@ -241,10 +225,6 @@ class MiniToolbar(QWidget):
                     transform: translateY(-1px);
                 }}
             """)
-            color: CSS color string for text color.
-        """
-        self.status_label.setText(text)
-        self.status_label.setStyleSheet(f"color: {color};")
 
     def set_region(self, x: int, y: int, w: int, h: int) -> None:
         """Set the region button to show selected region.
