@@ -1,0 +1,117 @@
+{
+  "name": "Certificate Renewal Workflow",
+  "description": "Automate SSL certificate renewal process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "certificates": 6,
+    "current_cert": 0,
+    "renewed_count": 0,
+    "expiring_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "cert_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize cert counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open certificate manager"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for manager"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "cert_loop",
+      "count": "{{certificates}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start certificate loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click certificate"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/cert_{{cert_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture certificate screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "cert_counter",
+      "value": "{{cert_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment cert counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{cert_counter < certificates}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more certs"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next cert"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/certificate_renewal_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
