@@ -1935,17 +1935,17 @@ class MainWindow(QMainWindow):
         
         main_layout.addLayout(toolbar)
         
-        splitter = QSplitter(Qt.Horizontal)
-        
+        self.splitter = QSplitter(Qt.Horizontal)
+
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.step_list = StepListWidget()
         left_layout.addWidget(QLabel("步骤列表:"))
         left_layout.addWidget(self.step_list)
-        
-        splitter.addWidget(left_panel)
+
+        self.splitter.addWidget(left_panel)
         
         right_panel = QTabWidget()
         
@@ -1985,10 +1985,10 @@ class MainWindow(QMainWindow):
         self.log_widget = LogWidget()
         right_panel.addTab(self.log_widget, "日志")
         
-        splitter.addWidget(right_panel)
-        splitter.setSizes([350, 1050])
-        
-        main_layout.addWidget(splitter)
+        self.splitter.addWidget(right_panel)
+        self.splitter.setSizes([350, 1050])
+
+        main_layout.addWidget(self.splitter)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -2509,6 +2509,7 @@ class MainWindow(QMainWindow):
         """Apply the current theme to all UI components."""
         self.setStyleSheet(theme_manager.get_stylesheet("main_window"))
         self.log_widget.text_edit.setStyleSheet(theme_manager.get_stylesheet("log"))
+        self.splitter.setStyleSheet(theme_manager.get_stylesheet("splitter"))
 
     def _toggle_always_on_top(self):
         self._always_on_top = not self._always_on_top
