@@ -1,410 +1,404 @@
-"""Time action module for RabAI AutoClick.
-
-Provides time operations:
-- TimeSleepAction: Sleep for duration
-- TimeNowAction: Get current time
-- TimeTimestampAction: Get current timestamp
-- TimeCountdownAction: Countdown timer
-- TimeMeasureAction: Measure elapsed time
 """
+Time manipulation and formatting actions.
+"""
+from __future__ import annotations
 
-import time
-import datetime
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union
 
 
-class TimeSleepAction(BaseAction):
-    """Sleep for duration."""
-    action_type = "time_sleep"
-    display_name = "延时等待"
-    description = "等待指定时间"
+def parse_time(time_str: str) -> Dict[str, int]:
+    """
+    Parse time string to hours, minutes, seconds.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sleep.
+    Args:
+        time_str: Time string (e.g., '14:30', '2:30 PM').
 
-        Args:
-            context: Execution context.
-            params: Dict with seconds.
+    Returns:
+        Dictionary with time components.
+    """
+    import re
 
-        Returns:
-            ActionResult indicating completion.
-        """
-        seconds = params.get('seconds', 1)
+    time_str = time_str.strip()
 
-        valid, msg = self.validate_type(seconds, (int, float), 'seconds')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    patterns = [
+        (r'^(\d{1,2}):(\d{2}):(\d{2})$', 3),
+        (r'^(\d{1,2}):(\d{2})$', 2),
+        (r'^(\d{1,2}):(\d{2})\s*(AM|PM)$', 2),
+        (r'^(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)$', 3),
+    ]
 
-        try:
-            resolved = context.resolve_value(seconds)
-            time.sleep(float(resolved))
+    for pattern, group_count in patterns:
+        match = re.match(pattern, time_str, re.IGNORECASE)
+        if match:
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            second = int(match.group(3)) if group_count == 3 else 0
+            meridiem = match.group(group_count) if match.group(group_count) else None
 
-            return ActionResult(
-                success=True,
-                message=f"延时完成: {resolved} 秒",
-                data={'seconds': resolved}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"延时失败: {str(e)}"
-            )
+            if meridiem:
+                if meridiem.upper() == 'PM' and hour != 12:
+                    hour += 12
+                elif meridiem.upper() == 'AM' and hour == 12:
+                    hour = 0
 
-    def get_required_params(self) -> List[str]:
-        return ['seconds']
+            return {
+                'hour': hour,
+                'minute': minute,
+                'second': second,
+                'total_seconds': hour * 3600 + minute * 60 + second,
+            }
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
+    raise ValueError(f"Cannot parse time: {time_str}")
 
 
-class TimeNowAction(BaseAction):
-    """Get current time."""
-    action_type = "time_now"
-    display_name = "获取当前时间"
-    description = "获取当前时间"
+def format_time(
+    hours: int,
+    minutes: int,
+    seconds: int = 0,
+    use_12h: bool = False
+) -> str:
+    """
+    Format time components to string.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute getting current time.
+    Args:
+        hours: Hour (0-23).
+        minutes: Minute (0-59).
+        seconds: Second (0-59).
+        use_12h: Use 12-hour format with AM/PM.
 
-        Args:
-            context: Execution context.
-            params: Dict with format, output_var.
-
-        Returns:
-            ActionResult with current time.
-        """
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'current_time')
-
-        try:
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
-            result = datetime.datetime.now().strftime(resolved_format)
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"当前时间: {result}",
-                data={
-                    'time': result,
-                    'format': resolved_format,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取时间失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'current_time'}
-
-
-class TimeTimestampAction(BaseAction):
-    """Get current timestamp."""
-    action_type = "time_timestamp"
-    display_name = "获取时间戳"
-    description = "获取当前Unix时间戳"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute getting timestamp.
-
-        Args:
-            context: Execution context.
-            params: Dict with output_var.
-
-        Returns:
-            ActionResult with timestamp.
-        """
-        output_var = params.get('output_var', 'timestamp')
-
-        try:
-            result = time.time()
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"时间戳: {result}",
-                data={
-                    'timestamp': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取时间戳失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'timestamp'}
-
-
-class TimeCountdownAction(BaseAction):
-    """Countdown timer."""
-    action_type = "time_countdown"
-    display_name = "倒计时"
-    description = "倒计时器"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute countdown.
-
-        Args:
-            context: Execution context.
-            params: Dict with seconds, output_var.
-
-        Returns:
-            ActionResult with remaining seconds.
-        """
-        seconds = params.get('seconds', 10)
-        output_var = params.get('output_var', 'countdown')
-
-        valid, msg = self.validate_type(seconds, (int, float), 'seconds')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved = context.resolve_value(seconds)
-            start = time.time()
-            end = start + float(resolved)
-
-            remaining = resolved
-            while time.time() < end and remaining > 0:
-                remaining = end - time.time()
-                time.sleep(min(0.1, remaining))
-
-            context.set(output_var, max(0, remaining))
-
-            return ActionResult(
-                success=True,
-                message=f"倒计时完成",
-                data={
-                    'remaining': max(0, remaining),
-                    'original': resolved,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"倒计时失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['seconds']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'countdown'}
-
-
-class TimeMeasureAction(BaseAction):
-    """Measure elapsed time."""
-    action_type = "time_measure"
-    display_name = "计时器"
-    description = "测量经过的时间"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute time measurement.
-
-        Args:
-            context: Execution context.
-            params: Dict with start_time, output_var.
-
-        Returns:
-            ActionResult with elapsed time.
-        """
-        start_time = params.get('start_time', None)
-        output_var = params.get('output_var', 'elapsed')
-
-        if start_time is None:
-            # Start new measurement
-            result = time.time()
-            context.set(output_var, result)
-            return ActionResult(
-                success=True,
-                message=f"计时开始: {result}",
-                data={
-                    'start_time': result,
-                    'output_var': output_var
-                }
-            )
+    Returns:
+        Formatted time string.
+    """
+    if use_12h:
+        if hours == 0:
+            h = 12
+            meridiem = 'AM'
+        elif hours < 12:
+            h = hours
+            meridiem = 'AM'
+        elif hours == 12:
+            h = 12
+            meridiem = 'PM'
         else:
-            # Calculate elapsed
-            try:
-                resolved_start = context.resolve_value(start_time)
-                elapsed = time.time() - float(resolved_start)
-                context.set(output_var, elapsed)
+            h = hours - 12
+            meridiem = 'PM'
 
-                return ActionResult(
-                    success=True,
-                    message=f"经过时间: {elapsed:.2f} 秒",
-                    data={
-                        'elapsed': elapsed,
-                        'start_time': resolved_start,
-                        'output_var': output_var
-                    }
-                )
-            except Exception as e:
-                return ActionResult(
-                    success=False,
-                    message=f"计时测量失败: {str(e)}"
-                )
+        if seconds:
+            return f'{h}:{minutes:02d}:{seconds:02d} {meridiem}'
+        return f'{h}:{minutes:02d} {meridiem}'
 
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'start_time': None, 'output_var': 'elapsed'}
+    if seconds:
+        return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+    return f'{hours:02d}:{minutes:02d}'
 
 
-class TimeFormatAction(BaseAction):
-    """Format timestamp."""
-    action_type = "time_format"
-    display_name = "格式化时间"
-    description = "格式化时间戳"
+def seconds_to_time_components(total_seconds: int) -> Dict[str, int]:
+    """
+    Convert total seconds to time components.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute time formatting.
+    Args:
+        total_seconds: Total seconds.
 
-        Args:
-            context: Execution context.
-            params: Dict with timestamp, format, output_var.
+    Returns:
+        Dictionary with hours, minutes, seconds.
+    """
+    if total_seconds < 0:
+        raise ValueError("Seconds cannot be negative")
 
-        Returns:
-            ActionResult with formatted time.
-        """
-        timestamp = params.get('timestamp', None)
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'formatted_time')
+    hours = total_seconds // 3600
+    remaining = total_seconds % 3600
+    minutes = remaining // 60
+    seconds = remaining % 60
 
-        try:
-            resolved_format = context.resolve_value(format_str)
-
-            if timestamp is None:
-                dt = datetime.datetime.now()
-            else:
-                resolved_ts = context.resolve_value(timestamp)
-                dt = datetime.datetime.fromtimestamp(float(resolved_ts))
-
-            result = dt.strftime(resolved_format)
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"格式化时间: {result}",
-                data={
-                    'time': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"格式化时间失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'timestamp': None, 'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'formatted_time'}
+    return {
+        'hours': hours,
+        'minutes': minutes,
+        'seconds': seconds,
+        'total_seconds': total_seconds,
+    }
 
 
-class TimeParseAction(BaseAction):
-    """Parse time string."""
-    action_type = "time_parse"
-    display_name = "解析时间"
-    description = "解析时间字符串"
+def time_components_to_seconds(
+    hours: int = 0,
+    minutes: int = 0,
+    seconds: int = 0
+) -> int:
+    """
+    Convert time components to total seconds.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute time parsing.
+    Args:
+        hours: Hours.
+        minutes: Minutes.
+        seconds: Seconds.
 
-        Args:
-            context: Execution context.
-            params: Dict with time_str, format, output_var.
+    Returns:
+        Total seconds.
+    """
+    return hours * 3600 + minutes * 60 + seconds
 
-        Returns:
-            ActionResult with parsed timestamp.
-        """
-        time_str = params.get('time_str', '')
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'parsed_timestamp')
 
-        valid, msg = self.validate_type(time_str, str, 'time_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+def add_time(
+    hours: int,
+    minutes: int,
+    seconds: int,
+    add_hours: int = 0,
+    add_minutes: int = 0,
+    add_seconds: int = 0
+) -> Dict[str, int]:
+    """
+    Add time components.
 
-        try:
-            resolved_time = context.resolve_value(time_str)
-            resolved_format = context.resolve_value(format_str)
+    Args:
+        hours: Base hours.
+        minutes: Base minutes.
+        seconds: Base seconds.
+        add_hours: Hours to add.
+        add_minutes: Minutes to add.
+        add_seconds: Seconds to add.
 
-            dt = datetime.datetime.strptime(resolved_time, resolved_format)
-            timestamp = dt.timestamp()
+    Returns:
+        Dictionary with result components.
+    """
+    total = (
+        hours * 3600 + minutes * 60 + seconds +
+        add_hours * 3600 + add_minutes * 60 + add_seconds
+    )
 
-            context.set(output_var, timestamp)
+    result_hours = total // 3600
+    remaining = total % 3600
+    result_minutes = remaining // 60
+    result_seconds = remaining % 60
 
-            return ActionResult(
-                success=True,
-                message=f"时间解析完成: {timestamp}",
-                data={
-                    'timestamp': timestamp,
-                    'datetime': dt.isoformat(),
-                    'output_var': output_var
-                }
-            )
-        except ValueError as e:
-            return ActionResult(
-                success=False,
-                message=f"时间解析失败: 无效的格式或时间 - {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"时间解析失败: {str(e)}"
-            )
+    return {
+        'hours': result_hours,
+        'minutes': result_minutes,
+        'seconds': result_seconds,
+    }
 
-    def get_required_params(self) -> List[str]:
-        return ['time_str', 'format']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'parsed_timestamp'}
+def subtract_time(
+    hours1: int,
+    minutes1: int,
+    seconds1: int,
+    hours2: int,
+    minutes2: int,
+    seconds2: int
+) -> Dict[str, Any]:
+    """
+    Subtract two times.
+
+    Args:
+        hours1, minutes1, seconds1: First time.
+        hours2, minutes2, seconds2: Second time.
+
+    Returns:
+        Dictionary with difference.
+    """
+    total1 = hours1 * 3600 + minutes1 * 60 + seconds1
+    total2 = hours2 * 3600 + minutes2 * 60 + seconds2
+
+    diff = total1 - total2
+
+    if diff < 0:
+        return {
+            'is_negative': True,
+            'hours': abs(diff) // 3600,
+            'minutes': (abs(diff) % 3600) // 60,
+            'seconds': abs(diff) % 60,
+        }
+
+    return {
+        'is_negative': False,
+        'hours': diff // 3600,
+        'minutes': (diff % 3600) // 60,
+        'seconds': diff % 60,
+    }
+
+
+def get_current_time_formatted(use_12h: bool = False) -> str:
+    """
+    Get current time as formatted string.
+
+    Args:
+        use_12h: Use 12-hour format.
+
+    Returns:
+        Formatted time string.
+    """
+    now = datetime.now()
+    return format_time(now.hour, now.minute, now.second, use_12h)
+
+
+def get_time_difference_seconds(
+    time1: str,
+    time2: str
+) -> int:
+    """
+    Get difference between two times in seconds.
+
+    Args:
+        time1: First time.
+        time2: Second time.
+
+    Returns:
+        Difference in seconds.
+    """
+    t1 = parse_time(time1)
+    t2 = parse_time(time2)
+
+    total1 = t1['total_seconds']
+    total2 = t2['total_seconds']
+
+    return total2 - total1
+
+
+def round_time(
+    hours: int,
+    minutes: int,
+    round_to_minutes: int = 15
+) -> Dict[str, int]:
+    """
+    Round time to nearest interval.
+
+    Args:
+        hours: Hour.
+        minutes: Minutes.
+        round_to_minutes: Round to this many minutes.
+
+    Returns:
+        Rounded time components.
+    """
+    total_minutes = hours * 60 + minutes
+
+    rounded_minutes = round(total_minutes / round_to_minutes) * round_to_minutes
+
+    result_hours = rounded_minutes // 60
+    result_minutes = rounded_minutes % 60
+
+    return {
+        'hours': result_hours,
+        'minutes': result_minutes,
+    }
+
+
+def get_timezone_offset_hours(timezone_name: str) -> float:
+    """
+    Get UTC offset in hours for timezone.
+
+    Args:
+        timezone_name: Timezone name.
+
+    Returns:
+        Offset in hours.
+    """
+    try:
+        from datetime import timezone as tz_module
+        import zoneinfo
+
+        tz = zoneinfo.ZoneInfo(timezone_name)
+        now = datetime.now()
+        offset = tz.utcoffset(now)
+        return offset.total_seconds() / 3600
+    except Exception:
+        return 0.0
+
+
+def is_valid_time(hours: int, minutes: int, seconds: int = 0) -> bool:
+    """
+    Validate time components.
+
+    Args:
+        hours: Hour (0-23).
+        minutes: Minutes (0-59).
+        seconds: Seconds (0-59).
+
+    Returns:
+        True if valid.
+    """
+    return (
+        0 <= hours <= 23 and
+        0 <= minutes <= 59 and
+        0 <= seconds <= 59
+    )
+
+
+def get_nearest_quarter_hour(hours: int, minutes: int) -> str:
+    """
+    Round time to nearest quarter hour.
+
+    Args:
+        hours: Hour.
+        minutes: Minutes.
+
+    Returns:
+        String like "2:15 PM" or "2:30 PM".
+    """
+    quarter = round(minutes / 15) * 15
+
+    if quarter == 60:
+        hours += 1
+        quarter = 0
+
+    return format_time(hours, quarter, 0, use_12h=True)
+
+
+def get_time_range_list(
+    start_time: str,
+    end_time: str,
+    interval_minutes: int = 30
+) -> List[str]:
+    """
+    Generate list of times between start and end.
+
+    Args:
+        start_time: Start time string.
+        end_time: End time string.
+        interval_minutes: Interval in minutes.
+
+    Returns:
+        List of formatted time strings.
+    """
+    start = parse_time(start_time)
+    end = parse_time(end_time)
+
+    start_total = start['total_seconds']
+    end_total = end['total_seconds']
+
+    if end_total < start_total:
+        end_total += 24 * 3600
+
+    times = []
+    current = start_total
+
+    while current <= end_total:
+        hours = (current // 3600) % 24
+        minutes = (current % 3600) // 60
+
+        times.append(format_time(hours, minutes))
+        current += interval_minutes * 60
+
+    return times
+
+
+def get_day_period(hours: int, minutes: int = 0) -> str:
+    """
+    Get period of day (morning, afternoon, evening, etc).
+
+    Args:
+        hours: Hour.
+        minutes: Minutes.
+
+    Returns:
+        Period name.
+    """
+    if 5 <= hours < 12:
+        return 'morning'
+    elif hours == 12 and minutes == 0:
+        return 'noon'
+    elif 12 <= hours < 17:
+        return 'afternoon'
+    elif 17 <= hours < 21:
+        return 'evening'
+    else:
+        return 'night'
