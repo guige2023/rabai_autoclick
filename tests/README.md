@@ -2,7 +2,7 @@
 
 This directory contains the test suite for RabAI AutoClick.
 
-## Test Files
+## 📁 Test Files
 
 | File | Description |
 |------|-------------|
@@ -13,7 +13,21 @@ This directory contains the test suite for RabAI AutoClick.
 | `debug_loader.py` | debug script for action loading |
 | `debug_engine.py` | debug script for engine |
 
-## Running Tests
+## 🚀 Quick Start
+
+### Run All Tests
+
+```bash
+pytest tests/ -v
+```
+
+### Run with Coverage
+
+```bash
+pytest tests/ -v --cov=. --cov-report=html --cov-report=term-missing
+```
+
+## 🧪 Running Tests
 
 ### Using pytest (Recommended)
 
@@ -29,6 +43,12 @@ pytest tests/ --cov=. --cov-report=html
 
 # Run specific test class
 pytest tests/test_core.py::TestContextManager -v
+
+# Run tests matching pattern
+pytest tests/ -k "test_click" -v
+
+# Run tests in specific directory
+pytest tests/core/ -v
 ```
 
 ### Using test_full.py
@@ -41,7 +61,14 @@ python tests/test_full.py
 pytest tests/test_full.py -v
 ```
 
-## Test Structure
+### Using Make
+
+```bash
+make test           # Run tests
+make test-cov      # Run tests with coverage
+```
+
+## 📐 Test Structure
 
 ### test_core.py
 
@@ -53,6 +80,13 @@ class TestContextManager:
         ctx = ContextManager()
         ctx.set('key', 'value')
         assert ctx.get('key') == 'value'
+
+    def test_variable_resolution(self):
+        ctx = ContextManager()
+        ctx.set('a', 10)
+        ctx.set('b', 20)
+        result = ctx.resolve_value('{{a + b}}')
+        assert result == 30
 ```
 
 ### test_modules.py
@@ -76,7 +110,7 @@ class TestWorkflowShare:
         # Test workflow sharing
 ```
 
-## Debug Scripts
+## 🔧 Debug Scripts
 
 ### debug_loader.py
 
@@ -86,7 +120,7 @@ Check if actions are loading correctly:
 python tests/debug_loader.py
 ```
 
-Output:
+**Expected Output:**
 ```
 Actions directory: ./actions
 Files found:
@@ -105,7 +139,7 @@ Test workflow execution:
 python tests/debug_engine.py
 ```
 
-Output:
+**Expected Output:**
 ```
 Actions loaded: ['click', 'delay', ...]
 Before run: {}
@@ -114,7 +148,7 @@ After run: {'test_var': 'hello'}
 test_var: hello
 ```
 
-## Writing Tests
+## ✍️ Writing Tests
 
 ### pytest Style
 
@@ -127,10 +161,19 @@ class TestMyFeature:
         ctx = ContextManager()
         # test code
         assert expected == actual
-    
+
     def test_error_case(self):
         with pytest.raises(ValueError):
             some_function(invalid_input)
+
+    @pytest.mark.parametrize("input,expected", [
+        (1, 2),
+        (2, 4),
+        (3, 6),
+    ])
+    def test_multiplication(self, input, expected):
+        result = input * 2
+        assert result == expected
 ```
 
 ### Decorator Style (test_modules.py)
@@ -161,27 +204,61 @@ def test_my_feature():
     assert True
 ```
 
-## Test Data
+### Async Tests
+
+```python
+import pytest
+import asyncio
+
+@pytest.mark.asyncio
+async def test_async_action():
+    result = await async_function()
+    assert result is not None
+```
+
+## 📊 Test Data
 
 Test data files are stored in:
 - `tests/data/` - JSON test fixtures
 - `tests/fixtures/` - Image and other test assets
 
-## CI/CD
+## 🔄 CI/CD
 
 Tests run automatically on:
 - Every pull request
 - Every push to main branch
 - Daily at midnight
 
-## Coverage Goals
+### GitHub Actions Workflow
 
-- Core modules: 90%+ coverage
-- Actions: 80%+ coverage
-- Utils: 70%+ coverage
-- UI: 50%+ coverage (harder to test)
+```yaml
+name: Test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        run: pytest tests/ -v
+```
 
-## Mocking
+## 📈 Coverage Goals
+
+| Module | Target |
+|--------|--------|
+| Core modules | 90%+ |
+| Actions | 80%+ |
+| Utils | 70%+ |
+| UI | 50%+ (harder to test) |
+
+## 🎭 Mocking
 
 Use `unittest.mock` for external dependencies:
 
@@ -193,4 +270,42 @@ def test_click_action(mock_click):
     action = ClickAction()
     action.execute(ctx, {'x': 100, 'y': 200})
     mock_click.assert_called_once_with(100, 200)
+
+@patch('core.engine.FlowEngine.run')
+def test_workflow_run(mock_run):
+    engine = FlowEngine()
+    engine.load_workflow({...})
+    engine.run()
+    mock_run.assert_called_once()
 ```
+
+## 🐛 Fixtures
+
+```python
+import pytest
+
+@pytest.fixture
+def context():
+    """Provide a clean ContextManager for each test."""
+    from core.context import ContextManager
+    return ContextManager()
+
+@pytest.fixture
+def workflow():
+    """Provide a sample workflow dict."""
+    return {
+        "name": "Test Workflow",
+        "steps": [
+            {"id": 1, "type": "delay", "seconds": 0.1}
+        ]
+    }
+```
+
+## ⚠️ Test Best Practices
+
+1. **Isolation**: Each test should be independent
+2. **Clear names**: Test names should describe what they verify
+3. **Single assertion**: Prefer one assertion per test when practical
+4. **Arrange-Act-Assert**: Structure test code clearly
+5. **Test edge cases**: Empty values, boundary conditions, errors
+6. **Mock external dependencies**: Don't rely on external systems
