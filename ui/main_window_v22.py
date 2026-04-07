@@ -1241,7 +1241,8 @@ class RecordingWidget(QWidget):
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        
+        colors = theme_manager.colors
+
         if self._use_mac_manager:
             info_label = QLabel("录屏功能：录制鼠标和键盘操作，自动生成工作流步骤\n✅ 已启用 Mac 进程隔离模式")
             info_label.setStyleSheet(f"color: {colors['primary']}; font-size: 11px;")
@@ -1251,7 +1252,6 @@ class RecordingWidget(QWidget):
         layout.addWidget(info_label)
 
         btn_layout = QHBoxLayout()
-        colors = theme_manager.colors
 
         self.record_btn = QPushButton("🔴 开始录制")
         self.record_btn.setStyleSheet(f"background-color: {colors['error']}; color: white; font-weight: bold;")
