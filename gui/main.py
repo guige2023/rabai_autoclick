@@ -220,6 +220,38 @@ class BaseTab(ttk.Frame):
             self.log(f"❌ {field_name} JSON格式错误: {str(e)}")
             return False, {}
 
+    def safe_text_update(self, text_widget: Any, content: str) -> None:
+        """
+        Safely update a ScrolledText widget's content.
+        
+        Args:
+            text_widget: The ScrolledText widget to update.
+            content: The content string to display.
+        """
+        try:
+            text_widget.configure(state='normal')
+            text_widget.delete(1.0, tk.END)
+            text_widget.insert(tk.END, content)
+            text_widget.configure(state='disabled')
+        except Exception as e:
+            self.log(f"❌ 文本更新失败: {str(e)}")
+
+    def safe_tree_update(self, tree_widget: Any, data: List[List[Any]]) -> None:
+        """
+        Safely update a Treeview widget's content.
+        
+        Args:
+            tree_widget: The Treeview widget to update.
+            data: List of rows, where each row is a list of values.
+        """
+        try:
+            for item in tree_widget.get_children():
+                tree_widget.delete(item)
+            for row in data:
+                tree_widget.insert("", tk.END, values=row)
+        except Exception as e:
+            self.log(f"❌ 树形视图更新失败: {str(e)}")
+
 
 class PredictTab(BaseTab):
     """
