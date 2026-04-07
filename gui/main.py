@@ -1561,7 +1561,24 @@ class RecTab(BaseTab):
 
 
 class RabAIGUI:
-    def __init__(self):
+    """
+    Main GUI application class for RabAI AutoClick.
+    
+    This class manages the main application window, sets up the UI layout,
+    and coordinates all tabs including predictive engine, self-healing,
+    scene management, diagnostics, workflow sharing, pipeline, and recording.
+    
+    Attributes:
+        root: The root Tkinter window.
+        tabs: Dictionary of tab instances keyed by name.
+        log_text: ScrolledText widget for log output.
+        status_label: Label widget for status display.
+    """
+    
+    def __init__(self) -> None:
+        """
+        Initialize the RabAI GUI application.
+        """
         self.root = tk.Tk()
         self.root.title("RabAI AutoClick v22 - 智能自动化工具")
         self.root.geometry("1000x700")
@@ -1571,7 +1588,10 @@ class RabAIGUI:
         self._setup_menu()
         self._setup_main_layout()
 
-    def _setup_styles(self):
+    def _setup_styles(self) -> None:
+        """
+        Configure Tkinter ttk styles for the application.
+        """
         style = ttk.Style()
         style.theme_use('clam')
         
@@ -1583,7 +1603,10 @@ class RabAIGUI:
         style.configure('TButton', padding=5)
         style.configure('Treeview', rowheight=25)
 
-    def _setup_menu(self):
+    def _setup_menu(self) -> None:
+        """
+        Set up the application menu bar.
+        """
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
 
@@ -1597,7 +1620,10 @@ class RabAIGUI:
         menubar.add_cascade(label="帮助", menu=help_menu)
         help_menu.add_command(label="关于", command=self._show_about)
 
-    def _setup_main_layout(self):
+    def _setup_main_layout(self) -> None:
+        """
+        Set up the main layout with tabs, log area, and status bar.
+        """
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -1633,18 +1659,30 @@ class RabAIGUI:
         self.status_label = ttk.Label(status_frame, text="就绪")
         self.status_label.pack(side=tk.LEFT)
 
-    def log(self, message):
+    def log(self, message: str) -> None:
+        """
+        Log a message with timestamp to the log text area.
+        
+        Args:
+            message: The message string to log.
+        """
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_text.configure(state='normal')
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
         self.log_text.configure(state='disabled')
 
-    def _open_data_dir(self):
+    def _open_data_dir(self) -> None:
+        """
+        Open the data directory in the system file explorer.
+        """
         import subprocess
         subprocess.run(['open', str(DATA_DIR)])
 
-    def _show_about(self):
+    def _show_about(self) -> None:
+        """
+        Display the about dialog with application information.
+        """
         messagebox.showinfo("关于", 
             "RabAI AutoClick v22\n\n"
             "智能自动化工具\n\n"
@@ -1659,11 +1697,19 @@ class RabAIGUI:
             "版本: 22.0.0"
         )
 
-    def run(self):
+    def run(self) -> None:
+        """
+        Start the GUI main event loop.
+        """
         self.root.mainloop()
 
 
-def main():
+def main() -> None:
+    """
+    Main entry point for the RabAI AutoClick GUI application.
+    
+    Initializes the data directory and launches the GUI.
+    """
     DATA_DIR.mkdir(exist_ok=True)
     app = RabAIGUI()
     app.run()
