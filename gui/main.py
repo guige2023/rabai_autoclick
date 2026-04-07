@@ -36,7 +36,32 @@ from src.workflow_share import create_share_system, ShareType
 from src.pipeline_mode import create_pipeline_runner, PipeMode
 from src.screen_recorder import create_screen_recorder, ElementDetection
 
+# Module constants
 DATA_DIR = Path(__file__).parent.parent / "data"
+
+# Type aliases for better readability
+_TkinterWidget = Any
+_Callback = Optional[Callable[[], None]]
+_ResultCallback = Optional[Callable[[Any], None]]
+
+# Application metadata
+APP_NAME = "RabAI AutoClick"
+APP_VERSION = "22.0.0"
+APP_TITLE = f"{APP_NAME} v{APP_VERSION} - 智能自动化工具"
+APP_GEOMETRY = "1000x700"
+APP_MIN_SIZE = (800, 600)
+
+# GUI color scheme
+COLOR_BG = '#f0f0f0'
+COLOR_PRIMARY = '#4a90d9'
+COLOR_SUCCESS = '#4caf50'
+COLOR_WARNING = '#ff9800'
+COLOR_ERROR = '#f44336'
+
+# GUI dimensions
+LOG_TEXT_HEIGHT = 5
+TREE_ROW_HEIGHT = 25
+NOTEBOOK TAB_PADDING = [15, 5]
 
 
 class OutputRedirector:
