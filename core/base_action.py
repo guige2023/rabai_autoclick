@@ -5,8 +5,64 @@ dataclass for standardized return values from action execution.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple, Union
+from functools import wraps
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 from dataclasses import dataclass, field
+import time
+import logging
+
+from .exceptions import RetryExhaustedError
+
+
+logger = logging.getLogger(__name__)
+
+F = TypeVar('F', bound=Callable[..., Any])
+
+
+def retry_on_failure(
+    max_retries: int = 3,
+    delay: float = 0.5,
+    backoff: float = 2.0,
+    exceptions: Tuple[Type[Exception], ...] = (Exception,)
+) -> Callable[[F], F]:
+    """Decorator to retry a function on failure with exponential backoff.
+
+    Args:
+        max_retries: Maximum number of retry attempts.
+        delay: Initial delay between retries in seconds.
+        backoff: Multiplier for delay after each retry.
+        exceptions: Tuple of exception types to catch and retry.
+
+    Returns:
+        Decorated function with retry logic.
+    """
+    def decorator(func: F) -> F:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            current_delay = delay
+            last_exception: Exception | None = None
+
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt == max_retries:
+                        break
+                    logger.warning(
+                        f"Attempt {attempt + 1}/{max_retries + 1} failed for "
+                        f"{func.__name__}: {e}. Retrying in {current_delay}s..."
+                    )
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+
+            raise RetryExhaustedError(
+                operation=func.__name__,
+                max_retries=max_retries,
+                last_cause=last_exception
+            )
+        return wrapper  # type: ignore
+    return decorator
 
 
 @dataclass
@@ -137,11 +193,103 @@ class BaseAction(ABC):
     def get_param(self, key: str, default: Any = None) -> Any:
         """Get a parameter value with optional default."""
         return self.params.get(key, default)
-    
+
     def get_required_params(self) -> List[str]:
         """List of required parameter names."""
         return []
-    
+
     def get_optional_params(self) -> Dict[str, Any]:
         """Dict of optional parameters with their default values."""
         return {}
+
+    def validate_coords(
+        self,
+        x: Any,
+        y: Any,
+        allow_none: bool = True
+    ) -> Tuple[bool, str]:
+        """Validate x and y coordinate parameters.
+
+        Args:
+            x: X coordinate value.
+            y: Y coordinate value.
+            allow_none: Whether None values are acceptable.
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
+        if x is None and y is None:
+            if allow_none:
+                return True, ""
+            return False, "Coordinates cannot both be None"
+
+        if x is not None:
+            valid, msg = self.validate_type(x, (int, float), 'x')
+            if not valid:
+                return False, msg
+
+        if y is not None:
+            valid, msg = self.validate_type(y, (int, float), 'y')
+            if not valid:
+                return False, msg
+
+        return True, ""
+
+    def validate_positive(
+        self,
+        value: Union[int, float],
+        param_name: str,
+        allow_zero: bool = False
+    ) -> Tuple[bool, str]:
+        """Validate a numeric parameter is positive.
+
+        Args:
+            value: Value to validate.
+            param_name: Name of the parameter.
+            allow_zero: Whether zero is acceptable.
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
+        valid, msg = self.validate_type(value, (int, float), param_name)
+        if not valid:
+            return False, msg
+
+        if allow_zero:
+            if value < 0:
+                return False, f"Parameter '{param_name}' must be >= 0, got {value}"
+        else:
+            if value <= 0:
+                return False, f"Parameter '{param_name}' must be > 0, got {value}"
+        return True, ""
+
+    def validate_string_not_empty(
+        self,
+        value: Any,
+        param_name: str
+    ) -> Tuple[bool, str]:
+        """Validate a string parameter is not empty.
+
+        Args:
+            value: Value to validate.
+            param_name: Name of the parameter.
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
+        valid, msg = self.validate_type(value, str, param_name)
+        if not valid:
+            return False, msg
+        if not value:
+            return False, f"Parameter '{param_name}' cannot be empty"
+        return True, ""
+
+    def get_full_params(self) -> Dict[str, Any]:
+        """Get all parameters including defaults.
+
+        Returns:
+            Dictionary with all required params filled with defaults.
+        """
+        full_params = self.get_optional_params().copy()
+        full_params.update(self.params)
+        return full_params
