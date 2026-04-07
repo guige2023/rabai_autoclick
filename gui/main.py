@@ -694,7 +694,7 @@ class SceneTab(BaseTab):
         ttk.Label(frame, text="图标:").grid(row=2, column=0, sticky=tk.W, pady=5)
         self.scene_icon_var = tk.StringVar(value="📦")
         ttk.Combobox(frame, textvariable=self.scene_icon_var, 
-                     values=["📦", "🏠", "💼", "🎮", "📚", "🎵", "📧", "🔧"], width=30).grid(row=2, column=1, sticky=tk.W, pady=5)
+                     values=SCENE_ICONS, width=30).grid(row=2, column=1, sticky=tk.W, pady=5)
 
         ttk.Button(frame, text="✅ 创建场景", command=self._create_scene).grid(row=3, column=0, columnspan=2, pady=15)
 
