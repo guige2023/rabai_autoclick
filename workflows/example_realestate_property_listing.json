@@ -1,0 +1,117 @@
+{
+  "name": "Real Estate Property Listing Workflow",
+  "description": "Automate property listing process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "listings_to_create": 48,
+    "current_listing": 0,
+    "created_listings": 0,
+    "pending_listings": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "listing_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize listing counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open property listing system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "property_listing_loop",
+      "count": "{{listings_to_create}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start property listing loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select property for listing"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for listing creation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/property_listing_{{listing_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture listing screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "listing_counter",
+      "value": "{{listing_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment listing counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{listing_counter < listings_to_create}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more listings"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next listing"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/realestate_property_listing_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
