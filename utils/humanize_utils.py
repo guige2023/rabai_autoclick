@@ -62,3 +62,61 @@ def parse_bytes(size_str: str) -> int:
         return int(float(size_str))
     except ValueError:
         raise ValueError(f"Cannot parse byte size: {size_str!r}")
+
+
+def format_duration(
+    seconds: float,
+    format_type: str = "long",
+    max_units: int = 2
+) -> str:
+    """Format duration in seconds as human-readable string."""
+    if seconds < 0:
+        return f"-{format_duration(-seconds, format_type, max_units)}"
+
+    units = [
+        ("year", 365 * 24 * 3600), ("month", 30 * 24 * 3600),
+        ("week", 7 * 24 * 3600), ("day", 24 * 3600),
+        ("hour", 3600), ("minute", 60), ("second", 1),
+    ]
+
+    parts = []
+    remaining = seconds
+    for name, secs_in_unit in units:
+        if remaining >= secs_in_unit:
+            count = int(remaining // secs_in_unit)
+            remaining %= secs_in_unit
+            if format_type == "long":
+                parts.append(f"{count} {name}{'s' if count != 1 else ''}")
+            else:
+                abbr = {"year": "yr", "month": "mo", "week": "wk",
+                        "day": "d", "hour": "hr", "minute": "min", "second": "sec"}
+                parts.append(f"{count}{abbr.get(name, name[0])}")
+            if len(parts) >= max_units:
+                break
+
+    if not parts:
+        return "just now"
+
+    if format_type == "long" and len(parts) > 1:
+        return ", ".join(parts[:-1]) + " and " + parts[-1]
+    return " ".join(parts)
+
+
+def time_ago(
+    dt: Union[datetime, int, float],
+    now: Optional[datetime] = None
+) -> str:
+    """Format a datetime as a human-readable 'time ago' string."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt, tz=timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    diff = now - dt
+    total_seconds = diff.total_seconds()
+    if total_seconds < 0:
+        return "in the future"
+    if total_seconds < 60:
+        return "just now"
+    return format_duration(total_seconds, "long", 2) + " ago"
