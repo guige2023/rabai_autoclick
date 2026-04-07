@@ -23,10 +23,10 @@ from core.base_action import BaseAction, ActionResult
 DEFAULT_SCREENSHOT_DIR: str = "screenshots"
 
 
-class ScreenshotAction(BaseAction):
+class ScreenCaptureAction(BaseAction):
     """Capture a screenshot of the screen or a region."""
-    action_type = "screenshot"
-    display_name = "截图"
+    action_type = "screen_capture"
+    display_name = "屏幕截图"
     description = "截取屏幕或指定区域的图像"
 
     def execute(
@@ -123,6 +123,90 @@ class ScreenshotAction(BaseAction):
             'path': '',
             'region': None,
             'save': True,
+            'timestamp': True,
+            'screenshot_dir': DEFAULT_SCREENSHOT_DIR
+        }
+
+
+class ScreenCaptureRegionAction(BaseAction):
+    """Capture a screenshot of a specific region and save."""
+    action_type = "capture_region"
+    display_name = "区域截图"
+    description = "截取指定区域的屏幕图像并保存"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute a region screenshot capture.
+
+        Args:
+            context: Execution context.
+            params: Dict with x, y, width, height, path.
+
+        Returns:
+            ActionResult with screenshot path and details.
+        """
+        x = params.get('x', 0)
+        y = params.get('y', 0)
+        width = params.get('width', 100)
+        height = params.get('height', 100)
+        path = params.get('path', '')
+        timestamp = params.get('timestamp', True)
+
+        # Validate coordinates
+        valid, msg = self.validate_coords(x, y, allow_none=False)
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        # Validate dimensions
+        valid, msg = self.validate_positive(width, 'width')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+        valid, msg = self.validate_positive(height, 'height')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        # Determine output path
+        if not path:
+            screenshot_dir = params.get('screenshot_dir', DEFAULT_SCREENSHOT_DIR)
+            Path(screenshot_dir).mkdir(parents=True, exist_ok=True)
+
+            if timestamp:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                path = os.path.join(screenshot_dir, f"region_{ts}.png")
+            else:
+                path = os.path.join(screenshot_dir, "region.png")
+
+        try:
+            # Capture region screenshot
+            img = pyautogui.screenshot(region=(x, y, width, height))
+            img.save(path)
+
+            return ActionResult(
+                success=True,
+                message=f"区域截图保存成功: {path}",
+                data={
+                    'path': path,
+                    'x': x,
+                    'y': y,
+                    'width': width,
+                    'height': height
+                }
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"区域截图失败: {str(e)}"
+            )
+
+    def get_required_params(self) -> List[str]:
+        return ['x', 'y', 'width', 'height']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            'path': '',
             'timestamp': True,
             'screenshot_dir': DEFAULT_SCREENSHOT_DIR
         }
