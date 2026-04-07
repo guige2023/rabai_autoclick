@@ -1640,13 +1640,14 @@ class DiagnosticsWidget(QWidget):
         layout.addLayout(btn_layout)
     
     def _refresh_workflows(self):
-        self.workflow_list.clear()
-        
-        if not self.diagnostics.execution_history:
-            self.workflow_list.addItem("暂无执行历史，请先运行工作流")
-            return
-        
-        for wf_id in self.diagnostics.execution_history.keys():
+        with batch_updates(self.workflow_list):
+            self.workflow_list.clear()
+
+            if not self.diagnostics.execution_history:
+                self.workflow_list.addItem("暂无执行历史，请先运行工作流")
+                return
+
+            for wf_id in self.diagnostics.execution_history.keys():
             try:
                 report = self.diagnostics.diagnose(wf_id)
                 emoji = "🟢" if report.overall_health == HealthLevel.EXCELLENT else \
@@ -2110,19 +2111,21 @@ class MainWindow(QMainWindow):
     
     def _on_workflow_imported(self, workflow: dict):
         self.current_workflow = workflow
-        self.step_list.clear()
         self.step_configs = {}
         self.next_step_id = 1
-        
-        for step in workflow.get('steps', []):
-            step['id'] = self.next_step_id
-            self.next_step_id += 1
-            self.step_configs[step['id']] = step.get('params', {})
-            
-            action_type = step.get('type', 'unknown')
-            action_info = self.engine.get_action_info().get(action_type, {})
-            display_name = action_info.get('display_name', action_type)
-            self.step_list.add_step(step['id'], action_type, display_name)
+
+        with batch_updates(self.step_list):
+            self.step_list.clear()
+
+            for step in workflow.get('steps', []):
+                step['id'] = self.next_step_id
+                self.next_step_id += 1
+                self.step_configs[step['id']] = step.get('params', {})
+
+                action_type = step.get('type', 'unknown')
+                action_info = self.engine.get_action_info().get(action_type, {})
+                display_name = action_info.get('display_name', action_type)
+                self.step_list.add_step(step['id'], action_type, display_name)
         
         if workflow.get('steps'):
             self.step_list.set_current_index(0)
