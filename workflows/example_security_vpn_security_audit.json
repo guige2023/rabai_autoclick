@@ -1,0 +1,117 @@
+{
+  "name": "Security VPN Security Audit Workflow",
+  "description": "Automate VPN security auditing",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "vpn_connections_to_audit": 50,
+    "current_connection": 0,
+    "secure_connections": 0,
+    "weak_connections": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "connection_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize connection counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open VPN management console"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for console"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "vpn_audit_loop",
+      "count": "{{vpn_connections_to_audit}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start VPN audit loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select VPN connection"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for connection audit"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/vpn_connection_{{connection_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture VPN screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "connection_counter",
+      "value": "{{connection_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment connection counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{connection_counter < vpn_connections_to_audit}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more connections"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next connection"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_vpn_security_audit_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
