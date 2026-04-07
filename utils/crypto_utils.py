@@ -106,3 +106,89 @@ def hmac_verify(
         signature = bytes.fromhex(signature)
     expected = hmac.new(_to_bytes(key), _to_bytes(data), hashlib.sha256).digest()
     return hmac.compare_digest(expected, signature)
+
+
+# === Secure Random ===
+
+def generate_random_bytes(n: int) -> bytes:
+    """Generate n cryptographically secure random bytes."""
+    return secrets.token_bytes(n)
+
+
+def generate_random_hex(n: int) -> str:
+    """Generate n cryptographically secure random hex digits."""
+    return secrets.token_hex(n)
+
+
+def generate_random_urlsafe(n: int) -> str:
+    """Generate n cryptographically secure URL-safe random bytes."""
+    return secrets.token_urlsafe(n)
+
+
+def generate_password(
+    length: int = 16,
+    uppercase: bool = True,
+    lowercase: bool = True,
+    digits: bool = True,
+    punctuation: bool = True
+) -> str:
+    """Generate a secure random password."""
+    chars = ""
+    if uppercase:
+        chars += string.ascii_uppercase
+    if lowercase:
+        chars += string.ascii_lowercase
+    if digits:
+        chars += string.digits
+    if punctuation:
+        chars += string.punctuation
+    if not chars:
+        chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(length))
+
+
+def generate_apikey(prefix: str = "sk", total_length: int = 32) -> str:
+    """Generate an API key with a prefix."""
+    random_part = secrets.token_hex(total_length // 2)
+    return f"{prefix}_{random_part}"
+
+
+# === Base64 ===
+
+def base64_encode(data: BytesOrStr, url_safe: bool = False) -> str:
+    """Encode data to base64 string."""
+    b = _to_bytes(data)
+    encoded = base64.urlsafe_b64encode(b) if url_safe else base64.b64encode(b)
+    return encoded.decode().rstrip("=")
+
+
+def base64_decode(data: str, url_safe: bool = False) -> bytes:
+    """Decode base64 string to bytes."""
+    padding = 4 - len(data) % 4
+    if padding != 4:
+        data += "=" * padding
+    return base64.urlsafe_b64decode(data) if url_safe else base64.b64decode(data)
+
+
+# === Key Derivation ===
+
+def derive_key(
+    password: BytesOrStr,
+    salt: Optional[bytes] = None,
+    key_length: int = 32,
+    iterations: int = 100000
+) -> Tuple[bytes, str]:
+    """Derive a key from password using PBKDF2."""
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    elif isinstance(salt, str):
+        salt = salt.encode()
+    key = hashlib.pbkdf2_hmac(
+        "sha256", _to_bytes(password), salt, iterations, dklen=key_length
+    )
+    return key, salt.hex()
+
+
+def secure_compare(a: BytesOrStr, b: BytesOrStr) -> bool:
+    """Constant-time string comparison to prevent timing attacks."""
+    return hmac.compare_digest(_to_bytes(a), _to_bytes(b))
