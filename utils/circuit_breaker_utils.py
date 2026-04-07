@@ -1,254 +1,216 @@
-"""
-Circuit Breaker Pattern Implementation
+"""Circuit breaker pattern utilities.
 
-Prevents cascading failures by failing fast when a service is unhealthy.
+Prevents cascading failures by wrapping operations in a circuit breaker
+that trips after repeated failures and auto-recovers.
+
+Example:
+    cb = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
+    with cb:
+        call_remote_service()
 """
 
 from __future__ import annotations
 
-import copy
+import logging
 import threading
 import time
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Generic, TypeVar
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, ParamSpec, TypeVar
 
+logger = logging.getLogger(__name__)
+
+P = ParamSpec("P")
 T = TypeVar("T")
 
 
 class CircuitState(Enum):
     """Circuit breaker states."""
-    CLOSED = auto()      # Normal operation
-    OPEN = auto()        # Failing fast
-    HALF_OPEN = auto()   # Testing recovery
+    CLOSED = "closed"    # Normal operation, requests pass through
+    OPEN = "open"        # Failing fast, no requests allowed
+    HALF_OPEN = "half_open"  # Testing if service recovered
 
 
 @dataclass
 class CircuitBreakerConfig:
-    """Configuration for circuit breaker."""
-    failure_threshold: int = 5          # Failures before opening
-    success_threshold: int = 2        # Successes in half-open to close
-    timeout_seconds: float = 30.0     # Time before trying half-open
-    expected_exceptions: tuple[type[Exception], ...] = (Exception,)
+    """Configuration for circuit breaker behavior."""
+    failure_threshold: int = 5
+    success_threshold: int = 2
+    recovery_timeout: float = 60.0
+    half_open_max_calls: int = 3
     excluded_exceptions: tuple[type[Exception], ...] = ()
+    monitor_window: float = 60.0
 
 
-@dataclass
-class CircuitBreakerMetrics:
-    """Metrics for circuit breaker."""
-    total_calls: int = 0
-    successful_calls: int = 0
-    failed_calls: int = 0
-    rejected_calls: int = 0
-    state_changes: int = 0
-    last_failure: float | None = None
-    last_success: float | None = None
-    consecutive_failures: int = 0
-    consecutive_successes: int = 0
+class CircuitBreakerOpen(Exception):
+    """Raised when circuit breaker is open and calls are rejected."""
+    pass
 
 
-class CircuitBreaker(Generic[T]):
-    """
-    Circuit breaker implementation.
+class CircuitBreaker:
+    """Circuit breaker implementation for fault tolerance.
 
-    Prevents repeated calls to a failing service by opening the circuit.
+    States:
+    - CLOSED: Normal operation. Failures increment counter.
+    - OPEN: After failure_threshold failures. All calls rejected.
+    - HALF_OPEN: After recovery_timeout. Limited calls allowed to test recovery.
     """
 
-    def __init__(self, config: CircuitBreakerConfig | None = None):
-        self._config = config or CircuitBreakerConfig()
+    def __init__(self, config: CircuitBreakerConfig | None = None) -> None:
+        self.config = config or CircuitBreakerConfig()
         self._state = CircuitState.CLOSED
-        self._metrics = CircuitBreakerMetrics()
+        self._failure_count = 0
+        self._success_count = 0
+        self._last_failure_time: float | None = None
         self._last_state_change = time.time()
         self._lock = threading.RLock()
 
     @property
     def state(self) -> CircuitState:
-        """Get current circuit state."""
+        """Get current circuit state, auto-transitioning if needed."""
         with self._lock:
             if self._state == CircuitState.OPEN:
-                # Check if we should transition to half-open
-                if time.time() - self._last_state_change >= self._config.timeout_seconds:
+                if self._should_attempt_reset():
                     self._transition_to(CircuitState.HALF_OPEN)
             return self._state
 
-    @property
-    def metrics(self) -> CircuitBreakerMetrics:
-        """Get circuit breaker metrics."""
-        with self._lock:
-            return copy.copy(self._metrics)
-
-    def call(self, func: Callable[[], T], *args: Any, **kwargs: Any) -> T:
-        """
-        Execute a function through the circuit breaker.
+    def call(self, func: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+        """Execute a function with circuit breaker protection.
 
         Args:
             func: Function to execute.
-            *args: Positional arguments for the function.
-            **kwargs: Keyword arguments for the function.
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
 
         Returns:
-            The result of the function.
+            Return value of the function.
 
         Raises:
-            CircuitBreakerOpen: If the circuit is open.
-            Exception: If the function raises an exception.
+            CircuitBreakerOpen: If circuit is open.
+            Exception: Any exception raised by the function.
         """
-        # Check if circuit allows the call
-        if not self._allow_request():
-            self._metrics.rejected_calls += 1
-            raise CircuitBreakerOpen(f"Circuit is {self.state.name}")
-
-        self._metrics.total_calls += 1
+        if not self._can_execute():
+            raise CircuitBreakerOpen(
+                f"Circuit breaker is open. State={self._state.value}"
+            )
 
         try:
             result = func(*args, **kwargs)
             self._on_success()
             return result
-
         except Exception as e:
-            if self._is_expected_exception(e):
-                self._on_failure()
+            if self._is_excluded_exception(e):
                 raise
-            else:
-                # Excluded exception - treat as success
-                self._on_success()
-                raise
+            self._on_failure()
+            raise
 
-    def _allow_request(self) -> bool:
-        """Check if a request should be allowed."""
+    def __enter__(self) -> "CircuitBreaker":
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+        """Context manager exit."""
+        if exc_type is not None and not self._is_excluded_exception(exc_val):
+            self._on_failure()
+        return False
+
+    def _can_execute(self) -> bool:
+        """Check if execution is allowed in current state."""
         with self._lock:
-            if self._state == CircuitState.CLOSED:
+            state = self.state
+            if state == CircuitState.CLOSED:
                 return True
+            if state == CircuitState.HALF_OPEN:
+                return self._half_open_calls < self.config.half_open_max_calls
+            return False
 
-            if self._state == CircuitState.OPEN:
-                # Check timeout
-                if time.time() - self._last_state_change >= self._config.timeout_seconds:
-                    self._transition_to(CircuitState.HALF_OPEN)
-                    return True
-                return False
-
-            # HALF_OPEN - allow limited requests
-            return True
+    def _should_attempt_reset(self) -> bool:
+        """Check if enough time has passed to attempt reset."""
+        if self._last_failure_time is None:
+            return False
+        return (time.time() - self._last_failure_time) >= self.config.recovery_timeout
 
     def _on_success(self) -> None:
         """Handle successful call."""
         with self._lock:
-            self._metrics.successful_calls += 1
-            self._metrics.consecutive_successes += 1
-            self._metrics.consecutive_failures = 0
-            self._metrics.last_success = time.time()
-
+            self._failure_count = 0
             if self._state == CircuitState.HALF_OPEN:
-                if self._metrics.consecutive_successes >= self._config.success_threshold:
+                self._success_count += 1
+                if self._success_count >= self.config.success_threshold:
                     self._transition_to(CircuitState.CLOSED)
+                    logger.info("Circuit breaker reset to CLOSED")
 
     def _on_failure(self) -> None:
         """Handle failed call."""
         with self._lock:
-            self._metrics.failed_calls += 1
-            self._metrics.consecutive_failures += 1
-            self._metrics.consecutive_successes = 0
-            self._metrics.last_failure = time.time()
+            self._failure_count += 1
+            self._last_failure_time = time.time()
 
-            if self._state == CircuitState.CLOSED:
-                if self._metrics.consecutive_failures >= self._config.failure_threshold:
-                    self._transition_to(CircuitState.OPEN)
-
-            elif self._state == CircuitState.HALF_OPEN:
+            if self._state == CircuitState.HALF_OPEN:
                 self._transition_to(CircuitState.OPEN)
+                logger.warning("Circuit breaker reopened after HALF_OPEN failure")
+
+            elif self._failure_count >= self.config.failure_threshold:
+                self._transition_to(CircuitState.OPEN)
+                logger.warning(
+                    "Circuit breaker opened after %d failures",
+                    self._failure_count,
+                )
 
     def _transition_to(self, new_state: CircuitState) -> None:
         """Transition to a new state."""
-        if self._state == new_state:
-            return
-
         self._state = new_state
         self._last_state_change = time.time()
-        self._metrics.state_changes += 1
 
         if new_state == CircuitState.HALF_OPEN:
-            self._metrics.consecutive_successes = 0
-
+            self._half_open_calls = 0
+            self._success_count = 0
         elif new_state == CircuitState.CLOSED:
-            self._metrics.consecutive_failures = 0
-            self._metrics.consecutive_successes = 0
+            self._failure_count = 0
+            self._success_count = 0
 
-    def _is_expected_exception(self, exception: Exception) -> bool:
-        """Check if an exception should trigger the circuit breaker."""
-        # Check excluded exceptions first
-        for exc_type in self._config.excluded_exceptions:
-            if isinstance(exception, exc_type):
-                return False
-
-        # Check expected exceptions
-        for exc_type in self._config.expected_exceptions:
-            if isinstance(exception, exc_type):
-                return True
-
-        return True
+    def _is_excluded_exception(self, exc: Exception) -> bool:
+        """Check if exception type is in excluded list."""
+        return isinstance(exc, self.config.excluded_exceptions)
 
     def reset(self) -> None:
-        """Manually reset the circuit breaker."""
+        """Manually reset the circuit breaker to closed state."""
         with self._lock:
             self._transition_to(CircuitState.CLOSED)
-            self._metrics.consecutive_failures = 0
-            self._metrics.consecutive_successes = 0
+            logger.info("Circuit breaker manually reset")
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get circuit breaker statistics."""
+        with self._lock:
+            return {
+                "state": self._state.value,
+                "failure_count": self._failure_count,
+                "success_count": self._success_count,
+                "last_failure_time": self._last_failure_time,
+                "last_state_change": self._last_state_change,
+                "uptime_seconds": time.time() - self._last_state_change,
+            }
 
 
-class CircuitBreakerOpen(Exception):
-    """Exception raised when circuit breaker is open."""
-    pass
+class CircuitBreakerRegistry:
+    """Registry for managing multiple circuit breakers by name."""
 
+    def __init__(self) -> None:
+        self._breakers: dict[str, CircuitBreaker] = {}
+        self._lock = threading.Lock()
 
-class CircuitBreakerDecorator(Generic[T]):
-    """
-    Decorator for adding circuit breaker to a function.
-    """
-
-    def __init__(
+    def get(
         self,
+        name: str,
         config: CircuitBreakerConfig | None = None,
-        name: str = "",
-    ):
-        self._breaker = CircuitBreaker(config)
-        self._name = name or "circuit_breaker"
+    ) -> CircuitBreaker:
+        """Get or create a circuit breaker by name."""
+        with self._lock:
+            if name not in self._breakers:
+                self._breakers[name] = CircuitBreaker(config)
+            return self._breakers[name]
 
-    def __call__(self, func: Callable[..., T]) -> Callable[..., T]:
-        """Decorate a function with circuit breaker."""
-
-        def wrapper(*args: Any, **kwargs: Any) -> T:
-            return self._breaker.call(func, *args, **kwargs)
-
-        wrapper.breaker = self._breaker
-        wrapper.__name__ = func.__name__
-        return wrapper
-
-    @property
-    def breaker(self) -> CircuitBreaker[T]:
-        """Access the underlying circuit breaker."""
-        return self._breaker
-
-
-def circuit_breaker(
-    config: CircuitBreakerConfig | None = None,
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """
-    Decorator to add circuit breaker to a function.
-
-    Usage:
-        @circuit_breaker( CircuitBreakerConfig(failure_threshold=3) )
-        def my_function():
-            ...
-    """
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        cb = CircuitBreaker(config)
-
-        def wrapper(*args: Any, **kwargs: Any) -> T:
-            return cb.call(func, *args, **kwargs)
-
-        wrapper.breaker = cb
-        wrapper.__name__ = func.__name__
-        return wrapper
-
-    return decorator
+    def all_stats(self) -> dict[str, dict[str, Any]]:
+        """Get statistics for all registered circuit breakers."""
+        with self._lock:
+            return {name: cb.get_stats() for name, cb in self._breakers.items()}
