@@ -2377,8 +2377,8 @@ class MainWindow(QMainWindow):
         
         self.current_workflow['steps'] = steps
         self.current_workflow['variables'] = self.variables_widget.get_variables()
-    
-    def _on_run(self):
+
+    def _on_run(self) -> None:
         if self.engine.is_running():
             return
         
@@ -2445,8 +2445,8 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         app_logger.warning("停止工作流", "Workflow")
         show_toast("工作流已停止", 'warning')
-    
-    def _on_pause(self):
+
+    def _on_pause(self) -> None:
         if self.engine.is_paused():
             self.engine.resume()
             self.pause_btn.setText("⏸ 暂停")
@@ -2543,12 +2543,12 @@ class MainWindow(QMainWindow):
         
         app_logger.info(f"按键显示: {self._teaching_mode}", "UI")
     
-    def _on_history(self):
+    def _on_history(self) -> None:
         dialog = HistoryDialog(self.history_manager, self)
         dialog.workflow_selected.connect(self._load_workflow_from_history)
         dialog.exec_()
-    
-    def _load_workflow_from_history(self, workflow: Dict[str, Any]):
+
+    def _load_workflow_from_history(self, workflow: Dict[str, Any]) -> None:
         self.current_workflow = workflow
         self.step_configs = {}
         self.next_step_id = 1
