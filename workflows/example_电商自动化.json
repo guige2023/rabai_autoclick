@@ -1,0 +1,195 @@
+{
+  "name": "电商订单处理自动化",
+  "description": "自动化处理电商平台订单",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "platform": "shop.example.com",
+    "orders_to_process": 20,
+    "current_order": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "order_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "初始化订单计数器"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "点击地址栏"
+    },
+    {
+      "id": 3,
+      "type": "type_text",
+      "text": "https://{{platform}}/admin/orders",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "打开订单管理页面"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 2.5,
+      "pre_delay": 0.5,
+      "comment": "等待页面加载"
+    },
+    {
+      "id": 5,
+      "type": "loop",
+      "loop_id": "order_loop",
+      "count": "{{orders_to_process}}",
+      "loop_start": 6,
+      "pre_delay": 0.3,
+      "comment": "开始订单处理循环"
+    },
+    {
+      "id": 6,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.5,
+      "comment": "点击订单"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "等待订单详情"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/order_{{order_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "截图订单详情"
+    },
+    {
+      "id": 9,
+      "type": "ocr",
+      "region": [100, 100, 500, 300],
+      "output_var": "order_status",
+      "pre_delay": 0.3,
+      "comment": "读取订单状态"
+    },
+    {
+      "id": 10,
+      "type": "condition",
+      "condition": "{{order_status.includes('pending')}}",
+      "true_next": 11,
+      "false_next": 14,
+      "pre_delay": 0.1,
+      "comment": "检查是否待处理"
+    },
+    {
+      "id": 11,
+      "type": "click_image",
+      "template": "./templates/approve_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "点击批准按钮"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "等待处理"
+    },
+    {
+      "id": 13,
+      "type": "goto",
+      "step_id": 17,
+      "pre_delay": 0.1,
+      "comment": "跳转到下一个"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{order_status.includes('refund')}}",
+      "true_next": 15,
+      "false_next": 17,
+      "pre_delay": 0.1,
+      "comment": "检查是否退款"
+    },
+    {
+      "id": 15,
+      "type": "click_image",
+      "template": "./templates/refund_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "点击退款按钮"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "等待处理"
+    },
+    {
+      "id": 17,
+      "type": "set_variable",
+      "name": "order_counter",
+      "value": "{{order_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加订单计数"
+    },
+    {
+      "id": 18,
+      "type": "key_press",
+      "key": "page_down",
+      "pre_delay": 0.3,
+      "comment": "滚动到下一个订单"
+    },
+    {
+      "id": 19,
+      "type": "condition",
+      "condition": "{{order_counter < orders_to_process}}",
+      "true_next": 20,
+      "false_next": 21,
+      "pre_delay": 0.1,
+      "comment": "检查是否还有订单"
+    },
+    {
+      "id": 20,
+      "type": "goto",
+      "step_id": 5,
+      "pre_delay": 0.1,
+      "comment": "继续处理下一个"
+    },
+    {
+      "id": 21,
+      "type": "screenshot",
+      "save_path": "./screenshots/orders_complete.png",
+      "pre_delay": 0.5,
+      "comment": "截图完成状态"
+    },
+    {
+      "id": 22,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}

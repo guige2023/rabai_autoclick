@@ -1,0 +1,147 @@
+{
+  "name": "File Format Converter Workflow",
+  "description": "Convert files between different formats automatically",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "source_format": "png",
+    "target_format": "jpg",
+    "files_to_convert": 15,
+    "current_file": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "file_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize file counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open source folder"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.5,
+      "comment": "Wait for folder"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "conversion_loop",
+      "count": "{{files_to_convert}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start conversion loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 150,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Select file"
+    },
+    {
+      "id": 6,
+      "type": "key_press",
+      "keys": ["ctrl", "a"],
+      "pre_delay": 0.2,
+      "comment": "Select all"
+    },
+    {
+      "id": 7,
+      "type": "click_image",
+      "template": "./templates/convert_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click convert button"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for conversion dialog"
+    },
+    {
+      "id": 9,
+      "type": "click_image",
+      "template": "./templates/format_{{target_format}}.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Select target format"
+    },
+    {
+      "id": 10,
+      "type": "screenshot",
+      "save_path": "./screenshots/conversion_progress_{{file_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture conversion progress"
+    },
+    {
+      "id": 11,
+      "type": "set_variable",
+      "name": "file_counter",
+      "value": "{{file_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment file counter"
+    },
+    {
+      "id": 12,
+      "type": "key_press",
+      "key": "down",
+      "pre_delay": 0.2,
+      "comment": "Move to next file"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{file_counter < files_to_convert}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more files"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue converting"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/conversion_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
