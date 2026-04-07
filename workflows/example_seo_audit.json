@@ -1,0 +1,147 @@
+{
+  "name": "SEO Audit Workflow",
+  "description": "Automate SEO audits across multiple web pages",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "pages_to_audit": 15,
+    "current_page": 0,
+    "issues_found": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "page_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize page counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 3,
+      "type": "type_text",
+      "text": "https://example.com/page{{page_counter}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to page"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for page to load"
+    },
+    {
+      "id": 5,
+      "type": "loop",
+      "loop_id": "audit_loop",
+      "count": "{{pages_to_audit}}",
+      "loop_start": 6,
+      "pre_delay": 0.3,
+      "comment": "Start audit loop"
+    },
+    {
+      "id": 6,
+      "type": "screenshot",
+      "save_path": "./screenshots/seo_page_{{page_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture page screenshot"
+    },
+    {
+      "id": 7,
+      "type": "ocr",
+      "region": [0, 0, 800, 100],
+      "output_var": "page_title",
+      "pre_delay": 0.3,
+      "comment": "Read page title"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{page_title.length < 30}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check for short title"
+    },
+    {
+      "id": 9,
+      "type": "set_variable",
+      "name": "issues_found",
+      "value": "{{issues_found + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment issues found"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 14,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "No issues"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "page_counter",
+      "value": "{{page_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment page counter"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{page_counter < pages_to_audit}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more pages"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 6,
+      "pre_delay": 0.1,
+      "comment": "Continue to next page"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/seo_audit_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
