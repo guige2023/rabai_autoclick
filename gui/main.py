@@ -312,7 +312,7 @@ class PredictTab(BaseTab):
         ttk.Label(frame, text="动作类型:").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.action_type_var = tk.StringVar(value="click")
         action_combo = ttk.Combobox(frame, textvariable=self.action_type_var, 
-                                     values=["click", "type", "hotkey", "wait", "launch_app"], width=30)
+                                     values=ACTION_TYPES, width=30)
         action_combo.grid(row=0, column=1, sticky=tk.W, pady=5)
 
         ttk.Label(frame, text="目标:").grid(row=1, column=0, sticky=tk.W, pady=5)
