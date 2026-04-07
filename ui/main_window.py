@@ -915,7 +915,7 @@ class MainWindow(QMainWindow):
         
         main_layout.addLayout(toolbar)
         
-        splitter = QSplitter(Qt.Horizontal)
+        self.splitter = QSplitter(Qt.Horizontal)
         
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -925,37 +925,37 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(QLabel("步骤列表:"))
         left_layout.addWidget(self.step_list)
         
-        splitter.addWidget(left_panel)
-        
+        self.splitter.addWidget(left_panel)
+
         right_panel = QTabWidget()
-        
+
         editor_widget = QWidget()
         editor_layout = QVBoxLayout(editor_widget)
-        
+
         self.action_list = QListWidget()
         self.action_list.setMaximumHeight(120)
         editor_layout.addWidget(QLabel("选择动作类型:"))
         editor_layout.addWidget(self.action_list)
-        
+
         self.config_stack = QStackedWidget()
         editor_layout.addWidget(QLabel("动作配置:"))
         editor_layout.addWidget(self.config_stack)
-        
+
         right_panel.addTab(editor_widget, "步骤编辑")
-        
+
         self.variables_widget = VariablesWidget()
         right_panel.addTab(self.variables_widget, "变量")
-        
+
         self.recording_widget = RecordingWidget()
         right_panel.addTab(self.recording_widget, "录屏")
-        
+
         self.log_widget = LogWidget()
         right_panel.addTab(self.log_widget, "日志")
-        
-        splitter.addWidget(right_panel)
-        splitter.setSizes([350, 950])
-        
-        main_layout.addWidget(splitter)
+
+        self.splitter.addWidget(right_panel)
+        self.splitter.setSizes([350, 950])
+
+        main_layout.addWidget(self.splitter)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -1738,7 +1738,7 @@ class MainWindow(QMainWindow):
         self.theme_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
 
         # Apply splitter styling
-        splitter_style = theme_manager.get_stylesheet("splitter")
+        self.splitter.setStyleSheet(theme_manager.get_stylesheet("splitter"))
 
     def changeEvent(self, event):
         """Handle window state changes to optimize timer usage."""
