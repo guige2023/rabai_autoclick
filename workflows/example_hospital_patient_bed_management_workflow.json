@@ -1,0 +1,175 @@
+{
+  "name": "Hospital Patient Bed Management Workflow",
+  "description": "Automate hospital bed management including admission, transfer, and discharge planning",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "bed_assignments": 40,
+    "current_assignment": 0,
+    "assigned_beds": 0,
+    "pending_assignments": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "bed_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize bed counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open bed management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system to load"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "bed_assignment_loop",
+      "count": "{{bed_assignments}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start bed assignment loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 160,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Open patient admission"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for admission"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/bed_assignment_{{bed_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture admission screenshot"
+    },
+    {
+      "id": 8,
+      "type": "click",
+      "x": 340,
+      "y": 230,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Check bed availability"
+    },
+    {
+      "id": 9,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for availability"
+    },
+    {
+      "id": 10,
+      "type": "click",
+      "x": 460,
+      "y": 300,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Assign appropriate bed"
+    },
+    {
+      "id": 11,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for assignment"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 580,
+      "y": 370,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Update bed status"
+    },
+    {
+      "id": 13,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "Wait for update"
+    },
+    {
+      "id": 14,
+      "type": "screenshot",
+      "save_path": "./screenshots/bed_assigned_{{bed_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture assignment confirmation"
+    },
+    {
+      "id": 15,
+      "type": "set_variable",
+      "name": "bed_counter",
+      "value": "{{bed_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment bed counter"
+    },
+    {
+      "id": 16,
+      "type": "condition",
+      "condition": "{{bed_counter < bed_assignments}}",
+      "true_next": 17,
+      "false_next": 18,
+      "pre_delay": 0.1,
+      "comment": "Check if more assignments"
+    },
+    {
+      "id": 17,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next assignment"
+    },
+    {
+      "id": 18,
+      "type": "screenshot",
+      "save_path": "./screenshots/bed_management_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 19,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
