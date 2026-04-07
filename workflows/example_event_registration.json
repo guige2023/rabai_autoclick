@@ -1,0 +1,148 @@
+{
+  "name": "Event Registration Workflow",
+  "description": "Automate event registration across multiple platforms",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "event_name": "Tech Conference 2024",
+    "attendee_count": 5,
+    "current_attendee": 0,
+    "registration_type": "VIP"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "attendee_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize attendee counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open event platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "registration_loop",
+      "count": "{{attendee_count}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start registration loop"
+    },
+    {
+      "id": 5,
+      "type": "click_image",
+      "template": "./templates/register_button.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click register button"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for form"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 300,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click name field"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "Attendee {{attendee_counter}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter attendee name"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "key": "tab",
+      "pre_delay": 0.2,
+      "comment": "Move to email field"
+    },
+    {
+      "id": 10,
+      "type": "type_text",
+      "text": "attendee{{attendee_counter}}@example.com",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter email"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/registration_{{attendee_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture registration screenshot"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "attendee_counter",
+      "value": "{{attendee_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment attendee counter"
+    },
+    {
+      "id": 13,
+      "type": "condition",
+      "condition": "{{attendee_counter < attendee_count}}",
+      "true_next": 14,
+      "false_next": 15,
+      "pre_delay": 0.1,
+      "comment": "Check if more attendees"
+    },
+    {
+      "id": 14,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next registration"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/event_registration_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 16,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
