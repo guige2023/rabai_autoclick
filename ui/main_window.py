@@ -676,14 +676,14 @@ class LogWidget(QWidget):
             }}
         """)
 
-    def _on_log_entry(self, entry):
+    def _on_log_entry(self, entry: Any) -> None:
         color = self._log_colors.get(entry.level, theme_manager.get_color('text_secondary'))
         timestamp = entry.timestamp.strftime("%H:%M:%S")
         timestamp_color = theme_manager.get_color('text_secondary')
         html = f'<span style="color: {timestamp_color};">[{timestamp}]</span> <span style="color: {color};">[{entry.level}]</span> {entry.message}'
         self.text_edit.append(html)
-    
-    def append_log(self, message: str, level: str = "INFO"):
+
+    def append_log(self, message: str, level: str = "INFO") -> None:
         app_logger.info(message) if level == "INFO" else \
         app_logger.warning(message) if level == "WARN" else \
         app_logger.error(message) if level == "ERROR" else \
