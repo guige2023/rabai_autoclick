@@ -591,7 +591,17 @@ class SceneTab(BaseTab):
 
 
 class DiagTab(BaseTab):
-    def setup_ui(self):
+    """
+    Diagnostics tab for workflow health monitoring and reporting.
+    
+    Features:
+        - Run diagnostics on workflows
+        - View health overview
+        - Generate detailed diagnostic reports
+    """
+    
+    def setup_ui(self) -> None:
+        """Set up the tab's UI components."""
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -642,7 +652,10 @@ class DiagTab(BaseTab):
         self.report_result = scrolledtext.ScrolledText(frame, height=12, state='disabled')
         self.report_result.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _run_diag(self):
+    def _run_diag(self) -> None:
+        """
+        Run diagnostics on specified workflow or all workflows.
+        """
         def do_diag():
             diag = create_diagnostics(str(DATA_DIR))
             workflow_id = self.diag_workflow_var.get()
@@ -668,7 +681,10 @@ class DiagTab(BaseTab):
 
         self.run_async(do_diag, show_result)
 
-    def _get_summary(self):
+    def _get_summary(self) -> None:
+        """
+        Retrieve and display health summary across all workflows.
+        """
         def do_summary():
             diag = create_diagnostics(str(DATA_DIR))
             return diag.get_health_summary()
@@ -698,7 +714,10 @@ class DiagTab(BaseTab):
 
         self.run_async(do_summary, show_result)
 
-    def _generate_report(self):
+    def _generate_report(self) -> None:
+        """
+        Generate and save a detailed diagnostic report for a workflow.
+        """
         workflow_id = self.report_workflow_var.get()
         if not workflow_id:
             messagebox.showwarning("提示", "请输入工作流 ID")
