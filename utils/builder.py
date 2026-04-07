@@ -155,18 +155,20 @@ class ChainBuilder:
         self._builders[name] = builder
         return self
 
-    def build_with(self, name: str, **kwargs: Any) -> 'ChainBuilder':
+    def build_with(self, name: str, attrs: Dict[str, Any]) -> 'ChainBuilder':
         """Build sub-component.
 
         Args:
             name: Builder name.
-            **kwargs: Arguments for builder.
+            attrs: Dictionary of attributes for builder.
 
         Returns:
             Self for chaining.
         """
         if name in self._builders:
-            self._builders[name].set(**kwargs)
+            builder = self._builders[name]
+            for key, value in attrs.items():
+                builder.set(key, value)
         return self
 
     def finalize(self) -> Dict[str, Any]:

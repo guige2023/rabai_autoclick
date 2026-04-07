@@ -130,7 +130,7 @@ class TestChainBuilder:
         """Test building with arguments."""
         cb = ChainBuilder()
         cb.add_builder("person", Builder(Person))
-        cb.build_with("person", name="Alice", age=30)
+        cb.build_with("person", {"name": "Alice", "age": 30})
         result = cb.finalize()
         assert result["person"].name == "Alice"
 
@@ -138,7 +138,7 @@ class TestChainBuilder:
         """Test getting built component."""
         cb = ChainBuilder()
         cb.add_builder("person", Builder(Person))
-        cb.build_with("person", name="Bob")
+        cb.build_with("person", {"name": "Bob"})
         cb.finalize()
         person = cb.get("person")
         assert person.name == "Bob"
