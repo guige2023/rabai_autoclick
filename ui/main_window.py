@@ -847,13 +847,17 @@ class MainWindow(QMainWindow):
         
         main_layout = QVBoxLayout(central_widget)
         main_layout.setSpacing(5)
-        
+
         toolbar = QHBoxLayout()
-        
+
         self.new_btn = QPushButton("📄 新建")
+        self.new_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         self.open_btn = QPushButton("📂 打开")
+        self.open_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         self.save_btn = QPushButton("💾 保存")
+        self.save_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
         self.history_btn = QPushButton("📚 记录")
+        self.history_btn.setStyleSheet(theme_manager.get_button_stylesheet('default'))
 
         colors = theme_manager.colors
         self.run_btn = QPushButton("▶ 运行")
