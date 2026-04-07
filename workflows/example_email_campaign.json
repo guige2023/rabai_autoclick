@@ -1,0 +1,133 @@
+{
+  "name": "Email Campaign Workflow",
+  "description": "Automate email campaign creation and sending",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "campaign_name": "Spring Promotion",
+    "segments": ["new_customers", "vip", "inactive"],
+    "current_segment": 0,
+    "emails_per_segment": 25
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "segment_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize segment index"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open email platform"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for platform"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "segments_loop",
+      "count": 3,
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start segments loop"
+    },
+    {
+      "id": 5,
+      "type": "click_image",
+      "template": "./templates/new_campaign.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Click new campaign"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for editor"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 300,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click campaign name"
+    },
+    {
+      "id": 8,
+      "type": "type_text",
+      "text": "{{campaign_name}} - {{segments[segment_index]}}",
+      "enter_after": false,
+      "pre_delay": 0.2,
+      "comment": "Enter campaign name"
+    },
+    {
+      "id": 9,
+      "type": "screenshot",
+      "save_path": "./screenshots/email_campaign_{{segment_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture campaign screenshot"
+    },
+    {
+      "id": 10,
+      "type": "set_variable",
+      "name": "segment_index",
+      "value": "{{segment_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment segment index"
+    },
+    {
+      "id": 11,
+      "type": "condition",
+      "condition": "{{segment_index < 3}}",
+      "true_next": 12,
+      "false_next": 13,
+      "pre_delay": 0.1,
+      "comment": "Check if more segments"
+    },
+    {
+      "id": 12,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next segment"
+    },
+    {
+      "id": 13,
+      "type": "screenshot",
+      "save_path": "./screenshots/email_campaign_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 14,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
