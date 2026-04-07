@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QAction, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QWidget
 )
 
-from ui.theme import theme_manager, ThemeType
+from ui.theme import theme_manager, ThemeType, ThemeColors
 
 
 class MiniToolbar(QWidget):
