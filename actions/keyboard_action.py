@@ -1,313 +1,220 @@
-"""Keyboard action module for RabAI AutoClick.
+"""Keyboard automation action for key typing and hotkeys.
 
-Provides keyboard operations:
-- KeyboardTypeAction: Type text
-- KeyboardPressAction: Press key
-- KeyboardHotkeyAction: Press hotkey combination
-- KeyboardWriteAction: Write to active window
-- KeyboardSleepAction: Wait/delay
+This module provides keyboard automation including
+key typing, hotkey combinations, and text input.
+
+Example:
+    >>> action = KeyboardAction()
+    >>> result = action.execute(command="type", text="Hello World")
 """
 
-from typing import Any, Dict, List
+from __future__ import annotations
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import time
+from dataclasses import dataclass
+from typing import Any, Optional
 
 
-class KeyboardTypeAction(BaseAction):
-    """Type text."""
-    action_type = "keyboard_type"
-    display_name = "键盘输入文本"
-    description = "输入文本内容"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute keyboard type.
-
-        Args:
-            context: Execution context.
-            params: Dict with text, interval, output_var.
-
-        Returns:
-            ActionResult with type status.
-        """
-        text = params.get('text', '')
-        interval = params.get('interval', 0)
-        output_var = params.get('output_var', 'type_status')
-
-        try:
-            import pyautogui
-
-            resolved_text = context.resolve_value(text)
-            resolved_interval = float(context.resolve_value(interval)) if interval else 0
-
-            pyautogui.write(resolved_text, interval=resolved_interval)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"键盘输入完成: {len(resolved_text)} 字符",
-                data={
-                    'text': resolved_text,
-                    'length': len(resolved_text),
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="键盘输入失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"键盘输入失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['text']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'interval': 0, 'output_var': 'type_status'}
+@dataclass
+class HotkeyCombo:
+    """Represents a hotkey combination."""
+    keys: list[str]
+    description: Optional[str] = None
 
 
-class KeyboardPressAction(BaseAction):
-    """Press key."""
-    action_type = "keyboard_press"
-    display_name = "键盘按键"
-    description = "按下指定按键"
-    version = "1.0"
+class KeyboardAction:
+    """Keyboard automation action.
+
+    Provides key typing, hotkey combinations, and
+    keyboard control for automation.
+
+    Example:
+        >>> action = KeyboardAction()
+        >>> result = action.execute(
+        ...     command="hotkey",
+        ...     keys=["cmd", "s"]
+        ... )
+    """
+
+    def __init__(self) -> None:
+        """Initialize keyboard action."""
+        self._paused = False
 
     def execute(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute keyboard press.
+        command: str,
+        text: Optional[str] = None,
+        key: Optional[str] = None,
+        keys: Optional[list[str]] = None,
+        interval: float = 0.0,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute keyboard command.
 
         Args:
-            context: Execution context.
-            params: Dict with key, output_var.
+            command: Command (type, press, hotkey, key_down, key_up).
+            text: Text to type.
+            key: Single key to press.
+            keys: List of keys for hotkey.
+            interval: Interval between key presses.
+            **kwargs: Additional parameters.
 
         Returns:
-            ActionResult with press status.
-        """
-        key = params.get('key', '')
-        output_var = params.get('output_var', 'press_status')
+            Command result dictionary.
 
+        Raises:
+            ValueError: If command is invalid.
+        """
         try:
             import pyautogui
-
-            resolved_key = context.resolve_value(key)
-
-            pyautogui.press(resolved_key)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"键盘按键完成: {resolved_key}",
-                data={
-                    'key': resolved_key,
-                    'output_var': output_var
-                }
-            )
+            pyautogui.FAILSAFE = True
         except ImportError:
-            return ActionResult(
-                success=False,
-                message="键盘按键失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"键盘按键失败: {str(e)}"
-            )
+            return {
+                "success": False,
+                "error": "pyautogui not installed. Run: pip install pyautogui",
+            }
 
-    def get_required_params(self) -> List[str]:
-        return ['key']
+        cmd = command.lower()
+        result: dict[str, Any] = {"command": cmd, "success": True}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'press_status'}
+        if cmd in ("type", "write", "typewrite"):
+            if text is None:
+                raise ValueError("text required for 'type' command")
+            pyautogui.write(text, interval=interval)
+            result["text"] = text
 
+        elif cmd == "press":
+            if key is None:
+                raise ValueError("key required for 'press' command")
+            pyautogui.press(key)
+            result["key"] = key
 
-class KeyboardHotkeyAction(BaseAction):
-    """Press hotkey combination."""
-    action_type = "keyboard_hotkey"
-    display_name = "键盘组合键"
-    description = "按下组合键"
-    version = "1.0"
+        elif cmd == "hotkey":
+            if not keys:
+                raise ValueError("keys required for 'hotkey' command")
+            pyautogui.hotkey(*keys)
+            result["keys"] = keys
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute keyboard hotkey.
+        elif cmd == "key_down":
+            if key is None:
+                raise ValueError("key required for 'key_down' command")
+            pyautogui.keyDown(key)
+            result["key"] = key
+
+        elif cmd == "key_up":
+            if key is None:
+                raise ValueError("key required for 'key_up' command")
+            pyautogui.keyUp(key)
+            result["key"] = key
+
+        elif cmd == "hold":
+            if not keys:
+                raise ValueError("keys required for 'hold' command")
+            for k in keys:
+                pyautogui.keyDown(k)
+            result["held"] = keys
+
+        elif cmd == "release":
+            if not keys:
+                raise ValueError("keys required for 'release' command")
+            for k in reversed(keys):
+                pyautogui.keyUp(k)
+            result["released"] = keys
+
+        elif cmd == "type_sequence":
+            sequence = kwargs.get("sequence", [])
+            for k in sequence:
+                if isinstance(k, str):
+                    pyautogui.press(k)
+                else:
+                    pyautogui.hotkey(*k)
+                time.sleep(interval)
+            result["sequence"] = sequence
+
+        elif cmd == "select_all":
+            pyautogui.hotkey("cmd", "a")
+            result["selected"] = "all"
+
+        elif cmd == "copy":
+            pyautogui.hotkey("cmd", "c")
+            result["copied"] = True
+
+        elif cmd == "paste":
+            pyautogui.hotkey("cmd", "v")
+            result["pasted"] = True
+
+        elif cmd == "cut":
+            pyautogui.hotkey("cmd", "x")
+            result["cut"] = True
+
+        elif cmd == "undo":
+            pyautogui.hotkey("cmd", "z")
+            result["undone"] = True
+
+        elif cmd == "redo":
+            pyautogui.hotkey("cmd", "shift", "z")
+            result["redone"] = True
+
+        elif cmd == "find":
+            pyautogui.hotkey("cmd", "f")
+            result["find_opened"] = True
+
+        elif cmd == "replace":
+            pyautogui.hotkey("cmd", "h")
+            result["replace_opened"] = True
+
+        else:
+            raise ValueError(f"Unknown command: {command}")
+
+        return result
+
+    def type_with_delay(self, text: str, delay: float = 0.05) -> dict[str, Any]:
+        """Type text with delay between keystrokes.
 
         Args:
-            context: Execution context.
-            params: Dict with keys, output_var.
+            text: Text to type.
+            delay: Delay between keystrokes.
 
         Returns:
-            ActionResult with hotkey status.
+            Result dictionary.
         """
-        keys = params.get('keys', [])
-        output_var = params.get('output_var', 'hotkey_status')
+        return self.execute(command="type", text=text, interval=delay)
 
-        try:
-            import pyautogui
-
-            resolved_keys = context.resolve_value(keys)
-
-            if isinstance(resolved_keys, str):
-                resolved_keys = resolved_keys.split('+')
-
-            pyautogui.hotkey(*resolved_keys)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"键盘组合键完成: {'+'.join(resolved_keys)}",
-                data={
-                    'keys': resolved_keys,
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="键盘组合键失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"键盘组合键失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['keys']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'hotkey_status'}
-
-
-class KeyboardWriteAction(BaseAction):
-    """Write to active window."""
-    action_type = "keyboard_write"
-    display_name = "键盘写入"
-    description = "向活动窗口写入内容"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute keyboard write.
+    def enter_text(self, text: str) -> dict[str, Any]:
+        """Type text and press Enter.
 
         Args:
-            context: Execution context.
-            params: Dict with text, output_var.
+            text: Text to type.
 
         Returns:
-            ActionResult with write status.
+            Result dictionary.
         """
-        text = params.get('text', '')
-        output_var = params.get('output_var', 'write_status')
+        self.execute(command="type", text=text)
+        return self.execute(command="press", key="enter")
 
-        try:
-            import pyautogui
+    def clear_field(self) -> dict[str, Any]:
+        """Clear current field (select all and delete).
 
-            resolved_text = context.resolve_value(text)
+        Returns:
+            Result dictionary.
+        """
+        self.execute(command="select_all")
+        time.sleep(0.1)
+        self.execute(command="press", key="delete")
+        return {"cleared": True}
 
-            pyautogui.typewrite(resolved_text)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"键盘写入完成",
-                data={
-                    'text': resolved_text,
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="键盘写入失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"键盘写入失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['text']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'write_status'}
-
-
-class KeyboardSleepAction(BaseAction):
-    """Wait/delay."""
-    action_type = "keyboard_sleep"
-    display_name = "键盘等待"
-    description = "等待一段时间"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute keyboard sleep.
+    def repeat_key(self, key: str, count: int, interval: float = 0.1) -> dict[str, Any]:
+        """Repeat a key press multiple times.
 
         Args:
-            context: Execution context.
-            params: Dict with seconds, output_var.
+            key: Key to press.
+            count: Number of times to press.
+            interval: Interval between presses.
 
         Returns:
-            ActionResult with sleep status.
+            Result dictionary.
         """
-        seconds = params.get('seconds', 1)
-        output_var = params.get('output_var', 'sleep_status')
-
-        try:
-            import pyautogui
-
-            resolved_seconds = float(context.resolve_value(seconds))
-
-            pyautogui.sleep(resolved_seconds)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"键盘等待完成: {resolved_seconds} 秒",
-                data={
-                    'seconds': resolved_seconds,
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="键盘等待失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"键盘等待失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'seconds': 1, 'output_var': 'sleep_status'}
+        for _ in range(count):
+            self.execute(command="press", key=key)
+            time.sleep(interval)
+        return {"repeated": key, "count": count}

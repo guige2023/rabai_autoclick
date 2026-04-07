@@ -1,321 +1,235 @@
-"""Mouse action module for RabAI AutoClick.
+"""Mouse automation action for cursor control.
 
-Provides mouse operations:
-- MouseClickAction: Click at position
-- MouseDoubleClickAction: Double click at position
-- MouseRightClickAction: Right click at position
-- MouseMoveAction: Move mouse to position
-- MouseGetPositionAction: Get current mouse position
+This module provides mouse control including
+movement, clicking, dragging, and position detection.
+
+Example:
+    >>> action = MouseAction()
+    >>> result = action.execute(command="move", x=100, y=200)
 """
 
-from typing import Any, Dict, List, Tuple
+from __future__ import annotations
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 
-class MouseClickAction(BaseAction):
-    """Click at position."""
-    action_type = "mouse_click"
-    display_name = "鼠标点击"
-    description = "在指定位置点击鼠标"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute mouse click.
-
-        Args:
-            context: Execution context.
-            params: Dict with x, y, button, output_var.
-
-        Returns:
-            ActionResult with click status.
-        """
-        x = params.get('x', 0)
-        y = params.get('y', 0)
-        button = params.get('button', 'left')
-        output_var = params.get('output_var', 'click_status')
-
-        try:
-            import pyautogui
-
-            resolved_x = int(context.resolve_value(x))
-            resolved_y = int(context.resolve_value(y))
-            resolved_button = context.resolve_value(button) if button else 'left'
-
-            pyautogui.click(resolved_x, resolved_y, button=resolved_button)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"鼠标点击完成: ({resolved_x}, {resolved_y})",
-                data={
-                    'position': (resolved_x, resolved_y),
-                    'button': resolved_button,
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="鼠标点击失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"鼠标点击失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['x', 'y']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'button': 'left', 'output_var': 'click_status'}
+@dataclass
+class MousePosition:
+    """Mouse cursor position."""
+    x: int
+    y: int
 
 
-class MouseDoubleClickAction(BaseAction):
-    """Double click at position."""
-    action_type = "mouse_double_click"
-    display_name = "鼠标双击"
-    description = "在指定位置双击鼠标"
-    version = "1.0"
+class MouseAction:
+    """Mouse automation action.
+
+    Provides cursor control, clicking, dragging, and
+    position detection for automation.
+
+    Example:
+        >>> action = MouseAction()
+        >>> result = action.execute(
+        ...     command="click",
+        ...     x=100,
+        ...     y=200,
+        ...     button="right"
+        ... )
+    """
+
+    def __init__(self) -> None:
+        """Initialize mouse action."""
+        self._dragging = False
 
     def execute(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute mouse double click.
+        command: str,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        clicks: int = 1,
+        interval: float = 0.0,
+        button: str = "left",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute mouse command.
 
         Args:
-            context: Execution context.
-            params: Dict with x, y, button, output_var.
+            command: Command (move, click, drag, scroll, etc.).
+            x: X coordinate.
+            y: Y coordinate.
+            clicks: Number of clicks.
+            interval: Interval between clicks.
+            button: Mouse button ('left', 'right', 'middle').
+            **kwargs: Additional parameters.
 
         Returns:
-            ActionResult with double click status.
-        """
-        x = params.get('x', 0)
-        y = params.get('y', 0)
-        button = params.get('button', 'left')
-        output_var = params.get('output_var', 'double_click_status')
+            Command result dictionary.
 
+        Raises:
+            ValueError: If coordinates are missing for position commands.
+        """
         try:
             import pyautogui
-
-            resolved_x = int(context.resolve_value(x))
-            resolved_y = int(context.resolve_value(y))
-            resolved_button = context.resolve_value(button) if button else 'left'
-
-            pyautogui.doubleClick(resolved_x, resolved_y, button=resolved_button)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"鼠标双击完成: ({resolved_x}, {resolved_y})",
-                data={
-                    'position': (resolved_x, resolved_y),
-                    'button': resolved_button,
-                    'output_var': output_var
-                }
-            )
+            pyautogui.FAILSAFE = True
         except ImportError:
-            return ActionResult(
-                success=False,
-                message="鼠标双击失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"鼠标双击失败: {str(e)}"
-            )
+            return {
+                "success": False,
+                "error": "pyautogui not installed. Run: pip install pyautogui",
+            }
 
-    def get_required_params(self) -> List[str]:
-        return ['x', 'y']
+        cmd = command.lower()
+        result: dict[str, Any] = {"command": cmd, "success": True}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'button': 'left', 'output_var': 'double_click_status'}
+        if cmd == "move":
+            if x is None or y is None:
+                raise ValueError("x and y required for 'move'")
+            duration = kwargs.get("duration", 0.0)
+            pyautogui.moveTo(x, y, duration=duration)
+            result["position"] = (x, y)
 
+        elif cmd == "click":
+            if x is not None and y is not None:
+                pyautogui.click(x, y, clicks=clicks, interval=interval, button=button)
+            else:
+                pyautogui.click(clicks=clicks, interval=interval, button=button)
+            result["clicked"] = (x, y) if x is not None else "current"
 
-class MouseRightClickAction(BaseAction):
-    """Right click at position."""
-    action_type = "mouse_right_click"
-    display_name = "鼠标右键点击"
-    description = "在指定位置右键点击"
-    version = "1.0"
+        elif cmd == "double_click":
+            if x is not None and y is not None:
+                pyautogui.doubleClick(x, y)
+            else:
+                pyautogui.doubleClick()
+            result["double_clicked"] = True
 
-    def execute(
+        elif cmd == "right_click":
+            if x is not None and y is not None:
+                pyautogui.rightClick(x, y)
+            else:
+                pyautogui.rightClick()
+            result["right_clicked"] = True
+
+        elif cmd == "middle_click":
+            if x is not None and y is not None:
+                pyautogui.middleClick(x, y)
+            else:
+                pyautogui.middleClick()
+            result["middle_clicked"] = True
+
+        elif cmd == "down":
+            if x is not None and y is not None:
+                pyautogui.mouseDown(x, y, button=button)
+            else:
+                pyautogui.mouseDown(button=button)
+            result["button_down"] = True
+            self._dragging = True
+
+        elif cmd == "up":
+            pyautogui.mouseUp(button=button)
+            result["button_up"] = True
+            self._dragging = False
+
+        elif cmd == "drag":
+            start_x = kwargs.get("start_x", x)
+            start_y = kwargs.get("start_y", y)
+            end_x = x
+            end_y = y
+            duration = kwargs.get("duration", 0.5)
+
+            if start_x is not None and start_y is not None:
+                pyautogui.moveTo(start_x, start_y)
+            pyautogui.drag(end_x - (start_x or 0), end_y - (start_y or 0), duration=duration, button=button)
+            result["dragged"] = True
+
+        elif cmd == "scroll":
+            amount = kwargs.get("amount", 3)
+            if x is not None and y is not None:
+                pyautogui.scroll(amount, x=x, y=y)
+            else:
+                pyautogui.scroll(amount)
+            result["scrolled"] = amount
+
+        elif cmd == "position":
+            pos = pyautogui.position()
+            result["position"] = (pos.x, pos.y)
+
+        elif cmd == "hover":
+            if x is None or y is None:
+                raise ValueError("x and y required for 'hover'")
+            duration = kwargs.get("duration", 1.0)
+            pyautogui.moveTo(x, y, duration=duration)
+            result["hovered"] = True
+
+        elif cmd == "move_relative":
+            if x is None or y is None:
+                raise ValueError("x and y required for 'move_relative'")
+            pyautogui.move(x, y)
+            result["moved"] = (x, y)
+
+        elif cmd == "smooth_move":
+            if x is None or y is None:
+                raise ValueError("x and y required for 'smooth_move'")
+            steps = kwargs.get("steps", 20)
+            start_pos = pyautogui.position()
+            start_x, start_y = start_pos.x, start_pos.y
+
+            for i in range(steps + 1):
+                ratio = i / steps
+                current_x = int(start_x + (x - start_x) * ratio)
+                current_y = int(start_y + (y - start_y) * ratio)
+                pyautogui.moveTo(current_x, current_y)
+                time.sleep(0.01)
+
+            result["moved"] = (x, y)
+
+        else:
+            raise ValueError(f"Unknown command: {command}")
+
+        return result
+
+    def is_dragging(self) -> bool:
+        """Check if mouse button is held down.
+
+        Returns:
+            True if dragging.
+        """
+        return self._dragging
+
+    def get_position(self) -> MousePosition:
+        """Get current mouse position.
+
+        Returns:
+            MousePosition object.
+        """
+        import pyautogui
+        pos = pyautogui.position()
+        return MousePosition(x=pos.x, y=pos.y)
+
+    def wait_for_position(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute mouse right click.
+        x: int,
+        y: int,
+        tolerance: int = 5,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """Wait for mouse to reach position.
 
         Args:
-            context: Execution context.
-            params: Dict with x, y, output_var.
+            x: Target X coordinate.
+            y: Target Y coordinate.
+            tolerance: Position tolerance.
+            timeout: Maximum wait time.
 
         Returns:
-            ActionResult with right click status.
+            Wait result dictionary.
         """
-        x = params.get('x', 0)
-        y = params.get('y', 0)
-        output_var = params.get('output_var', 'right_click_status')
+        import pyautogui
+        start_time = time.time()
 
-        try:
-            import pyautogui
+        while time.time() - start_time < timeout:
+            pos = pyautogui.position()
+            if abs(pos.x - x) <= tolerance and abs(pos.y - y) <= tolerance:
+                return {"reached": True, "time": time.time() - start_time}
+            time.sleep(0.1)
 
-            resolved_x = int(context.resolve_value(x))
-            resolved_y = int(context.resolve_value(y))
-
-            pyautogui.click(resolved_x, resolved_y, button='right')
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"鼠标右键点击完成: ({resolved_x}, {resolved_y})",
-                data={
-                    'position': (resolved_x, resolved_y),
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="鼠标右键点击失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"鼠标右键点击失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['x', 'y']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'right_click_status'}
-
-
-class MouseMoveAction(BaseAction):
-    """Move mouse to position."""
-    action_type = "mouse_move"
-    display_name = "鼠标移动"
-    description = "移动鼠标到指定位置"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute mouse move.
-
-        Args:
-            context: Execution context.
-            params: Dict with x, y, duration, output_var.
-
-        Returns:
-            ActionResult with move status.
-        """
-        x = params.get('x', 0)
-        y = params.get('y', 0)
-        duration = params.get('duration', 0)
-        output_var = params.get('output_var', 'move_status')
-
-        try:
-            import pyautogui
-
-            resolved_x = int(context.resolve_value(x))
-            resolved_y = int(context.resolve_value(y))
-            resolved_duration = float(context.resolve_value(duration)) if duration else 0
-
-            pyautogui.moveTo(resolved_x, resolved_y, duration=resolved_duration)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"鼠标移动完成: ({resolved_x}, {resolved_y})",
-                data={
-                    'position': (resolved_x, resolved_y),
-                    'duration': resolved_duration,
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="鼠标移动失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"鼠标移动失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['x', 'y']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'duration': 0, 'output_var': 'move_status'}
-
-
-class MouseGetPositionAction(BaseAction):
-    """Get current mouse position."""
-    action_type = "mouse_get_position"
-    display_name = "获取鼠标位置"
-    description = "获取当前鼠标位置"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute get mouse position.
-
-        Args:
-            context: Execution context.
-            params: Dict with output_var.
-
-        Returns:
-            ActionResult with current position.
-        """
-        output_var = params.get('output_var', 'mouse_position')
-
-        try:
-            import pyautogui
-
-            x, y = pyautogui.position()
-            context.set(output_var, (x, y))
-
-            return ActionResult(
-                success=True,
-                message=f"获取鼠标位置: ({x}, {y})",
-                data={
-                    'position': (x, y),
-                    'output_var': output_var
-                }
-            )
-        except ImportError:
-            return ActionResult(
-                success=False,
-                message="获取鼠标位置失败: 未安装pyautogui库"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取鼠标位置失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'mouse_position'}
+        return {"reached": False, "timeout": True}
