@@ -1,0 +1,117 @@
+{
+  "name": "知识库更新自动化",
+  "description": "自动化知识库文章创建和更新流程",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "articles_to_update": 12,
+    "current_article": 0,
+    "categories": ["产品", "技术", "支持"],
+    "current_category": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "article_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "初始化文章计数器"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "打开知识库系统"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "等待系统加载"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "article_loop",
+      "count": "{{articles_to_update}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "开始文章更新循环"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "点击文章"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "等待文章加载"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/article_{{article_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "截图文章内容"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "article_counter",
+      "value": "{{article_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加文章计数"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{article_counter < articles_to_update}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "检查是否还有文章"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "继续更新下一篇"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/knowledge_base_complete.png",
+      "pre_delay": 0.5,
+      "comment": "截图完成状态"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
