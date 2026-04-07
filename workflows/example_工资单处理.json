@@ -1,0 +1,116 @@
+{
+  "name": "工资单处理自动化",
+  "description": "自动化工资单生成和分发流程",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "employees_count": 50,
+    "current_employee": 0,
+    "payroll_period": "2024-03"
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "employee_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "初始化员工计数器"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "打开工资系统"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "等待系统加载"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "payroll_loop",
+      "count": "{{employees_count}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "开始工资处理循环"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "点击员工"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "等待员工详情"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/payslip_{{employee_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "截图工资单"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "employee_counter",
+      "value": "{{employee_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加员工计数"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{employee_counter < employees_count}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "检查是否还有员工"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "继续处理下一个"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/payroll_complete.png",
+      "pre_delay": 0.5,
+      "comment": "截图完成状态"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
