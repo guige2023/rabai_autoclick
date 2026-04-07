@@ -1,0 +1,117 @@
+{
+  "name": "Nuclear Radiation Monitoring Workflow",
+  "description": "Automate nuclear radiation monitoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "monitors_to_check": 51,
+    "current_monitor": 0,
+    "checked_monitors": 0,
+    "exceeded_thresholds": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "monitor_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize monitor counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open radiation monitoring system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "radiation_monitoring_loop",
+      "count": "{{monitors_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start radiation monitoring loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select monitor for checking"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/radiation_monitor_{{monitor_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture monitoring screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "monitor_counter",
+      "value": "{{monitor_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment monitor counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{monitor_counter < monitors_to_check}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more monitors"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next monitor"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/nuclear_radiation_monitoring_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
