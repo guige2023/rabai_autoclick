@@ -757,7 +757,7 @@ class RecordingWidget(QWidget):
         self._recording_manager.recording_started.connect(self._on_recording_started)
         self._recording_manager.recording_stopped.connect(self._on_recording_stopped)
 
-    def _on_record(self):
+    def _on_record(self) -> None:
         if self._recording_manager.start_recording():
             self.record_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
