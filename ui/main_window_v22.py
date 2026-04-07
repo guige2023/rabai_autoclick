@@ -1888,7 +1888,9 @@ class MainWindow(QMainWindow):
         self.stats_btn = QPushButton("📊 统计")
         self.memory_btn = QPushButton("💾 内存")
         self.mini_btn = QPushButton("📱 迷你")
-        
+        self.theme_btn = QPushButton("🌙 深色")
+        self.theme_btn.setCheckable(True)
+
         self.stop_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
         
@@ -1910,6 +1912,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.stats_btn)
         toolbar.addWidget(self.memory_btn)
         toolbar.addWidget(self.mini_btn)
+        toolbar.addWidget(self.theme_btn)
         toolbar.addStretch()
         
         self.memory_label = QLabel()
@@ -2220,7 +2223,8 @@ class MainWindow(QMainWindow):
         self.stats_btn.clicked.connect(self._on_show_stats)
         self.memory_btn.clicked.connect(self._on_memory_optimize)
         self.mini_btn.clicked.connect(self._toggle_mini_mode)
-        
+        self.theme_btn.clicked.connect(self._toggle_theme)
+
         self.action_list.currentRowChanged.connect(self._on_action_selected)
         
         self.step_list.add_btn.clicked.connect(self._on_add_step)
@@ -2454,8 +2458,30 @@ class MainWindow(QMainWindow):
             
             self.hide()
             self.mini_btn.setText("📱 完整")
-            self.mini_btn.setStyleSheet("background-color: #9C27B0; color: white;")
-    
+            colors = theme_manager.colors
+            self.mini_btn.setStyleSheet(f"background-color: {colors['warning']}; color: white;")
+
+    def _toggle_theme(self):
+        """Toggle between light and dark themes."""
+        from ui.theme import ThemeType
+        new_theme = theme_manager.toggle_theme()
+
+        if new_theme == ThemeType.DARK:
+            self.theme_btn.setText("☀️ 浅色")
+            self.theme_btn.setChecked(True)
+        else:
+            self.theme_btn.setText("🌙 深色")
+            self.theme_btn.setChecked(False)
+
+        self._apply_theme()
+        show_toast(f"主题已切换为{'深色' if new_theme == ThemeType.DARK else '浅色'}模式", 'info')
+        app_logger.info(f"主题切换: {new_theme.value}", "UI")
+
+    def _apply_theme(self):
+        """Apply the current theme to all UI components."""
+        self.setStyleSheet(theme_manager.get_stylesheet("main_window"))
+        self.log_widget.text_edit.setStyleSheet(theme_manager.get_stylesheet("log"))
+
     def _toggle_always_on_top(self):
         self._always_on_top = not self._always_on_top
         colors = theme_manager.colors
