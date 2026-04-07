@@ -1,336 +1,207 @@
-"""Form filler action for automated form filling and submission.
+"""
+Form Filler Action Module.
 
-This module provides form filling capabilities including
-field detection, validation, and multi-step form submission.
+Fills web forms with data, handles various input types,
+manages multi-step forms, and validates submission.
 
 Example:
-    >>> action = FormFillerAction()
-    >>> result = action.execute(
-    ...     form_data={"username": "user", "password": "pass"},
-    ...     submit=True
-    ... )
+    >>> from form_filler_action import FormFiller
+    >>> filler = FormFiller()
+    >>> await filler.fill(page, {"username": "alice", "password": "secret"})
+    >>> await filler.submit()
 """
-
 from __future__ import annotations
 
+import asyncio
+import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 
 @dataclass
 class FormField:
     """Represents a form field."""
-    name: str
-    type: str
     selector: str
+    type: str
     value: Any = None
-    required: bool = False
-    options: list[str] = field(default_factory=list)
-    validation: Optional[str] = None
+    options: list[dict[str, str]] = None
 
 
-@dataclass
-class FormConfig:
-    """Configuration for form filling."""
-    submit_selector: Optional[str] = None
-    submit_method: str = "click"  # click or javascript
-    wait_after_submit: float = 2.0
-    validate_before_submit: bool = True
-    clear_before_fill: bool = True
-    fill_delay: float = 0.1
+class FormFiller:
+    """Fill and submit web forms."""
 
+    def __init__(self):
+        self._fields: dict[str, FormField] = {}
+        self._current_field_index = 0
 
-class FormFillerAction:
-    """Form filling and submission action.
-
-    Provides automated form filling with field detection,
-    validation, and multi-step submission workflows.
-
-    Example:
-        >>> action = FormFillerAction()
-        >>> result = action.execute(
-        ...     operation="fill_and_submit",
-        ...     form_data={"email": "test@example.com"},
-        ...     submit_selector="#submit-btn"
-        ... )
-    """
-
-    def __init__(self, config: Optional[FormConfig] = None) -> None:
-        """Initialize form filler.
-
-        Args:
-            config: Optional form configuration.
-        """
-        self.config = config or FormConfig()
-        self._fields: list[FormField] = []
-        self._last_filled: dict[str, Any] = {}
-
-    def execute(
+    def add_field(
         self,
-        operation: str,
-        form_data: Optional[dict[str, Any]] = None,
-        submit_selector: Optional[str] = None,
-        html: Optional[str] = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Execute form operation.
+        selector: str,
+        value: Any,
+        field_type: Optional[str] = None,
+    ) -> "FormFiller":
+        """Add a field to the form definition."""
+        self._fields[selector] = FormField(
+            selector=selector,
+            type=field_type or "text",
+            value=value,
+        )
+        return self
+
+    def set_fields(self, fields: dict[str, Any]) -> "FormFiller":
+        """Set multiple fields at once."""
+        for selector, value in fields.items():
+            self.add_field(selector, value)
+        return self
+
+    async def fill(self, page: Any, fields: Optional[dict[str, Any]] = None) -> bool:
+        """
+        Fill form fields on a Playwright page.
 
         Args:
-            operation: Operation name.
-            form_data: Data to fill into form.
-            submit_selector: Selector for submit button.
-            html: HTML content to parse for form.
-            **kwargs: Additional parameters.
+            page: Playwright page object
+            fields: Optional dict of selector->value overrides
 
         Returns:
-            Operation result dictionary.
-
-        Raises:
-            ValueError: If operation is invalid.
+            True on success
         """
-        op = operation.lower()
-        result: dict[str, Any] = {"operation": op, "success": True}
+        all_fields = dict(self._fields)
+        if fields:
+            for selector, value in fields.items():
+                all_fields[selector] = FormField(selector=selector, type="text", value=value)
 
-        if op == "parse":
-            if not html:
-                raise ValueError("html required for 'parse' operation")
-            result.update(self._parse_form(html))
+        for selector, field in all_fields.items():
+            try:
+                await self._fill_field(page, field)
+            except Exception as e:
+                return False
+        return True
 
-        elif op == "fill":
-            if not form_data:
-                raise ValueError("form_data required for 'fill' operation")
-            result.update(self._fill_form(form_data))
+    async def _fill_field(self, page: Any, field: FormField) -> None:
+        selector = field.selector
+        value = field.value
 
-        elif op == "submit":
-            result.update(self._submit_form(submit_selector or self.config.submit_selector))
-
-        elif op == "fill_and_submit":
-            if not form_data:
-                raise ValueError("form_data required")
-            result.update(self._fill_form(form_data))
-            if result["success"]:
-                result.update(self._submit_form(submit_selector or self.config.submit_selector))
-
-        elif op == "validate":
-            result.update(self._validate_form())
-
-        elif op == "get_fields":
-            result["fields"] = [
-                {"name": f.name, "type": f.type, "required": f.required, "options": f.options}
-                for f in self._fields
-            ]
-
+        if field.type in ("text", "email", "password", "search", "url", "tel", "number"):
+            await page.fill(selector, str(value), timeout=5000)
+        elif field.type == "textarea":
+            await page.fill(selector, str(value), timeout=5000)
+        elif field.type == "checkbox":
+            if value:
+                await page.check(selector)
+            else:
+                await page.uncheck(selector)
+        elif field.type == "radio":
+            await page.click(f"{selector}[value='{value}']")
+        elif field.type == "select":
+            await page.select_option(selector, value)
+        elif field.type == "file":
+            if isinstance(value, list):
+                await page.set_input_files(selector, value)
+            else:
+                await page.set_input_files(selector, [value])
+        elif field.type == "date":
+            await page.fill(selector, str(value))
+        elif field.type == "contenteditable":
+            await page.evaluate(f'document.querySelector("{selector}").innerHTML = "{value}"')
         else:
-            raise ValueError(f"Unknown operation: {operation}")
+            await page.fill(selector, str(value), timeout=5000)
 
-        return result
-
-    def _parse_form(self, html: str) -> dict[str, Any]:
-        """Parse HTML for form fields.
+    async def submit(
+        self,
+        page: Any,
+        submit_selector: Optional[str] = None,
+        wait_for_navigation: bool = True,
+    ) -> bool:
+        """
+        Submit the form.
 
         Args:
-            html: HTML content.
+            page: Playwright page
+            submit_selector: CSS selector for submit button (auto-detected if None)
+            wait_for_navigation: Wait for navigation after submit
 
         Returns:
-            Parsed form information.
+            True on success
         """
-        import re
+        if submit_selector:
+            if wait_for_navigation:
+                async with page.expect_navigation(timeout=10000):
+                    await page.click(submit_selector)
+            else:
+                await page.click(submit_selector)
+        else:
+            buttons = ["button[type='submit']", "input[type='submit']", ".btn-submit", "[type='submit']"]
+            for btn_selector in buttons:
+                try:
+                    elem = await page.query_selector(btn_selector)
+                    if elem and await elem.is_visible():
+                        if wait_for_navigation:
+                            async with page.expect_navigation(timeout=10000):
+                                await elem.click()
+                        else:
+                            await elem.click()
+                        return True
+                except Exception:
+                    continue
+            await page.evaluate("document.querySelector('form').submit()")
+        return True
 
-        fields: list[FormField] = []
+    def detect_fields(self, page: Any) -> dict[str, dict[str, Any]]:
+        """Auto-detect form fields from a Playwright page."""
+        fields: dict[str, dict[str, Any]] = {}
 
-        # Parse input fields
-        input_pattern = re.compile(
-            r'<input[^>]+name=["\']([^"\']+)["\'][^>]*>',
-            re.IGNORECASE | re.DOTALL,
-        )
-        for match in input_pattern.finditer(html):
-            attrs = match.group(0)
-            name = match.group(1)
-
-            field_type = "text"
-            if 'type="' in attrs.lower():
-                type_match = re.search(r'type=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
-                if type_match:
-                    field_type = type_match.group(1).lower()
-
-            required = "required" in attrs.lower()
-
-            selector = f"input[name='{name}']"
-            fields.append(FormField(
-                name=name,
-                type=field_type,
-                selector=selector,
-                required=required,
-            ))
-
-        # Parse select fields
-        select_pattern = re.compile(
-            r'<select[^>]+name=["\']([^"\']+)["\'][^>]*>(.*?)</select>',
-            re.IGNORECASE | re.DOTALL,
-        )
-        for match in select_pattern.finditer(html):
-            name = match.group(1)
-            options_html = match.group(2)
-            options = re.findall(r'<option[^>]+value=["\']([^"\']+)["\']', options_html, re.IGNORECASE)
-
-            selector = f"select[name='{name}']"
-            fields.append(FormField(
-                name=name,
-                type="select",
-                selector=selector,
-                options=options,
-            ))
-
-        # Parse textarea fields
-        textarea_pattern = re.compile(
-            r'<textarea[^>]+name=["\']([^"\']+)["\'][^>]*>',
-            re.IGNORECASE | re.DOTALL,
-        )
-        for match in textarea_pattern.finditer(html):
-            name = match.group(1)
-            selector = f"textarea[name='{name}']"
-            fields.append(FormField(
-                name=name,
-                type="textarea",
-                selector=selector,
-            ))
-
-        self._fields = fields
-
-        return {
-            "field_count": len(fields),
-            "fields": [
-                {"name": f.name, "type": f.type, "selector": f.selector, "required": f.required}
-                for f in fields
-            ],
+        selectors = {
+            "input[type='text']": "text",
+            "input[type='email']": "email",
+            "input[type='password']": "password",
+            "input[type='search']": "search",
+            "input[type='tel']": "tel",
+            "input[type='number']": "number",
+            "input[type='date']": "date",
+            "input[type='checkbox']": "checkbox",
+            "input[type='radio']": "radio",
+            "input[type='file']": "file",
+            "textarea": "textarea",
+            "select": "select",
         }
 
-    def _fill_form(self, form_data: dict[str, Any]) -> dict[str, Any]:
-        """Fill form with data.
-
-        Args:
-            form_data: Data to fill.
-
-        Returns:
-            Fill result dictionary.
-        """
-        try:
-            import pyautogui
-        except ImportError:
-            return {"success": False, "error": "pyautogui not installed"}
-
-        filled: list[str] = []
-        errors: list[str] = []
-
-        for name, value in form_data.items():
-            # Find field by name
-            field = next((f for f in self._fields if f.name == name), None)
-
-            if not field:
-                errors.append(f"Field not found: {name}")
+        for selector, field_type in selectors.items():
+            try:
+                elements = await page.query_selector_all(selector)
+                for elem in elements:
+                    tag = await elem.evaluate("el => el.tagName.toLowerCase()")
+                    name = await elem.get_attribute("name") or await elem.get_attribute("id") or ""
+                    selector_str = selector
+                    if name:
+                        selector_str = f"{selector}[name='{name}']"
+                    fields[selector_str] = {
+                        "type": field_type,
+                        "name": name,
+                        "required": await elem.get_attribute("required") is not None,
+                        "placeholder": await elem.get_attribute("placeholder") or "",
+                    }
+            except Exception:
                 continue
 
-            try:
-                if self.config.clear_before_fill:
-                    # Select all and delete
-                    pyautogui.hotkey("cmd", "a")
-                    time.sleep(0.05)
+        return fields
 
-                # Type value
-                if isinstance(value, str):
-                    pyautogui.write(str(value), interval=self.config.fill_delay)
-                elif isinstance(value, int):
-                    pyautogui.write(str(value), interval=self.config.fill_delay)
-
-                filled.append(name)
-                self._last_filled[name] = value
-
-            except Exception as e:
-                errors.append(f"Error filling {name}: {str(e)}")
-
-        return {
-            "filled_count": len(filled),
-            "filled": filled,
-            "errors": errors,
-        }
-
-    def _submit_form(self, selector: Optional[str]) -> dict[str, Any]:
-        """Submit form.
-
-        Args:
-            selector: Submit button selector.
-
-        Returns:
-            Submit result dictionary.
-        """
-        try:
-            import pyautogui
-        except ImportError:
-            return {"success": False, "error": "pyautogui not installed"}
-
-        if not selector and not self._fields:
-            # Just press enter to submit
-            pyautogui.press("enter")
-            time.sleep(self.config.wait_after_submit)
-            return {"submitted": True, "method": "enter"}
-
-        if selector:
-            # Click submit button (would need browser context in real impl)
-            pyautogui.click()
-            time.sleep(self.config.wait_after_submit)
-            return {"submitted": True, "selector": selector}
-
-        return {"submitted": False, "error": "No submit method specified"}
-
-    def _validate_form(self) -> dict[str, Any]:
-        """Validate form fields.
-
-        Returns:
-            Validation result dictionary.
-        """
+    def validate(self, fields: dict[str, Any]) -> tuple[bool, list[str]]:
+        """Validate form data."""
         errors: list[str] = []
-        required_missing: list[str] = []
+        for selector, field in self._fields.items():
+            value = field.value
+            if value is None or value == "":
+                continue
+            if field.type == "email":
+                if not re.match(r"[^@]+@[^@]+\.[^@]+", str(value)):
+                    errors.append(f"{selector}: Invalid email format")
+            elif field.type == "tel":
+                digits = re.sub(r"\D", "", str(value))
+                if len(digits) < 10:
+                    errors.append(f"{selector}: Phone number too short")
+        return len(errors) == 0, errors
 
-        for field in self._fields:
-            if field.required:
-                if field.name not in self._last_filled:
-                    required_missing.append(field.name)
 
-        if required_missing:
-            errors.append(f"Required fields missing: {', '.join(required_missing)}")
-
-        return {
-            "valid": len(errors) == 0,
-            "errors": errors,
-            "required_missing": required_missing,
-        }
-
-    def set_field_value(self, name: str, value: Any) -> None:
-        """Set field value directly.
-
-        Args:
-            name: Field name.
-            value: Field value.
-        """
-        for field in self._fields:
-            if field.name == name:
-                field.value = value
-                break
-
-    def get_field(self, name: str) -> Optional[FormField]:
-        """Get field by name.
-
-        Args:
-            name: Field name.
-
-        Returns:
-            FormField or None.
-        """
-        return next((f for f in self._fields if f.name == name), None)
-
-    def clear_fields(self) -> None:
-        """Clear all field values."""
-        self._last_filled.clear()
-        for field in self._fields:
-            field.value = None
+if __name__ == "__main__":
+    print("FormFiller module loaded")
