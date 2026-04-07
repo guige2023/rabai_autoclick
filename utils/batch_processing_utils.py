@@ -1,229 +1,139 @@
-"""
-Batch processing utilities for bulk operations.
-
-Provides chunking, parallel processing, progress tracking,
-error aggregation, and result merging.
-"""
+"""Batch processing utilities: chunking, parallel processing, and result aggregation."""
 
 from __future__ import annotations
 
-import asyncio
-import logging
-import time
+import multiprocessing
+import threading
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Generator, Iterator
 
-logger = logging.getLogger(__name__)
-
-
-class ProcessingMode(Enum):
-    SEQUENTIAL = auto()
-    PARALLEL = auto()
-    CHUNKED = auto()
+__all__ = [
+    "BatchConfig",
+    "BatchProcessor",
+    "chunk",
+    "process_parallel",
+    "process_map",
+]
 
 
 @dataclass
 class BatchConfig:
     """Configuration for batch processing."""
+
     chunk_size: int = 100
-    max_concurrency: int = 10
-    timeout_per_item: float = 30.0
-    stop_on_error: bool = False
-    retry_count: int = 0
-    retry_delay: float = 1.0
+    max_workers: int = 4
+    use_processes: bool = False
+    timeout_seconds: float = 300.0
+
+
+def chunk(items: list[Any], size: int) -> Generator[list[Any], None, None]:
+    """Split items into chunks of specified size."""
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
 
 
 @dataclass
-class BatchResult:
-    """Result of a batch operation."""
-    total: int
-    successful: int
-    failed: int
-    results: list[Any]
-    errors: list[tuple[int, str]] = field(default_factory=list)
-    duration_seconds: float = 0.0
-
-    @property
-    def success_rate(self) -> float:
-        if self.total == 0:
-            return 0.0
-        return self.successful / self.total * 100
-
-
-@dataclass
-class ProcessingProgress:
-    """Progress tracking for batch operations."""
-    processed: int = 0
-    successful: int = 0
-    failed: int = 0
-    started_at: float = field(default_factory=time.time)
-    estimated_remaining: float = 0.0
-
-    @property
-    def percentage(self) -> float:
-        return 0.0
-
-    @property
-    def items_per_second(self) -> float:
-        elapsed = time.time() - self.started_at
-        return self.processed / elapsed if elapsed > 0 else 0.0
-
-
 class BatchProcessor:
-    """Generic batch processor with multiple processing modes."""
+    """Process items in configurable batches."""
 
-    def __init__(self, config: Optional[BatchConfig] = None) -> None:
-        self.config = config or BatchConfig()
-        self._progress_callback: Optional[Callable[[ProcessingProgress], None]] = None
+    config: BatchConfig = field(default_factory=BatchConfig)
 
-    def on_progress(self, callback: Callable[[ProcessingProgress], None]) -> "BatchProcessor":
-        """Register a progress callback."""
-        self._progress_callback = callback
-        return self
+    def __post_init__(self) -> None:
+        self._pool: Callable[[], Any]
+        if self.config.use_processes:
+            self._pool = lambda: ProcessPoolExecutor(max_workers=self.config.max_workers)
+        else:
+            self._pool = lambda: ThreadPoolExecutor(max_workers=self.config.max_workers)
 
     def process(
         self,
         items: list[Any],
-        processor: Callable[[Any], Any],
-        mode: ProcessingMode = ProcessingMode.CHUNKED,
-    ) -> BatchResult:
-        """Process items in batch mode."""
-        start = time.perf_counter()
-        results = []
-        errors = []
-        successful = 0
-        failed = 0
+        process_fn: Callable[[Any], Any],
+        reduce_fn: Callable[[list[Any]], Any] | None = None,
+    ) -> list[Any]:
+        """Process items in parallel batches."""
+        chunks_list = list(chunk(items, self.config.chunk_size))
+        results: list[Any] = []
 
-        if mode == ProcessingMode.SEQUENTIAL:
-            for i, item in enumerate(items):
+        with self._pool() as executor:
+            futures = [executor.submit(self._process_chunk, chunk, process_fn) for chunk in chunks_list]
+            for future in futures:
                 try:
-                    result = processor(item)
-                    results.append(result)
-                    successful += 1
-                except Exception as e:
-                    errors.append((i, str(e)))
-                    failed += 1
-                    if self.config.stop_on_error:
-                        break
-
-        elif mode == ProcessingMode.PARALLEL:
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_concurrency) as executor:
-                futures = {executor.submit(processor, item): i for i, item in enumerate(items)}
-                for future in concurrent.futures.as_completed(futures):
-                    i = futures[future]
-                    try:
-                        result = future.result(timeout=self.config.timeout_per_item)
+                    result = future.result(timeout=self.config.timeout_seconds)
+                    if reduce_fn:
                         results.append(result)
-                        successful += 1
-                    except Exception as e:
-                        errors.append((i, str(e)))
-                        failed += 1
+                    else:
+                        results.extend(result)
+                except Exception:
+                    pass
 
-        elif mode == ProcessingMode.CHUNKED:
-            chunks = self._chunk_list(items, self.config.chunk_size)
-            for chunk_idx, chunk in enumerate(chunks):
-                chunk_start = chunk_idx * self.config.chunk_size
-                for i, item in enumerate(chunk):
-                    global_idx = chunk_start + i
-                    try:
-                        result = processor(item)
-                        results.append(result)
-                        successful += 1
-                    except Exception as e:
-                        errors.append((global_idx, str(e)))
-                        failed += 1
+        return results
 
-        return BatchResult(
-            total=len(items),
-            successful=successful,
-            failed=failed,
-            results=results,
-            errors=errors,
-            duration_seconds=time.perf_counter() - start,
-        )
-
-    async def process_async(
+    def _process_chunk(
         self,
-        items: list[Any],
-        processor: Callable[..., Coroutine[Any, Any, Any]],
-        mode: ProcessingMode = ProcessingMode.CHUNKED,
-    ) -> BatchResult:
-        """Process items asynchronously."""
-        start = time.perf_counter()
-        results = []
-        errors = []
-        successful = 0
-        failed = 0
-
-        if mode == ProcessingMode.PARALLEL:
-            semaphore = asyncio.Semaphore(self.config.max_concurrency)
-
-            async def process_with_semaphore(item: Any, idx: int) -> tuple[int, Any, Optional[str]]:
-                async with semaphore:
-                    try:
-                        result = await asyncio.wait_for(processor(item), timeout=self.config.timeout_per_item)
-                        return idx, result, None
-                    except Exception as e:
-                        return idx, None, str(e)
-
-            tasks = [process_with_semaphore(item, i) for i, item in enumerate(items)]
-            task_results = await asyncio.gather(*tasks)
-
-            for idx, result, error in task_results:
-                if error:
-                    errors.append((idx, error))
-                    failed += 1
-                else:
-                    results.append(result)
-                    successful += 1
-
-        elif mode == ProcessingMode.CHUNKED:
-            chunks = self._chunk_list(items, self.config.chunk_size)
-            for chunk_idx, chunk in enumerate(chunks):
-                chunk_start = chunk_idx * self.config.chunk_size
-                for i, item in enumerate(chunk):
-                    global_idx = chunk_start + i
-                    try:
-                        result = await asyncio.wait_for(processor(item), timeout=self.config.timeout_per_item)
-                        results.append(result)
-                        successful += 1
-                    except Exception as e:
-                        errors.append((global_idx, str(e)))
-                        failed += 1
-
-        return BatchResult(
-            total=len(items),
-            successful=successful,
-            failed=failed,
-            results=results,
-            errors=errors,
-            duration_seconds=time.perf_counter() - start,
-        )
-
-    def _chunk_list(self, items: list[Any], chunk_size: int) -> list[list[Any]]:
-        """Split a list into chunks."""
-        return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+        chunk: list[Any],
+        process_fn: Callable[[Any], Any],
+    ) -> list[Any]:
+        """Process a single chunk of items."""
+        return [process_fn(item) for item in chunk]
 
 
-class BulkUpsertProcessor:
-    """Batch upsert processor for database operations."""
+def process_parallel(
+    func: Callable[[Any], Any],
+    items: list[Any],
+    max_workers: int = 4,
+    use_processes: bool = False,
+) -> list[Any]:
+    """Process items in parallel using a thread or process pool."""
+    executor_class = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
+    with executor_class(max_workers=max_workers) as executor:
+        return list(executor.map(func, items))
 
-    def __init__(self, batch_size: int = 100) -> None:
+
+def process_map(
+    func: Callable[[Any], Any],
+    items: Iterator[Any],
+    chunk_size: int = 1,
+    max_workers: int = 4,
+) -> Generator[Any, None, None]:
+    """Process items as a generator with configurable chunk size."""
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for result in executor.map(func, items, chunksize=chunk_size):
+            yield result
+
+
+class StreamBatchProcessor:
+    """Process streaming data in batches."""
+
+    def __init__(self, batch_size: int = 100, flush_interval: float = 5.0) -> None:
         self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self._buffer: list[Any] = []
+        self._last_flush = time.time()
+        self._lock = threading.Lock()
 
-    def group_by_operation(self, items: list[dict[str, Any]], key_field: str = "id") -> tuple[list[dict], list[dict]]:
-        """Group items into inserts and updates based on presence of key field."""
-        inserts = []
-        updates = []
-        for item in items:
-            if key_field in item and item[key_field]:
-                updates.append(item)
-            else:
-                inserts.append(item)
-        return inserts, updates
+    def add(self, item: Any) -> list[Any] | None:
+        """Add an item to the buffer, flush if full."""
+        with self._lock:
+            self._buffer.append(item)
+            if len(self._buffer) >= self.batch_size:
+                return self._flush()
+            return None
 
-    def create_batches(self, items: list[Any]) -> list[list[Any]]:
-        """Create batches from items."""
-        return [items[i:i + self.batch_size] for i in range(0, len(items), self.batch_size)]
+    def should_flush(self) -> bool:
+        """Check if buffer should be flushed by time."""
+        return (time.time() - self._last_flush) >= self.flush_interval
+
+    def flush(self) -> list[Any]:
+        """Force flush the buffer."""
+        with self._lock:
+            return self._flush()
+
+    def _flush(self) -> list[Any]:
+        """Internal flush."""
+        batch = list(self._buffer)
+        self._buffer.clear()
+        self._last_flush = time.time()
+        return batch
