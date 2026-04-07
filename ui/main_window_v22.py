@@ -1161,19 +1161,12 @@ class LogWidget(QWidget):
         
         clear_btn.clicked.connect(self.clear)
         export_btn.clicked.connect(self._export_log)
-        
+
         app_logger.add_listener(self._on_log_entry)
-    
+
     def _on_log_entry(self, entry):
-        colors = {
-            'DEBUG': '#888888',
-            'INFO': '#4fc3f7',
-            'SUCCESS': '#81c784',
-            'WARNING': '#ffb74d',
-            'ERROR': '#e57373',
-            'CRITICAL': '#f44336'
-        }
-        color = colors.get(entry.level, '#d4d4d4')
+        log_colors = theme_manager.get_log_colors()
+        color = log_colors.get(entry.level, '#d4d4d4')
         timestamp = entry.timestamp.strftime("%H:%M:%S")
         html = f'<span style="color: #888;">[{timestamp}]</span> <span style="color: {color};">[{entry.level}]</span> {entry.message}'
         self.text_edit.append(html)
