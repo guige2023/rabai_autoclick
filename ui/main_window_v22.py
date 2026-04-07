@@ -1290,7 +1290,7 @@ class RecordingWidget(QWidget):
         if not PYNPUT_AVAILABLE:
             self.record_btn.setEnabled(False)
             self.status_label.setText("状态: pynput未安装，录屏功能不可用")
-            self.status_label.setStyleSheet("color: red;")
+            self.status_label.setStyleSheet(f"color: {colors['error']};")
     
     def _connect_signals(self):
         self.record_btn.clicked.connect(self._on_record)
@@ -1449,7 +1449,7 @@ class RecordingWidget(QWidget):
         self.record_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_label.setText(f"状态: 错误 - {error_msg}")
-        self.status_label.setStyleSheet("color: red;")
+        self.status_label.setStyleSheet(f"color: {theme_manager.colors['error']};")
         show_error("录制错误", error_msg)
     
     def _refresh_action_list(self):
