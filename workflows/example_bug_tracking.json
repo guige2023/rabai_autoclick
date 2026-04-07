@@ -1,0 +1,167 @@
+{
+  "name": "Bug Tracking Workflow",
+  "description": "Automate bug triage and assignment process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "bug_severity_levels": ["critical", "high", "medium", "low"],
+    "bugs_to_process": 15,
+    "current_bug": 0,
+    "assigned_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "bug_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize bug counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open bug tracking system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "bug_loop",
+      "count": "{{bugs_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start bug loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on bug"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for bug details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/bug_{{bug_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture bug screenshot"
+    },
+    {
+      "id": 8,
+      "type": "ocr",
+      "region": [100, 100, 300, 200],
+      "output_var": "severity",
+      "pre_delay": 0.3,
+      "comment": "Read severity"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{severity.includes('critical')}}",
+      "true_next": 10,
+      "false_next": 12,
+      "pre_delay": 0.1,
+      "comment": "Check if critical"
+    },
+    {
+      "id": 10,
+      "type": "click_image",
+      "template": "./templates/assign_senior.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Assign to senior dev"
+    },
+    {
+      "id": 11,
+      "type": "goto",
+      "step_id": 16,
+      "pre_delay": 0.1,
+      "comment": "Skip to next"
+    },
+    {
+      "id": 12,
+      "type": "click_image",
+      "template": "./templates/assign_junior.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Assign to junior dev"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "assigned_count",
+      "value": "{{assigned_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment assigned count"
+    },
+    {
+      "id": 14,
+      "type": "set_variable",
+      "name": "bug_counter",
+      "value": "{{bug_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment bug counter"
+    },
+    {
+      "id": 15,
+      "type": "condition",
+      "condition": "{{bug_counter < bugs_to_process}}",
+      "true_next": 16,
+      "false_next": 17,
+      "pre_delay": 0.1,
+      "comment": "Check if more bugs"
+    },
+    {
+      "id": 16,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next bug"
+    },
+    {
+      "id": 17,
+      "type": "screenshot",
+      "save_path": "./screenshots/bug_tracking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 18,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2,
+    "continue_on_error": true
+  }
+}
