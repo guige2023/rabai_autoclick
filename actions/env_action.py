@@ -1,161 +1,157 @@
-"""Environment variable action module for RabAI AutoClick.
+"""Environment action for environment variable management.
 
-Provides environment operations:
-- EnvGetAction: Get environment variable
-- EnvSetAction: Set environment variable
-- EnvListAction: List environment variables
-- EnvExpandAction: Expand environment variables in string
+This module provides environment variable operations
+including get, set, list, and export.
+
+Example:
+    >>> action = EnvAction()
+    >>> result = action.execute(command="get", key="PATH")
 """
 
 from __future__ import annotations
 
 import os
-import sys
-from typing import Any, Dict, List, Optional
-
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from dataclasses import dataclass
+from typing import Any, Optional
 
 
-class EnvGetAction(BaseAction):
-    """Get environment variable."""
-    action_type = "env_get"
-    display_name = "环境变量获取"
-    description = "获取环境变量"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute env get."""
-        key = params.get('key', '')
-        default = params.get('default', None)
-        output_var = params.get('output_var', 'env_value')
-
-        if not key:
-            return ActionResult(success=False, message="key is required")
-
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-            value = os.environ.get(resolved_key, default)
-
-            if context:
-                context.set(output_var, value)
-            return ActionResult(success=True, message=f"{resolved_key} = {value}", data={'key': resolved_key, 'value': value})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Env get error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'default': None, 'output_var': 'env_value'}
+@dataclass
+class EnvVariable:
+    """Represents an environment variable."""
+    key: str
+    value: str
 
 
-class EnvSetAction(BaseAction):
-    """Set environment variable."""
-    action_type = "env_set"
-    display_name = "环境变量设置"
-    description = "设置环境变量"
-    version = "1.0"
+class EnvAction:
+    """Environment variable management action.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute env set."""
-        key = params.get('key', '')
-        value = params.get('value', '')
-        export = params.get('export', True)
-        output_var = params.get('output_var', 'env_set_result')
+    Provides environment variable operations
+    including get, set, list, and export.
 
-        if not key:
-            return ActionResult(success=False, message="key is required")
+    Example:
+        >>> action = EnvAction()
+        >>> result = action.execute(
+        ...     command="set",
+        ...     key="MY_VAR",
+        ...     value="test"
+        ... )
+    """
 
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_value = context.resolve_value(value) if context else value
+    def __init__(self) -> None:
+        """Initialize environment action."""
+        pass
 
-            if export:
-                os.environ[resolved_key] = str(resolved_value)
-            else:
-                os.environ[resolved_key] = str(resolved_value)
+    def execute(
+        self,
+        command: str,
+        key: Optional[str] = None,
+        value: Optional[str] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute environment command.
 
-            result = {'key': resolved_key, 'value': str(resolved_value), 'exported': export}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Set {resolved_key} = {resolved_value}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Env set error: {str(e)}")
+        Args:
+            command: Command (get, set, list, unset, expand).
+            key: Variable name.
+            value: Variable value.
+            **kwargs: Additional parameters.
 
-    def get_required_params(self) -> List[str]:
-        return ['key', 'value']
+        Returns:
+            Command result dictionary.
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'export': True, 'output_var': 'env_set_result'}
+        Raises:
+            ValueError: If command is invalid.
+        """
+        cmd = command.lower()
+        result: dict[str, Any] = {"command": cmd, "success": True}
 
+        if cmd == "get":
+            if not key:
+                raise ValueError("key required for 'get'")
+            result["value"] = os.environ.get(key, "")
+            result["exists"] = key in os.environ
 
-class EnvListAction(BaseAction):
-    """List environment variables."""
-    action_type = "env_list"
-    display_name = "环境变量列表"
-    description = "列出环境变量"
-    version = "1.0"
+        elif cmd == "set":
+            if not key:
+                raise ValueError("key required for 'set'")
+            if value is None:
+                raise ValueError("value required for 'set'")
+            os.environ[key] = value
+            result["set"] = True
+            result["key"] = key
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute env list."""
-        filter_key = params.get('filter', '')
-        limit = params.get('limit', 100)
-        output_var = params.get('output_var', 'env_list')
+        elif cmd == "unset":
+            if not key:
+                raise ValueError("key required for 'unset'")
+            if key in os.environ:
+                del os.environ[key]
+            result["unset"] = True
 
-        try:
-            resolved_filter = context.resolve_value(filter_key) if context else filter_key
-            resolved_limit = context.resolve_value(limit) if context else limit
+        elif cmd == "list":
+            result["variables"] = [
+                {"key": k, "value": v}
+                for k, v in os.environ.items()
+            ]
+            result["count"] = len(os.environ)
 
-            env_vars = os.environ
-            if resolved_filter:
-                env_vars = {k: v for k, v in env_vars.items() if resolved_filter.lower() in k.lower()}
+        elif cmd == "list_filtered":
+            if not key:
+                raise ValueError("key pattern required")
+            pattern = key.lower()
+            result["variables"] = [
+                {"key": k, "value": v}
+                for k, v in os.environ.items()
+                if pattern in k.lower()
+            ]
+            result["count"] = len(result["variables"])
 
-            items = sorted(env_vars.items())[:resolved_limit]
-            result = {'variables': [{'key': k, 'value': v} for k, v in items], 'count': len(items)}
+        elif cmd == "expand":
+            if not key:
+                raise ValueError("key required for 'expand'")
+            path_str = os.environ.get(key, key)
+            result["value"] = os.path.expandvars(path_str)
+            result["expanded"] = True
 
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Listed {len(items)} env vars", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Env list error: {str(e)}")
+        elif cmd == "exists":
+            if not key:
+                raise ValueError("key required for 'exists'")
+            result["exists"] = key in os.environ
 
-    def get_required_params(self) -> List[str]:
-        return []
+        elif cmd == "copy":
+            src = kwargs.get("source")
+            dst = kwargs.get("destination")
+            if not src or not dst:
+                raise ValueError("source and destination required")
+            os.environ[dst] = os.environ.get(src, "")
+            result["copied"] = True
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'filter': '', 'limit': 100, 'output_var': 'env_list'}
+        else:
+            raise ValueError(f"Unknown command: {command}")
 
+        return result
 
-class EnvExpandAction(BaseAction):
-    """Expand environment variables in string."""
-    action_type = "env_expand"
-    display_name = "环境变量展开"
-    description = "展开字符串中的环境变量"
-    version = "1.0"
+    def get_all(self) -> dict[str, str]:
+        """Get all environment variables.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute env expand."""
-        value = params.get('value', '')
-        output_var = params.get('output_var', 'expanded_value')
+        Returns:
+            Dictionary of all variables.
+        """
+        return dict(os.environ)
 
-        if not value:
-            return ActionResult(success=False, message="value is required")
+    def get_path(self) -> list[str]:
+        """Get PATH variable as list.
 
-        try:
-            resolved_value = context.resolve_value(value) if context else value
-            expanded = os.path.expanduser(os.path.expandvars(resolved_value))
+        Returns:
+            List of path directories.
+        """
+        path_value = os.environ.get("PATH", "")
+        return [p for p in path_value.split(os.pathsep) if p]
 
-            if context:
-                context.set(output_var, expanded)
-            return ActionResult(success=True, message=expanded, data={'original': resolved_value, 'expanded': expanded})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Env expand error: {str(e)}")
+    def set_from_dict(self, variables: dict[str, str]) -> None:
+        """Set multiple variables from dictionary.
 
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'expanded_value'}
+        Args:
+            variables: Dictionary of variables.
+        """
+        for key, value in variables.items():
+            os.environ[key] = value

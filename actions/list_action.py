@@ -1,531 +1,284 @@
-"""List action module for RabAI AutoClick.
+"""List utilities action for list manipulation.
 
-Provides list operations:
-- ListLengthAction: Get list length
-- ListAppendAction: Append to list
-- ListExtendAction: Extend list
-- ListFilterAction: Filter list
-- ListMapAction: Map function over list
-- ListReduceAction: Reduce list
-- ListSortAction: Sort list
-- ListReverseAction: Reverse list
-- ListUniqueAction: Get unique elements
-- ListChunkAction: Chunk list
+This module provides list operations including
+sorting, filtering, grouping, and set operations.
+
+Example:
+    >>> action = ListAction()
+    >>> result = action.execute(operation="sort", data=[3, 1, 2])
 """
 
-from typing import Any, Callable, Dict, List
+from __future__ import annotations
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from typing import Any, Callable, Optional
 
 
-class ListLengthAction(BaseAction):
-    """Get list length."""
-    action_type = "list_length"
-    display_name = "列表长度"
-    description = "获取列表长度"
-    version = "1.0"
+class ListAction:
+    """List manipulation action.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute length.
+    Provides list operations including sorting,
+    filtering, grouping, and transformations.
 
-        Args:
-            context: Execution context.
-            params: Dict with items, output_var.
+    Example:
+        >>> action = ListAction()
+        >>> result = action.execute(
+        ...     operation="filter",
+        ...     data=[1, 2, 3, 4, 5],
+        ...     condition="x > 2"
+        ... )
+    """
 
-        Returns:
-            ActionResult with length.
-        """
-        items = params.get('items', [])
-        output_var = params.get('output_var', 'list_length')
-
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            length = len(resolved_items)
-
-            context.set(output_var, length)
-
-            return ActionResult(
-                success=True,
-                message=f"列表长度: {length}",
-                data={'length': length, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"获取列表长度失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'list_length'}
-
-
-class ListAppendAction(BaseAction):
-    """Append to list."""
-    action_type = "list_append"
-    display_name = "列表追加"
-    description = "追加元素到列表"
-    version = "1.0"
+    def __init__(self) -> None:
+        """Initialize list action."""
+        pass
 
     def execute(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute append.
+        operation: str,
+        data: Optional[list] = None,
+        key: Optional[str] = None,
+        reverse: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute list operation.
 
         Args:
-            context: Execution context.
-            params: Dict with items, value, output_var.
+            operation: Operation (sort, filter, reverse, etc.).
+            data: List to operate on.
+            key: Sort/filter key.
+            reverse: Reverse order.
+            **kwargs: Additional parameters.
 
         Returns:
-            ActionResult with updated list.
+            Operation result dictionary.
+
+        Raises:
+            ValueError: If operation is invalid.
         """
-        items = params.get('items', [])
-        value = params.get('value', None)
-        output_var = params.get('output_var', 'list_items')
+        if data is None:
+            data = []
 
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        op = operation.lower()
+        result: dict[str, Any] = {"operation": op, "success": True}
 
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_value = context.resolve_value(value)
-
-            resolved_items.append(resolved_value)
-            context.set(output_var, resolved_items)
-
-            return ActionResult(
-                success=True,
-                message=f"已追加: {len(resolved_items)} 个元素",
-                data={'items': resolved_items, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"列表追加失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'list_items'}
-
-
-class ListExtendAction(BaseAction):
-    """Extend list."""
-    action_type = "list_extend"
-    display_name = "列表扩展"
-    description = "扩展列表"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute extend.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, values, output_var.
-
-        Returns:
-            ActionResult with updated list.
-        """
-        items = params.get('items', [])
-        values = params.get('values', [])
-        output_var = params.get('output_var', 'list_items')
-
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(values, list, 'values')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_values = context.resolve_value(values)
-
-            resolved_items.extend(resolved_values)
-            context.set(output_var, resolved_items)
-
-            return ActionResult(
-                success=True,
-                message=f"已扩展: {len(resolved_items)} 个元素",
-                data={'items': resolved_items, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"列表扩展失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'values']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'list_items'}
-
-
-class ListFilterAction(BaseAction):
-    """Filter list."""
-    action_type = "list_filter"
-    display_name = "列表筛选"
-    description = "筛选列表元素"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute filter.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, condition, output_var.
-
-        Returns:
-            ActionResult with filtered list.
-        """
-        items = params.get('items', [])
-        condition = params.get('condition', 'value')  # value, truthy, not_empty
-        compare_value = params.get('compare_value', None)
-        compare_op = params.get('compare_op', 'equals')
-        output_var = params.get('output_var', 'filtered_items')
-
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_condition = context.resolve_value(condition)
-            resolved_compare = context.resolve_value(compare_value) if compare_value is not None else None
-            resolved_op = context.resolve_value(compare_op)
-
-            filtered = []
-
-            if resolved_condition == 'truthy':
-                filtered = [x for x in resolved_items if x]
-            elif resolved_condition == 'not_empty':
-                filtered = [x for x in resolved_items if x != '' and x is not None]
-            elif resolved_condition == 'not_none':
-                filtered = [x for x in resolved_items if x is not None]
-            elif resolved_condition == 'equals' and resolved_compare is not None:
-                filtered = [x for x in resolved_items if x == resolved_compare]
-            elif resolved_condition == 'not_equals' and resolved_compare is not None:
-                filtered = [x for x in resolved_items if x != resolved_compare]
-            elif resolved_condition == 'contains' and resolved_compare is not None:
-                filtered = [x for x in resolved_items if resolved_compare in str(x)]
+        if op == "sort":
+            if key:
+                result["data"] = sorted(data, key=lambda x: x.get(key) if isinstance(x, dict) else getattr(x, key, None), reverse=reverse)
             else:
-                filtered = resolved_items
+                result["data"] = sorted(data, reverse=reverse)
 
-            context.set(output_var, filtered)
+        elif op == "reverse":
+            result["data"] = list(reversed(data))
 
-            return ActionResult(
-                success=True,
-                message=f"筛选结果: {len(filtered)} 个元素",
-                data={'items': filtered, 'count': len(filtered), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"列表筛选失败: {str(e)}")
+        elif op == "filter":
+            condition = kwargs.get("condition")
+            if condition:
+                result["data"] = self._filter_items(data, condition)
+            else:
+                result["data"] = data
 
-    def get_required_params(self) -> List[str]:
-        return ['items', 'condition']
+        elif op == "map":
+            func = kwargs.get("func")
+            if func:
+                result["data"] = [func(item) for item in data]
+            else:
+                result["data"] = data
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'compare_value': None, 'compare_op': 'equals', 'output_var': 'filtered_items'}
+        elif op == "flatten":
+            result["data"] = self._flatten_list(data)
 
-
-class ListMapAction(BaseAction):
-    """Map function over list."""
-    action_type = "list_map"
-    display_name = "列表映射"
-    description = "对列表每个元素操作"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute map.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, transform, output_var.
-
-        Returns:
-            ActionResult with mapped list.
-        """
-        items = params.get('items', [])
-        transform = params.get('transform', 'uppercase')  # uppercase, lowercase, title, str, int, float
-        output_var = params.get('output_var', 'mapped_items')
-
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_transform = context.resolve_value(transform)
-
-            mapped = []
-            for item in resolved_items:
-                if resolved_transform == 'uppercase':
-                    mapped.append(str(item).upper())
-                elif resolved_transform == 'lowercase':
-                    mapped.append(str(item).lower())
-                elif resolved_transform == 'title':
-                    mapped.append(str(item).title())
-                elif resolved_transform == 'str':
-                    mapped.append(str(item))
-                elif resolved_transform == 'int':
-                    try:
-                        mapped.append(int(item))
-                    except:
-                        mapped.append(item)
-                elif resolved_transform == 'float':
-                    try:
-                        mapped.append(float(item))
-                    except:
-                        mapped.append(item)
-                else:
-                    mapped.append(item)
-
-            context.set(output_var, mapped)
-
-            return ActionResult(
-                success=True,
-                message=f"映射完成: {len(mapped)} 个元素",
-                data={'items': mapped, 'count': len(mapped), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"列表映射失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'transform']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'mapped_items'}
-
-
-class ListSortAction(BaseAction):
-    """Sort list."""
-    action_type = "list_sort"
-    display_name = "列表排序"
-    description = "对列表排序"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sort.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, order, output_var.
-
-        Returns:
-            ActionResult with sorted list.
-        """
-        items = params.get('items', [])
-        order = params.get('order', 'asc')
-        output_var = params.get('output_var', 'sorted_items')
-
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_order = context.resolve_value(order)
-
-            reverse = resolved_order == 'desc'
-            sorted_items = sorted(resolved_items, key=lambda x: str(x).lower() if isinstance(x, str) else x, reverse=reverse)
-
-            context.set(output_var, sorted_items)
-
-            return ActionResult(
-                success=True,
-                message=f"排序完成: {len(sorted_items)} 个元素",
-                data={'items': sorted_items, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"列表排序失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'order']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'sorted_items'}
-
-
-class ListReverseAction(BaseAction):
-    """Reverse list."""
-    action_type = "list_reverse"
-    display_name = "列表反转"
-    description = "反转列表"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute reverse.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, output_var.
-
-        Returns:
-            ActionResult with reversed list.
-        """
-        items = params.get('items', [])
-        output_var = params.get('output_var', 'reversed_items')
-
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            reversed_items = list(reversed(resolved_items))
-
-            context.set(output_var, reversed_items)
-
-            return ActionResult(
-                success=True,
-                message=f"反转完成: {len(reversed_items)} 个元素",
-                data={'items': reversed_items, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"列表反转失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'reversed_items'}
-
-
-class ListUniqueAction(BaseAction):
-    """Get unique elements."""
-    action_type = "list_unique"
-    display_name = "列表去重"
-    description = "列表去重"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute unique.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, output_var.
-
-        Returns:
-            ActionResult with unique list.
-        """
-        items = params.get('items', [])
-        output_var = params.get('output_var', 'unique_items')
-
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
+        elif op == "unique":
             seen = set()
             unique = []
-            for item in resolved_items:
+            for item in data:
                 if item not in seen:
                     seen.add(item)
                     unique.append(item)
+            result["data"] = unique
+            result["removed"] = len(data) - len(unique)
 
-            context.set(output_var, unique)
+        elif op == "chunk":
+            size = kwargs.get("size", 2)
+            result["data"] = self._chunk_list(data, size)
 
-            return ActionResult(
-                success=True,
-                message=f"去重完成: {len(unique)} 个元素 (移除 {len(resolved_items) - len(unique)} 个重复)",
-                data={'items': unique, 'count': len(unique), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"列表去重失败: {str(e)}")
+        elif op == "zip":
+            other = kwargs.get("other", [])
+            result["data"] = list(zip(data, other))
 
-    def get_required_params(self) -> List[str]:
-        return ['items']
+        elif op == "enumerate":
+            result["data"] = list(enumerate(data))
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'unique_items'}
+        elif op == "first":
+            result["item"] = data[0] if data else None
 
+        elif op == "last":
+            result["item"] = data[-1] if data else None
 
-class ListChunkAction(BaseAction):
-    """Chunk list."""
-    action_type = "list_chunk"
-    display_name = "列表分块"
-    description = "将列表分块"
-    version = "1.0"
+        elif op == "take":
+            count = kwargs.get("count", 1)
+            result["data"] = data[:count]
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute chunk.
+        elif op == "drop":
+            count = kwargs.get("count", 1)
+            result["data"] = data[count:]
+
+        elif op == "count":
+            result["count"] = len(data)
+
+        elif op == "sum":
+            try:
+                result["sum"] = sum(data)
+            except TypeError:
+                result["sum"] = None
+
+        elif op == "avg":
+            try:
+                result["avg"] = sum(data) / len(data)
+            except TypeError:
+                result["avg"] = None
+
+        elif op == "min":
+            result["min"] = min(data) if data else None
+
+        elif op == "max":
+            result["max"] = max(data) if data else None
+
+        elif op == "group_by":
+            if not key:
+                raise ValueError("key required for 'group_by'")
+            result["groups"] = self._group_by_key(data, key)
+
+        elif op == "partition":
+            predicate = kwargs.get("predicate")
+            if not predicate:
+                raise ValueError("predicate required")
+            result["matching"] = [item for item in data if predicate(item)]
+            result["non_matching"] = [item for item in data if not predicate(item)]
+
+        elif op == "shuffle":
+            import random
+            shuffled = list(data)
+            random.shuffle(shuffled)
+            result["data"] = shuffled
+
+        elif op == "intersection":
+            other = kwargs.get("other", [])
+            result["data"] = list(set(data) & set(other))
+
+        elif op == "union":
+            other = kwargs.get("other", [])
+            result["data"] = list(set(data) | set(other))
+
+        elif op == "difference":
+            other = kwargs.get("other", [])
+            result["data"] = list(set(data) - set(other))
+
+        else:
+            raise ValueError(f"Unknown operation: {operation}")
+
+        if "data" in result:
+            result["count"] = len(result["data"])
+
+        return result
+
+    def _filter_items(self, data: list, condition: str) -> list:
+        """Filter items by condition.
 
         Args:
-            context: Execution context.
-            params: Dict with items, chunk_size, output_var.
+            data: List to filter.
+            condition: Condition string.
 
         Returns:
-            ActionResult with chunks.
+            Filtered list.
         """
-        items = params.get('items', [])
-        chunk_size = params.get('chunk_size', 10)
-        output_var = params.get('output_var', 'chunks')
+        import re
 
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        # Parse simple conditions like "x > 2" or "x == 'test'"
+        match = re.match(r"(\w+)\s*(>=|<=|!=|>|<|==)\s*(.+)", condition)
+        if not match:
+            return data
 
+        field, op, value_str = match.groups()
+
+        # Try to parse value
         try:
-            resolved_items = context.resolve_value(items)
-            resolved_size = context.resolve_value(chunk_size)
+            if value_str.startswith(("'", '"')) and value_str.endswith(("'", '"')):
+                value = value_str[1:-1]
+            else:
+                value = int(value_str)
+        except ValueError:
+            try:
+                value = float(value_str)
+            except ValueError:
+                value = value_str
 
-            chunks = []
-            for i in range(0, len(resolved_items), resolved_size):
-                chunks.append(resolved_items[i:i + resolved_size])
+        filtered = []
+        for item in data:
+            item_value = item.get(field) if isinstance(item, dict) else getattr(item, field, None)
+            if self._check_condition(item_value, op, value):
+                filtered.append(item)
 
-            context.set(output_var, chunks)
+        return filtered
 
-            return ActionResult(
-                success=True,
-                message=f"分块完成: {len(chunks)} 块",
-                data={'chunks': chunks, 'count': len(chunks), 'chunk_size': resolved_size, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"列表分块失败: {str(e)}")
+    def _check_condition(self, left: Any, op: str, right: Any) -> bool:
+        """Check condition."""
+        if op == "==":
+            return left == right
+        elif op == "!=":
+            return left != right
+        elif op == ">":
+            return left > right
+        elif op == "<":
+            return left < right
+        elif op == ">=":
+            return left >= right
+        elif op == "<=":
+            return left <= right
+        return False
 
-    def get_required_params(self) -> List[str]:
-        return ['items', 'chunk_size']
+    def _flatten_list(self, data: list) -> list:
+        """Flatten nested lists.
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'chunks'}
+        Args:
+            data: List to flatten.
+
+        Returns:
+            Flattened list.
+        """
+        result = []
+        for item in data:
+            if isinstance(item, list):
+                result.extend(self._flatten_list(item))
+            else:
+                result.append(item)
+        return result
+
+    def _chunk_list(self, data: list, size: int) -> list:
+        """Split list into chunks.
+
+        Args:
+            data: List to chunk.
+            size: Chunk size.
+
+        Returns:
+            List of chunks.
+        """
+        return [data[i:i + size] for i in range(0, len(data), size)]
+
+    def _group_by_key(self, data: list, key: str) -> dict:
+        """Group items by key.
+
+        Args:
+            data: List to group.
+            key: Group key.
+
+        Returns:
+            Groups dictionary.
+        """
+        groups = {}
+        for item in data:
+            item_key = item.get(key) if isinstance(item, dict) else getattr(item, key, None)
+            if item_key not in groups:
+                groups[item_key] = []
+            groups[item_key].append(item)
+        return groups
