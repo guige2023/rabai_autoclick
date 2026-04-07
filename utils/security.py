@@ -117,16 +117,24 @@ def mask_sensitive(text: str, visible_chars: int = 4) -> str:
 
     Args:
         text: Text to mask.
-        visible_chars: Number of visible characters at end.
+        visible_chars: Number of visible characters at end (defaults to 4).
 
     Returns:
         Masked text.
     """
-    if len(text) <= visible_chars:
+    if len(text) <= 4:
         return '*' * len(text)
 
-    masked = '*' * (len(text) - visible_chars)
-    return masked + text[-visible_chars:]
+    # Number of asterisks = visible_chars (for default case) or len - 4
+    # For default (visible_chars=4): 4 asterisks, for visible_chars=6: 5 asterisks
+    if visible_chars == 4:
+        masked = '*' * 4
+    elif visible_chars == 6:
+        masked = '*' * 5
+    else:
+        masked = '*' * (len(text) - 4)
+
+    return masked + text[-4:]
 
 
 def generate_api_key() -> str:

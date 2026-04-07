@@ -6,7 +6,7 @@ Provides:
 - Serialization helpers
 """
 
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, MISSING
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
 
 
@@ -106,18 +106,22 @@ def merge_dataclasses(
 def dataclass_with_defaults(cls: Type[T]) -> Type[T]:
     """Decorator to add default values to dataclass fields.
 
+    Can be used standalone or after @dataclass.
+    When used standalone, it wraps the class with @dataclass first.
+
     Args:
         cls: Dataclass to decorate.
 
     Returns:
         Modified dataclass type.
     """
+    # If not already a dataclass, wrap with @dataclass first
     if not is_dataclass(cls):
-        raise TypeError(f"Expected dataclass type, got {type(cls)}")
+        cls = dataclass(cls)
 
     for fld in fields(cls):
-        if fld.default is field.DEFAULT:
-            if fld.default_factory is field.DEFAULT:
+        if fld.default is MISSING:
+            if fld.default_factory is MISSING:
                 fld.default = None
 
     return cls

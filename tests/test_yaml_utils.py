@@ -78,7 +78,7 @@ class TestDumpYaml:
 
     def test_dump_with_indent(self) -> None:
         """Test dumping with custom indent."""
-        data = {"nested": {"key": "value"}}
+        data = {"outer": {"nested": {"key": "value"}}}
         result = dump_yaml(data, indent=4)
         assert result is not None
         assert "    nested:" in result

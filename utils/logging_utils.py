@@ -231,11 +231,11 @@ def rotate_log_file(path: str, keep: int = 5) -> None:
 
     # Rename existing logs
     for i in range(keep - 1, 0, -1):
-        old_path = path.with_suffix(f".{i}")
-        new_path = path.with_suffix(f".{i + 1}")
+        old_path = Path(f"{path}.{i}")
+        new_path = Path(f"{path}.{i + 1}")
 
         if old_path.exists():
             old_path.rename(new_path)
 
     # Rename current log
-    path.rename(path.with_suffix(".1"))
+    path.rename(Path(f"{path}.1"))

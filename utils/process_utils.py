@@ -6,6 +6,7 @@ Provides:
 - Resource monitoring
 """
 
+import io
 import os
 import sys
 import time
@@ -333,9 +334,15 @@ def daemonize() -> bool:
     """Daemonize the current process (Unix only).
 
     Returns:
-        True if successfully daemonized.
+        True if successfully daemonized, False otherwise.
     """
     if sys.platform == 'win32':
+        return False
+
+    # In test environments, stdin may be redirected and have no fileno
+    try:
+        test_stdin_fileno = sys.stdin.fileno()
+    except (io.UnsupportedOperation, AttributeError):
         return False
 
     try:

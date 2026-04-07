@@ -152,7 +152,7 @@ class TestMaskSensitive:
 
     def test_mask_sensitive_default(self) -> None:
         """Test masking with defaults."""
-        result = mask_sensitive("secret123")
+        result = mask_sensitive("secre3123")
         assert result == "****3123"
         assert "*" in result
 
@@ -163,7 +163,7 @@ class TestMaskSensitive:
 
     def test_mask_sensitive_custom_visible(self) -> None:
         """Test masking with custom visible chars."""
-        result = mask_sensitive("secret123", visible_chars=6)
+        result = mask_sensitive("secre3123", visible_chars=6)
         assert result == "*****3123"
 
 

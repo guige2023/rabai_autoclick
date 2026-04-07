@@ -38,7 +38,7 @@ def dump_yaml(data: Any, path: Optional[Union[str, Path]] = None, indent: int = 
         YAML string if path not provided, else None.
     """
     try:
-        yaml_str = yaml.dump(data, indent=indent, allow_unicode=True)
+        yaml_str = yaml.dump(data, indent=indent, allow_unicode=True, default_flow_style=False)
 
         if path:
             with open(path, 'w', encoding='utf-8') as f:
