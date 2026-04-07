@@ -1,19 +1,25 @@
 """Theme management for RabAI AutoClick UI.
 
-Provides centralized theme management with light/dark mode support
-and consistent styling across all UI components.
+Provides centralized theme management with light/dark mode support,
+consistent styling, animations, and persistent theme preferences.
 """
 
+import json
+import os
 from enum import Enum
 from typing import Dict, Optional
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, pyqtSignal, QSettings
 
 
 class ThemeType(Enum):
     """Available theme types."""
     LIGHT = "light"
     DARK = "dark"
+
+
+# Theme persistence file path
+_THEME_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'theme_config.json')
 
 
 class ThemeColors:
@@ -137,8 +143,8 @@ class ThemeColors:
 class ThemeManager(QObject):
     """Centralized theme management singleton.
 
-    Manages theme switching and provides theme-aware styling
-    for all UI components.
+    Manages theme switching, persistence, and provides theme-aware styling
+    with animated transitions for all UI components.
     """
 
     _instance: Optional['ThemeManager'] = None
@@ -156,6 +162,28 @@ class ThemeManager(QObject):
         self._initialized = True
         self._current_theme: ThemeType = ThemeType.LIGHT
         self._colors: Dict[str, str] = ThemeColors.LIGHT.copy()
+        self._settings = QSettings('RabAI', 'AutoClick')
+        self._load_saved_theme()
+
+    def _load_saved_theme(self) -> None:
+        """Load saved theme preference from disk."""
+        try:
+            saved_theme = self._settings.value('theme', 'light')
+            if saved_theme == 'dark':
+                self._current_theme = ThemeType.DARK
+                self._colors = ThemeColors.DARK.copy()
+            else:
+                self._current_theme = ThemeType.LIGHT
+                self._colors = ThemeColors.LIGHT.copy()
+        except Exception:
+            pass
+
+    def _save_theme(self) -> None:
+        """Save current theme preference to disk."""
+        try:
+            self._settings.setValue('theme', self._current_theme.value)
+        except Exception:
+            pass
 
     @property
     def theme(self) -> ThemeType:
@@ -193,6 +221,7 @@ class ThemeManager(QObject):
         else:
             self._colors = ThemeColors.LIGHT.copy()
 
+        self._save_theme()
         self.theme_changed.emit(theme)
 
     def toggle_theme(self) -> ThemeType:
@@ -223,7 +252,7 @@ class ThemeManager(QObject):
         return self._get_light_stylesheet(component)
 
     def _get_light_stylesheet(self, component: str) -> str:
-        """Get light theme stylesheet.
+        """Get light theme stylesheet with animations.
 
         Args:
             component: Component name.
@@ -236,17 +265,18 @@ class ThemeManager(QObject):
             "main_window": f"""
                 QMainWindow {{ background-color: {c['bg_main']}; }}
                 QTabWidget::pane {{ border: 1px solid {c['border']}; background-color: {c['bg_widget']}; }}
-                QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
+                QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; border-top-left-radius: 4px; border-top-right-radius: 4px; }}
                 QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
-                QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; }}
+                QTabBar::tab:hover {{ background-color: {c['bg_hover']}; }}
+                QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: background-color 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['primary_hover']}; }}
                 QPushButton:pressed {{ background-color: {c['primary_active']}; }}
                 QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
-                QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; }}
+                QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; transition: border-color 0.2s ease; }}
                 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {c['border_focus']}; }}
                 QGroupBox {{ font-weight: bold; margin-top: 8px; padding-top: 8px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
                 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
-                QLabel {{ color: {c['text_primary']}; }}
+                QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
                 QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
@@ -260,14 +290,14 @@ class ThemeManager(QObject):
             """,
             "mini_toolbar": f"""
                 QWidget {{ background-color: {c['bg_dark_main']}; border-radius: 8px; }}
-                QPushButton {{ background-color: {c['bg_dark_hover']}; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; min-width: 60px; }}
-                QPushButton:hover {{ background-color: {c['bg_dark_active']}; }}
-                QPushButton:pressed {{ background-color: {c['bg_dark_hover']}; }}
+                QPushButton {{ background-color: {c['bg_dark_hover']}; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; min-width: 60px; transition: all 0.2s ease; }}
+                QPushButton:hover {{ background-color: {c['bg_dark_active']}; transform: translateY(-1px); }}
+                QPushButton:pressed {{ background-color: {c['bg_dark_hover']}; transform: translateY(0px); }}
                 QPushButton#run_btn {{ background-color: {c['success']}; }}
-                QPushButton#run_btn:hover {{ background-color: {c['success_hover']}; }}
+                QPushButton#run_btn:hover {{ background-color: {c['success_hover']}; transform: translateY(-1px); }}
                 QPushButton#stop_btn {{ background-color: {c['error']}; }}
-                QPushButton#stop_btn:hover {{ background-color: {c['error_hover']}; }}
-                QLabel {{ color: {c['text_dark_primary']}; font-size: 12px; padding: 0 8px; }}
+                QPushButton#stop_btn:hover {{ background-color: {c['error_hover']}; transform: translateY(-1px); }}
+                QLabel {{ color: {c['text_dark_primary']}; font-size: 12px; padding: 0 8px; transition: color 0.2s ease; }}
             """,
             "log": f"""
                 QTextEdit {{
@@ -276,33 +306,92 @@ class ThemeManager(QObject):
                     font-family: Consolas, 'Microsoft YaHei';
                     font-size: 12px;
                     border: none;
+                    transition: background-color 0.3s ease;
                 }}
             """,
             "message_success": f"""
                 QMessageBox {{ background-color: #f0f9eb; }}
-                QPushButton {{ background-color: {c['success']}; color: white; padding: 8px 20px; border: none; border-radius: 4px; }}
+                QPushButton {{ background-color: {c['success']}; color: white; padding: 8px 20px; border: none; border-radius: 4px; transition: background-color 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['success_hover']}; }}
             """,
             "message_error": f"""
                 QMessageBox {{ background-color: #fef0f0; }}
-                QPushButton {{ background-color: {c['error']}; color: white; padding: 8px 20px; border: none; border-radius: 4px; }}
+                QPushButton {{ background-color: {c['error']}; color: white; padding: 8px 20px; border: none; border-radius: 4px; transition: background-color 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['error_hover']}; }}
             """,
             "toast": f"""
-                QWidget {{ background-color: {c['primary']}; border-radius: 8px; }}
+                QWidget {{ background-color: {c['primary']}; border-radius: 8px; transition: opacity 0.3s ease; }}
                 QLabel {{ color: white; font-size: 14px; }}
             """,
             "dialog": f"""
                 QDialog {{ background-color: {c['bg_widget']}; }}
                 QLabel {{ color: {c['text_primary']}; }}
-                QPushButton {{ padding: 6px 16px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; }}
+                QPushButton {{ padding: 6px 16px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: all 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+            """,
+            "button_animated": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['primary']};
+                    color: {c['text_on_primary']};
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['primary_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['primary_active']};
+                    transform: translateY(0px);
+                    box-shadow: none;
+                }}
+            """,
+            "button_success": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['success']};
+                    color: white;
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['success_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['success_hover']};
+                    transform: translateY(0px);
+                }}
+            """,
+            "button_danger": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['error']};
+                    color: white;
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['error_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['error_hover']};
+                    transform: translateY(0px);
+                }}
             """,
         }
         return stylesheets.get(component, "")
 
     def _get_dark_stylesheet(self, component: str) -> str:
-        """Get dark theme stylesheet.
+        """Get dark theme stylesheet with animations.
 
         Args:
             component: Component name.
@@ -315,17 +404,18 @@ class ThemeManager(QObject):
             "main_window": f"""
                 QMainWindow {{ background-color: {c['bg_main']}; }}
                 QTabWidget::pane {{ border: 1px solid {c['border']}; background-color: {c['bg_widget']}; }}
-                QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
+                QTabBar::tab {{ padding: 8px 16px; background-color: {c['bg_toolbar']}; color: {c['text_primary']}; border-top-left-radius: 4px; border-top-right-radius: 4px; }}
                 QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
-                QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; }}
+                QTabBar::tab:hover {{ background-color: {c['bg_hover']}; }}
+                QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: all 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['primary_hover']}; }}
                 QPushButton:pressed {{ background-color: {c['primary_active']}; }}
                 QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
-                QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; }}
+                QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; transition: border-color 0.2s ease; }}
                 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {c['border_focus']}; }}
                 QGroupBox {{ font-weight: bold; margin-top: 8px; padding-top: 8px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; }}
                 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {c['text_primary']}; }}
-                QLabel {{ color: {c['text_primary']}; }}
+                QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
                 QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
@@ -339,14 +429,14 @@ class ThemeManager(QObject):
             """,
             "mini_toolbar": f"""
                 QWidget {{ background-color: {c['bg_dark_main']}; border-radius: 8px; }}
-                QPushButton {{ background-color: {c['bg_dark_hover']}; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; min-width: 60px; }}
-                QPushButton:hover {{ background-color: {c['bg_dark_active']}; }}
-                QPushButton:pressed {{ background-color: {c['bg_dark_hover']}; }}
+                QPushButton {{ background-color: {c['bg_dark_hover']}; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-size: 12px; min-width: 60px; transition: all 0.2s ease; }}
+                QPushButton:hover {{ background-color: {c['bg_dark_active']}; transform: translateY(-1px); }}
+                QPushButton:pressed {{ background-color: {c['bg_dark_hover']}; transform: translateY(0px); }}
                 QPushButton#run_btn {{ background-color: {c['success']}; }}
-                QPushButton#run_btn:hover {{ background-color: {c['success_hover']}; }}
+                QPushButton#run_btn:hover {{ background-color: {c['success_hover']}; transform: translateY(-1px); }}
                 QPushButton#stop_btn {{ background-color: {c['error']}; }}
-                QPushButton#stop_btn:hover {{ background-color: {c['error_hover']}; }}
-                QLabel {{ color: {c['text_dark_primary']}; font-size: 12px; padding: 0 8px; }}
+                QPushButton#stop_btn:hover {{ background-color: {c['error_hover']}; transform: translateY(-1px); }}
+                QLabel {{ color: {c['text_dark_primary']}; font-size: 12px; padding: 0 8px; transition: color 0.2s ease; }}
             """,
             "log": f"""
                 QTextEdit {{
@@ -355,27 +445,86 @@ class ThemeManager(QObject):
                     font-family: Consolas, 'Microsoft YaHei';
                     font-size: 12px;
                     border: none;
+                    transition: background-color 0.3s ease;
                 }}
             """,
             "message_success": f"""
                 QMessageBox {{ background-color: {c['bg_widget']}; }}
-                QPushButton {{ background-color: {c['success']}; color: {c['text_on_primary']}; padding: 8px 20px; border: none; border-radius: 4px; }}
+                QPushButton {{ background-color: {c['success']}; color: {c['text_on_primary']}; padding: 8px 20px; border: none; border-radius: 4px; transition: all 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['success_hover']}; }}
             """,
             "message_error": f"""
                 QMessageBox {{ background-color: {c['bg_widget']}; }}
-                QPushButton {{ background-color: {c['error']}; color: {c['text_on_primary']}; padding: 8px 20px; border: none; border-radius: 4px; }}
+                QPushButton {{ background-color: {c['error']}; color: {c['text_on_primary']}; padding: 8px 20px; border: none; border-radius: 4px; transition: all 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['error_hover']}; }}
             """,
             "toast": f"""
-                QWidget {{ background-color: {c['primary']}; border-radius: 8px; }}
+                QWidget {{ background-color: {c['primary']}; border-radius: 8px; transition: opacity 0.3s ease; }}
                 QLabel {{ color: white; font-size: 14px; }}
             """,
             "dialog": f"""
                 QDialog {{ background-color: {c['bg_widget']}; }}
                 QLabel {{ color: {c['text_primary']}; }}
-                QPushButton {{ padding: 6px 16px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; }}
+                QPushButton {{ padding: 6px 16px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: all 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+            """,
+            "button_animated": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['primary']};
+                    color: {c['text_on_primary']};
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['primary_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['primary_active']};
+                    transform: translateY(0px);
+                    box-shadow: none;
+                }}
+            """,
+            "button_success": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['success']};
+                    color: white;
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['success_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['success_hover']};
+                    transform: translateY(0px);
+                }}
+            """,
+            "button_danger": f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                    background-color: {c['error']};
+                    color: white;
+                    border: none;
+                    transition: all 0.2s ease;
+                }}
+                QPushButton:hover {{
+                    background-color: {c['error_hover']};
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['error_hover']};
+                    transform: translateY(0px);
+                }}
             """,
         }
         return stylesheets.get(component, "")
@@ -394,6 +543,21 @@ class ThemeManager(QObject):
             "ERROR": self._colors["log_error"],
             "CRITICAL": self._colors["log_critical"],
         }
+
+    def get_button_stylesheet(self, style: str = 'default') -> str:
+        """Get animated button stylesheet.
+
+        Args:
+            style: Button style ('default', 'success', 'danger').
+
+        Returns:
+            CSS stylesheet string for buttons.
+        """
+        if style == 'success':
+            return self.get_stylesheet('button_success')
+        elif style == 'danger':
+            return self.get_stylesheet('button_danger')
+        return self.get_stylesheet('button_animated')
 
 
 # Global singleton instance

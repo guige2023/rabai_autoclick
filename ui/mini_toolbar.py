@@ -124,9 +124,11 @@ class MiniToolbar(QWidget):
                 color: white;
                 border: 1px solid {dark_colors['border_dark']};
                 border-radius: 4px;
+                transition: opacity 0.2s ease;
             }}
             QMenu::item {{
                 padding: 8px 20px;
+                transition: background-color 0.2s ease;
             }}
             QMenu::item:selected {{
                 background-color: {dark_colors['bg_dark_hover']};
