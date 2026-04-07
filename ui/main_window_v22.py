@@ -2236,13 +2236,22 @@ class MainWindow(QMainWindow):
         
         for widget in self.config_widgets.values():
             widget.config_changed.connect(self._on_config_changed)
-        
+
         self.engine_signals = EngineSignals()
-        self.engine_signals.step_start.connect(self._on_engine_step_start)
-        self.engine_signals.step_end.connect(self._on_engine_step_end)
-        self.engine_signals.workflow_end.connect(self._on_engine_workflow_end)
-        self.engine_signals.error.connect(self._on_engine_error)
-        
+        # Use QueuedConnection for thread-safe signal-slot communication
+        self.engine_signals.step_start.connect(
+            self._on_engine_step_start, type=Qt.QueuedConnection
+        )
+        self.engine_signals.step_end.connect(
+            self._on_engine_step_end, type=Qt.QueuedConnection
+        )
+        self.engine_signals.workflow_end.connect(
+            self._on_engine_workflow_end, type=Qt.QueuedConnection
+        )
+        self.engine_signals.error.connect(
+            self._on_engine_error, type=Qt.QueuedConnection
+        )
+
         self.engine.set_callbacks(
             on_step_start=lambda step: self.engine_signals.step_start.emit(step),
             on_step_end=lambda step, result: self.engine_signals.step_end.emit(step, result),
