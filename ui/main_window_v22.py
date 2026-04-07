@@ -1175,7 +1175,7 @@ class LogWidget(QWidget):
         """Handle theme change to update log colors."""
         self._log_colors = theme_manager.get_log_colors()
 
-    def _on_log_entry(self, entry):
+    def _on_log_entry(self, entry) -> None:
         color = self._log_colors.get(entry.level, theme_manager.get_color('text_secondary'))
         timestamp = entry.timestamp.strftime("%H:%M:%S")
         timestamp_color = theme_manager.get_color('text_secondary')
@@ -1419,7 +1419,7 @@ class RecordingWidget(QWidget):
                 optimized += 1
         return optimized
     
-    def _on_add_to_workflow(self):
+    def _on_add_to_workflow(self) -> None:
         actions = self._recording_manager.get_actions()
         if not actions:
             show_warning("提示", "没有可添加的操作，请先录制")
@@ -1435,15 +1435,15 @@ class RecordingWidget(QWidget):
         self.workflow_added.emit(steps)
         show_toast(f"已添加 {len(steps)} 个步骤到工作流", 'success')
     
-    def _on_action_recorded(self, action_type: str, params: dict):
+    def _on_action_recorded(self, action_type: str, params: dict) -> None:
         self.action_added.emit(f"{action_type}: {params}")
         app_logger.info(f"录屏动作: {action_type} - {params}", "Recording")
     
-    def _on_recording_started(self):
+    def _on_recording_started(self) -> None:
         self.list_cleared.emit()
         app_logger.info("开始录制操作", "Recording")
     
-    def _on_recording_stopped(self, actions):
+    def _on_recording_stopped(self, actions) -> None:
         app_logger.info(f"录制完成，共 {len(actions)} 个动作", "Recording")
 
     def _on_recording_error(self, error_msg: str) -> None:
@@ -2194,11 +2194,11 @@ class MainWindow(QMainWindow):
         else:
             app_logger.warning("快捷键模块不可用", "Hotkey")
     
-    def _on_record_start_hotkey(self):
+    def _on_record_start_hotkey(self) -> None:
         if not self.recording_widget._recording_manager.is_recording():
             self.recording_widget._on_record()
     
-    def _on_record_stop_hotkey(self):
+    def _on_record_stop_hotkey(self) -> None:
         if self.recording_widget._recording_manager.is_recording():
             self.recording_widget._on_stop()
             self.showNormal()
