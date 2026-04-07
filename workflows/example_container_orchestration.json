@@ -1,0 +1,116 @@
+{
+  "name": "Container Orchestration Workflow",
+  "description": "Automate Docker and Kubernetes container management",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "containers_to_manage": 6,
+    "current_container": 0,
+    "status_checks": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "container_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize container counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open container dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "container_loop",
+      "count": "{{containers_to_manage}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start container loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on container"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for container details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/container_{{container_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture container screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "container_counter",
+      "value": "{{container_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment container counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{container_counter < containers_to_manage}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more containers"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next container"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/container_orchestration_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 3
+  }
+}
