@@ -210,7 +210,7 @@ class ErrorAccumulator:
         """
         self._errors.append((context, error))
 
-       def try_add(self, context: str, func: Callable[[], Any]) -> None:
+    def try_add(self, context: str, func: Callable[[], Any]) -> None:
         """Try to execute function and add any error.
 
         Args:
