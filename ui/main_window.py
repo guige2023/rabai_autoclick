@@ -565,24 +565,26 @@ class VariablesWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
-    
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.table = QTableWidget()
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["变量名", "值"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table)
-        
+
         btn_layout = QHBoxLayout()
         self.add_btn = QPushButton("添加变量")
+        self.add_btn.setStyleSheet(theme_manager.get_button_stylesheet('success'))
         self.remove_btn = QPushButton("删除变量")
+        self.remove_btn.setStyleSheet(theme_manager.get_button_stylesheet('danger'))
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.remove_btn)
         layout.addLayout(btn_layout)
-        
+
         self.add_btn.clicked.connect(self._add_variable)
         self.remove_btn.clicked.connect(self._remove_variable)
     
