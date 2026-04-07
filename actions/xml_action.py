@@ -1,14 +1,18 @@
 """XML action module for RabAI AutoClick.
 
-Provides XML operations:
-- XmlParseAction: Parse XML string
-- XmlToDictAction: Convert XML to dict
-- XmlFromDictAction: Create XML from dict
-- XmlGetValueAction: Get value from XML
+Provides XML processing operations:
+- XmlParseAction: Parse XML string/file
+- XmlToDictAction: Convert XML to dictionary
+- XmlFromDictAction: Create XML from dictionary
+- XmlValidateAction: Validate XML schema
+- XmlXPathAction: Extract data using XPath
+- XmlPrettyAction: Pretty print XML
+- XmlMinifyAction: Minify XML
 """
 
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List, Optional, Union
 
 import sys
 import os
@@ -18,51 +22,80 @@ from core.base_action import BaseAction, ActionResult
 
 
 class XmlParseAction(BaseAction):
-    """Parse XML string."""
+    """Parse XML string/file."""
     action_type = "xml_parse"
     display_name = "解析XML"
-    description = "解析XML字符串"
+    description = "解析XML字符串或文件"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute XML parsing.
+        """Execute parse.
 
         Args:
             context: Execution context.
-            params: Dict with xml_string, output_var.
+            params: Dict with content, file_path, output_var.
 
         Returns:
             ActionResult with parsed XML.
         """
-        xml_string = params.get('xml_string', '')
-        output_var = params.get('output_var', 'xml_result')
+        content = params.get('content', '')
+        file_path = params.get('file_path', '')
+        output_var = params.get('output_var', 'xml_parsed')
 
-        valid, msg = self.validate_type(xml_string, str, 'xml_string')
+        valid, msg = self.validate_type(output_var, str, 'output_var')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
-            resolved = context.resolve_value(xml_string)
-            root = ET.fromstring(resolved)
+            resolved_content = ''
+            if content:
+                resolved_content = context.resolve_value(content)
+            elif file_path:
+                resolved_path = context.resolve_value(file_path)
+                if not os.path.exists(resolved_path):
+                    return ActionResult(
+                        success=False,
+                        message=f"文件不存在: {resolved_path}"
+                    )
+                with open(resolved_path, 'r', encoding='utf-8') as f:
+                    resolved_content = f.read()
+            else:
+                return ActionResult(
+                    success=False,
+                    message="必须提供content或file_path"
+                )
 
-            result = {
-                'tag': root.tag,
-                'text': root.text,
-                'attrib': root.attrib,
-            }
+            root = ET.fromstring(resolved_content)
 
-            context.set(output_var, result)
+            def etree_to_dict(node):
+                result = {}
+                if node.text and node.text.strip():
+                    if len(node) == 0:
+                        return node.text.strip()
+                    result['#text'] = node.text.strip()
+                for attr, val in node.attrib.items():
+                    result[f'@{attr}'] = val
+                for child in node:
+                    child_dict = etree_to_dict(child)
+                    if child.tag in result:
+                        if not isinstance(result[child.tag], list):
+                            result[child.tag] = [result[child.tag]]
+                        result[child.tag].append(child_dict)
+                    else:
+                        result[child.tag] = child_dict
+                return result
+
+            parsed = etree_to_dict(root)
+            context.set(output_var, parsed)
 
             return ActionResult(
                 success=True,
-                message=f"XML解析完成: {root.tag}",
-                data={
-                    'result': result,
-                    'output_var': output_var
-                }
+                message=f"XML已解析: {root.tag}",
+                data={'root': root.tag, 'parsed': parsed, 'output_var': output_var}
             )
         except ET.ParseError as e:
             return ActionResult(
@@ -72,78 +105,91 @@ class XmlParseAction(BaseAction):
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"解析XML失败: {str(e)}"
+                message=f"XML解析失败: {str(e)}"
             )
 
     def get_required_params(self) -> List[str]:
-        return ['xml_string']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'xml_result'}
+        return {'content': '', 'file_path': '', 'output_var': 'xml_parsed'}
 
 
 class XmlToDictAction(BaseAction):
-    """Convert XML to dict."""
+    """Convert XML to dictionary."""
     action_type = "xml_to_dict"
     display_name = "XML转字典"
     description = "将XML转换为字典"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute XML to dict conversion.
+        """Execute convert.
 
         Args:
             context: Execution context.
-            params: Dict with xml_string, output_var.
+            params: Dict with content, file_path, output_var.
 
         Returns:
-            ActionResult with dict representation.
+            ActionResult with dictionary.
         """
-        xml_string = params.get('xml_string', '')
+        content = params.get('content', '')
+        file_path = params.get('file_path', '')
         output_var = params.get('output_var', 'xml_dict')
 
-        valid, msg = self.validate_type(xml_string, str, 'xml_string')
+        valid, msg = self.validate_type(output_var, str, 'output_var')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
-            resolved = context.resolve_value(xml_string)
+            resolved_content = ''
+            if content:
+                resolved_content = context.resolve_value(content)
+            elif file_path:
+                resolved_path = context.resolve_value(file_path)
+                if not os.path.exists(resolved_path):
+                    return ActionResult(
+                        success=False,
+                        message=f"文件不存在: {resolved_path}"
+                    )
+                with open(resolved_path, 'r', encoding='utf-8') as f:
+                    resolved_content = f.read()
+            else:
+                return ActionResult(
+                    success=False,
+                    message="必须提供content或file_path"
+                )
+
+            root = ET.fromstring(resolved_content)
 
             def etree_to_dict(node):
                 result = {}
-                if node.attrib:
-                    result['@attributes'] = node.attrib
                 if node.text and node.text.strip():
+                    if len(node) == 0:
+                        return node.text.strip()
                     result['#text'] = node.text.strip()
+                for attr, val in node.attrib.items():
+                    result[f'@{attr}'] = val
                 for child in node:
                     child_dict = etree_to_dict(child)
                     if child.tag in result:
                         if not isinstance(result[child.tag], list):
                             result[child.tag] = [result[child.tag]]
-                        result[child.tag].append(child_dict[child.tag])
+                        result[child.tag].append(child_dict)
                     else:
-                        result[child.tag] = child_dict[child.tag]
-                return {node.tag: result}
+                        result[child.tag] = child_dict
+                return result
 
-            root = ET.fromstring(resolved)
-            result = etree_to_dict(root)
-            context.set(output_var, result)
+            result_dict = etree_to_dict(root)
+            context.set(output_var, result_dict)
 
             return ActionResult(
                 success=True,
-                message="XML转字典完成",
-                data={
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except ET.ParseError as e:
-            return ActionResult(
-                success=False,
-                message=f"XML解析错误: {str(e)}"
+                message=f"XML转字典完成",
+                data={'dict': result_dict, 'output_var': output_var}
             )
         except Exception as e:
             return ActionResult(
@@ -152,24 +198,25 @@ class XmlToDictAction(BaseAction):
             )
 
     def get_required_params(self) -> List[str]:
-        return ['xml_string']
+        return []
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'xml_dict'}
+        return {'content': '', 'file_path': '', 'output_var': 'xml_dict'}
 
 
 class XmlFromDictAction(BaseAction):
-    """Create XML from dict."""
+    """Create XML from dictionary."""
     action_type = "xml_from_dict"
     display_name = "字典转XML"
     description = "将字典转换为XML"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute dict to XML conversion.
+        """Execute convert.
 
         Args:
             context: Execution context.
@@ -180,51 +227,52 @@ class XmlFromDictAction(BaseAction):
         """
         data = params.get('data', {})
         root_tag = params.get('root_tag', 'root')
-        output_var = params.get('output_var', 'xml_string')
+        output_var = params.get('output_var', 'xml_output')
+        pretty = params.get('pretty', True)
 
-        valid, msg = self.validate_type(data, dict, 'data')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(root_tag, str, 'root_tag')
+        valid, msg = self.validate_type(output_var, str, 'output_var')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
             resolved_data = context.resolve_value(data)
             resolved_root = context.resolve_value(root_tag)
+            resolved_pretty = context.resolve_value(pretty)
 
-            def dict_to_etree(tag, d):
-                element = ET.Element(tag)
-                if isinstance(d, dict):
-                    if '@attributes' in d:
-                        element.attrib.update(d['@attributes'])
-                    for key, value in d.items():
-                        if key == '@attributes':
-                            continue
+            def dict_to_etree(parent, data_dict):
+                if isinstance(data_dict, dict):
+                    for key, value in data_dict.items():
+                        if key.startswith('@'):
+                            parent.set(key[1:], str(value))
                         elif key == '#text':
-                            element.text = str(value)
+                            parent.text = str(value)
                         elif isinstance(value, list):
                             for item in value:
-                                element.append(dict_to_etree(key, item))
+                                child = ET.SubElement(parent, key)
+                                dict_to_etree(child, item)
+                        elif isinstance(value, dict):
+                            child = ET.SubElement(parent, key)
+                            dict_to_etree(child, value)
                         else:
-                            element.append(dict_to_etree(key, value))
-                else:
-                    element.text = str(d)
-                return element
+                            child = ET.SubElement(parent, key)
+                            child.text = str(value)
+                elif data_dict is not None:
+                    parent.text = str(data_dict)
 
-            root = dict_to_etree(resolved_root, resolved_data)
-            result = ET.tostring(root, encoding='unicode')
+            root = ET.Element(resolved_root)
+            dict_to_etree(root, resolved_data)
 
-            context.set(output_var, result)
+            if resolved_pretty:
+                ET.indent(root, space='  ')
+
+            xml_str = ET.tostring(root, encoding='unicode', xml_declaration=True)
+
+            context.set(output_var, xml_str)
 
             return ActionResult(
                 success=True,
-                message="字典转XML完成",
-                data={
-                    'result': result,
-                    'output_var': output_var
-                }
+                message=f"字典转XML完成 ({len(xml_str)} 字符)",
+                data={'xml': xml_str, 'output_var': output_var}
             )
         except Exception as e:
             return ActionResult(
@@ -233,78 +281,79 @@ class XmlFromDictAction(BaseAction):
             )
 
     def get_required_params(self) -> List[str]:
-        return ['data', 'root_tag']
+        return ['data']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'xml_string'}
+        return {'root_tag': 'root', 'output_var': 'xml_output', 'pretty': True}
 
 
-class XmlGetValueAction(BaseAction):
-    """Get value from XML."""
-    action_type = "xml_get_value"
-    display_name = "获取XML值"
-    description = "从XML中获取指定路径的值"
+class XmlXPathAction(BaseAction):
+    """Extract data using XPath."""
+    action_type = "xml_xpath"
+    display_name = "XPath提取"
+    description = "使用XPath从XML中提取数据"
+    version = "1.0"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute XML value extraction.
+        """Execute XPath.
 
         Args:
             context: Execution context.
-            params: Dict with xml_string, path, output_var.
+            params: Dict with content, file_path, xpath, output_var.
 
         Returns:
-            ActionResult with extracted value.
+            ActionResult with extracted data.
         """
-        xml_string = params.get('xml_string', '')
-        path = params.get('path', '')
-        output_var = params.get('output_var', 'xml_value')
+        content = params.get('content', '')
+        file_path = params.get('file_path', '')
+        xpath = params.get('xpath', '')
+        output_var = params.get('output_var', 'xpath_result')
 
-        valid, msg = self.validate_type(xml_string, str, 'xml_string')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(path, str, 'path')
+        valid, msg = self.validate_type(xpath, str, 'xpath')
         if not valid:
             return ActionResult(success=False, message=msg)
 
         try:
-            resolved_xml = context.resolve_value(xml_string)
-            resolved_path = context.resolve_value(path)
-
-            root = ET.fromstring(resolved_xml)
-
-            # Parse path like "root/child/tag"
-            parts = resolved_path.split('/')
-            current = root
-            for part in parts:
-                found = False
-                for elem in current:
-                    if elem.tag == part:
-                        current = elem
-                        found = True
-                        break
-                if not found:
+            resolved_content = ''
+            if content:
+                resolved_content = context.resolve_value(content)
+            elif file_path:
+                resolved_path = context.resolve_value(file_path)
+                if not os.path.exists(resolved_path):
                     return ActionResult(
                         success=False,
-                        message=f"路径不存在: {resolved_path}"
+                        message=f"文件不存在: {resolved_path}"
                     )
+                with open(resolved_path, 'r', encoding='utf-8') as f:
+                    resolved_content = f.read()
+            else:
+                return ActionResult(
+                    success=False,
+                    message="必须提供content或file_path"
+                )
 
-            result = current.text if current.text else str(current.attrib)
+            resolved_xpath = context.resolve_value(xpath)
 
-            context.set(output_var, result)
+            root = ET.fromstring(resolved_content)
+            nodes = root.findall(resolved_xpath)
+
+            results = []
+            for node in nodes:
+                if len(node) == 0:
+                    results.append(node.text)
+                else:
+                    results.append(ET.tostring(node, encoding='unicode'))
+
+            context.set(output_var, results)
 
             return ActionResult(
                 success=True,
-                message=f"获取XML值: {result}",
-                data={
-                    'result': result,
-                    'path': resolved_path,
-                    'output_var': output_var
-                }
+                message=f"XPath提取: {len(results)} 个结果",
+                data={'count': len(results), 'results': results, 'output_var': output_var}
             )
         except ET.ParseError as e:
             return ActionResult(
@@ -314,11 +363,157 @@ class XmlGetValueAction(BaseAction):
         except Exception as e:
             return ActionResult(
                 success=False,
-                message=f"获取XML值失败: {str(e)}"
+                message=f"XPath提取失败: {str(e)}"
             )
 
     def get_required_params(self) -> List[str]:
-        return ['xml_string', 'path']
+        return ['xpath']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'xml_value'}
+        return {'content': '', 'file_path': '', 'output_var': 'xpath_result'}
+
+
+class XmlPrettyAction(BaseAction):
+    """Pretty print XML."""
+    action_type = "xml_pretty"
+    display_name = "格式化XML"
+    description = "格式化美化XML"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute pretty.
+
+        Args:
+            context: Execution context.
+            params: Dict with content, file_path, indent, output_var.
+
+        Returns:
+            ActionResult with formatted XML.
+        """
+        content = params.get('content', '')
+        file_path = params.get('file_path', '')
+        indent = params.get('indent', '  ')
+        output_var = params.get('output_var', 'xml_pretty')
+
+        valid, msg = self.validate_type(output_var, str, 'output_var')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        try:
+            resolved_content = ''
+            if content:
+                resolved_content = context.resolve_value(content)
+            elif file_path:
+                resolved_path = context.resolve_value(file_path)
+                if not os.path.exists(resolved_path):
+                    return ActionResult(
+                        success=False,
+                        message=f"文件不存在: {resolved_path}"
+                    )
+                with open(resolved_path, 'r', encoding='utf-8') as f:
+                    resolved_content = f.read()
+            else:
+                return ActionResult(
+                    success=False,
+                    message="必须提供content或file_path"
+                )
+
+            resolved_indent = context.resolve_value(indent)
+
+            root = ET.fromstring(resolved_content)
+            ET.indent(root, space=resolved_indent)
+            formatted = ET.tostring(root, encoding='unicode')
+
+            context.set(output_var, formatted)
+
+            return ActionResult(
+                success=True,
+                message=f"XML已格式化 ({len(formatted)} 字符)",
+                data={'xml': formatted, 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"XML格式化失败: {str(e)}"
+            )
+
+    def get_required_params(self) -> List[str]:
+        return []
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'content': '', 'file_path': '', 'indent': '  ', 'output_var': 'xml_pretty'}
+
+
+class XmlMinifyAction(BaseAction):
+    """Minify XML."""
+    action_type = "xml_minify"
+    display_name = "压缩XML"
+    description = "压缩XML去除空白"
+    version = "1.0"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute minify.
+
+        Args:
+            context: Execution context.
+            params: Dict with content, file_path, output_var.
+
+        Returns:
+            ActionResult with minified XML.
+        """
+        content = params.get('content', '')
+        file_path = params.get('file_path', '')
+        output_var = params.get('output_var', 'xml_minified')
+
+        valid, msg = self.validate_type(output_var, str, 'output_var')
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        try:
+            resolved_content = ''
+            if content:
+                resolved_content = context.resolve_value(content)
+            elif file_path:
+                resolved_path = context.resolve_value(file_path)
+                if not os.path.exists(resolved_path):
+                    return ActionResult(
+                        success=False,
+                        message=f"文件不存在: {resolved_path}"
+                    )
+                with open(resolved_path, 'r', encoding='utf-8') as f:
+                    resolved_content = f.read()
+            else:
+                return ActionResult(
+                    success=False,
+                    message="必须提供content或file_path"
+                )
+
+            root = ET.fromstring(resolved_content)
+            minified = ET.tostring(root, encoding='unicode')
+
+            context.set(output_var, minified)
+
+            return ActionResult(
+                success=True,
+                message=f"XML已压缩 ({len(minified)} 字符)",
+                data={'xml': minified, 'size': len(minified), 'output_var': output_var}
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"XML压缩失败: {str(e)}"
+            )
+
+    def get_required_params(self) -> List[str]:
+        return []
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {'content': '', 'file_path': '', 'output_var': 'xml_minified'}
