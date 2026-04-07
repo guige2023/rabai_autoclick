@@ -772,7 +772,18 @@ class DiagTab(BaseTab):
 
 
 class ShareTab(BaseTab):
-    def setup_ui(self):
+    """
+    Workflow sharing tab for registering, importing, and exporting workflows.
+    
+    Features:
+        - Register workflows for sharing
+        - Create share links (public/private/team)
+        - Import/export workflows in various formats
+        - View sharing statistics
+    """
+    
+    def setup_ui(self) -> None:
+        """Set up the tab's UI components."""
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -882,7 +893,10 @@ class ShareTab(BaseTab):
         self.share_list_result = scrolledtext.ScrolledText(frame, height=12, state='disabled')
         self.share_list_result.pack(fill=tk.BOTH, expand=True, pady=10)
 
-    def _browse_workflow_file(self):
+    def _browse_workflow_file(self) -> None:
+        """
+        Open a file dialog to browse for workflow JSON files.
+        """
         filename = filedialog.askopenfilename(filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
         if filename:
             self.register_file_var.set(filename)
@@ -904,7 +918,10 @@ class ShareTab(BaseTab):
 
         self.run_async(do_register, show_result)
 
-    def _create_link(self):
+    def _create_link(self) -> None:
+        """
+        Create a share link for the specified workflow.
+        """
         workflow_id = self.link_workflow_var.get()
         if not workflow_id:
             messagebox.showwarning("提示", "请输入工作流 ID")
@@ -934,7 +951,10 @@ class ShareTab(BaseTab):
 
         self.run_async(do_create, show_result)
 
-    def _import_workflow(self):
+    def _import_workflow(self) -> None:
+        """
+        Import a workflow from URL, JSON, or base64 format.
+        """
         source = self.import_source_var.get()
         if not source:
             messagebox.showwarning("提示", "请输入来源")
@@ -962,7 +982,10 @@ class ShareTab(BaseTab):
 
         self.run_async(do_import, show_result)
 
-    def _export_workflow(self):
+    def _export_workflow(self) -> None:
+        """
+        Export a workflow to JSON or base64 format.
+        """
         workflow_id = self.export_workflow_var.get()
         if not workflow_id:
             messagebox.showwarning("提示", "请输入工作流 ID")
@@ -990,7 +1013,10 @@ class ShareTab(BaseTab):
 
         self.run_async(do_export, show_result)
 
-    def _list_shared(self):
+    def _list_shared(self) -> None:
+        """
+        List all shared workflows and their statistics.
+        """
         def do_list():
             share_sys = create_share_system(str(DATA_DIR))
             return share_sys.list_shared_workflows()
@@ -1009,7 +1035,10 @@ class ShareTab(BaseTab):
 
         self.run_async(do_list, show_result)
 
-    def _share_stats(self):
+    def _share_stats(self) -> None:
+        """
+        Display sharing statistics.
+        """
         def do_stats():
             share_sys = create_share_system(str(DATA_DIR))
             return share_sys.get_share_stats()
