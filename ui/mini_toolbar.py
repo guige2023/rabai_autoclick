@@ -7,7 +7,7 @@ workflow controls and common actions.
 from typing import Optional
 
 from PyQt5.QtCore import Qt, QPoint, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QPainter, QPen, QColor, QBrush, QRadialGradient
 from PyQt5.QtWidgets import (
     QAction, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QWidget
 )
@@ -16,7 +16,7 @@ from ui.theme import theme_manager, ThemeType, ThemeColors
 
 
 class MiniToolbar(QWidget):
-    """Compact floating toolbar widget.
+    """Compact floating toolbar widget with shadow effect.
 
     Provides quick access to workflow controls including
     run, stop, region selection, window selection, and settings.
@@ -44,6 +44,22 @@ class MiniToolbar(QWidget):
     def _on_theme_changed(self, theme: ThemeType) -> None:
         """Handle theme changes."""
         self._is_dark_theme = theme == ThemeType.DARK
+        self._apply_stylesheet()
+
+    def _init_ui(self) -> None:
+        """Initialize the toolbar UI."""
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True
+        )
+        self.setFixedHeight(40)
+        self.setMinimumWidth(400)
+        self.setStyleSheet("background: transparent;")
+
         self._apply_stylesheet()
 
     def _init_ui(self) -> None:
