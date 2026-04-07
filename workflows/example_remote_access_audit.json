@@ -1,0 +1,117 @@
+{
+  "name": "Remote Access Audit Workflow",
+  "description": "Automate remote access configuration review",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "remote_connections_to_audit": 30,
+    "current_connection": 0,
+    "secure_connections": 0,
+    "insecure_connections": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "conn_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize connection counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open remote access management"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for management"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "remote_access_loop",
+      "count": "{{remote_connections_to_audit}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start remote access loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select remote connection"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for security check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/remote_access_{{conn_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture connection screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "conn_counter",
+      "value": "{{conn_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment connection counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{conn_counter < remote_connections_to_audit}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more connections"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next connection"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/remote_access_audit_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
