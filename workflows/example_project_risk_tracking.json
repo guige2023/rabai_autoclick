@@ -1,0 +1,117 @@
+{
+  "name": "Project Risk Tracking Workflow",
+  "description": "Automate project risk monitoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "risks_to_track": 46,
+    "current_risk": 0,
+    "tracked_risks": 0,
+    "high_priority_risks": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "risk_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize risk counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open risk management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "risk_tracking_loop",
+      "count": "{{risks_to_track}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start risk tracking loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select risk for tracking"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for risk assessment"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/risk_tracking_{{risk_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture risk screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "risk_counter",
+      "value": "{{risk_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment risk counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{risk_counter < risks_to_track}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more risks"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next risk"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/project_risk_tracking_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
