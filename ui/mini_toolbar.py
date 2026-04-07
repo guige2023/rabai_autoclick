@@ -128,7 +128,7 @@ class MiniToolbar(QWidget):
         self.menu.setStyleSheet(f"""
             QMenu {{
                 background-color: {dark_colors['bg_dark_widget']};
-                color: white;
+                color: {dark_colors['text_primary']};
                 border: 1px solid {dark_colors['border_dark']};
                 border-radius: 4px;
                 transition: opacity 0.2s ease;
