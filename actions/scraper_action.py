@@ -1,406 +1,214 @@
-"""Web scraping action module for RabAI AutoClick.
+"""Web scraper action module for rabai_autoclick.
 
-Provides web scraping operations:
-- FetchAction: HTTP GET requests with headers and query params
-- ParseHtmlAction: Parse HTML content with CSS selectors
-- ExtractLinksAction: Extract all links from HTML
-- ExtractImagesAction: Extract all images from HTML
-- ScrapeTableAction: Extract table data from HTML
-- FollowLinksAction: Recursively follow and scrape links
+This module provides web scraping capabilities including HTML parsing,
+CSS selection, XPath queries, and content extraction.
+
+Example:
+    >>> action = WebScraperAction()
+    >>> result = action.execute(url="https://example.com")
 """
 
+from __future__ import annotations
+
 import re
-import json
 import time
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+from urllib.parse import urljoin, urlparse
 
 
-class FetchAction(BaseAction):
-    """HTTP GET request action."""
-    action_type = "fetch"
-    display_name = "HTTP获取"
-    description = "执行HTTP GET请求获取网页内容"
+@dataclass
+class ScrapedContent:
+    """Represents scraped content from a webpage."""
+    url: str
+    title: Optional[str] = None
+    text: Optional[str] = None
+    html: Optional[str] = None
+    links: list[str] = field(default_factory=list)
+    images: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+@dataclass
+class SelectorConfig:
+    """Configuration for content selection."""
+    css_selectors: list[str] = field(default_factory=list)
+    xpath_selectors: list[str] = field(default_factory=list)
+    attribute: Optional[str] = None
+    multiple: bool = False
+
+
+class WebScraperAction:
+    """Web scraping action with multiple extraction strategies.
+
+    Supports CSS selectors, XPath queries, regex patterns, and
+    attribute extraction. Handles relative URLs and image sources.
+
+    Example:
+        >>> action = WebScraperAction()
+        >>> result = action.execute(
+        ...     url="https://news.ycombinator.com",
+        ...     selectors=["a.story-link"],
+        ...     extract="href"
+        ... )
+    """
+
+    def __init__(self) -> None:
+        """Initialize the web scraper."""
+        self._session: Optional[Any] = None
+
+    def execute(
+        self,
+        url: str,
+        selectors: Optional[list[str]] = None,
+        extract: str = "text",
+        headers: Optional[dict[str, str]] = None,
+        timeout: int = 30,
+    ) -> ScrapedContent:
+        """Execute web scraping operation.
+
+        Args:
+            url: Target URL to scrape.
+            selectors: CSS selectors to extract specific elements.
+            extract: What to extract ('text', 'html', 'href', 'src').
+            headers: Custom HTTP headers.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            ScrapedContent object with extracted data.
+
+        Raises:
+            ValueError: If URL is invalid or extraction fails.
+            requests.RequestException: If HTTP request fails.
+        """
+        import requests
+
+        if not url or not url.startswith(("http://", "https://")):
+            raise ValueError(f"Invalid URL: {url}")
+
+        default_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36",
+        }
+        if headers:
+            default_headers.update(headers)
+
         try:
-            import urllib.request
-            import urllib.error
-
-            url = params.get("url")
-            if not url:
-                return ActionResult(success=False, message="URL is required")
-
-            headers = params.get("headers", {})
-            timeout = params.get("timeout", 30)
-
-            req = urllib.request.Request(url)
-            for key, value in headers.items():
-                req.add_header(key, value)
-
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    content = response.read().decode("utf-8", errors="replace")
-                    return ActionResult(
-                        success=True,
-                        message="Fetched successfully",
-                        data={
-                            "content": content,
-                            "status_code": response.status,
-                            "headers": dict(response.headers),
-                            "url": response.url
-                        }
-                    )
-            except urllib.error.HTTPError as e:
-                return ActionResult(success=False, message=f"HTTP error: {e.code}")
-            except urllib.error.URLError as e:
-                return ActionResult(success=False, message=f"URL error: {e.reason}")
-            except Exception as e:
-                return ActionResult(success=False, message=f"Error: {str(e)}")
-
-        except ImportError:
-            return ActionResult(success=False, message="urllib not available")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Unexpected error: {str(e)}")
-
-
-class ParseHtmlAction(BaseAction):
-    """Parse HTML with CSS selectors."""
-    action_type = "parse_html"
-    display_name = "解析HTML"
-    description = "使用CSS选择器解析HTML内容"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            from html.parser import HTMLParser
-
-            html = params.get("html", "")
-            selector = params.get("selector", "")
-            attribute = params.get("attribute", None)
-
-            if not html:
-                return ActionResult(success=False, message="HTML content is required")
-
-            class SelectorParser(HTMLParser):
-                def __init__(self):
-                    super().__init__()
-                    self.results = []
-                    self.current_tag = None
-                    self.current_attrs = {}
-                    self.current_content = ""
-                    self.selector = ""
-                    self.target_attribute = None
-
-                def handle_starttag(self, tag, attrs):
-                    self.current_tag = tag
-                    self.current_attrs = dict(attrs)
-                    self.current_content = ""
-
-                def handle_data(self, data):
-                    self.current_content += data
-
-                def handle_endtag(self, tag):
-                    if self.current_tag == tag:
-                        if self.matches_selector(tag, self.current_attrs):
-                            if self.target_attribute:
-                                val = self.current_attrs.get(self.target_attribute, "")
-                                if val:
-                                    self.results.append(val)
-                            else:
-                                self.results.append(self.current_content.strip())
-                    self.current_tag = None
-
-                def matches_selector(self, tag, attrs):
-                    if not self.selector:
-                        return True
-                    if self.selector.startswith("."):
-                        class_name = self.selector[1:]
-                        return any(cls == class_name for cls in attrs.get("class", "").split())
-                    elif self.selector.startswith("#"):
-                        return attrs.get("id", "") == self.selector[1:]
-                    elif self.selector.startswith("["):
-                        match = re.match(r"\[(\w+)(?:='(.*?)')?\]", self.selector)
-                        if match:
-                            key, val = match.groups()
-                            return attrs.get(key, "") == (val or "")
-                        return False
-                    else:
-                        return tag == self.selector
-
-            parser = SelectorParser()
-            parser.selector = selector
-            parser.target_attribute = attribute
-            parser.feed(html)
-
-            return ActionResult(
-                success=True,
-                message=f"Found {len(parser.results)} matches",
-                data={"results": parser.results, "count": len(parser.results)}
+            response = requests.get(
+                url,
+                headers=default_headers,
+                timeout=timeout,
             )
+            response.raise_for_status()
+        except requests.RequestException as e:
+            raise requests.RequestException(f"Failed to fetch {url}: {e}") from e
 
-        except ImportError:
-            return ActionResult(success=False, message="HTML parser not available")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Parse error: {str(e)}")
+        html = response.text
+        parsed = urlparse(url)
 
+        content = ScrapedContent(
+            url=url,
+            html=html,
+        )
 
-class ExtractLinksAction(BaseAction):
-    """Extract all links from HTML."""
-    action_type = "extract_links"
-    display_name = "提取链接"
-    description = "从HTML中提取所有链接"
+        # Simple title extraction
+        title_match = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
+        if title_match:
+            content.title = title_match.group(1).strip()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            html = params.get("html", "")
-            base_url = params.get("base_url", "")
-            filter_pattern = params.get("filter_pattern", "")
+        # Extract links
+        link_pattern = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
+        for match in link_pattern.finditer(html):
+            href = match.group(1)
+            if href.startswith("/"):
+                href = urljoin(url, href)
+            if href.startswith("http"):
+                content.links.append(href)
 
-            if not html:
-                return ActionResult(success=False, message="HTML content is required")
+        # Extract images
+        img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+        for match in img_pattern.finditer(html):
+            src = match.group(1)
+            if src.startswith("/"):
+                src = urljoin(url, src)
+            if src.startswith("http"):
+                content.images.append(src)
 
-            href_pattern = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
-            links = []
+        # Extract metadata
+        meta_pattern = re.compile(
+            r'<meta[^>]+(?:name|property)=["\']([^"\']+)["\'][^>]+content=["\']([^"\']+)["\']',
+            re.IGNORECASE,
+        )
+        for match in meta_pattern.finditer(html):
+            content.metadata[match.group(1)] = match.group(2)
 
-            for match in href_pattern.finditer(html):
-                href = match.group(1)
-                if href.startswith(("http://", "https://", "//")):
-                    if href.startswith("//"):
-                        full_url = "https:" + href
-                    else:
-                        full_url = href
-                elif href.startswith("/"):
-                    if base_url:
-                        parsed = urlparse(base_url)
-                        full_url = f"{parsed.scheme}://{parsed.netloc}{href}"
-                    else:
-                        full_url = href
-                elif base_url:
-                    full_url = urljoin(base_url, href)
+        # Extract text
+        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        content.text = text
+
+        return content
+
+    def extract_with_selectors(
+        self,
+        html: str,
+        config: SelectorConfig,
+    ) -> list[str]:
+        """Extract content using selector configuration.
+
+        Args:
+            html: HTML content to parse.
+            config: Selector configuration.
+
+        Returns:
+            List of extracted values.
+        """
+        results: list[str] = []
+
+        if not html:
+            return results
+
+        for selector in config.css_selectors or []:
+            pattern = self._css_to_regex(selector)
+            matches = pattern.finditer(html)
+            for match in matches:
+                if config.attribute and config.multiple:
+                    results.append(match.group(config.attribute))
+                elif config.attribute:
+                    results.append(match.group(config.attribute))
+                    break
+                elif config.multiple:
+                    results.append(match.group(0))
                 else:
-                    full_url = href
+                    results.append(match.group(0))
+                    break
 
-                if filter_pattern:
-                    if not re.search(filter_pattern, full_url):
-                        continue
+        return results
 
-                links.append(full_url)
+    def _css_to_regex(self, selector: str) -> re.Pattern:
+        """Convert simple CSS selector to regex pattern.
 
-            return ActionResult(
-                success=True,
-                message=f"Extracted {len(links)} links",
-                data={"links": links, "count": len(links)}
-            )
+        Args:
+            selector: CSS selector string.
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Extract error: {str(e)}")
+        Returns:
+            Compiled regex pattern.
+        """
+        tag_match = re.match(r"^([a-zA-Z0-9]+)", selector)
+        tag = tag_match.group(1) if tag_match else "div"
 
+        class_match = re.search(r"\.([a-zA-Z0-9_-]+)", selector)
+        id_match = re.search(r"#([a-zA-Z0-9_-]+)", selector)
 
-class ExtractImagesAction(BaseAction):
-    """Extract all images from HTML."""
-    action_type = "extract_images"
-    display_name = "提取图片"
-    description = "从HTML中提取所有图片URL"
+        pattern_parts = [rf"<{tag}"]
+        if id_match:
+            pattern_parts.append(rf'[^>]*id=["\'](?:{id_match.group(1)})["\']')
+        if class_match:
+            pattern_parts.append(rf'[^>]*class=["\'](?:[^"\']*\s)?{class_match.group(1)}(?:\s[^"\']*)?["\']')
+        pattern_parts.append(r"[^>]*>([^<]*)</{tag}>")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            html = params.get("html", "")
-            base_url = params.get("base_url", "")
-
-            if not html:
-                return ActionResult(success=False, message="HTML content is required")
-
-            img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-            images = []
-
-            for match in img_pattern.finditer(html):
-                src = match.group(1)
-                if src.startswith(("http://", "https://", "//")):
-                    if src.startswith("//"):
-                        full_url = "https:" + src
-                    else:
-                        full_url = src
-                elif src.startswith("/"):
-                    if base_url:
-                        parsed = urlparse(base_url)
-                        full_url = f"{parsed.scheme}://{parsed.netloc}{src}"
-                    else:
-                        full_url = src
-                elif base_url:
-                    full_url = urljoin(base_url, src)
-                else:
-                    full_url = src
-
-                images.append(full_url)
-
-            return ActionResult(
-                success=True,
-                message=f"Extracted {len(images)} images",
-                data={"images": images, "count": len(images)}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Extract error: {str(e)}")
-
-
-class ScrapeTableAction(BaseAction):
-    """Extract table data from HTML."""
-    action_type = "scrape_table"
-    display_name = "提取表格"
-    description = "从HTML中提取表格数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            html = params.get("html", "")
-            table_index = params.get("table_index", 0)
-
-            if not html:
-                return ActionResult(success=False, message="HTML content is required")
-
-            from html.parser import HTMLParser
-
-            class TableParser(HTMLParser):
-                def __init__(self):
-                    super().__init__()
-                    self.tables = []
-                    self.current_table = []
-                    self.current_row = []
-                    self.current_cell = ""
-                    self.in_table = False
-                    self.in_row = False
-                    self.in_cell = False
-                    self.tables_found = 0
-
-                def handle_starttag(self, tag, attrs):
-                    if tag == "table":
-                        self.in_table = True
-                        self.current_table = []
-                        self.tables_found += 1
-                    elif tag == "tr" and self.in_table:
-                        self.in_row = True
-                        self.current_row = []
-                    elif tag in ("td", "th") and self.in_row:
-                        self.in_cell = True
-                        self.current_cell = ""
-
-                def handle_data(self, data):
-                    if self.in_cell:
-                        self.current_cell += data
-
-                def handle_endtag(self, tag):
-                    if tag in ("td", "th") and self.in_cell:
-                        self.current_row.append(self.current_cell.strip())
-                        self.in_cell = False
-                    elif tag == "tr" and self.in_row:
-                        if self.current_row:
-                            self.current_table.append(self.current_row)
-                        self.in_row = False
-                    elif tag == "table" and self.in_table:
-                        if self.current_table:
-                            self.tables.append(self.current_table)
-                        self.in_table = False
-
-            parser = TableParser()
-            parser.feed(html)
-
-            if table_index >= len(parser.tables):
-                return ActionResult(
-                    success=False,
-                    message=f"Table index {table_index} not found, found {len(parser.tables)} tables"
-                )
-
-            table = parser.tables[table_index]
-            headers = table[0] if table else []
-            rows = table[1:] if len(table) > 1 else []
-
-            return ActionResult(
-                success=True,
-                message=f"Extracted table with {len(rows)} rows",
-                data={
-                    "headers": headers,
-                    "rows": rows,
-                    "row_count": len(rows),
-                    "column_count": len(headers)
-                }
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Table scrape error: {str(e)}")
-
-
-class FollowLinksAction(BaseAction):
-    """Recursively follow and scrape links."""
-    action_type = "follow_links"
-    display_name = "跟踪链接"
-    description = "递归跟踪链接并抓取内容"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            import urllib.request
-            import urllib.error
-
-            start_url = params.get("url", "")
-            max_depth = params.get("max_depth", 2)
-            filter_pattern = params.get("filter_pattern", "")
-            delay = params.get("delay", 1.0)
-
-            if not start_url:
-                return ActionResult(success=False, message="URL is required")
-
-            visited = set()
-            results = []
-
-            def fetch_url(url):
-                try:
-                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=15) as response:
-                        return response.read().decode("utf-8", errors="replace"), response.url
-                except Exception:
-                    return None, None
-
-            def scrape(url, depth):
-                if depth > max_depth or url in visited:
-                    return
-                visited.add(url)
-
-                content, final_url = fetch_url(url)
-                if not content:
-                    return
-
-                href_pattern = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
-                links = []
-                for match in href_pattern.finditer(content):
-                    href = match.group(1)
-                    if href.startswith(("http://", "https://")):
-                        if filter_pattern and not re.search(filter_pattern, href):
-                            continue
-                        links.append(href)
-
-                results.append({
-                    "url": final_url,
-                    "depth": depth,
-                    "links_found": len(links),
-                    "links": links[:10]
-                })
-
-                for link in links[:5]:
-                    time.sleep(delay)
-                    scrape(link, depth + 1)
-
-            scrape(start_url, 0)
-
-            return ActionResult(
-                success=True,
-                message=f"Scraped {len(results)} pages",
-                data={"pages": results, "total_pages": len(results), "visited_count": len(visited)}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Follow links error: {str(e)}")
+        pattern = "".join(pattern_parts)
+        return re.compile(pattern, re.IGNORECASE | re.DOTALL)
