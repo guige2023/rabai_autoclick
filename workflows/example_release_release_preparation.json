@@ -1,0 +1,117 @@
+{
+  "name": "Release Release Preparation Workflow",
+  "description": "Automate release preparation tasks",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "tasks_to_prepare": 50,
+    "current_task": 0,
+    "prepared_tasks": 0,
+    "blockers": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "release_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize release counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open release management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "release_preparation_loop",
+      "count": "{{tasks_to_prepare}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start release preparation loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select release task"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for task preparation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/release_preparation_{{release_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture release screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "release_counter",
+      "value": "{{release_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment release counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{release_counter < tasks_to_prepare}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more tasks"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next task"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/release_release_preparation_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
