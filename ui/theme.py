@@ -431,6 +431,7 @@ class ThemeManager(QObject):
                 QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
                 QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; alternate-background-color: {c['bg_hover']}; }}
+                QTableWidget::item:selected {{ background-color: {c['selection']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QListWidget::item:hover {{ background-color: {c['bg_hover']}; }}
                 QListWidget::item:selected {{ background-color: {c['selection']}; }}
@@ -657,6 +658,7 @@ class ThemeManager(QObject):
                 QLabel {{ color: {c['text_primary']}; transition: color 0.2s ease; }}
                 QHeaderView::section {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; padding: 6px; border: 1px solid {c['border']}; }}
                 QTableWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; alternate-background-color: {c['bg_hover']}; }}
+                QTableWidget::item:selected {{ background-color: {c['selection']}; }}
                 QListWidget {{ background-color: {c['bg_widget']}; color: {c['text_primary']}; border: 1px solid {c['border']}; }}
                 QListWidget::item:hover {{ background-color: {c['bg_hover']}; }}
                 QListWidget::item:selected {{ background-color: {c['selection']}; }}
