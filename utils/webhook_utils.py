@@ -1,232 +1,272 @@
-"""Webhook utilities for sending, receiving, verifying, and retrying webhooks."""
+"""
+Webhook utilities for event delivery and processing.
+
+Provides webhook delivery, signature verification, retry logic,
+event queuing, and multi-destination fan-out.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
 import json
+import logging
 import time
-import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from enum import Enum, auto
+from typing import Any, Callable, Optional
 
-__all__ = [
-    "WebhookEvent",
-    "WebhookDelivery",
-    "WebhookSender",
-    "WebhookReceiver",
-    "verify_webhook_signature",
-]
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class DeliveryStatus(Enum):
+    PENDING = auto()
+    DELIVERED = auto()
+    FAILED = auto()
+    RETRYING = auto()
 
 
 @dataclass
 class WebhookEvent:
-    """A webhook event to be sent."""
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    type: str = ""
-    data: dict[str, Any] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    secret: str = ""
-
-    def to_json(self) -> str:
-        payload = {
-            "id": self.id,
-            "type": self.type,
-            "data": self.data,
-            "created_at": self.created_at,
-        }
-        return json.dumps(payload, default=str)
-
-    def signature(self, secret: str | None = None) -> str:
-        sig_key = secret or self.secret
-        return hashlib.sha256(self.to_json().encode() + sig_key.encode()).hexdigest()
+    """Represents a webhook event."""
+    id: str
+    event_type: str
+    payload: dict[str, Any]
+    timestamp: float = field(default_factory=time.time)
+    headers: dict[str, str] = field(default_factory=dict)
+    retries: int = 0
 
 
 @dataclass
-class WebhookDelivery:
-    """Record of a webhook delivery attempt."""
-    event_id: str
+class WebhookEndpoint:
+    """Webhook endpoint configuration."""
     url: str
-    payload: str
-    headers: dict[str, str]
-    response_status: int | None = None
-    response_body: str | None = None
-    attempts: int = 0
-    success: bool = False
-    delivered_at: float | None = None
-    error: str | None = None
+    secret: Optional[str] = None
+    content_type: str = "application/json"
+    timeout: float = 10.0
+    enabled: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class WebhookSender:
-    """Sends webhooks to configured endpoints with retry and signature verification."""
-
-    def __init__(self, default_secret: str = "") -> None:
-        self.default_secret = default_secret
-        self._delivery_log: list[WebhookDelivery] = []
-
-    def send(
-        self,
-        url: str,
-        event: WebhookEvent,
-        secret: str | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float = 10.0,
-    ) -> WebhookDelivery:
-        sig_key = secret or self.default_secret
-        payload = event.to_json()
-        timestamp = str(int(time.time()))
-
-        delivery_headers = {
-            "Content-Type": "application/json",
-            "X-Webhook-ID": event.id,
-            "X-Webhook-Type": event.type,
-            "X-Webhook-Timestamp": timestamp,
-            "X-Webhook-Signature": self._make_signature(payload, timestamp, sig_key),
-            **(headers or {}),
-        }
-
-        delivery = WebhookDelivery(
-            event_id=event.id,
-            url=url,
-            payload=payload,
-            headers=delivery_headers,
-        )
-
-        try:
-            import urllib.request
-            req = urllib.request.Request(
-                url,
-                data=payload.encode("utf-8"),
-                headers=delivery_headers,
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                delivery.response_status = resp.status
-                delivery.response_body = resp.read().decode("utf-8", errors="replace")
-                delivery.success = 200 <= resp.status < 300
-        except urllib.error.HTTPError as e:
-            delivery.response_status = e.code
-            delivery.response_body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else None
-            delivery.error = str(e)
-        except Exception as e:
-            delivery.error = str(e)
-
-        delivery.attempts = 1
-        delivery.delivered_at = time.time()
-        self._delivery_log.append(delivery)
-        return delivery
-
-    def send_with_retry(
-        self,
-        url: str,
-        event: WebhookEvent,
-        max_attempts: int = 3,
-        backoff_base: float = 1.0,
-        **kwargs: Any,
-    ) -> WebhookDelivery:
-        last_delivery: WebhookDelivery | None = None
-        for attempt in range(max_attempts):
-            delivery = self.send(url, event, **kwargs)
-            last_delivery = delivery
-            if delivery.success:
-                return delivery
-            if attempt < max_attempts - 1:
-                delay = backoff_base * (2 ** attempt)
-                time.sleep(delay)
-
-        return last_delivery or WebhookDelivery(
-            event_id=event.id, url=url, payload=event.to_json(), headers={}, error="Max attempts reached"
-        )
-
-    def _make_signature(self, payload: str, timestamp: str, secret: str) -> str:
-        signed_payload = f"{timestamp}.{payload}"
-        return hmac.new(
-            secret.encode("utf-8"),
-            signed_payload.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-
-    def deliveries(self, event_id: str | None = None) -> list[WebhookDelivery]:
-        if event_id:
-            return [d for d in self._delivery_log if d.event_id == event_id]
-        return list(self._delivery_log)
+@dataclass
+class DeliveryResult:
+    """Result of a webhook delivery attempt."""
+    status: DeliveryStatus
+    status_code: Optional[int] = None
+    response_body: Optional[str] = None
+    duration_ms: float = 0.0
+    error: Optional[str] = None
 
 
-class WebhookReceiver:
-    """Verifies and processes incoming webhooks."""
+class WebhookSignature:
+    """Webhook signature generation and verification."""
 
-    def __init__(self, secret: str = "") -> None:
-        self.secret = secret
-        self._handlers: dict[str, Callable[[dict[str, Any]], None]] = {}
+    @staticmethod
+    def generate(payload: bytes | str, secret: str, algorithm: str = "sha256") -> str:
+        """Generate HMAC signature for a payload."""
+        if isinstance(payload, str):
+            payload = payload.encode()
+        if algorithm == "sha256":
+            mac = hmac.new(secret.encode(), payload, hashlib.sha256)
+        elif algorithm == "sha512":
+            mac = hmac.new(secret.encode(), payload, hashlib.sha512)
+        else:
+            mac = hmac.new(secret.encode(), payload, hashlib.sha256)
+        return f"{algorithm}={mac.hexdigest()}"
 
-    def verify(
-        self,
-        payload: bytes | str,
-        signature: str,
-        timestamp: str,
-    ) -> bool:
-        if not self.secret:
-            return True
-        if isinstance(payload, bytes):
-            payload = payload.decode("utf-8")
-        signed_payload = f"{timestamp}.{payload}"
-        expected = hmac.new(
-            self.secret.encode("utf-8"),
-            signed_payload.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+    @staticmethod
+    def verify(payload: bytes | str, signature: str, secret: str) -> bool:
+        """Verify a webhook signature."""
+        expected = WebhookSignature.generate(payload, secret)
         return hmac.compare_digest(expected, signature)
 
-    def on(self, event_type: str, handler: Callable[[dict[str, Any]], None]) -> None:
-        self._handlers[event_type] = handler
+    @staticmethod
+    def generate_idempotency_key(event_id: str, endpoint_url: str) -> str:
+        """Generate an idempotency key for deduplication."""
+        raw = f"{event_id}:{endpoint_url}"
+        return hashlib.sha256(raw.encode()).hexdigest()
 
-    def handle(
+
+class WebhookDeliverer:
+    """Delivers webhook events to endpoints."""
+
+    def __init__(self, timeout: float = 10.0, max_retries: int = 3) -> None:
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def deliver(
         self,
-        payload: bytes | str,
-        headers: dict[str, str],
-    ) -> tuple[bool, str]:
-        if isinstance(payload, bytes):
-            payload = payload.decode("utf-8")
+        endpoint: WebhookEndpoint,
+        event: WebhookEvent,
+    ) -> DeliveryResult:
+        """Deliver an event to a webhook endpoint."""
+        start = time.perf_counter()
+        payload = json.dumps(event.payload)
+        headers = dict(event.headers)
+        headers["Content-Type"] = endpoint.content_type
+        headers["X-Webhook-Event"] = event.event_type
+        headers["X-Webhook-Event-ID"] = event.id
+        headers["X-Webhook-Timestamp"] = str(event.timestamp)
 
-        signature = headers.get("X-Webhook-Signature", "")
-        timestamp = headers.get("X-Webhook-Timestamp", "")
+        if endpoint.secret:
+            signature = WebhookSignature.generate(payload, endpoint.secret)
+            headers["X-Webhook-Signature"] = signature
 
-        if not self.verify(payload, signature, timestamp):
-            return False, "Invalid signature"
+        for attempt in range(self.max_retries):
+            try:
+                client = await self._get_client()
+                response = await client.post(
+                    endpoint.url,
+                    content=payload,
+                    headers=headers,
+                )
+                duration_ms = (time.perf_counter() - start) * 1000
 
-        try:
-            data = json.loads(payload)
-            event_type = data.get("type", "")
-            handler = self._handlers.get(event_type)
-            if handler:
-                handler(data.get("data", {}))
-            return True, "OK"
-        except json.JSONDecodeError as e:
-            return False, f"Invalid JSON: {e}"
+                if 200 <= response.status_code < 300:
+                    return DeliveryResult(
+                        status=DeliveryStatus.DELIVERED,
+                        status_code=response.status_code,
+                        response_body=response.text[:500],
+                        duration_ms=duration_ms,
+                    )
+                elif response.status_code >= 500:
+                    continue
+                else:
+                    return DeliveryResult(
+                        status=DeliveryStatus.FAILED,
+                        status_code=response.status_code,
+                        response_body=response.text[:500],
+                        duration_ms=duration_ms,
+                        error=f"Client error: {response.status_code}",
+                    )
+            except httpx.TimeoutException:
+                if attempt == self.max_retries - 1:
+                    return DeliveryResult(
+                        status=DeliveryStatus.FAILED,
+                        duration_ms=(time.perf_counter() - start) * 1000,
+                        error="Timeout",
+                    )
+            except Exception as e:
+                if attempt == self.max_retries - 1:
+                    return DeliveryResult(
+                        status=DeliveryStatus.FAILED,
+                        duration_ms=(time.perf_counter() - start) * 1000,
+                        error=str(e),
+                    )
+
+        return DeliveryResult(
+            status=DeliveryStatus.FAILED,
+            duration_ms=(time.perf_counter() - start) * 1000,
+            error="Max retries exceeded",
+        )
+
+    async def close(self) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None
 
 
-def verify_webhook_signature(
-    payload: str | bytes,
-    signature: str,
-    timestamp: str,
-    secret: str,
-    tolerance_seconds: int = 300,
-) -> bool:
-    """Verify a webhook signature with timestamp tolerance."""
-    try:
-        ts = int(timestamp)
-        if abs(time.time() - ts) > tolerance_seconds:
-            return False
-    except ValueError:
-        return False
+class WebhookManager:
+    """Manages multiple webhook endpoints and event delivery."""
 
-    if isinstance(payload, bytes):
-        payload = payload.decode("utf-8")
+    def __init__(self) -> None:
+        self._endpoints: dict[str, WebhookEndpoint] = {}
+        self._deliverer = WebhookDeliverer()
+        self._delivery_history: list[DeliveryResult] = []
 
-    signed_payload = f"{timestamp}.{payload}"
-    expected = hmac.new(
-        secret.encode("utf-8"),
-        signed_payload.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    def register_endpoint(
+        self,
+        name: str,
+        url: str,
+        secret: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Register a webhook endpoint."""
+        self._endpoints[name] = WebhookEndpoint(url=url, secret=secret, **kwargs)
+        logger.info("Registered webhook endpoint: %s -> %s", name, url)
+
+    def unregister_endpoint(self, name: str) -> None:
+        """Unregister a webhook endpoint."""
+        if name in self._endpoints:
+            del self._endpoints[name]
+
+    async def broadcast(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        filter_names: Optional[list[str]] = None,
+    ) -> dict[str, DeliveryResult]:
+        """Broadcast an event to all registered endpoints."""
+        event = WebhookEvent(
+            id=f"{time.time()}-{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}",
+            event_type=event_type,
+            payload=payload,
+        )
+
+        results = {}
+        targets = {k: v for k, v in self._endpoints.items() if v.enabled}
+        if filter_names:
+            targets = {k: v for k, v in targets.items() if k in filter_names}
+
+        for name, endpoint in targets.items():
+            result = await self._deliverer.deliver(endpoint, event)
+            results[name] = result
+            self._delivery_history.append(result)
+
+        return results
+
+    async def deliver_to(
+        self,
+        endpoint_name: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> Optional[DeliveryResult]:
+        """Deliver an event to a specific endpoint."""
+        endpoint = self._endpoints.get(endpoint_name)
+        if not endpoint:
+            logger.error("Unknown endpoint: %s", endpoint_name)
+            return None
+
+        event = WebhookEvent(
+            id=f"{time.time()}-{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}",
+            event_type=event_type,
+            payload=payload,
+        )
+
+        result = await self._deliverer.deliver(endpoint, event)
+        self._delivery_history.append(result)
+        return result
+
+    def get_history(self, limit: int = 100) -> list[DeliveryResult]:
+        """Get recent delivery history."""
+        return self._delivery_history[-limit:]
+
+    def get_endpoint_stats(self, name: str) -> dict[str, Any]:
+        """Get delivery statistics for an endpoint."""
+        endpoint = self._endpoints.get(name)
+        if not endpoint:
+            return {}
+
+        relevant = [r for r in self._delivery_history]
+        total = len(relevant)
+        delivered = sum(1 for r in relevant if r.status == DeliveryStatus.DELIVERED)
+        failed = sum(1 for r in relevant if r.status == DeliveryStatus.FAILED)
+        avg_duration = sum(r.duration_ms for r in relevant) / total if total > 0 else 0
+
+        return {
+            "endpoint": name,
+            "url": endpoint.url,
+            "total_deliveries": total,
+            "delivered": delivered,
+            "failed": failed,
+            "success_rate": (delivered / total * 100) if total > 0 else 0,
+            "avg_duration_ms": avg_duration,
+        }
