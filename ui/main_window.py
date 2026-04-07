@@ -1297,13 +1297,13 @@ class MainWindow(QMainWindow):
             show_toast("教学模式已关闭", 'info')
         
         app_logger.info(f"教学模式: {self._teaching_mode}", "UI")
-    
-    def _on_history(self):
+
+    def _on_history(self) -> None:
         dialog = HistoryDialog(self.history_manager, self)
         dialog.workflow_selected.connect(self._load_workflow_from_history)
         dialog.exec_()
-    
-    def _load_workflow_from_history(self, workflow: Dict[str, Any]):
+
+    def _load_workflow_from_history(self, workflow: Dict[str, Any]) -> None:
         self.current_workflow = workflow
         self.step_configs = {}
         self.next_step_id = 1
