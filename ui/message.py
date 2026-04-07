@@ -7,7 +7,7 @@ message manager for user feedback with animations.
 from typing import Dict, Optional
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEasingCurve, QPropertyAnimation
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QColor, QFont, QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QMessageBox, QWidget, QGraphicsOpacityEffect
 )
@@ -139,6 +139,13 @@ class ToastWidget(QWidget):
         msg_label.setWordWrap(True)
         msg_label.setMaximumWidth(400)
         layout.addWidget(msg_label)
+
+        # Add subtle shadow for depth
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(10)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setOffset(0, 2)
+        self.setGraphicsEffect(shadow)
 
     def _get_level_color(self, level: MessageLevel) -> str:
         """Get color for message level from theme manager.
