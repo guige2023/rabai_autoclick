@@ -1,165 +1,140 @@
-"""Regex action module for RabAI AutoClick.
+"""Regular expression action module for RabAI AutoClick.
 
 Provides regex operations:
-- RegexMatchAction: Match pattern
-- RegexSearchAction: Search pattern
+- RegexMatchAction: Check if pattern matches
+- RegexSearchAction: Search for pattern
 - RegexFindAllAction: Find all matches
-- RegexReplaceAction: Replace pattern
+- RegexReplaceAction: Replace matches
 - RegexSplitAction: Split by pattern
 - RegexGroupsAction: Extract groups
 """
 
-import re
-from typing import Any, Dict, List
+from __future__ import annotations
 
+import re
 import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from typing import Any, Dict, List, Optional
+
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
 class RegexMatchAction(BaseAction):
-    """Match pattern at start."""
+    """Check if pattern matches."""
     action_type = "regex_match"
     display_name = "正则匹配"
-    description = "从头匹配正则"
+    description = "检查正则是否匹配"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute match.
-
-        Args:
-            context: Execution context.
-            params: Dict with pattern, text, flags, output_var.
-
-        Returns:
-            ActionResult with match result.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute regex match."""
         pattern = params.get('pattern', '')
         text = params.get('text', '')
         flags = params.get('flags', 0)
-        output_var = params.get('output_var', 'regex_match')
+        output_var = params.get('output_var', 'regex_match_result')
 
-        valid, msg = self.validate_type(pattern, str, 'pattern')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(text, str, 'text')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not pattern or not text:
+            return ActionResult(success=False, message="pattern and text are required")
 
         try:
-            resolved_pattern = context.resolve_value(pattern)
-            resolved_text = context.resolve_value(text)
-            resolved_flags = context.resolve_value(flags)
+            import re as re_module
 
-            flags_val = self._parse_flags(resolved_flags)
-            match = re.match(resolved_pattern, resolved_text, flags_val)
+            resolved_pattern = context.resolve_value(pattern) if context else pattern
+            resolved_text = context.resolve_value(text) if context else text
+            resolved_flags = context.resolve_value(flags) if context else flags
 
+            flags_int = 0
+            if resolved_flags == 1:
+                flags_int = re_module.IGNORECASE
+            elif resolved_flags == 2:
+                flags_int = re_module.MULTILINE
+
+            compiled = re_module.compile(resolved_pattern, flags_int)
+            match = compiled.search(resolved_text)
+            matched = match is not None
+
+            result = {'matched': matched, 'pattern': resolved_pattern}
             if match:
-                result = {
-                    'matched': True,
-                    'group': match.group(),
-                    'span': match.span(),
-                }
-                context.set(output_var, result)
-                return ActionResult(
-                    success=True,
-                    message=f"匹配成功: {match.group()}",
-                    data={'match': result, 'output_var': output_var}
-                )
-            else:
-                context.set(output_var, {'matched': False})
-                return ActionResult(
-                    success=True,
-                    message="未匹配",
-                    data={'match': {'matched': False}, 'output_var': output_var}
-                )
-        except Exception as e:
-            return ActionResult(success=False, message=f"正则匹配失败: {str(e)}")
+                result['match'] = match.group(0)
+                result['span'] = match.span()
 
-    def _parse_flags(self, flags: int) -> int:
-        return flags
+            if context:
+                context.set(output_var, matched)
+            return ActionResult(success=matched, message=f"Pattern {'matched' if matched else 'not matched'}", data=result)
+        except re_module.error as e:
+            return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Regex match error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
         return ['pattern', 'text']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'flags': 0, 'output_var': 'regex_match'}
+        return {'flags': 0, 'output_var': 'regex_match_result'}
 
 
 class RegexSearchAction(BaseAction):
-    """Search pattern in text."""
+    """Search for pattern."""
     action_type = "regex_search"
     display_name = "正则搜索"
-    description = "搜索正则"
+    description = "搜索正则匹配"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute search.
-
-        Args:
-            context: Execution context.
-            params: Dict with pattern, text, flags, output_var.
-
-        Returns:
-            ActionResult with search result.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute regex search."""
         pattern = params.get('pattern', '')
         text = params.get('text', '')
         flags = params.get('flags', 0)
-        output_var = params.get('output_var', 'regex_search')
+        output_var = params.get('output_var', 'regex_search_result')
 
-        valid, msg = self.validate_type(pattern, str, 'pattern')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(text, str, 'text')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not pattern or not text:
+            return ActionResult(success=False, message="pattern and text are required")
 
         try:
-            resolved_pattern = context.resolve_value(pattern)
-            resolved_text = context.resolve_value(text)
+            import re as re_module
 
-            match = re.search(resolved_pattern, resolved_text)
+            resolved_pattern = context.resolve_value(pattern) if context else pattern
+            resolved_text = context.resolve_value(text) if context else text
+            resolved_flags = context.resolve_value(flags) if context else flags
+
+            flags_int = 0
+            if resolved_flags == 1:
+                flags_int = re_module.IGNORECASE
+            elif resolved_flags == 2:
+                flags_int = re_module.MULTILINE
+
+            compiled = re_module.compile(resolved_pattern, flags_int)
+            match = compiled.search(resolved_text)
 
             if match:
                 result = {
-                    'matched': True,
-                    'group': match.group(),
+                    'found': True,
+                    'match': match.group(0),
                     'span': match.span(),
+                    'start': match.start(),
+                    'end': match.end(),
+                    'groups': match.groups(),
                 }
-                context.set(output_var, result)
-                return ActionResult(
-                    success=True,
-                    message=f"找到: {match.group()}",
-                    data={'match': result, 'output_var': output_var}
-                )
+                if context:
+                    context.set(output_var, result)
+                return ActionResult(success=True, message=f"Found: {match.group(0)[:50]}", data=result)
             else:
-                context.set(output_var, {'matched': False})
-                return ActionResult(
-                    success=True,
-                    message="未找到",
-                    data={'match': {'matched': False}, 'output_var': output_var}
-                )
+                result = {'found': False}
+                if context:
+                    context.set(output_var, None)
+                return ActionResult(success=False, message="Pattern not found", data=result)
+        except re_module.error as e:
+            return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
         except Exception as e:
-            return ActionResult(success=False, message=f"正则搜索失败: {str(e)}")
+            return ActionResult(success=False, message=f"Regex search error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
         return ['pattern', 'text']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'flags': 0, 'output_var': 'regex_search'}
+        return {'flags': 0, 'output_var': 'regex_search_result'}
 
 
 class RegexFindAllAction(BaseAction):
@@ -169,239 +144,208 @@ class RegexFindAllAction(BaseAction):
     description = "查找所有匹配"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute find all.
-
-        Args:
-            context: Execution context.
-            params: Dict with pattern, text, flags, output_var.
-
-        Returns:
-            ActionResult with all matches.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute regex findall."""
         pattern = params.get('pattern', '')
         text = params.get('text', '')
         flags = params.get('flags', 0)
+        limit = params.get('limit', None)
         output_var = params.get('output_var', 'regex_matches')
 
-        valid, msg = self.validate_type(pattern, str, 'pattern')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(text, str, 'text')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not pattern or not text:
+            return ActionResult(success=False, message="pattern and text are required")
 
         try:
-            resolved_pattern = context.resolve_value(pattern)
-            resolved_text = context.resolve_value(text)
+            import re as re_module
 
-            matches = re.findall(resolved_pattern, resolved_text)
+            resolved_pattern = context.resolve_value(pattern) if context else pattern
+            resolved_text = context.resolve_value(text) if context else text
+            resolved_flags = context.resolve_value(flags) if context else flags
+            resolved_limit = context.resolve_value(limit) if context else limit
 
-            context.set(output_var, matches)
+            flags_int = 0
+            if resolved_flags == 1:
+                flags_int = re_module.IGNORECASE
+            elif resolved_flags == 2:
+                flags_int = re_module.MULTILINE
 
-            return ActionResult(
-                success=True,
-                message=f"找到 {len(matches)} 个匹配",
-                data={'matches': matches, 'count': len(matches), 'output_var': output_var}
-            )
+            compiled = re_module.compile(resolved_pattern, flags_int)
+            matches = compiled.findall(resolved_text)
+
+            if resolved_limit:
+                matches = matches[:resolved_limit]
+
+            result = {'matches': matches, 'count': len(matches)}
+            if context:
+                context.set(output_var, matches)
+            return ActionResult(success=True, message=f"Found {len(matches)} matches", data=result)
+        except re_module.error as e:
+            return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
         except Exception as e:
-            return ActionResult(success=False, message=f"正则查找全部失败: {str(e)}")
+            return ActionResult(success=False, message=f"Regex findall error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
         return ['pattern', 'text']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'flags': 0, 'output_var': 'regex_matches'}
+        return {'flags': 0, 'limit': None, 'output_var': 'regex_matches'}
 
 
 class RegexReplaceAction(BaseAction):
-    """Replace pattern."""
+    """Replace pattern matches."""
     action_type = "regex_replace"
     display_name = "正则替换"
-    description = "替换正则匹配"
+    description = "正则替换"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute replace.
-
-        Args:
-            context: Execution context.
-            params: Dict with pattern, text, replacement, flags, output_var.
-
-        Returns:
-            ActionResult with replaced text.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute regex replace."""
         pattern = params.get('pattern', '')
         text = params.get('text', '')
         replacement = params.get('replacement', '')
+        count = params.get('count', 0)  # 0 = all
         flags = params.get('flags', 0)
-        output_var = params.get('output_var', 'regex_replaced')
+        output_var = params.get('output_var', 'regex_replace_result')
 
-        valid, msg = self.validate_type(pattern, str, 'pattern')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(text, str, 'text')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(replacement, str, 'replacement')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not pattern or not text:
+            return ActionResult(success=False, message="pattern and text are required")
 
         try:
-            resolved_pattern = context.resolve_value(pattern)
-            resolved_text = context.resolve_value(text)
-            resolved_replacement = context.resolve_value(replacement)
+            import re as re_module
 
-            result = re.sub(resolved_pattern, resolved_replacement, resolved_text)
+            resolved_pattern = context.resolve_value(pattern) if context else pattern
+            resolved_text = context.resolve_value(text) if context else text
+            resolved_replacement = context.resolve_value(replacement) if context else replacement
+            resolved_count = context.resolve_value(count) if context else count
+            resolved_flags = context.resolve_value(flags) if context else flags
 
-            context.set(output_var, result)
+            flags_int = 0
+            if resolved_flags == 1:
+                flags_int = re_module.IGNORECASE
+            elif resolved_flags == 2:
+                flags_int = re_module.MULTILINE
 
-            return ActionResult(
-                success=True,
-                message=f"已替换: {result[:50]}...",
-                data={'replaced': result, 'output_var': output_var}
-            )
+            result = re_module.sub(resolved_pattern, resolved_replacement, resolved_text, count=int(resolved_count), flags=flags_int)
+
+            if context:
+                context.set(output_var, result)
+            return ActionResult(success=True, message=f"Replaced text", data={'result': result})
+        except re_module.error as e:
+            return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
         except Exception as e:
-            return ActionResult(success=False, message=f"正则替换失败: {str(e)}")
+            return ActionResult(success=False, message=f"Regex replace error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
-        return ['pattern', 'text', 'replacement']
+        return ['pattern', 'text']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'flags': 0, 'output_var': 'regex_replaced'}
+        return {'replacement': '', 'count': 0, 'flags': 0, 'output_var': 'regex_replace_result'}
 
 
 class RegexSplitAction(BaseAction):
-    """Split by pattern."""
+    """Split text by pattern."""
     action_type = "regex_split"
     display_name = "正则分割"
     description = "按正则分割"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute split.
-
-        Args:
-            context: Execution context.
-            params: Dict with pattern, text, maxsplit, output_var.
-
-        Returns:
-            ActionResult with split parts.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute regex split."""
         pattern = params.get('pattern', '')
         text = params.get('text', '')
         maxsplit = params.get('maxsplit', 0)
-        output_var = params.get('output_var', 'regex_split')
+        flags = params.get('flags', 0)
+        output_var = params.get('output_var', 'regex_split_result')
 
-        valid, msg = self.validate_type(pattern, str, 'pattern')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(text, str, 'text')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not pattern or not text:
+            return ActionResult(success=False, message="pattern and text are required")
 
         try:
-            resolved_pattern = context.resolve_value(pattern)
-            resolved_text = context.resolve_value(text)
-            resolved_maxsplit = context.resolve_value(maxsplit)
+            import re as re_module
 
-            parts = re.split(resolved_pattern, resolved_text, maxsplit=resolved_maxsplit)
+            resolved_pattern = context.resolve_value(pattern) if context else pattern
+            resolved_text = context.resolve_value(text) if context else text
+            resolved_max = context.resolve_value(maxsplit) if context else maxsplit
+            resolved_flags = context.resolve_value(flags) if context else flags
 
-            context.set(output_var, parts)
+            flags_int = 0
+            if resolved_flags == 1:
+                flags_int = re_module.IGNORECASE
+            elif resolved_flags == 2:
+                flags_int = re_module.MULTILINE
 
-            return ActionResult(
-                success=True,
-                message=f"已分割为 {len(parts)} 部分",
-                data={'parts': parts, 'count': len(parts), 'output_var': output_var}
-            )
+            parts = re_module.split(resolved_pattern, resolved_text, maxsplit=int(resolved_max), flags=flags_int)
+
+            result = {'parts': parts, 'count': len(parts)}
+            if context:
+                context.set(output_var, parts)
+            return ActionResult(success=True, message=f"Split into {len(parts)} parts", data=result)
+        except re_module.error as e:
+            return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
         except Exception as e:
-            return ActionResult(success=False, message=f"正则分割失败: {str(e)}")
+            return ActionResult(success=False, message=f"Regex split error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
         return ['pattern', 'text']
 
     def get_optional_params(self) -> Dict[str, Any]:
-        return {'maxsplit': 0, 'output_var': 'regex_split'}
+        return {'maxsplit': 0, 'flags': 0, 'output_var': 'regex_split_result'}
 
 
 class RegexGroupsAction(BaseAction):
-    """Extract regex groups."""
+    """Extract capture groups."""
     action_type = "regex_groups"
-    display_name = "正则分组"
-    description = "提取正则分组"
+    display_name = "正则提取组"
+    description = "提取捕获组"
     version = "1.0"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute groups.
-
-        Args:
-            context: Execution context.
-            params: Dict with pattern, text, flags, output_var.
-
-        Returns:
-            ActionResult with groups.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute regex groups."""
         pattern = params.get('pattern', '')
         text = params.get('text', '')
         flags = params.get('flags', 0)
         output_var = params.get('output_var', 'regex_groups')
 
-        valid, msg = self.validate_type(pattern, str, 'pattern')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(text, str, 'text')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+        if not pattern or not text:
+            return ActionResult(success=False, message="pattern and text are required")
 
         try:
-            resolved_pattern = context.resolve_value(pattern)
-            resolved_text = context.resolve_value(text)
+            import re as re_module
 
-            match = re.search(resolved_pattern, resolved_text)
+            resolved_pattern = context.resolve_value(pattern) if context else pattern
+            resolved_text = context.resolve_value(text) if context else text
+            resolved_flags = context.resolve_value(flags) if context else flags
+
+            flags_int = 0
+            if resolved_flags == 1:
+                flags_int = re_module.IGNORECASE
+            elif resolved_flags == 2:
+                flags_int = re_module.MULTILINE
+
+            compiled = re_module.compile(resolved_pattern, flags_int)
+            match = compiled.search(resolved_text)
 
             if match:
                 groups = match.groups()
+                named = match.groupdict()
                 result = {
-                    'matched': True,
                     'groups': groups,
-                    'group_dict': match.groupdict() if match.groupdict() else None,
+                    'named': named,
+                    'count': len(groups),
+                    'match': match.group(0),
                 }
-                context.set(output_var, result)
-                return ActionResult(
-                    success=True,
-                    message=f"分组: {len(groups)} 个",
-                    data={'groups': result, 'output_var': output_var}
-                )
+                if context:
+                    context.set(output_var, result)
+                return ActionResult(success=True, message=f"Found {len(groups)} groups", data=result)
             else:
-                context.set(output_var, {'matched': False})
-                return ActionResult(
-                    success=True,
-                    message="未匹配",
-                    data={'groups': {'matched': False}, 'output_var': output_var}
-                )
+                result = {'groups': [], 'count': 0}
+                if context:
+                    context.set(output_var, result)
+                return ActionResult(success=False, message="No match found", data=result)
+        except re_module.error as e:
+            return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
         except Exception as e:
-            return ActionResult(success=False, message=f"正则分组失败: {str(e)}")
+            return ActionResult(success=False, message=f"Regex groups error: {str(e)}")
 
     def get_required_params(self) -> List[str]:
         return ['pattern', 'text']
