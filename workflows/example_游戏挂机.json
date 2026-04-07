@@ -1,0 +1,168 @@
+{
+  "name": "游戏挂机自动化",
+  "description": "游戏自动挂机练级工作流",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "skill_rotation": ["Q", "W", "E", "R"],
+    "move_keys": ["W", "A", "S", "D"],
+    "loot_keys": ["F"],
+    "hp_threshold": 30,
+    "buff_duration": 60,
+    "session_minutes": 120
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "minute_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 3.0,
+      "comment": "初始化计时器，等待游戏加载"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "session_loop",
+      "count": "{{session_minutes}}",
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "开始挂机循环"
+    },
+    {
+      "id": 3,
+      "type": "key_press",
+      "keys": ["Q"],
+      "pre_delay": 0.2,
+      "comment": "释放技能Q"
+    },
+    {
+      "id": 4,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.1,
+      "comment": "技能间隔"
+    },
+    {
+      "id": 5,
+      "type": "key_press",
+      "keys": ["W"],
+      "pre_delay": 0.2,
+      "comment": "释放技能W"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.1,
+      "comment": "技能间隔"
+    },
+    {
+      "id": 7,
+      "type": "key_press",
+      "keys": ["E"],
+      "pre_delay": 0.2,
+      "comment": "释放技能E"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.1,
+      "comment": "技能间隔"
+    },
+    {
+      "id": 9,
+      "type": "key_press",
+      "keys": ["R"],
+      "pre_delay": 0.2,
+      "comment": "释放大招R"
+    },
+    {
+      "id": 10,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.2,
+      "comment": "等待技能冷却"
+    },
+    {
+      "id": 11,
+      "type": "key_press",
+      "keys": ["F"],
+      "pre_delay": 0.2,
+      "comment": "拾取掉落物品"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 0.3,
+      "pre_delay": 0.1,
+      "comment": "短暂延迟"
+    },
+    {
+      "id": 13,
+      "type": "key_press",
+      "keys": ["W"],
+      "pre_delay": 0.2,
+      "comment": "移动前进"
+    },
+    {
+      "id": 14,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.2,
+      "comment": "移动时间"
+    },
+    {
+      "id": 15,
+      "type": "screenshot",
+      "save_path": "./screenshots/game_session_{{minute_counter}}.png",
+      "pre_delay": 0.3,
+      "comment": "定期截图记录"
+    },
+    {
+      "id": 16,
+      "type": "set_variable",
+      "name": "minute_counter",
+      "value": "{{minute_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加分钟计数"
+    },
+    {
+      "id": 17,
+      "type": "condition",
+      "condition": "{{minute_counter < session_minutes}}",
+      "true_next": 18,
+      "false_next": 19,
+      "pre_delay": 0.1,
+      "comment": "检查是否继续挂机"
+    },
+    {
+      "id": 18,
+      "type": "goto",
+      "step_id": 3,
+      "pre_delay": 0.1,
+      "comment": "继续挂机循环"
+    },
+    {
+      "id": 19,
+      "type": "screenshot",
+      "save_path": "./screenshots/game_session_complete.png",
+      "pre_delay": 0.5,
+      "comment": "挂机完成截图"
+    },
+    {
+      "id": 20,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": false
+  }
+}

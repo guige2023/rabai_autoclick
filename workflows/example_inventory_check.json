@@ -1,0 +1,158 @@
+{
+  "name": "Inventory Check Workflow",
+  "description": "Automate inventory management and stock checking",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "warehouse_location": "Warehouse A",
+    "items_to_check": 20,
+    "current_item": 0,
+    "low_stock_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "item_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize item counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open inventory system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system to load"
+    },
+    {
+      "id": 4,
+      "type": "click_image",
+      "template": "./templates/warehouse_a.png",
+      "confidence": 0.80,
+      "pre_delay": 0.5,
+      "comment": "Select warehouse location"
+    },
+    {
+      "id": 5,
+      "type": "loop",
+      "loop_id": "inventory_loop",
+      "count": "{{items_to_check}}",
+      "loop_start": 6,
+      "pre_delay": 0.3,
+      "comment": "Start inventory check loop"
+    },
+    {
+      "id": 6,
+      "type": "click",
+      "x": 150,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on item"
+    },
+    {
+      "id": 7,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "Wait for item details"
+    },
+    {
+      "id": 8,
+      "type": "screenshot",
+      "save_path": "./screenshots/inventory_item_{{item_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture item screenshot"
+    },
+    {
+      "id": 9,
+      "type": "ocr",
+      "region": [300, 200, 500, 300],
+      "output_var": "stock_level",
+      "pre_delay": 0.3,
+      "comment": "Read stock level"
+    },
+    {
+      "id": 10,
+      "type": "condition",
+      "condition": "{{stock_level.includes('low') OR stock_level.includes('0')}}",
+      "true_next": 11,
+      "false_next": 12,
+      "pre_delay": 0.1,
+      "comment": "Check if low stock"
+    },
+    {
+      "id": 11,
+      "type": "set_variable",
+      "name": "low_stock_count",
+      "value": "{{low_stock_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment low stock counter"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "item_counter",
+      "value": "{{item_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment item counter"
+    },
+    {
+      "id": 13,
+      "type": "key_press",
+      "key": "down",
+      "pre_delay": 0.2,
+      "comment": "Move to next item"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{item_counter < items_to_check}}",
+      "true_next": 15,
+      "false_next": 16,
+      "pre_delay": 0.1,
+      "comment": "Check if more items"
+    },
+    {
+      "id": 15,
+      "type": "goto",
+      "step_id": 5,
+      "pre_delay": 0.1,
+      "comment": "Continue checking"
+    },
+    {
+      "id": 16,
+      "type": "screenshot",
+      "save_path": "./screenshots/inventory_summary.png",
+      "pre_delay": 0.5,
+      "comment": "Capture summary screenshot"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
