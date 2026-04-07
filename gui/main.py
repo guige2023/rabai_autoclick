@@ -166,7 +166,13 @@ class PredictTab(BaseTab):
         notebook.add(analyze_frame, text="行为分析")
         self._setup_analyze_tab(analyze_frame)
 
-    def _setup_record_tab(self, parent):
+    def _setup_record_tab(self, parent: Any) -> None:
+        """
+        Set up the action recording subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="记录用户动作", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -194,7 +200,13 @@ class PredictTab(BaseTab):
 
         ttk.Button(frame, text="✓ 记录动作", command=self._record_action).grid(row=5, column=0, columnspan=2, pady=15)
 
-    def _setup_predict_tab(self, parent):
+    def _setup_predict_tab(self, parent: Any) -> None:
+        """
+        Set up the prediction subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="预测下一个动作", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -350,7 +362,13 @@ class HealTab(BaseTab):
         notebook.add(stats_frame, text="错误统计")
         self._setup_stats_tab(stats_frame)
 
-    def _setup_fix_tab(self, parent):
+    def _setup_fix_tab(self, parent: Any) -> None:
+        """
+        Set up the error fixing subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="错误分析与修复建议", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -375,7 +393,13 @@ class HealTab(BaseTab):
         self.fix_result = scrolledtext.ScrolledText(frame, height=12, state='disabled')
         self.fix_result.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=10)
 
-    def _setup_stats_tab(self, parent):
+    def _setup_stats_tab(self, parent: Any) -> None:
+        """
+        Set up the error statistics subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="错误统计", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -529,7 +553,13 @@ class SceneTab(BaseTab):
 
         ttk.Button(frame, text="✅ 创建场景", command=self._create_scene).grid(row=3, column=0, columnspan=2, pady=15)
 
-    def _setup_stats_tab(self, parent):
+    def _setup_stats_tab(self, parent: Any) -> None:
+        """
+        Set up the scene statistics subtab.
+        
+        Args:
+            parent: The parent frame widget.
+        """
         frame = ttk.LabelFrame(parent, text="场景统计", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
