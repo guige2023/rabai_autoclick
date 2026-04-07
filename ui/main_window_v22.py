@@ -1445,15 +1445,15 @@ class RecordingWidget(QWidget):
     
     def _on_recording_stopped(self, actions):
         app_logger.info(f"录制完成，共 {len(actions)} 个动作", "Recording")
-    
-    def _on_recording_error(self, error_msg: str):
+
+    def _on_recording_error(self, error_msg: str) -> None:
         self.record_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_label.setText(f"状态: 错误 - {error_msg}")
         self.status_label.setStyleSheet(f"color: {theme_manager.colors['error']};")
         show_error("录制错误", error_msg)
-    
-    def _refresh_action_list(self):
+
+    def _refresh_action_list(self) -> None:
         with batch_updates(self.action_list):
             self.action_list.clear()
             actions = self._recording_manager.get_actions()
@@ -1546,12 +1546,12 @@ class PredictiveWidget(QWidget):
             self.alternatives_list.clear()
 
         self._update_stats()
-    
-    def _on_alternative_clicked(self, item):
+
+    def _on_alternative_clicked(self, item: Any) -> None:
         text = item.text().replace("• ", "")
         self.action_triggered.emit("suggested", {"action": text})
-    
-    def _show_analysis(self):
+
+    def _show_analysis(self) -> None:
         analysis = self.engine.analyze_user_behavior()
         
         dialog = QDialog(self)
@@ -2049,8 +2049,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             app_logger.debug(f"内存显示更新失败: {e}")
             self.memory_label.setText("")
-    
-    def _on_workflow_added_from_recording(self, steps: list):
+
+    def _on_workflow_added_from_recording(self, steps: list) -> None:
         TYPE_MAP = {
             'hotkey': 'key_press',
             'type_text': 'type_text',
