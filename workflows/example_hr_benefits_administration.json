@@ -1,0 +1,117 @@
+{
+  "name": "HR Benefits Administration Workflow",
+  "description": "Automate employee benefits management",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "benefits_to_enroll": 48,
+    "current_benefit": 0,
+    "enrolled_benefits": 0,
+    "pending_enrollments": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "benefit_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize benefit counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open benefits administration portal"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for portal"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "benefits_loop",
+      "count": "{{benefits_to_enroll}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start benefits enrollment loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select benefit for enrollment"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for enrollment"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/benefits_enrollment_{{benefit_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture benefits screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "benefit_counter",
+      "value": "{{benefit_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment benefit counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{benefit_counter < benefits_to_enroll}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more benefits"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next benefit"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/hr_benefits_administration_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
