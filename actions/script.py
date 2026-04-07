@@ -8,28 +8,39 @@ Provides script execution and control flow actions:
 - SetVariableAction: Set context variables
 """
 
+import ast
+import re
 import time
 import random
 import sys
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from ..core.base_action import BaseAction, ActionResult
 
 
-# Security keyword blacklist for script execution
-DANGEROUS_KEYWORDS: List[str] = [
-    'import os', 'import sys', 'import subprocess', 'import shutil',
-    'exec(', 'eval(', 'compile(', '__import__',
-    'open(', 'file(', 'input(',
-    'os.system', 'os.popen', 'os.spawn',
-    'subprocess.', 'shutil.',
-    'globals()', 'locals()', 'vars()',
-    'getattr(', 'setattr(', 'delattr(',
-    '__class__', '__bases__', '__subclasses__',
-    '__builtins__', '__import__',
-]
+# Modules and names blocked from import/attribute access
+DANGEROUS_MODULES: frozenset[str] = frozenset({
+    'os', 'sys', 'subprocess', 'shutil', 'threading', 'multiprocessing',
+    'ctypes', 'signal', 'socket', 'requests', 'urllib', 'http', 'ftplib',
+    'telnetlib', 'poplib', 'imaplib', 'smtplib', 'pty', 'tty', 'termios',
+    'importlib', 'pkgutil', 'runpy', 'code', 'codeop',
+    'pickle', 'marshal', 'yaml', 'json',
+})
+
+# Attribute names that are always dangerous
+DANGEROUS_ATTRS: frozenset[str] = frozenset({
+    'system', 'popen', 'spawn', 'spawnl', 'spawnle', 'spawnv',
+    'exec', 'execfile', 'compile', '__import__', '__builtins__',
+    'getattr', 'setattr', 'delattr', 'write', 'read',
+    'globals', 'locals', 'vars', 'open', 'file',
+    'fork', 'execv', 'execl', 'execle', 'execlp', 'execvp',
+})
+
+# Builtin names that are dangerous when called
+DANGEROUS_BUILTINS: frozenset[str] = frozenset({
+    'exec', 'eval', 'compile', 'open', 'input', '__import__',
+})
 
 # Valid value types for SetVariableAction
 VALID_VALUE_TYPES: List[str] = ['string', 'int', 'float', 'bool', 'expression']
@@ -42,7 +53,7 @@ class ScriptAction(BaseAction):
     description = "执行Python代码片段"
     
     def _check_safety(self, code: str) -> Tuple[bool, str]:
-        """Check if code contains dangerous keywords.
+        """Check if code contains dangerous patterns using AST analysis.
         
         Args:
             code: Python code to check.
@@ -50,9 +61,46 @@ class ScriptAction(BaseAction):
         Returns:
             Tuple of (is_safe, error_message).
         """
-        for keyword in DANGEROUS_KEYWORDS:
-            if keyword in code:
-                return False, f"安全限制: 不允许使用 '{keyword}'"
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False, "安全限制: 代码语法错误"
+
+        for node in ast.walk(tree):
+            # Block import X / import X as Y
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split('.')[0]
+                    if root in DANGEROUS_MODULES:
+                        return False, f"安全限制: 不允许导入 '{alias.name}'"
+
+            # Block from X import Y
+            if isinstance(node, ast.ImportFrom):
+                if node.module:
+                    root = node.module.split('.')[0]
+                    if root in DANGEROUS_MODULES:
+                        return False, f"安全限制: 不允许从 '{node.module}' 导入"
+
+            # Block attribute access: os.spawn, sys.exit, etc.
+            if isinstance(node, ast.Attribute):
+                if node.attr in DANGEROUS_ATTRS:
+                    return False, f"安全限制: 不允许使用 '{node.attr}'"
+
+            # Block dangerous calls: eval(), exec(), open(), compile()
+            if isinstance(node, ast.Call):
+                # Direct name call: eval(...), exec(...)
+                if isinstance(node.func, ast.Name):
+                    if node.func.id in DANGEROUS_BUILTINS:
+                        return False, f"安全限制: 不允许调用 '{node.func.id}'"
+                # Attribute call: os.system(...), obj.getattr(...)
+                if isinstance(node.func, ast.Attribute):
+                    if node.func.attr in DANGEROUS_ATTRS:
+                        return False, f"安全限制: 不允许调用 '{node.func.attr}'"
+
+            # Block named expressions (:=) which can shadow builtins
+            if isinstance(node, ast.NamedExpr):
+                return False, f"安全限制: 不允许使用命名表达式"
+
         return True, ""
     
     def execute(
@@ -347,10 +395,19 @@ class SetVariableAction(BaseAction):
                 success=False,
                 message="变量名为空"
             )
-        
+
         valid, msg = self.validate_type(name, str, 'name')
         if not valid:
             return ActionResult(success=False, message=msg)
+
+        # Block dangerous variable names
+        if name.startswith('_'):
+            return ActionResult(success=False, message=f"安全限制: 变量名不能以 '_' 开头")
+        if re.search(r'\.|\[|\]|\(|\)', name):
+            return ActionResult(success=False, message=f"安全限制: 变量名包含非法字符")
+        blocked_names = {'context', 'self', 'import', 'global', 'nonlocal'}
+        if name.lower() in blocked_names:
+            return ActionResult(success=False, message=f"安全限制: '{name}' 是保留关键字")
         
         valid, msg = self.validate_in(value_type, VALID_VALUE_TYPES, 'value_type')
         if not valid:
