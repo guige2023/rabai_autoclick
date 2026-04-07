@@ -68,3 +68,25 @@ def generate_ean13(data: str) -> bytes:
     """Generate EAN-13 barcode (12 digits, check digit auto-computed)."""
     data = data.strip()[:12]
     return generate_barcode_image(data, "ean13", "PNG")
+
+
+def validate_barcode_data(data: str, format: str) -> bool:
+    """Validate barcode data for a given format."""
+    if not BARCODE_AVAILABLE:
+        raise ImportError("python-barcode required")
+    try:
+        barcode_class = get_barcode_class(format.lower())
+        barcode_class(data)
+        return True
+    except Exception:
+        return False
+
+
+def generate_code39(data: str) -> bytes:
+    """Generate Code 39 barcode (alphanumeric)."""
+    return generate_barcode_image(data, "code39", "PNG")
+
+
+def get_barcode_formats() -> list:
+    """Get list of supported barcode formats."""
+    return list(SUPPORTED_FORMATS)
