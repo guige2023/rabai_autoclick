@@ -493,6 +493,10 @@ class ThemeManager(QObject):
                     transform: translateY(0px);
                     box-shadow: none;
                 }}
+                QPushButton:checked {{
+                    background-color: {c['primary_active']};
+                    border: 2px solid {c['primary']};
+                }}
             """,
             "button_success": f"""
                 QPushButton {{
@@ -695,6 +699,10 @@ class ThemeManager(QObject):
                     background-color: {c['primary_active']};
                     transform: translateY(0px);
                     box-shadow: none;
+                }}
+                QPushButton:checked {{
+                    background-color: {c['primary_active']};
+                    border: 2px solid {c['primary']};
                 }}
             """,
             "button_success": f"""
