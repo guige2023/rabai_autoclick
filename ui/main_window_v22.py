@@ -342,10 +342,11 @@ class ActionConfigWidget(QWidget):
         if hasattr(self.parent(), 'variables_widget'):
             var_names = self.parent().variables_widget.get_variable_names()
             current_text = self.output_var.currentText()
-            self.output_var.clear()
-            self.output_var.addItem("")
-            for name in var_names:
-                self.output_var.addItem(name)
+            with batch_updates(self.output_var):
+                self.output_var.clear()
+                self.output_var.addItem("")
+                for name in var_names:
+                    self.output_var.addItem(name)
             idx = self.output_var.findText(current_text)
             if idx >= 0:
                 self.output_var.setCurrentIndex(idx)
