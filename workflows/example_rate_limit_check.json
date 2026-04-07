@@ -1,0 +1,117 @@
+{
+  "name": "API Rate Limit Check Workflow",
+  "description": "Automate API rate limit monitoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "apis_to_check": 10,
+    "current_api": 0,
+    "healthy_count": 0,
+    "throttled_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "api_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize API counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open API dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "rate_limit_loop",
+      "count": "{{apis_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start rate limit check loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click API"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for metrics"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/rate_limit_{{api_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture rate limit screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "api_counter",
+      "value": "{{api_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment API counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{api_counter < apis_to_check}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more APIs"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next API"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/rate_limit_check_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
