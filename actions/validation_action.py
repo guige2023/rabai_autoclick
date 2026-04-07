@@ -1,370 +1,245 @@
-"""Data validation action module for RabAI AutoClick.
+"""Validation action for data validation and schema checking.
 
-Provides validation operations:
-- ValidateEmailAction: Validate email
-- ValidateUrlAction: Validate URL
-- ValidatePhoneAction: Validate phone number
-- ValidateIpAction: Validate IP address
-- ValidateJsonAction: Validate JSON
-- ValidateNumberAction: Validate number range
-- ValidateLengthAction: Validate string length
-- ValidateRegexAction: Validate with regex
+This module provides data validation with support for
+type checking, range validation, and custom rules.
+
+Example:
+    >>> action = ValidationAction()
+    >>> result = action.execute(value=5, rules=[{"type": "number", "min": 0, "max": 10}])
 """
 
 from __future__ import annotations
 
 import re
-import sys
-from typing import Any, Dict, List, Optional
-
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 
-class ValidateEmailAction(BaseAction):
-    """Validate email address."""
-    action_type = "validate_email"
-    display_name = "邮箱验证"
-    description = "验证邮箱地址"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute email validation."""
-        email = params.get('email', '')
-        output_var = params.get('output_var', 'email_valid')
-
-        if not email:
-            return ActionResult(success=False, message="email is required")
-
-        try:
-            resolved = context.resolve_value(email) if context else email
-            pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-            valid = bool(re.match(pattern, str(resolved)))
-
-            result = {'valid': valid, 'email': str(resolved)}
-            if context:
-                context.set(output_var, valid)
-            return ActionResult(success=valid, message=f"Email {'valid' if valid else 'invalid'}: {resolved}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Email validation error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['email']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'email_valid'}
+@dataclass
+class ValidationRule:
+    """Represents a validation rule."""
+    rule_type: str
+    message: str = ""
+    value: Any = None
 
 
-class ValidateUrlAction(BaseAction):
-    """Validate URL."""
-    action_type = "validate_url"
-    display_name = "URL验证"
-    description = "验证URL"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute URL validation."""
-        url = params.get('url', '')
-        schemes = params.get('schemes', ['http', 'https'])
-        output_var = params.get('output_var', 'url_valid')
-
-        if not url:
-            return ActionResult(success=False, message="url is required")
-
-        try:
-            from urllib.parse import urlparse
-
-            resolved = context.resolve_value(url) if context else url
-            resolved_schemes = context.resolve_value(schemes) if context else schemes
-
-            parsed = urlparse(resolved)
-            valid = bool(parsed.scheme and parsed.netloc and parsed.scheme in resolved_schemes)
-
-            result = {'valid': valid, 'scheme': parsed.scheme, 'netloc': parsed.netloc}
-            if context:
-                context.set(output_var, valid)
-            return ActionResult(success=valid, message=f"URL {'valid' if valid else 'invalid'}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"URL validation error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'schemes': ['http', 'https'], 'output_var': 'url_valid'}
+@dataclass
+class ValidationError:
+    """Represents a validation error."""
+    field: str
+    message: str
+    rule: str
 
 
-class ValidatePhoneAction(BaseAction):
-    """Validate phone number."""
-    action_type = "validate_phone"
-    display_name = "手机号验证"
-    description = "验证手机号"
-    version = "1.0"
+class ValidationAction:
+    """Data validation action.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute phone validation."""
-        phone = params.get('phone', '')
-        country = params.get('country', 'CN')  # CN, US, etc.
-        output_var = params.get('output_var', 'phone_valid')
+    Provides validation for types, ranges, patterns,
+    and custom validation rules.
 
-        if not phone:
-            return ActionResult(success=False, message="phone is required")
+    Example:
+        >>> action = ValidationAction()
+        >>> result = action.execute(
+        ...     value="test@example.com",
+        ...     rules=[{"type": "email"}]
+        ... )
+    """
 
-        try:
-            resolved = context.resolve_value(phone) if context else phone
-            resolved_country = context.resolve_value(country) if context else country
+    def __init__(self) -> None:
+        """Initialize validation action."""
+        self._last_errors: list[ValidationError] = []
 
-            patterns = {
-                'CN': r'^1[3-9]\d{9}$',
-                'US': r'^\+?1?\d{10}$',
-                'UK': r'^\+?44\d{10}$',
-                'DEFAULT': r'^\+?[\d\s-]{10,}$',
-            }
-            pattern = patterns.get(resolved_country, patterns['DEFAULT'])
-            cleaned = re.sub(r'[\s\-\(\)]', '', str(resolved))
-            valid = bool(re.match(pattern, cleaned))
+    def execute(
+        self,
+        value: Any,
+        rules: Optional[list[dict]] = None,
+        field_name: str = "value",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute validation.
 
-            result = {'valid': valid, 'phone': resolved, 'country': resolved_country}
-            if context:
-                context.set(output_var, valid)
-            return ActionResult(success=valid, message=f"Phone {'valid' if valid else 'invalid'}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Phone validation error: {str(e)}")
+        Args:
+            value: Value to validate.
+            rules: List of validation rule dicts.
+            field_name: Name of field for error messages.
+            **kwargs: Additional parameters.
 
-    def get_required_params(self) -> List[str]:
-        return ['phone']
+        Returns:
+            Validation result dictionary.
+        """
+        result: dict[str, Any] = {"success": True, "valid": True, "value": value}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'country': 'CN', 'output_var': 'phone_valid'}
+        if not rules:
+            return result
 
+        errors: list[ValidationError] = []
 
-class ValidateIpAction(BaseAction):
-    """Validate IP address."""
-    action_type = "validate_ip"
-    display_name = "IP地址验证"
-    description = "验证IP地址"
-    version = "1.0"
+        for rule_dict in rules:
+            rule_type = rule_dict.get("type", "")
+            rule_value = rule_dict.get("value")
+            message = rule_dict.get("message", f"Validation failed for {rule_type}")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute IP validation."""
-        ip = params.get('ip', '')
-        ip_type = params.get('ip_type', None)  # None, 4, 6
-        output_var = params.get('output_var', 'ip_valid')
+            is_valid = self._validate_rule(value, rule_type, rule_value)
 
-        if not ip:
-            return ActionResult(success=False, message="ip is required")
+            if not is_valid:
+                errors.append(ValidationError(
+                    field=field_name,
+                    message=message,
+                    rule=rule_type,
+                ))
 
-        try:
-            import socket
+        self._last_errors = errors
 
-            resolved = context.resolve_value(ip) if context else ip
-            resolved_type = context.resolve_value(ip_type) if context else ip_type
+        if errors:
+            result["valid"] = False
+            result["success"] = False
+            result["errors"] = [
+                {"field": e.field, "message": e.message, "rule": e.rule}
+                for e in errors
+            ]
 
-            valid = False
-            ip_version = None
+        return result
 
+    def _validate_rule(self, value: Any, rule_type: str, rule_value: Any) -> bool:
+        """Validate a single rule.
+
+        Args:
+            value: Value to validate.
+            rule_type: Type of rule.
+            rule_value: Rule parameter value.
+
+        Returns:
+            True if valid.
+        """
+        if rule_type == "required":
+            return value is not None and value != ""
+
+        elif rule_type == "type":
+            expected = rule_value.lower() if isinstance(rule_value, str) else rule_value
+            if expected == "string":
+                return isinstance(value, str)
+            elif expected == "number" or expected == "int":
+                return isinstance(value, (int, float))
+            elif expected == "bool":
+                return isinstance(value, bool)
+            elif expected == "list":
+                return isinstance(value, list)
+            elif expected == "dict":
+                return isinstance(value, dict)
+            return type(value).__name__.lower() == expected
+
+        elif rule_type == "min":
             try:
-                socket.inet_pton(socket.AF_INET6, str(resolved))
-                valid = True
-                ip_version = 6
-            except socket.error:
-                try:
-                    socket.inet_aton(str(resolved))
-                    valid = True
-                    ip_version = 4
-                except socket.error:
-                    valid = False
+                return float(value) >= float(rule_value)
+            except (TypeError, ValueError):
+                return False
 
-            if resolved_type:
-                expected = int(resolved_type)
-                valid = valid and ip_version == expected
+        elif rule_type == "max":
+            try:
+                return float(value) <= float(rule_value)
+            except (TypeError, ValueError):
+                return False
 
-            result = {'valid': valid, 'ip': str(resolved), 'version': ip_version}
-            if context:
-                context.set(output_var, valid)
-            return ActionResult(success=valid, message=f"IP {'valid' if valid else 'invalid'}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"IP validation error: {str(e)}")
+        elif rule_type == "min_length":
+            return len(value) >= rule_value
 
-    def get_required_params(self) -> List[str]:
-        return ['ip']
+        elif rule_type == "max_length":
+            return len(value) <= rule_value
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'ip_type': None, 'output_var': 'ip_valid'}
+        elif rule_type == "equals":
+            return value == rule_value
 
+        elif rule_type == "not_equals":
+            return value != rule_value
 
-class ValidateJsonAction(BaseAction):
-    """Validate JSON string."""
-    action_type = "validate_json"
-    display_name = "JSON验证"
-    description = "验证JSON"
-    version = "1.0"
+        elif rule_type == "in":
+            return value in rule_value if isinstance(rule_value, list) else value == rule_value
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute JSON validation."""
-        json_str = params.get('json', '')
-        output_var = params.get('output_var', 'json_valid')
+        elif rule_type == "not_in":
+            return value not in rule_value if isinstance(rule_value, list) else True
 
-        if not json_str:
-            return ActionResult(success=False, message="json is required")
+        elif rule_type == "contains":
+            return str(rule_value) in str(value)
 
-        try:
+        elif rule_type == "email":
+            pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+            return bool(re.match(pattern, str(value)))
+
+        elif rule_type == "url":
+            pattern = r"^https?://[^\s<>\"]+$"
+            return bool(re.match(pattern, str(value)))
+
+        elif rule_type == "phone":
+            pattern = r"^\+?[\d\s\-\(\)]+$"
+            return bool(re.match(pattern, str(value)))
+
+        elif rule_type == "ip":
+            pattern = r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"
+            return bool(re.match(pattern, str(value)))
+
+        elif rule_type == "regex":
+            try:
+                return bool(re.search(rule_value, str(value)))
+            except re.error:
+                return False
+
+        elif rule_type == "date":
+            from dateutil import parser
+            try:
+                parser.parse(str(value))
+                return True
+            except Exception:
+                return False
+
+        elif rule_type == "json":
             import json
+            try:
+                json.loads(str(value))
+                return True
+            except Exception:
+                return False
 
-            resolved = context.resolve_value(json_str) if context else json_str
-            json.loads(resolved)
+        elif rule_type == "uuid":
+            pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            return bool(re.match(pattern, str(value).lower()))
 
-            result = {'valid': True}
-            if context:
-                context.set(output_var, True)
-            return ActionResult(success=True, message="JSON is valid")
-        except json.JSONDecodeError as e:
-            result = {'valid': False, 'error': str(e)}
-            if context:
-                context.set(output_var, False)
-            return ActionResult(success=False, message=f"Invalid JSON: {str(e)}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"JSON validation error: {str(e)}")
+        elif rule_type == "credit_card":
+            pattern = r"^\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}$"
+            return bool(re.match(pattern, str(value)))
 
-    def get_required_params(self) -> List[str]:
-        return ['json']
+        return True
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'json_valid'}
+    def validate_dict(
+        self,
+        data: dict,
+        schema: dict,
+    ) -> dict[str, Any]:
+        """Validate dictionary against schema.
 
+        Args:
+            data: Dictionary to validate.
+            schema: Schema definition.
 
-class ValidateNumberAction(BaseAction):
-    """Validate number in range."""
-    action_type = "validate_number"
-    display_name = "数字范围验证"
-    description = "验证数字范围"
-    version = "1.0"
+        Returns:
+            Validation result.
+        """
+        errors: list[dict] = []
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute number validation."""
-        value = params.get('value', None)
-        min_val = params.get('min', None)
-        max_val = params.get('max', None)
-        integer_only = params.get('integer_only', False)
-        output_var = params.get('output_var', 'number_valid')
+        for field_name, rules in schema.items():
+            value = data.get(field_name)
+            field_errors = self.execute(value, rules, field_name)
+            if not field_errors.get("valid", True):
+                errors.extend(field_errors.get("errors", []))
 
-        if value is None:
-            return ActionResult(success=False, message="value is required")
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+        }
 
-        try:
-            resolved = context.resolve_value(value) if context else value
-            resolved_min = context.resolve_value(min_val) if context else min_val
-            resolved_max = context.resolve_value(max_val) if context else max_val
-            resolved_int = context.resolve_value(integer_only) if context else integer_only
+    def get_errors(self) -> list[ValidationError]:
+        """Get last validation errors.
 
-            num = float(resolved)
-            if resolved_int and not num.is_integer():
-                valid = False
-            elif resolved_min is not None and num < float(resolved_min):
-                valid = False
-            elif resolved_max is not None and num > float(resolved_max):
-                valid = False
-            else:
-                valid = True
-
-            result = {'valid': valid, 'value': num, 'min': resolved_min, 'max': resolved_max}
-            if context:
-                context.set(output_var, valid)
-            return ActionResult(success=valid, message=f"Number {'in' if valid else 'out of'} range", data=result)
-        except ValueError:
-            result = {'valid': False, 'error': 'Not a number'}
-            if context:
-                context.set(output_var, False)
-            return ActionResult(success=False, message=f"Not a number: {resolved}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Number validation error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'min': None, 'max': None, 'integer_only': False, 'output_var': 'number_valid'}
-
-
-class ValidateLengthAction(BaseAction):
-    """Validate string length."""
-    action_type = "validate_length"
-    display_name = "字符串长度验证"
-    description = "验证字符串长度"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute length validation."""
-        value = params.get('value', '')
-        min_len = params.get('min_length', None)
-        max_len = params.get('max_length', None)
-        output_var = params.get('output_var', 'length_valid')
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            resolved_min = context.resolve_value(min_len) if context else min_len
-            resolved_max = context.resolve_value(max_len) if context else max_len
-
-            length = len(str(resolved))
-            if resolved_min is not None and length < int(resolved_min):
-                valid = False
-            elif resolved_max is not None and length > int(resolved_max):
-                valid = False
-            else:
-                valid = True
-
-            result = {'valid': valid, 'length': length, 'min': resolved_min, 'max': resolved_max}
-            if context:
-                context.set(output_var, valid)
-            return ActionResult(success=valid, message=f"Length {length}: {'valid' if valid else 'invalid'}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Length validation error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'min_length': None, 'max_length': None, 'output_var': 'length_valid'}
-
-
-class ValidateRegexAction(BaseAction):
-    """Validate with regex pattern."""
-    action_type = "validate_regex"
-    display_name = "正则验证"
-    description = "正则验证"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute regex validation."""
-        value = params.get('value', '')
-        pattern = params.get('pattern', '')
-        output_var = params.get('output_var', 'regex_valid')
-
-        if not value or not pattern:
-            return ActionResult(success=False, message="value and pattern are required")
-
-        try:
-            import re as re_module
-
-            resolved_val = context.resolve_value(value) if context else value
-            resolved_pattern = context.resolve_value(pattern) if context else pattern
-
-            match = re_module.search(resolved_pattern, str(resolved_val))
-            valid = match is not None
-
-            result = {'valid': valid, 'pattern': resolved_pattern, 'value': str(resolved_val)}
-            if context:
-                context.set(output_var, valid)
-            return ActionResult(success=valid, message=f"Regex {'matched' if valid else 'not matched'}", data=result)
-        except re_module.error as e:
-            return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Regex validation error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value', 'pattern']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'regex_valid'}
+        Returns:
+            List of ValidationError objects.
+        """
+        return self._last_errors
