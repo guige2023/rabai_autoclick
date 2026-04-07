@@ -414,7 +414,7 @@ class ThemeManager(QObject):
                 QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
                 QTabBar::tab:hover {{ background-color: {c['bg_hover']}; }}
                 QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: background-color 0.2s ease; }}
-                QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+                QPushButton:hover {{ background-color: {c['primary_hover']}; cursor: pointinghand; }}
                 QPushButton:pressed {{ background-color: {c['primary_active']}; }}
                 QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
                 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; transition: border-color 0.2s ease; }}
@@ -472,7 +472,7 @@ class ThemeManager(QObject):
                 QDialog {{ background-color: {c['bg_widget']}; }}
                 QLabel {{ color: {c['text_primary']}; }}
                 QPushButton {{ padding: 6px 16px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: all 0.2s ease; }}
-                QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+                QPushButton:hover {{ background-color: {c['primary_hover']}; cursor: pointinghand; }}
             """,
             "button_animated": f"""
                 QPushButton {{
@@ -617,7 +617,7 @@ class ThemeManager(QObject):
                 QTabBar::tab:selected {{ background-color: {c['bg_widget']}; }}
                 QTabBar::tab:hover {{ background-color: {c['bg_hover']}; }}
                 QPushButton {{ padding: 6px 12px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: all 0.2s ease; }}
-                QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+                QPushButton:hover {{ background-color: {c['primary_hover']}; cursor: pointinghand; }}
                 QPushButton:pressed {{ background-color: {c['primary_active']}; }}
                 QPushButton:disabled {{ background-color: {c['bg_toolbar']}; color: {c['text_disabled']}; }}
                 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 6px; border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; color: {c['text_primary']}; transition: border-color 0.2s ease; }}
@@ -675,7 +675,7 @@ class ThemeManager(QObject):
                 QDialog {{ background-color: {c['bg_widget']}; }}
                 QLabel {{ color: {c['text_primary']}; }}
                 QPushButton {{ padding: 6px 16px; border-radius: 4px; background-color: {c['primary']}; color: {c['text_on_primary']}; border: none; transition: all 0.2s ease; }}
-                QPushButton:hover {{ background-color: {c['primary_hover']}; }}
+                QPushButton:hover {{ background-color: {c['primary_hover']}; cursor: pointinghand; }}
             """,
             "button_animated": f"""
                 QPushButton {{
