@@ -4,6 +4,7 @@ import platform
 import time
 import copy
 import logging
+import contextlib
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
@@ -35,6 +36,24 @@ from ui.message import message_manager, show_error, show_success, show_warning, 
 from ui.stats_dialog import StatsDialog
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def batch_updates(widget: QWidget):
+    """Context manager to batch UI updates for performance.
+
+    Disables updates before a batch of changes, then re-enables
+    and performs a single repaint after.
+
+    Args:
+        widget: Widget to batch updates for.
+    """
+    widget.setUpdatesEnabled(False)
+    try:
+        yield
+    finally:
+        widget.setUpdatesEnabled(True)
+        widget.update()
 
 IS_MACOS = platform.system() == 'Darwin'
 IS_WINDOWS = platform.system() == 'Windows'
@@ -915,18 +934,20 @@ class MainWindow(QMainWindow):
     
     def _load_actions(self):
         action_info = self.engine.get_action_info()
-        
-        for action_type, info in action_info.items():
-            item = QListWidgetItem(f"{info['display_name']}")
-            item.setData(Qt.UserRole, action_type)
-            item.setToolTip(f"{info['description']}\n类型: {action_type}")
-            self.action_list.addItem(item)
-        
-        self.config_widgets = {}
-        for action_type, info in action_info.items():
-            widget = ActionConfigWidget(info)
-            self.config_widgets[action_type] = widget
-            self.config_stack.addWidget(widget)
+
+        with batch_updates(self.action_list):
+            for action_type, info in action_info.items():
+                item = QListWidgetItem(f"{info['display_name']}")
+                item.setData(Qt.UserRole, action_type)
+                item.setToolTip(f"{info['description']}\n类型: {action_type}")
+                self.action_list.addItem(item)
+
+        with batch_updates(self.config_stack):
+            self.config_widgets = {}
+            for action_type, info in action_info.items():
+                widget = ActionConfigWidget(info)
+                self.config_widgets[action_type] = widget
+                self.config_stack.addWidget(widget)
     
     def _setup_hotkeys(self):
         if self.hotkey_manager.is_available():
@@ -1206,21 +1227,22 @@ class MainWindow(QMainWindow):
         self.current_workflow = workflow
         self.step_configs = {}
         self.next_step_id = 1
-        
-        self.step_list.clear()
-        
-        for step in self.current_workflow.get('steps', []):
-            step_id = step.get('id', self.next_step_id)
-            action_type = step.get('type', '')
-            
-            action_info = self.engine.get_action_info().get(action_type, {})
-            display_name = action_info.get('display_name', action_type)
-            
-            self.step_list.add_step(step_id, action_type, display_name)
-            self.step_configs[step_id] = step.copy()
-            
-            self.next_step_id = max(self.next_step_id, step_id + 1)
-        
+
+        with batch_updates(self.step_list):
+            self.step_list.clear()
+
+            for step in self.current_workflow.get('steps', []):
+                step_id = step.get('id', self.next_step_id)
+                action_type = step.get('type', '')
+
+                action_info = self.engine.get_action_info().get(action_type, {})
+                display_name = action_info.get('display_name', action_type)
+
+                self.step_list.add_step(step_id, action_type, display_name)
+                self.step_configs[step_id] = step.copy()
+
+                self.next_step_id = max(self.next_step_id, step_id + 1)
+
         self.variables_widget.set_variables(self.current_workflow.get('variables', {}))
         show_toast("已加载历史记录", 'success')
         app_logger.info("从历史记录加载工作流", "Workflow")
@@ -1597,11 +1619,23 @@ class MainWindow(QMainWindow):
         elif action == status_action:
             usage = memory_manager.get_memory_usage()
             from PyQt5.QtWidgets import QMessageBox
-            QMessageBox.information(self, "内存状态", 
+            QMessageBox.information(self, "内存状态",
                 f"物理内存 (RSS): {usage['rss']} MB\n"
                 f"虚拟内存 (VMS): {usage['vms']} MB\n"
                 f"缓存数量: {usage['cache_size']}")
-    
+
+    def changeEvent(self, event):
+        """Handle window state changes to optimize timer usage."""
+        if event.type() == event.WindowStateChange:
+            if self.windowState() & Qt.WindowMinimized:
+                # Pause memory timer when minimized to save resources
+                self._memory_timer.stop()
+            elif self.windowState() & Qt.WindowNoState:
+                # Resume when restored
+                if not self._memory_timer.isActive():
+                    self._memory_timer.start()
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         self._memory_timer.stop()
         self.hotkey_manager.unregister_hotkeys()
