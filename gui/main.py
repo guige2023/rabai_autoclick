@@ -2,7 +2,17 @@
 """
 RabAI AutoClick v22 GUI
 图形用户界面 - 完全调用 CLI 所有功能
+
+This module provides a Tkinter-based graphical interface for the RabAI AutoClick
+automation tool, featuring predictive engine, self-healing, scene management,
+diagnostics, workflow sharing, pipeline integration, and screen recording.
+
+Author: RabAI Team
+Version: 22.0.0
 """
+
+from __future__ import annotations
+
 import sys
 import os
 import json
@@ -11,7 +21,7 @@ import datetime
 import threading
 import subprocess
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Any, Dict, List, Union, TypeVar, TextIO
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
@@ -30,34 +40,93 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 
 
 class OutputRedirector:
-    def __init__(self, text_widget):
+    """
+    Redirects stdout/stderr to a Tkinter ScrolledText widget.
+    
+    This class captures write operations and displays them in the GUI's
+    log text widget, providing real-time output visibility.
+    
+    Attributes:
+        text_widget: The Tkinter ScrolledText widget to write to.
+        buffer: Internal buffer for incomplete writes.
+    """
+    
+    def __init__(self, text_widget: Any) -> None:
+        """
+        Initialize the redirector with a target text widget.
+        
+        Args:
+            text_widget: A Tkinter ScrolledText or Text widget instance.
+        """
         self.text_widget = text_widget
-        self.buffer = ""
+        self.buffer: str = ""
 
-    def write(self, string):
+    def write(self, string: str) -> None:
+        """
+        Write a string to the text widget.
+        
+        Args:
+            string: The text content to display.
+        """
         self.text_widget.configure(state='normal')
         self.text_widget.insert(tk.END, string)
         self.text_widget.see(tk.END)
         self.text_widget.configure(state='disabled')
 
-    def flush(self):
+    def flush(self) -> None:
+        """Flush the internal buffer (no-op for GUI redirector)."""
         pass
 
 
 class BaseTab(ttk.Frame):
-    def __init__(self, parent, app):
+    """
+    Base class for all GUI tabs in RabAI AutoClick.
+    
+    Provides common functionality for async task execution,
+    logging, and UI setup patterns.
+    
+    Attributes:
+        app: Reference to the main RabAIGUI application instance.
+    """
+    
+    def __init__(self, parent: Any, app: RabAIGUI) -> None:
+        """
+        Initialize the base tab.
+        
+        Args:
+            parent: The parent Tkinter widget (typically a ttk.Notebook).
+            app: Reference to the main RabAIGUI application.
+        """
         super().__init__(parent)
         self.app = app
         self.setup_ui()
 
-    def setup_ui(self):
+    def setup_ui(self) -> None:
+        """Set up the tab's UI components. Override in subclasses."""
         pass
 
-    def log(self, message):
+    def log(self, message: str) -> None:
+        """
+        Log a message to the main application's log area.
+        
+        Args:
+            message: The message string to log.
+        """
         self.app.log(message)
 
-    def run_async(self, func, callback=None):
-        def wrapper():
+    def run_async(self, func: Callable[[], Any], callback: Optional[Callable[[Any], None]] = None) -> None:
+        """
+        Execute a function in a background thread safely.
+        
+        This method runs the given function in a daemon thread and,
+        upon completion, invokes the optional callback in the main
+        GUI thread using after_idle.
+        
+        Args:
+            func: A callable to execute in the background.
+            callback: Optional callback function to receive the result.
+        """
+        def wrapper() -> None:
             try:
                 result = func()
                 if callback:
