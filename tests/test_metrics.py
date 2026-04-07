@@ -117,8 +117,10 @@ class TestHistogram:
         hist.observe(7.0)
 
         counts = hist.bucket_counts()
-        assert counts[1.0] == 2
-        assert counts[5.0] == 1
+        # Buckets are cumulative: 0.5 goes in bucket 1.0, 3.0 in 5.0, 7.0 in 10.0
+        assert counts[1.0] == 1
+        assert counts[5.0] == 2
+        assert counts[10.0] == 3
 
     def test_reset(self) -> None:
         """Test histogram reset."""
