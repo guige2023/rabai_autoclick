@@ -1089,8 +1089,8 @@ class MainWindow(QMainWindow):
             on_workflow_end=lambda success: self.engine_signals.workflow_end.emit(success),
             on_error=lambda step, msg: self.engine_signals.error.emit(step, msg)
         )
-    
-    def _on_new(self):
+
+    def _on_new(self) -> None:
         if self.step_list.get_step_count() > 0:
             if not show_question("确认", "是否新建工作流？当前未保存的内容将丢失。"):
                 return
@@ -1103,8 +1103,8 @@ class MainWindow(QMainWindow):
         self.log_widget.clear()
         app_logger.info("新建工作流", "Workflow")
         show_toast("新建工作流", 'info')
-    
-    def _on_open(self):
+
+    def _on_open(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self, "打开工作流", "", "JSON文件 (*.json)"
         )
@@ -1134,8 +1134,8 @@ class MainWindow(QMainWindow):
                 show_toast(f"已打开: {os.path.basename(file_path)}", 'success')
             except Exception as e:
                 show_error("打开失败", f"无法打开文件: {str(e)}")
-    
-    def _on_save(self):
+
+    def _on_save(self) -> None:
         menu = QMenu(self)
         save_file_action = menu.addAction("💾 保存到文件...")
         quick_save_action = menu.addAction("⚡ 快速保存到记录")
