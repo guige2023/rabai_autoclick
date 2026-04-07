@@ -597,6 +597,10 @@ class ThemeManager(QObject):
                 }}
                 QSplitter::handle {{
                     background-color: {c['border']};
+                    transition: background-color 0.2s ease;
+                }}
+                QSplitter::handle:hover {{
+                    background-color: {c['primary']};
                 }}
             """,
             "progress_animated": f"""
@@ -818,6 +822,10 @@ class ThemeManager(QObject):
                 }}
                 QSplitter::handle {{
                     background-color: {c['border']};
+                    transition: background-color 0.2s ease;
+                }}
+                QSplitter::handle:hover {{
+                    background-color: {c['primary']};
                 }}
             """,
             "progress_animated": f"""
