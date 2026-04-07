@@ -1,371 +1,173 @@
-"""Hash utilities for RabAI AutoClick.
+"""
+Hash utilities for checksums, digests, and hash-based data structures.
 
-Provides:
-- Common hash functions (MD5, SHA1, SHA256, etc.)
-- File hashing utilities
-- Incremental hashing
-- Hash-based IDs and checksums
+Provides implementations of common hash functions, Bloom filters,
+and hash ring utilities.
 """
 
+from __future__ import annotations
+
 import hashlib
-import io
-import os
-from typing import (
-    BinaryIO,
-    Callable,
-    Optional,
-    Union,
-)
+import struct
+from typing import Callable
 
 
-def md5(data: Union[bytes, str], hexdigest: bool = True) -> Union[bytes, str]:
-    """Compute MD5 hash.
+def fnv1a(data: bytes, seed: int = 0) -> int:
+    """
+    Fowler-Noll-Vo hash (FNV-1a variant).
 
     Args:
-        data: Data to hash.
-        hexdigest: If True, return hex string; else bytes.
+        data: Bytes to hash
+        seed: Optional seed value
 
     Returns:
-        Hash as hex string or bytes.
+        64-bit hash value
     """
-    if isinstance(data, str):
-        data = data.encode()
-    result = hashlib.md5(data)
-    return result.hexdigest() if hexdigest else result.digest()
+    FNV_OFFSET_BASIS = 14695981039346656037
+    FNV_PRIME = 1099511628211
+    h = FNV_OFFSET_BASIS ^ seed
+    for byte in data:
+        h ^= byte
+        h = (h * FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return h
 
 
-def sha1(data: Union[bytes, str], hexdigest: bool = True) -> Union[bytes, str]:
-    """Compute SHA1 hash.
+def murmurhash3(data: bytes, seed: int = 0) -> int:
+    """
+    MurmurHash3 (32-bit) implementation.
 
     Args:
-        data: Data to hash.
-        hexdigest: If True, return hex string; else bytes.
+        data: Bytes to hash
+        seed: Seed value
 
     Returns:
-        Hash as hex string or bytes.
+        32-bit hash value
     """
-    if isinstance(data, str):
-        data = data.encode()
-    result = hashlib.sha1(data)
-    return result.hexdigest() if hexdigest else result.digest()
+    c1 = 0xcc9e2d51
+    c2 = 0x1b873593
+    length = len(data)
+    h = seed
+    rounded_end = (length // 4) * 4
+    for i in range(0, rounded_end, 4):
+        k = struct.unpack("<I", data[i : i + 4])[0]
+        k = (k * c1) & 0xFFFFFFFF
+        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+        k = (k * c2) & 0xFFFFFFFF
+        h ^= k
+        h = ((h << 13) | (h >> 19)) & 0xFFFFFFFF
+        h = (h * 5 + 0xe6546b64) & 0xFFFFFFFF
+    k = 0
+    tail_size = length % 4
+    if tail_size >= 3:
+        k ^= data[rounded_end + 2] << 16
+    if tail_size >= 2:
+        k ^= data[rounded_end + 1] << 8
+    if tail_size >= 1:
+        k ^= data[rounded_end]
+        k = (k * c1) & 0xFFFFFFFF
+        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+        k = (k * c2) & 0xFFFFFFFF
+        h ^= k
+    h ^= length
+    h ^= (h >> 16)
+    h = (h * 0x85ebca6b) & 0xFFFFFFFF
+    h ^= (h >> 13)
+    h = (h * 0xc2b2ae35) & 0xFFFFFFFF
+    h ^= (h >> 16)
+    return h
 
 
-def sha256(data: Union[bytes, str], hexdigest: bool = True) -> Union[bytes, str]:
-    """Compute SHA256 hash.
+def djb2(data: bytes) -> int:
+    """DJB2 hash function (Daniel J. Bernstein)."""
+    h = 5381
+    for byte in data:
+        h = ((h << 5) + h + byte) & 0xFFFFFFFF
+    return h
+
+
+def sdbm(data: bytes) -> int:
+    """SDBM hash function."""
+    h = 0
+    for byte in data:
+        h = (byte + (h << 6) + (h << 16) - h) & 0xFFFFFFFF
+    return h
+
+
+class BloomFilter:
+    """
+    Simple Bloom filter for set membership testing.
 
     Args:
-        data: Data to hash.
-        hexdigest: If True, return hex string; else bytes.
-
-    Returns:
-        Hash as hex string or bytes.
+        size: Number of bits in filter
+        num_hashes: Number of hash functions
     """
-    if isinstance(data, str):
-        data = data.encode()
-    result = hashlib.sha256(data)
-    return result.hexdigest() if hexdigest else result.digest()
+
+    def __init__(self, size: int = 10000, num_hashes: int = 7) -> None:
+        self.size = size
+        self.num_hashes = num_hashes
+        self.bits = [False] * size
+
+    def _get_hash_positions(self, item: bytes) -> list[int]:
+        """Get bit positions for an item."""
+        h1 = murmurhash3(item) % self.size
+        h2 = djb2(item) % self.size
+        return [(h1 + i * h2) % self.size for i in range(self.num_hashes)]
+
+    def add(self, item: bytes) -> None:
+        """Add item to filter."""
+        for pos in self._get_hash_positions(item):
+            self.bits[pos] = True
+
+    def might_contain(self, item: bytes) -> bool:
+        """Check if item might be in filter (may have false positives)."""
+        return all(self.bits[pos] for pos in self._get_hash_positions(item))
+
+    def __len__(self) -> int:
+        return sum(self.bits)
+
+    def false_positive_rate(self, n: int) -> float:
+        """Estimate false positive rate for n insertions."""
+        k = self.num_hashes
+        m = self.size
+        exponent = -k * n / m
+        return (1 - math.e**exponent) ** k
 
 
-def sha512(data: Union[bytes, str], hexdigest: bool = True) -> Union[bytes, str]:
-    """Compute SHA512 hash.
-
-    Args:
-        data: Data to hash.
-        hexdigest: If True, return hex string; else bytes.
-
-    Returns:
-        Hash as hex string or bytes.
-    """
-    if isinstance(data, str):
-        data = data.encode()
-    result = hashlib.sha512(data)
-    return result.hexdigest() if hexdigest else result.digest()
+import math
 
 
-def sha3_256(data: Union[bytes, str], hexdigest: bool = True) -> Union[bytes, str]:
-    """Compute SHA3-256 hash.
-
-    Args:
-        data: Data to hash.
-        hexdigest: If True, return hex string; else bytes.
-
-    Returns:
-        Hash as hex string or bytes.
-    """
-    if isinstance(data, str):
-        data = data.encode()
-    result = hashlib.sha3_256(data)
-    return result.hexdigest() if hexdigest else result.digest()
-
-
-def sha3_512(data: Union[bytes, str], hexdigest: bool = True) -> Union[bytes, str]:
-    """Compute SHA3-512 hash.
-
-    Args:
-        data: Data to hash.
-        hexdigest: If True, return hex string; else bytes.
-
-    Returns:
-        Hash as hex string or bytes.
-    """
-    if isinstance(data, str):
-        data = data.encode()
-    result = hashlib.sha3_512(data)
-    return result.hexdigest() if hexdigest else result.digest()
-
-
-def blake2b(data: Union[bytes, str], hexdigest: bool = True) -> Union[bytes, str]:
-    """Compute BLAKE2b hash.
-
-    Args:
-        data: Data to hash.
-        hexdigest: If True, return hex string; else bytes.
-
-    Returns:
-        Hash as hex string or bytes.
-    """
-    if isinstance(data, str):
-        data = data.encode()
-    result = hashlib.blake2b(data)
-    return result.hexdigest() if hexdigest else result.digest()
-
-
-def blake2s(data: Union[bytes, str], hexdigest: bool = True) -> Union[bytes, str]:
-    """Compute BLAKE2s hash.
-
-    Args:
-        data: Data to hash.
-        hexdigest: If True, return hex string; else bytes.
-
-    Returns:
-        Hash as hex string or bytes.
-    """
-    if isinstance(data, str):
-        data = data.encode()
-    result = hashlib.blake2s(data)
-    return result.hexdigest() if hexdigest else result.digest()
-
-
-def file_hash(
-    filepath: str,
-    algorithm: str = "sha256",
-    chunk_size: int = 8192,
+def consistent_hash(
+    key: str,
+    nodes: list[str],
+    replicas: int = 100,
+    hash_fn: Callable[[bytes], int] | None = None,
 ) -> str:
-    """Compute hash of a file.
+    """
+    Consistent hashing to determine which node a key maps to.
 
     Args:
-        filepath: Path to the file.
-        algorithm: Hash algorithm name.
-        chunk_size: Read chunk size in bytes.
+        key: Key to hash
+        nodes: List of node identifiers
+        replicas: Number of virtual nodes per physical node
+        hash_fn: Hash function (default: djb2)
 
     Returns:
-        Hex digest of the file hash.
+        Node identifier that should handle the key
     """
-    hasher = hashlib.new(algorithm)
-    with open(filepath, "rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            hasher.update(chunk)
-    return hasher.hexdigest()
+    if not nodes:
+        raise ValueError("No nodes provided")
+    if hash_fn is None:
+        hash_fn = lambda b: djb2(b)
 
+    positions: dict[int, str] = {}
+    for node in nodes:
+        for i in range(replicas):
+            pos = hash_fn(f"{node}#{i}".encode())
+            positions[pos] = node
 
-def file_hash_stream(
-    stream: BinaryIO,
-    algorithm: str = "sha256",
-    chunk_size: int = 8192,
-) -> str:
-    """Compute hash of a stream.
-
-    Args:
-        stream: File-like object to hash.
-        algorithm: Hash algorithm name.
-        chunk_size: Read chunk size in bytes.
-
-    Returns:
-        Hex digest of the stream hash.
-    """
-    hasher = hashlib.new(algorithm)
-    while True:
-        chunk = stream.read(chunk_size)
-        if not chunk:
-            break
-        hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def hash_bytes(
-    data: bytes,
-    algorithm: str = "sha256",
-    hexdigest: bool = True,
-) -> Union[bytes, str]:
-    """Compute hash of bytes with a specific algorithm.
-
-    Args:
-        data: Data to hash.
-        algorithm: Hash algorithm name.
-        hexdigest: If True, return hex string; else bytes.
-
-    Returns:
-        Hash as hex string or bytes.
-    """
-    hasher = hashlib.new(algorithm)
-    hasher.update(data)
-    return hasher.hexdigest() if hexdigest else hasher.digest()
-
-
-class IncrementalHasher:
-    """Incremental hasher for streaming data."""
-
-    def __init__(
-        self,
-        algorithm: str = "sha256",
-    ) -> None:
-        """Initialize incremental hasher.
-
-        Args:
-            algorithm: Hash algorithm name.
-        """
-        self._hasher = hashlib.new(algorithm)
-
-    def update(self, data: bytes) -> None:
-        """Update hash with more data.
-
-        Args:
-            data: Additional data to hash.
-        """
-        self._hasher.update(data)
-
-    def digest(self) -> bytes:
-        """Get raw hash digest."""
-        return self._hasher.digest()
-
-    def hexdigest(self) -> str:
-        """Get hex string hash digest."""
-        return self._hasher.hexdigest()
-
-    def copy(self) -> "IncrementalHasher":
-        """Create a copy of the current hasher state."""
-        new_hasher = IncrementalHasher.__new__(IncrementalHasher)
-        new_hasher._hasher = self._hasher.copy()
-        return new_hasher
-
-
-def hash_file_md5(filepath: str) -> str:
-    """Compute MD5 hash of a file (convenience function).
-
-    Args:
-        filepath: Path to the file.
-
-    Returns:
-        MD5 hex digest.
-    """
-    return file_hash(filepath, algorithm="md5")
-
-
-def hash_file_sha256(filepath: str) -> str:
-    """Compute SHA256 hash of a file (convenience function).
-
-    Args:
-        filepath: Path to the file.
-
-    Returns:
-        SHA256 hex digest.
-    """
-    return file_hash(filepath, algorithm="sha256")
-
-
-def hash_directory(
-    dirpath: str,
-    algorithm: str = "sha256",
-    ignore_hidden: bool = True,
-) -> str:
-    """Compute hash of a directory (all files sorted).
-
-    Args:
-        dirpath: Path to the directory.
-        algorithm: Hash algorithm name.
-        ignore_hidden: If True, skip hidden files and directories.
-
-    Returns:
-        Combined hash of all files.
-    """
-    import os
-
-    def _walk_and_hash():
-        paths = []
-        for root, dirs, files in os.walk(dirpath):
-            if ignore_hidden:
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                files = [f for f in files if not f.startswith(".")]
-
-            dirs.sort()
-            for filename in sorted(files):
-                full_path = os.path.join(root, filename)
-                rel_path = os.path.relpath(full_path, dirpath)
-                paths.append((rel_path, full_path))
-
-        hasher = IncrementalHasher(algorithm=algorithm)
-        for rel_path, full_path in paths:
-            hasher.update(rel_path.encode())
-            hasher.update(file_hash(full_path, algorithm).encode())
-
-        return hasher.hexdigest()
-
-    return _walk_and_hash()
-
-
-def checksum(data: Union[bytes, str], algorithm: str = "crc32") -> int:
-    """Compute a simple checksum.
-
-    Args:
-        data: Data to checksum.
-        algorithm: Algorithm ("crc32" or "adler32").
-
-    Returns:
-        Checksum as integer.
-    """
-    if isinstance(data, str):
-        data = data.encode()
-
-    if algorithm == "crc32":
-        return hashlib.crc32(data) & 0xFFFFFFFF
-    elif algorithm == "adler32":
-        return hashlib.adler32(data) & 0xFFFFFFFF
-    else:
-        raise ValueError(f"Unknown algorithm: {algorithm}")
-
-
-def checksum_hex(data: Union[bytes, str], algorithm: str = "crc32") -> str:
-    """Compute a hex checksum.
-
-    Args:
-        data: Data to checksum.
-        algorithm: Algorithm ("crc32" or "adler32").
-
-    Returns:
-        Checksum as hex string.
-    """
-    return f"{checksum(data, algorithm):08x}"
-
-
-def hash_to_id(
-    data: Union[bytes, str],
-    prefix: str = "",
-    length: int = 12,
-) -> str:
-    """Generate a short hash-based ID.
-
-    Args:
-        data: Data to hash.
-        prefix: Optional prefix for the ID.
-        length: Length of hash to use (in hex chars).
-
-    Returns:
-        Short ID string like "abc123" or "user_abc123".
-    """
-    hex_hash = sha256(data, hexdigest=True)[:length]
-    if prefix:
-        return f"{prefix}_{hex_hash}"
-    return hex_hash
+    key_pos = hash_fn(key.encode())
+    sorted_positions = sorted(positions.keys())
+    for pos in sorted_positions:
+        if key_pos <= pos:
+            return positions[pos]
+    return positions[sorted_positions[0]]
