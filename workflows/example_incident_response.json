@@ -1,0 +1,162 @@
+{
+  "name": "Incident Response Workflow",
+  "description": "Automate security incident response procedures",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "incidents_to_review": 10,
+    "current_incident": 0,
+    "critical_count": 0,
+    "resolved_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "incident_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize incident counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open incident dashboard"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for dashboard"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "incident_loop",
+      "count": "{{incidents_to_review}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start incident loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on incident"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for incident details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/incident_{{incident_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture incident screenshot"
+    },
+    {
+      "id": 8,
+      "type": "condition",
+      "condition": "{{incident_counter % 5 == 0}}",
+      "true_next": 9,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check severity level"
+    },
+    {
+      "id": 9,
+      "type": "click",
+      "x": 350,
+      "y": 350,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Escalate critical incident"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 13,
+      "pre_delay": 0.1,
+      "comment": "Skip to next incident"
+    },
+    {
+      "id": 11,
+      "type": "click",
+      "x": 400,
+      "y": 400,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Mark as resolved"
+    },
+    {
+      "id": 12,
+      "type": "set_variable",
+      "name": "resolved_count",
+      "value": "{{resolved_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment resolved count"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "incident_counter",
+      "value": "{{incident_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment incident counter"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{incident_counter < incidents_to_review}}",
+      "true_next": 15,
+      "false_next": 16,
+      "pre_delay": 0.1,
+      "comment": "Check if more incidents"
+    },
+    {
+      "id": 15,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next incident"
+    },
+    {
+      "id": 16,
+      "type": "screenshot",
+      "save_path": "./screenshots/incident_response_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
