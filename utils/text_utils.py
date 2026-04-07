@@ -402,3 +402,5 @@ def count_lines(text: str) -> int:
 
     Returns:
         Line count.
+    """
+    return len(text.splitlines())

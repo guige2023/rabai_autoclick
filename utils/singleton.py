@@ -169,16 +169,14 @@ def threaded_singleton(cls: Type[T]) -> Type[T]:
     _instance = None
     _lock = threading.Lock()
 
-    class Wrapper(cls):  # type: ignore
-        def __new__(cls, *args, **kwargs):
-            if _instance is None:
-                global _instance
-                with _lock:
-                    if _instance is None:
-                        _instance = super().__new__(cls)
-                        _instance.__init__(*args, **kwargs)
-            return _instance
+    def get_singleton(*args: Any, **kwargs: Any) -> T:
+        nonlocal _instance
+        if _instance is None:
+            with _lock:
+                if _instance is None:
+                    _instance = cls(*args, **kwargs)
+        return _instance
 
-    Wrapper.__name__ = cls.__name__
-    Wrapper.__doc__ = cls.__doc__
-    return Wrapper
+    get_singleton.__name__ = cls.__name__
+    get_singleton.__doc__ = cls.__doc__
+    return get_singleton  # type: ignore
