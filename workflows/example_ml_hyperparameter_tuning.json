@@ -1,0 +1,117 @@
+{
+  "name": "ML Hyperparameter Tuning Workflow",
+  "description": "Automate hyperparameter tuning",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "experiments_to_run": 50,
+    "current_experiment": 0,
+    "completed_experiments": 0,
+    "failed_experiments": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "experiment_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize experiment counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open hyperparameter tuning tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "hyperparameter_tuning_loop",
+      "count": "{{experiments_to_run}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start hyperparameter tuning loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select experiment for tuning"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for tuning"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/hyperparameter_tuning_{{experiment_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture tuning screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "experiment_counter",
+      "value": "{{experiment_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment experiment counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{experiment_counter < experiments_to_run}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more experiments"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next experiment"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/ml_hyperparameter_tuning_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
