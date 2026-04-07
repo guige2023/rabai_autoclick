@@ -1326,8 +1326,8 @@ class MainWindow(QMainWindow):
         self.variables_widget.set_variables(self.current_workflow.get('variables', {}))
         show_toast("已加载历史记录", 'success')
         app_logger.info("从历史记录加载工作流", "Workflow")
-    
-    def _on_action_selected(self, index):
+
+    def _on_action_selected(self, index: int) -> None:
         if index >= 0:
             item = self.action_list.item(index)
             action_type = item.data(Qt.UserRole)
@@ -1335,7 +1335,7 @@ class MainWindow(QMainWindow):
             if widget:
                 self.config_stack.setCurrentWidget(widget)
 
-    def _on_add_step(self):
+    def _on_add_step(self) -> None:
         current_row = self.action_list.currentRow()
         if current_row < 0:
             show_warning("提示", "请先选择一个动作类型")
@@ -1364,8 +1364,8 @@ class MainWindow(QMainWindow):
         self.step_list.set_current_index(self.step_list.get_step_count() - 1)
 
         app_logger.info(f"添加步骤: {display_name}", "Editor")
-    
-    def _on_remove_step(self):
+
+    def _on_remove_step(self) -> None:
         index = self.step_list.get_current_index()
         if index >= 0:
             item = self.step_list.list_widget.item(index)
