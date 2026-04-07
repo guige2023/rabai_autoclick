@@ -1,375 +1,296 @@
-"""Mathematical operations action module for RabAI AutoClick.
+"""Math operations action module for RabAI AutoClick.
 
 Provides math operations:
-- MathAddAction: Addition
-- MathSubtractAction: Subtraction
-- MathMultiplyAction: Multiplication
-- MathDivideAction: Division
-- MathPowerAction: Power
-- MathSqrtAction: Square root
-- MathAbsAction: Absolute value
-- MathRoundAction: Round number
-- MathMinMaxAction: Min/max of numbers
-- MathSumProductAction: Sum and product
-- MathPercentAction: Percentage calculation
+- MathBasicAction: Basic arithmetic
+- MathAdvancedAction: Advanced math functions
+- MathStatisticsAction: Statistical functions
+- MathTrigonometryAction: Trigonometric functions
+- MathRandomAction: Random number generation
 """
 
-from __future__ import annotations
-
 import math
-import sys
-from typing import Any, Dict, List, Optional, Union
+import random
+import statistics
+from typing import Any, Dict, List, Optional
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class MathAddAction(BaseAction):
-    """Addition."""
-    action_type = "math_add"
-    display_name = "数学加法"
-    description = "加法运算"
-    version = "1.0"
+class MathBasicAction(BaseAction):
+    """Basic arithmetic."""
+    action_type = "math_basic"
+    display_name = "基础数学"
+    description = "基础数学运算"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute add."""
-        a = params.get('a', 0)
-        b = params.get('b', 0)
-        output_var = params.get('output_var', 'math_result')
-
         try:
-            resolved_a = context.resolve_value(a) if context else a
-            resolved_b = context.resolve_value(b) if context else b
-            result = float(resolved_a) + float(resolved_b)
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"{resolved_a} + {resolved_b} = {result}", data={'result': result})
+            operation = params.get("operation", "add")
+            a = params.get("a", 0)
+            b = params.get("b", 0)
+            values = params.get("values", [])
+
+            if values:
+                nums = [float(v) for v in values if v is not None]
+            else:
+                nums = [float(a), float(b)]
+
+            if operation == "add":
+                result = sum(nums)
+            elif operation == "subtract":
+                if len(nums) >= 2:
+                    result = nums[0] - sum(nums[1:])
+                else:
+                    result = nums[0]
+            elif operation == "multiply":
+                result = 1
+                for n in nums:
+                    result *= n
+            elif operation == "divide":
+                if nums[1] == 0:
+                    return ActionResult(success=False, message="Division by zero")
+                result = nums[0] / nums[1]
+            elif operation == "modulo":
+                result = nums[0] % nums[1]
+            elif operation == "power":
+                result = nums[0] ** nums[1]
+            elif operation == "sqrt":
+                result = math.sqrt(nums[0])
+            elif operation == "abs":
+                result = abs(nums[0])
+            elif operation == "floor":
+                result = math.floor(nums[0])
+            elif operation == "ceil":
+                result = math.ceil(nums[0])
+            elif operation == "round":
+                decimals = params.get("decimals", 0)
+                result = round(nums[0], decimals)
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+            return ActionResult(success=True, message=f"{operation} = {result}", data={"result": result})
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Add error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'a': 0, 'b': 0, 'output_var': 'math_result'}
+            return ActionResult(success=False, message=f"Math error: {str(e)}")
 
 
-class MathSubtractAction(BaseAction):
-    """Subtraction."""
-    action_type = "math_subtract"
-    display_name = "数学减法"
-    description = "减法运算"
-    version = "1.0"
+class MathAdvancedAction(BaseAction):
+    """Advanced math functions."""
+    action_type = "math_advanced"
+    display_name = "高等数学"
+    description = "高等数学函数"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute subtract."""
-        a = params.get('a', 0)
-        b = params.get('b', 0)
-        output_var = params.get('output_var', 'math_result')
-
         try:
-            resolved_a = context.resolve_value(a) if context else a
-            resolved_b = context.resolve_value(b) if context else b
-            result = float(resolved_a) - float(resolved_b)
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"{resolved_a} - {resolved_b} = {result}", data={'result': result})
+            operation = params.get("operation", "")
+            value = params.get("value", 0)
+            values = params.get("values", [])
+
+            if values:
+                nums = [float(v) for v in values]
+            else:
+                nums = [float(value)]
+
+            if operation == "log":
+                base = params.get("base", math.e)
+                if len(nums) >= 2:
+                    result = math.log(nums[1], nums[0])
+                else:
+                    result = math.log(nums[0], base)
+            elif operation == "log10":
+                result = math.log10(nums[0])
+            elif operation == "log2":
+                result = math.log2(nums[0])
+            elif operation == "exp":
+                result = math.exp(nums[0])
+            elif operation == "factorial":
+                result = math.factorial(int(nums[0]))
+            elif operation == "gcd":
+                if len(nums) >= 2:
+                    result = math.gcd(int(nums[0]), int(nums[1]))
+                else:
+                    result = nums[0]
+            elif operation == "lcm":
+                if len(nums) >= 2:
+                    result = abs(nums[0] * nums[1]) // math.gcd(int(nums[0]), int(nums[1]))
+                else:
+                    result = nums[0]
+            elif operation == "degrees":
+                result = math.degrees(nums[0])
+            elif operation == "radians":
+                result = math.radians(nums[0])
+            elif operation == "hypot":
+                result = math.hypot(*nums)
+            elif operation == "isfinite":
+                result = math.isfinite(nums[0])
+            elif operation == "isinf":
+                result = math.isinf(nums[0])
+            elif operation == "isnan":
+                result = math.isnan(nums[0])
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+            return ActionResult(success=True, message=f"{operation} = {result}", data={"result": result})
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Subtract error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'a': 0, 'b': 0, 'output_var': 'math_result'}
+            return ActionResult(success=False, message=f"Advanced math error: {str(e)}")
 
 
-class MathMultiplyAction(BaseAction):
-    """Multiplication."""
-    action_type = "math_multiply"
-    display_name = "数学乘法"
-    description = "乘法运算"
-    version = "1.0"
+class MathStatisticsAction(BaseAction):
+    """Statistical functions."""
+    action_type = "math_statistics"
+    display_name = "统计函数"
+    description = "统计函数"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute multiply."""
-        a = params.get('a', 1)
-        b = params.get('b', 1)
-        output_var = params.get('output_var', 'math_result')
-
         try:
-            resolved_a = context.resolve_value(a) if context else a
-            resolved_b = context.resolve_value(b) if context else b
-            result = float(resolved_a) * float(resolved_b)
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"{resolved_a} * {resolved_b} = {result}", data={'result': result})
+            operation = params.get("operation", "mean")
+            values = params.get("values", [])
+
+            if not values:
+                return ActionResult(success=False, message="No values provided")
+
+            nums = [float(v) for v in values]
+
+            if operation == "mean":
+                result = statistics.mean(nums)
+            elif operation == "median":
+                result = statistics.median(nums)
+            elif operation == "mode":
+                result = statistics.mode(nums)
+            elif operation == "stdev":
+                result = statistics.stdev(nums)
+            elif operation == "variance":
+                result = statistics.variance(nums)
+            elif operation == "pvariance":
+                result = statistics.pvariance(nums)
+            elif operation == "sum":
+                result = sum(nums)
+            elif operation == "min":
+                result = min(nums)
+            elif operation == "max":
+                result = max(nums)
+            elif operation == "count":
+                result = len(nums)
+            elif operation == "median_low":
+                result = statistics.median_low(nums)
+            elif operation == "median_high":
+                result = statistics.median_high(nums)
+            elif operation == "quantiles":
+                n = params.get("n", 4)
+                result = statistics.quantiles(nums, n=n)
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+            return ActionResult(success=True, message=f"{operation} = {result}", data={"result": result, "count": len(nums)})
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Multiply error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'a': 1, 'b': 1, 'output_var': 'math_result'}
+            return ActionResult(success=False, message=f"Statistics error: {str(e)}")
 
 
-class MathDivideAction(BaseAction):
-    """Division."""
-    action_type = "math_divide"
-    display_name = "数学除法"
-    description = "除法运算"
-    version = "1.0"
+class MathTrigonometryAction(BaseAction):
+    """Trigonometric functions."""
+    action_type = "math_trig"
+    display_name = "三角函数"
+    description = "三角函数运算"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute divide."""
-        a = params.get('a', 1)
-        b = params.get('b', 1)
-        output_var = params.get('output_var', 'math_result')
-
         try:
-            resolved_a = context.resolve_value(a) if context else a
-            resolved_b = context.resolve_value(b) if context else b
-            if float(resolved_b) == 0:
-                return ActionResult(success=False, message="Division by zero")
-            result = float(resolved_a) / float(resolved_b)
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"{resolved_a} / {resolved_b} = {result}", data={'result': result})
+            operation = params.get("operation", "sin")
+            value = params.get("value", 0)
+            degrees = params.get("degrees", False)
+
+            angle = float(value)
+            if degrees:
+                angle = math.radians(angle)
+
+            if operation == "sin":
+                result = math.sin(angle)
+            elif operation == "cos":
+                result = math.cos(angle)
+            elif operation == "tan":
+                result = math.tan(angle)
+            elif operation == "asin":
+                result = math.asin(angle)
+                if degrees:
+                    result = math.degrees(result)
+            elif operation == "acos":
+                result = math.acos(angle)
+                if degrees:
+                    result = math.degrees(result)
+            elif operation == "atan":
+                result = math.atan(angle)
+                if degrees:
+                    result = math.degrees(result)
+            elif operation == "atan2":
+                y = params.get("y", 0)
+                result = math.atan2(float(y), angle)
+                if degrees:
+                    result = math.degrees(result)
+            elif operation == "sinh":
+                result = math.sinh(angle)
+            elif operation == "cosh":
+                result = math.cosh(angle)
+            elif operation == "tanh":
+                result = math.tanh(angle)
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+            return ActionResult(success=True, message=f"{operation}({value}) = {result}", data={"result": result})
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Divide error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'a': 1, 'b': 1, 'output_var': 'math_result'}
+            return ActionResult(success=False, message=f"Trig error: {str(e)}")
 
 
-class MathPowerAction(BaseAction):
-    """Power."""
-    action_type = "math_power"
-    display_name = "数学幂运算"
-    description = "幂运算"
-    version = "1.0"
+class MathRandomAction(BaseAction):
+    """Random number generation."""
+    action_type = "math_random"
+    display_name = "随机数"
+    description = "随机数生成"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute power."""
-        base = params.get('base', 2)
-        exponent = params.get('exponent', 3)
-        output_var = params.get('output_var', 'math_result')
-
         try:
-            resolved_base = context.resolve_value(base) if context else base
-            resolved_exp = context.resolve_value(exponent) if context else exponent
-            result = float(resolved_base) ** float(resolved_exp)
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"{resolved_base}^{resolved_exp} = {result}", data={'result': result})
+            operation = params.get("operation", "random")
+            min_val = params.get("min", 0)
+            max_val = params.get("max", 1)
+            count = params.get("count", 1)
+            seed = params.get("seed", None)
+
+            if seed is not None:
+                random.seed(seed)
+
+            if operation == "random":
+                results = [random.random() for _ in range(count)]
+            elif operation == "uniform":
+                results = [random.uniform(min_val, max_val) for _ in range(count)]
+            elif operation == "randint":
+                results = [random.randint(int(min_val), int(max_val)) for _ in range(count)]
+            elif operation == "randrange":
+                step = params.get("step", 1)
+                results = [random.randrange(int(min_val), int(max_val), step) for _ in range(count)]
+            elif operation == "choice":
+                choices = params.get("choices", [min_val, max_val])
+                results = [random.choice(choices) for _ in range(count)]
+            elif operation == "shuffle":
+                items = params.get("items", list(range(int(min_val), int(max_val) + 1)))
+                result_list = list(items)
+                random.shuffle(result_list)
+                results = result_list
+            elif operation == "sample":
+                population = params.get("population", list(range(int(min_val), int(max_val) + 1)))
+                results = random.sample(population, min(count, len(population)))
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+            return ActionResult(
+                success=True,
+                message=f"Generated {len(results)} random values",
+                data={"results": results, "count": len(results)}
+            )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Power error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'base': 2, 'exponent': 3, 'output_var': 'math_result'}
-
-
-class MathSqrtAction(BaseAction):
-    """Square root."""
-    action_type = "math_sqrt"
-    display_name = "数学平方根"
-    description = "平方根"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute sqrt."""
-        value = params.get('value', 0)
-        output_var = params.get('output_var', 'math_result')
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            val = float(resolved)
-            if val < 0:
-                return ActionResult(success=False, message="Cannot take square root of negative number")
-            result = math.sqrt(val)
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"sqrt({val}) = {result}", data={'result': result})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Sqrt error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'value': 0, 'output_var': 'math_result'}
-
-
-class MathAbsAction(BaseAction):
-    """Absolute value."""
-    action_type = "math_abs"
-    display_name = "数学绝对值"
-    description = "绝对值"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute abs."""
-        value = params.get('value', 0)
-        output_var = params.get('output_var', 'math_result')
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            result = abs(float(resolved))
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"abs({resolved}) = {result}", data={'result': result})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Abs error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'value': 0, 'output_var': 'math_result'}
-
-
-class MathRoundAction(BaseAction):
-    """Round number."""
-    action_type = "math_round"
-    display_name = "数学四舍五入"
-    description = "四舍五入"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute round."""
-        value = params.get('value', 0)
-        decimals = params.get('decimals', 0)
-        output_var = params.get('output_var', 'math_result')
-
-        try:
-            resolved = context.resolve_value(value) if context else value
-            resolved_d = context.resolve_value(decimals) if context else decimals
-            result = round(float(resolved), int(resolved_d))
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"round({resolved}, {resolved_d}) = {result}", data={'result': result})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Round error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'value': 0, 'decimals': 0, 'output_var': 'math_result'}
-
-
-class MathMinMaxAction(BaseAction):
-    """Min and max of numbers."""
-    action_type = "math_minmax"
-    display_name = "数学最值"
-    description = "最小值最大值"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute min/max."""
-        numbers = params.get('numbers', [])
-        output_var = params.get('output_var', 'math_result')
-
-        if not numbers:
-            return ActionResult(success=False, message="numbers is required")
-
-        try:
-            resolved = context.resolve_value(numbers) if context else numbers
-            nums = [float(n) for n in resolved]
-            result = {'min': min(nums), 'max': max(nums), 'count': len(nums)}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"min={result['min']}, max={result['max']}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"MinMax error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['numbers']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'math_result'}
-
-
-class MathSumProductAction(BaseAction):
-    """Sum and product of numbers."""
-    action_type = "math_sump"
-    display_name = "数学总和与乘积"
-    description = "总和与乘积"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute sum/product."""
-        numbers = params.get('numbers', [])
-        output_var = params.get('output_var', 'math_result')
-
-        if not numbers:
-            return ActionResult(success=False, message="numbers is required")
-
-        try:
-            resolved = context.resolve_value(numbers) if context else numbers
-            nums = [float(n) for n in resolved]
-            result = {'sum': sum(nums), 'product': math.prod(nums), 'count': len(nums), 'avg': sum(nums) / len(nums)}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"sum={result['sum']}, product={result['product']}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"SumProduct error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['numbers']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'math_result'}
-
-
-class MathPercentAction(BaseAction):
-    """Percentage calculation."""
-    action_type = "math_percent"
-    display_name = "数学百分比"
-    description = "百分比计算"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute percentage."""
-        value = params.get('value', 0)
-        total = params.get('total', 100)
-        operation = params.get('operation', 'of')  # of, what_percent, percent_of
-        output_var = params.get('output_var', 'math_result')
-
-        try:
-            resolved_val = context.resolve_value(value) if context else value
-            resolved_total = context.resolve_value(total) if context else total
-
-            val = float(resolved_val)
-            total_f = float(resolved_total)
-
-            if operation == 'of':
-                result = (val / 100) * total_f
-                message = f"{val}% of {total_f} = {result}"
-            elif operation == 'what_percent':
-                result = (val / total_f) * 100 if total_f != 0 else 0
-                message = f"{val} / {total_f} = {result}%"
-            else:  # percent_of
-                result = (val / 100) * total_f
-                message = f"{val}% of {total_f} = {result}"
-
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=message, data={'result': result, 'operation': operation})
-        except Exception as e:
-            return ActionResult(success=False, message=f"Percent error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['value']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'total': 100, 'operation': 'of', 'output_var': 'math_result'}
+            return ActionResult(success=False, message=f"Random error: {str(e)}")
