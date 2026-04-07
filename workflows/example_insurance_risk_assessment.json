@@ -1,0 +1,117 @@
+{
+  "name": "Insurance Risk Assessment Workflow",
+  "description": "Automate insurance risk assessment",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "assessments_to_process": 48,
+    "current_assessment": 0,
+    "processed_assessments": 0,
+    "high_risk_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "assessment_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize assessment counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open risk assessment system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "risk_assessment_loop",
+      "count": "{{assessments_to_process}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start risk assessment loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select assessment for processing"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for assessment"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/risk_assessment_{{assessment_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture assessment screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "assessment_counter",
+      "value": "{{assessment_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment assessment counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{assessment_counter < assessments_to_process}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more assessments"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next assessment"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/insurance_risk_assessment_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
