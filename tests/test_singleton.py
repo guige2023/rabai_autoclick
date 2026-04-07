@@ -51,7 +51,7 @@ class TestSingletonDecorator:
         class MyClass:
             pass
 
-        assert MySingleton.__name__ == "MyClass"
+        assert MyClass.__name__ == "MyClass"
 
 
 class TestSingletonWithLock:
