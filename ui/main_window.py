@@ -1519,8 +1519,8 @@ class MainWindow(QMainWindow):
             self._update_button_texts()
             app_logger.info(f"快捷键已更新", "Hotkey")
             show_toast("快捷键设置已保存", 'success')
-    
-    def _on_select_window(self):
+
+    def _on_select_window(self) -> None:
         """选择目标窗口"""
         from utils.window_selector import WindowSelectorDialog
         
@@ -1567,8 +1567,8 @@ class MainWindow(QMainWindow):
         self.window_btn.setText("🪟 窗口")
         self.window_btn.setStyleSheet("")
         show_toast("已清除窗口选择", 'info')
-    
-    def _on_select_region(self):
+
+    def _on_select_region(self) -> None:
         """选择识别区域"""
         if self._target_region and self._window_mode:
             reply = QMessageBox.question(
