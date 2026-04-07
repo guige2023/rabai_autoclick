@@ -1,0 +1,165 @@
+{
+  "name": "仓储库存管理自动化",
+  "description": "自动化仓储库存管理和补货流程",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "warehouse_id": "WH001",
+    "products_to_check": 30,
+    "current_product": 0,
+    "low_stock_threshold": 10,
+    "reorder_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "product_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "初始化产品计数器"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "打开仓库管理系统"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "等待系统加载"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "inventory_loop",
+      "count": "{{products_to_check}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "开始库存检查循环"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 150,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "点击产品"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "等待产品详情"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/inventory_{{product_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "截图库存信息"
+    },
+    {
+      "id": 8,
+      "type": "ocr",
+      "region": [300, 200, 500, 300],
+      "output_var": "stock_level",
+      "pre_delay": 0.3,
+      "comment": "读取库存数量"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{stock_level.includes('low')}}",
+      "true_next": 10,
+      "false_next": 12,
+      "pre_delay": 0.1,
+      "comment": "检查是否低库存"
+    },
+    {
+      "id": 10,
+      "type": "set_variable",
+      "name": "reorder_count",
+      "value": "{{reorder_count + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加补货计数"
+    },
+    {
+      "id": 11,
+      "type": "goto",
+      "step_id": 14,
+      "pre_delay": 0.1,
+      "comment": "跳转到下一个"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 0.5,
+      "pre_delay": 0.2,
+      "comment": "库存正常"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "product_counter",
+      "value": "{{product_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "增加产品计数"
+    },
+    {
+      "id": 14,
+      "type": "key_press",
+      "key": "down",
+      "pre_delay": 0.2,
+      "comment": "移动到下一个产品"
+    },
+    {
+      "id": 15,
+      "type": "condition",
+      "condition": "{{product_counter < products_to_check}}",
+      "true_next": 16,
+      "false_next": 17,
+      "pre_delay": 0.1,
+      "comment": "检查是否还有产品"
+    },
+    {
+      "id": 16,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "继续检查"
+    },
+    {
+      "id": 17,
+      "type": "screenshot",
+      "save_path": "./screenshots/inventory_check_complete.png",
+      "pre_delay": 0.5,
+      "comment": "截图完成状态"
+    },
+    {
+      "id": 18,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "最终延迟"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
