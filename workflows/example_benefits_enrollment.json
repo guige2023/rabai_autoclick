@@ -1,0 +1,116 @@
+{
+  "name": "Benefits Enrollment Workflow",
+  "description": "Automate employee benefits enrollment process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "benefit_plans": ["health", "dental", "vision", "401k"],
+    "current_plan": 0,
+    "employees_to_enroll": 20
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "plan_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize plan index"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open benefits portal"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for portal"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "plans_loop",
+      "count": 4,
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start plans loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Click on plan"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.3,
+      "comment": "Wait for plan details"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/benefit_{{plan_index}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture benefit screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "plan_index",
+      "value": "{{plan_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment plan index"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{plan_index < 4}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more plans"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next plan"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/benefits_enrollment_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
