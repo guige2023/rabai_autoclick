@@ -1,350 +1,184 @@
-"""
-Retry and Backoff Utilities
-
-Provides configurable retry logic with various backoff strategies
-and error classification.
-"""
+"""Retry utilities with backoff strategies and exception handling."""
 
 from __future__ import annotations
 
 import asyncio
-import copy
 import random
 import time
-from abc import ABC, abstractmethod
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Generic, TypeVar
+from dataclasses import dataclass
+from enum import Enum
+from functools import wraps
+from typing import Any, Callable, TypeVar, Union
+
+__all__ = [
+    "BackoffStrategy",
+    "RetryConfig",
+    "retry",
+    "retry_async",
+    "RetryError",
+    "CircuitBreaker",
+]
 
 T = TypeVar("T")
 
 
 class BackoffStrategy(Enum):
-    """Available backoff strategies."""
-    FIXED = auto()
-    LINEAR = auto()
-    EXPONENTIAL = auto()
-    EXPONENTIAL_WITH_JITTER = auto()
-    FIBONACCI = auto()
+    FIXED = "fixed"
+    LINEAR = "linear"
+    EXPONENTIAL = "exponential"
+    FIBONACCI = "fibonacci"
+    JITTER = "jitter"
 
 
 @dataclass
 class RetryConfig:
     """Configuration for retry behavior."""
     max_attempts: int = 3
-    initial_delay_ms: float = 100.0
-    max_delay_ms: float = 30000.0
-    backoff_strategy: BackoffStrategy = BackoffStrategy.EXPONENTIAL_WITH_JITTER
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    strategy: BackoffStrategy = BackoffStrategy.EXPONENTIAL
+    jitter: bool = True
     retryable_exceptions: tuple[type[Exception], ...] = (Exception,)
-    non_retryable_exceptions: tuple[type[Exception], ...] = ()
-    timeout_seconds: float | None = None
+    on_retry: Callable[[Exception, int], None] | None = None
 
 
-@dataclass
-class RetryResult(Generic[T]):
-    """Result of a retry operation."""
-    success: bool
-    value: T | None = None
-    error: Exception | None = None
-    attempts: int = 0
-    total_time_ms: float = 0.0
-    backoff_ms: float = 0.0
-    logs: list[dict[str, Any]] = field(default_factory=list)
+class RetryError(Exception):
+    """Raised when all retry attempts are exhausted."""
 
-    @property
-    def failed(self) -> bool:
-        return not self.success
+    def __init__(self, message: str, attempts: int, last_exception: Exception) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.last_exception = last_exception
 
 
-class BackoffCalculator:
-    """
-    Calculates backoff delays based on strategy.
-    """
+def _calculate_delay(
+    attempt: int,
+    config: RetryConfig,
+) -> float:
+    if config.strategy == BackoffStrategy.FIXED:
+        delay = config.base_delay
+    elif config.strategy == BackoffStrategy.LINEAR:
+        delay = config.base_delay * attempt
+    elif config.strategy == BackoffStrategy.EXPONENTIAL:
+        delay = config.base_delay * (2 ** (attempt - 1))
+    elif config.strategy == BackoffStrategy.FIBONACCI:
+        a, b = 1, 1
+        for _ in range(attempt - 1):
+            a, b = b, a + b
+        delay = config.base_delay * a
+    else:
+        delay = config.base_delay
 
-    def __init__(self, strategy: BackoffStrategy, initial_delay_ms: float, max_delay_ms: float):
-        self.strategy = strategy
-        self.initial_delay_ms = initial_delay_ms
-        self.max_delay_ms = max_delay_ms
-        self._fib_prev = 0.0
-        self._fib_curr = 1.0
+    delay = min(delay, config.max_delay)
 
-    def calculate(self, attempt: int) -> float:
-        """
-        Calculate delay for the given attempt number.
+    if config.jitter:
+        delay *= 0.5 + random.random()
 
-        Args:
-            attempt: The attempt number (0-indexed).
-
-        Returns:
-            Delay in milliseconds.
-        """
-        if self.strategy == BackoffStrategy.FIXED:
-            delay = self.initial_delay_ms
-
-        elif self.strategy == BackoffStrategy.LINEAR:
-            delay = self.initial_delay_ms * (attempt + 1)
-
-        elif self.strategy == BackoffStrategy.EXPONENTIAL:
-            delay = self.initial_delay_ms * (2 ** attempt)
-
-        elif self.strategy == BackoffStrategy.EXPONENTIAL_WITH_JITTER:
-            base_delay = self.initial_delay_ms * (2 ** attempt)
-            jitter = random.uniform(0, 0.3) * base_delay
-            delay = base_delay + jitter
-
-        elif self.strategy == BackoffStrategy.FIBONACCI:
-            if attempt == 0:
-                delay = self.initial_delay_ms
-            else:
-                fib = self._fib_prev + self._fib_curr
-                self._fib_prev = self._fib_curr
-                self._fib_curr = fib
-                delay = self.initial_delay_ms * fib
-
-        else:
-            delay = self.initial_delay_ms
-
-        return min(delay, self.max_delay_ms)
-
-    def reset(self) -> None:
-        """Reset the calculator state."""
-        self._fib_prev = 0.0
-        self._fib_curr = 1.0
-
-
-def is_retryable(
-    exception: Exception,
-    retryable: tuple[type[Exception], ...],
-    non_retryable: tuple[type[Exception], ...],
-) -> bool:
-    """
-    Determine if an exception is retryable.
-
-    Args:
-        exception: The exception to check.
-        retryable: Tuple of retryable exception types.
-        non_retryable: Tuple of non-retryable exception types.
-
-    Returns:
-        True if the exception should be retried.
-    """
-    # Non-retryable takes precedence
-    for exc_type in non_retryable:
-        if isinstance(exception, exc_type):
-            return False
-
-    # Check if it's in the retryable list
-    for exc_type in retryable:
-        if isinstance(exception, exc_type):
-            return True
-
-    return False
+    return delay
 
 
 def retry(
-    func: Callable[[], T],
     config: RetryConfig | None = None,
-) -> RetryResult[T]:
-    """
-    Execute a function with retry logic.
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator for retrying a function with backoff."""
+    cfg = config or RetryConfig()
 
-    Args:
-        func: Function to execute.
-        config: Retry configuration.
-
-    Returns:
-        RetryResult with execution details.
-    """
-    config = config or RetryConfig()
-    calculator = BackoffCalculator(
-        config.backoff_strategy,
-        config.initial_delay_ms,
-        config.max_delay_ms,
-    )
-
-    start_time = time.time()
-    logs: list[dict[str, Any]] = []
-    last_error: Exception | None = None
-
-    for attempt in range(config.max_attempts):
-        attempt_start = time.time()
-
-        try:
-            result = func()
-            elapsed = (time.time() - start_time) * 1000
-
-            return RetryResult(
-                success=True,
-                value=result,
-                attempts=attempt + 1,
-                total_time_ms=elapsed,
-                backoff_ms=calculator.calculate(attempt - 1) if attempt > 0 else 0,
-                logs=logs,
+    def decorator(fn: Callable[..., T]) -> Callable[..., T]:
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            last_exception: Exception | None = None
+            for attempt in range(1, cfg.max_attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except cfg.retryable_exceptions as e:
+                    last_exception = e
+                    if attempt == cfg.max_attempts:
+                        break
+                    delay = _calculate_delay(attempt, cfg)
+                    if cfg.on_retry:
+                        cfg.on_retry(e, attempt)
+                    time.sleep(delay)
+            raise RetryError(
+                f"Failed after {cfg.max_attempts} attempts",
+                cfg.max_attempts,
+                last_exception or RuntimeError("Unknown error"),
             )
-
-        except Exception as e:
-            attempt_elapsed = (time.time() - attempt_start) * 1000
-            last_error = e
-
-            # Check if retryable
-            if not is_retryable(e, config.retryable_exceptions, config.non_retryable_exceptions):
-                elapsed = (time.time() - start_time) * 1000
-                return RetryResult(
-                    success=False,
-                    error=e,
-                    attempts=attempt + 1,
-                    total_time_ms=elapsed,
-                    logs=logs,
-                )
-
-            logs.append({
-                "attempt": attempt + 1,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "duration_ms": attempt_elapsed,
-                "timestamp": time.time(),
-            })
-
-            # Check timeout
-            if config.timeout_seconds:
-                elapsed = (time.time() - start_time) * 1000
-                if elapsed / 1000 >= config.timeout_seconds:
-                    return RetryResult(
-                        success=False,
-                        error=e,
-                        attempts=attempt + 1,
-                        total_time_ms=elapsed,
-                        logs=logs,
-                    )
-
-            # Calculate backoff and sleep
-            if attempt < config.max_attempts - 1:
-                delay_ms = calculator.calculate(attempt)
-                time.sleep(delay_ms / 1000)
-                calculator.reset()
-
-    elapsed = (time.time() - start_time) * 1000
-    return RetryResult(
-        success=False,
-        error=last_error,
-        attempts=config.max_attempts,
-        total_time_ms=elapsed,
-        logs=logs,
-    )
+        return wrapper
+    return decorator
 
 
-async def retry_async(
-    func: Callable[[], T],
+def retry_async(
     config: RetryConfig | None = None,
-) -> RetryResult[T]:
-    """
-    Execute an async function with retry logic.
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Async version of retry decorator."""
+    cfg = config or RetryConfig()
 
-    Args:
-        func: Async function to execute.
-        config: Retry configuration.
-
-    Returns:
-        RetryResult with execution details.
-    """
-    config = config or RetryConfig()
-    calculator = BackoffCalculator(
-        config.backoff_strategy,
-        config.initial_delay_ms,
-        config.max_delay_ms,
-    )
-
-    start_time = time.time()
-    logs: list[dict[str, Any]] = []
-    last_error: Exception | None = None
-
-    for attempt in range(config.max_attempts):
-        attempt_start = time.time()
-
-        try:
-            result = await func()
-            elapsed = (time.time() - start_time) * 1000
-
-            return RetryResult(
-                success=True,
-                value=result,
-                attempts=attempt + 1,
-                total_time_ms=elapsed,
-                backoff_ms=calculator.calculate(attempt - 1) if attempt > 0 else 0,
-                logs=logs,
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(fn)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            last_exception: Exception | None = None
+            for attempt in range(1, cfg.max_attempts + 1):
+                try:
+                    return await fn(*args, **kwargs)
+                except cfg.retryable_exceptions as e:
+                    last_exception = e
+                    if attempt == cfg.max_attempts:
+                        break
+                    delay = _calculate_delay(attempt, cfg)
+                    if cfg.on_retry:
+                        cfg.on_retry(e, attempt)
+                    await asyncio.sleep(delay)
+            raise RetryError(
+                f"Failed after {cfg.max_attempts} attempts",
+                cfg.max_attempts,
+                last_exception or RuntimeError("Unknown error"),
             )
-
-        except Exception as e:
-            attempt_elapsed = (time.time() - attempt_start) * 1000
-            last_error = e
-
-            if not is_retryable(e, config.retryable_exceptions, config.non_retryable_exceptions):
-                elapsed = (time.time() - start_time) * 1000
-                return RetryResult(
-                    success=False,
-                    error=e,
-                    attempts=attempt + 1,
-                    total_time_ms=elapsed,
-                    logs=logs,
-                )
-
-            logs.append({
-                "attempt": attempt + 1,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "duration_ms": attempt_elapsed,
-                "timestamp": time.time(),
-            })
-
-            if attempt < config.max_attempts - 1:
-                delay_ms = calculator.calculate(attempt)
-                await asyncio.sleep(delay_ms / 1000)
-                calculator.reset()
-
-    elapsed = (time.time() - start_time) * 1000
-    return RetryResult(
-        success=False,
-        error=last_error,
-        attempts=config.max_attempts,
-        total_time_ms=elapsed,
-        logs=logs,
-    )
+        return wrapper
+    return decorator
 
 
-class RetryableOperation(Generic[T]):
-    """
-    Wrapper for making operations retryable.
-    """
+class CircuitBreaker:
+    """Circuit breaker pattern implementation."""
 
     def __init__(
         self,
-        func: Callable[[], T],
-        config: RetryConfig | None = None,
-    ):
-        self._func = func
-        self._config = config or RetryConfig()
+        failure_threshold: int = 5,
+        recovery_timeout: float = 60.0,
+        expected_exception: type[Exception] = Exception,
+    ) -> None:
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.expected_exception = expected_exception
+        self._failure_count = 0
+        self._last_failure_time: float | None = None
+        self._state = "closed"
 
-    def execute(self) -> RetryResult[T]:
-        """Execute with retry."""
-        return retry(self._func, self._config)
+    @property
+    def state(self) -> str:
+        if self._state == "open":
+            if self._last_failure_time:
+                if time.time() - self._last_failure_time >= self.recovery_timeout:
+                    self._state = "half-open"
+        return self._state
 
-    async def execute_async(self) -> RetryResult[T]:
-        """Execute async with retry."""
-        return await retry_async(self._func, self._config)
+    def call(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        if self.state == "open":
+            raise RuntimeError("Circuit breaker is OPEN")
 
+        try:
+            result = fn(*args, **kwargs)
+            if self._state == "half-open":
+                self._state = "closed"
+                self._failure_count = 0
+            return result
+        except self.expected_exception as e:
+            self._failure_count += 1
+            self._last_failure_time = time.time()
+            if self._failure_count >= self.failure_threshold:
+                self._state = "open"
+            raise
 
-def with_retry(
-    config: RetryConfig | None = None,
-) -> Callable[[Callable[[], T]], RetryableOperation[T]]:
-    """
-    Decorator to make a function retryable.
-
-    Usage:
-        @with_retry(RetryConfig(max_attempts=5))
-        def my_function():
-            ...
-    """
-    def decorator(func: Callable[[], T]) -> RetryableOperation[T]:
-        return RetryableOperation(func, config)
-    return decorator
+    def reset(self) -> None:
+        self._failure_count = 0
+        self._last_failure_time = None
+        self._state = "closed"
