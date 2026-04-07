@@ -432,6 +432,14 @@ class ThemeManager(QObject):
                 QStatusBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QProgressBar {{ border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; text-align: center; }}
                 QProgressBar::chunk {{ background-color: {c['primary']}; border-radius: 3px; }}
+                QScrollBar:vertical {{ width: 8px; background: {c['bg_toolbar']}; }}
+                QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 4px; min-height: 20px; }}
+                QScrollBar::handle:vertical:hover {{ background: {c['text_secondary']}; }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+                QScrollBar:horizontal {{ height: 8px; background: {c['bg_toolbar']}; }}
+                QScrollBar::handle:horizontal {{ background: {c['border']}; border-radius: 4px; min-width: 20px; }}
+                QScrollBar::handle:horizontal:hover {{ background: {c['text_secondary']}; }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
             """,
             "mini_toolbar": f"""
                 QWidget {{ background-color: {c['bg_dark_main']}; border-radius: 8px; }}
@@ -639,6 +647,14 @@ class ThemeManager(QObject):
                 QStatusBar {{ background-color: {c['bg_toolbar']}; color: {c['text_primary']}; }}
                 QProgressBar {{ border: 1px solid {c['border']}; border-radius: 4px; background-color: {c['bg_widget']}; text-align: center; }}
                 QProgressBar::chunk {{ background-color: {c['primary']}; border-radius: 3px; }}
+                QScrollBar:vertical {{ width: 8px; background: {c['bg_toolbar']}; }}
+                QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 4px; min-height: 20px; }}
+                QScrollBar::handle:vertical:hover {{ background: {c['text_secondary']}; }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+                QScrollBar:horizontal {{ height: 8px; background: {c['bg_toolbar']}; }}
+                QScrollBar::handle:horizontal {{ background: {c['border']}; border-radius: 4px; min-width: 20px; }}
+                QScrollBar::handle:horizontal:hover {{ background: {c['text_secondary']}; }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
             """,
             "mini_toolbar": f"""
                 QWidget {{ background-color: {c['bg_dark_main']}; border-radius: 8px; }}
