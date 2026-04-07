@@ -1,632 +1,318 @@
-"""Heap data structure and utilities for RabAI AutoClick.
+"""
+Heap and priority queue utilities.
 
-Provides:
-- Min-heap implementation
-- Max-heap implementation
-- Priority queue
-- Indexed heap (decrease-key support)
-- Heap sort
-- Top-K algorithms
-- Merge K sorted sequences
+Provides min/max heaps, Fibonacci heap, heap sort, and
+k-largest/k-smallest element finding.
 """
 
 from __future__ import annotations
 
-import heapq
-from dataclasses import dataclass, field
-from typing import (
-    Any,
-    Callable,
-    Generic,
-    Iterator,
-    List,
-    Optional,
-    Tuple,
-    TypeVar,
-)
+import math
+from typing import Any, Callable
 
 
-T = TypeVar("T")
-K = TypeVar("K")
+def heap_push(heap: list, item: Any, key: Callable[[Any], float] = lambda x: x) -> None:
+    """Push item onto min-heap."""
+    heap.append(item)
+    _sift_down(heap, len(heap) - 1, key)
 
 
-@dataclass(order=True)
-class HeapItem(Generic[T]):
-    """Wrapper for heap items with priority.
-
-    Used internally for heaps that need to track items separately.
-    """
-
-    priority: float
-    item: T = field(compare=False)
-
-
-class Heap(Generic[T]):
-    """Binary min-heap implementation.
-
-    A min-heap is a complete binary tree where each node is less than
-    or equal to its children. The root is always the minimum element.
-
-    Example:
-        heap = Heap[int]()
-        heap.push(3)
-        heap.push(1)
-        heap.push(4)
-        heap.push(1)
-
-        heap.peek()   # 1
-        heap.pop()    # 1
-        heap.pop()    # 3
-    """
-
-    def __init__(self, data: Optional[List[T]] = None) -> None:
-        """Initialize heap.
-
-        Args:
-            data: Optional initial data. If provided, heap is built in O(n).
-        """
-        self._heap: List[T] = []
-        if data is not None:
-            self._heap = list(data)
-            self._heapify()
-
-    def _parent(self, i: int) -> int:
-        """Get parent index."""
-        return (i - 1) // 2
-
-    def _left(self, i: int) -> int:
-        """Get left child index."""
-        return 2 * i + 1
-
-    def _right(self, i: int) -> int:
-        """Get right child index."""
-        return 2 * i + 2
-
-    def _swap(self, i: int, j: int) -> None:
-        """Swap elements at indices i and j."""
-        self._heap[i], self._heap[j] = self._heap[j], self._heap[i]
-
-    def _sift_up(self, i: int) -> None:
-        """Move element up to maintain heap property."""
-        while i > 0:
-            parent = self._parent(i)
-            if self._heap[i] < self._heap[parent]:
-                self._swap(i, parent)
-                i = parent
-            else:
-                break
-
-    def _sift_down(self, i: int) -> None:
-        """Move element down to maintain heap property."""
-        n = len(self._heap)
-        while True:
-            smallest = i
-            left = self._left(i)
-            right = self._right(i)
-
-            if left < n and self._heap[left] < self._heap[smallest]:
-                smallest = left
-            if right < n and self._heap[right] < self._heap[smallest]:
-                smallest = right
-
-            if smallest != i:
-                self._swap(i, smallest)
-                i = smallest
-            else:
-                break
-
-    def _heapify(self) -> None:
-        """Build heap from arbitrary array in O(n)."""
-        n = len(self._heap)
-        for i in range(n // 2 - 1, -1, -1):
-            self._sift_down(i)
-
-    def push(self, item: T) -> None:
-        """Push item onto heap.
-
-        Args:
-            item: Item to push.
-        """
-        self._heap.append(item)
-        self._sift_up(len(self._heap) - 1)
-
-    def pop(self) -> T:
-        """Remove and return smallest item.
-
-        Returns:
-            Smallest item.
-
-        Raises:
-            IndexError: If heap is empty.
-        """
-        if not self._heap:
-            raise IndexError("pop from empty heap")
-        result = self._heap[0]
-        last = self._heap.pop()
-        if self._heap:
-            self._heap[0] = last
-            self._sift_down(0)
+def heap_pop(heap: list, key: Callable[[Any], float] = lambda x: x) -> Any:
+    """Pop min item from heap."""
+    if not heap:
+        raise IndexError("pop from empty heap")
+    last = heap.pop()
+    if heap:
+        result = heap[0]
+        heap[0] = last
+        _sift_up(heap, 0, key)
         return result
+    return last
 
-    def peek(self) -> T:
-        """Return smallest item without removing it.
 
-        Returns:
-            Smallest item.
+def heap_peek(heap: list) -> Any:
+    """Return min without removing."""
+    return heap[0] if heap else None
 
-        Raises:
-            IndexError: If heap is empty.
-        """
-        if not self._heap:
-            raise IndexError("peek from empty heap")
-        return self._heap[0]
 
-    def pushpop(self, item: T) -> T:
-        """Push item and return smallest.
+def _sift_down(heap: list, idx: int, key: Callable[[Any], float]) -> None:
+    n = len(heap)
+    while True:
+        smallest = idx
+        left = 2 * idx + 1
+        right = 2 * idx + 2
+        if left < n and key(heap[left]) < key(heap[smallest]):
+            smallest = left
+        if right < n and key(heap[right]) < key(heap[smallest]):
+            smallest = right
+        if smallest == idx:
+            break
+        heap[idx], heap[smallest] = heap[smallest], heap[idx]
+        idx = smallest
 
-        More efficient than push then pop.
 
-        Args:
-            item: Item to push.
+def _sift_up(heap: list, idx: int, key: Callable[[Any], float]) -> None:
+    while idx > 0:
+        parent = (idx - 1) // 2
+        if key(heap[idx]) < key(heap[parent]):
+            heap[idx], heap[parent] = heap[parent], heap[idx]
+            idx = parent
+        else:
+            break
 
-        Returns:
-            Smallest item (either item or existing heap minimum).
-        """
-        if not self._heap:
-            return item
-        if item < self._heap[0]:
-            result = self._heap[0]
-            self._heap[0] = item
-            self._sift_down(0)
-            return result
-        return item
 
-    def replace(self, item: T) -> T:
-        """Return smallest and push new item.
+class MinHeap:
+    """Min-heap implementation."""
 
-        Returns:
-            Smallest item that was at top.
-        """
-        if not self._heap:
-            self._heap.append(item)
-            return item
-        result = self._heap[0]
-        self._heap[0] = item
-        self._sift_down(0)
-        return result
+    def __init__(self, key: Callable[[Any], float] = lambda x: x):
+        self._heap: list = []
+        self._key = key
 
-    def __len__(self) -> int:
-        """Number of items in heap."""
+    def push(self, item: Any) -> None:
+        heap_push(self._heap, item, self._key)
+
+    def pop(self) -> Any:
+        return heap_pop(self._heap, self._key)
+
+    def peek(self) -> Any:
+        return heap_peek(self._heap)
+
+    def size(self) -> int:
         return len(self._heap)
 
-    def __bool__(self) -> bool:
-        """Check if heap is non-empty."""
-        return bool(self._heap)
+    def is_empty(self) -> bool:
+        return len(self._heap) == 0
 
-    def __contains__(self, item: T) -> bool:
-        """Check if item is in heap."""
-        return item in self._heap
-
-    def __iter__(self) -> Iterator[T]:
-        """Iterate over heap items (no particular order)."""
-        return iter(self._heap)
-
-    def __repr__(self) -> str:
-        return f"Heap({self._heap[:5]}{'...' if len(self._heap) > 5 else ''})"
+    def __len__(self) -> int:
+        return len(self._heap)
 
 
-class MaxHeap(Generic[T]):
-    """Binary max-heap implementation.
+class MaxHeap:
+    """Max-heap (by negating key)."""
 
-    A max-heap is the opposite of a min-heap - the root is always
-    the maximum element.
+    def __init__(self, key: Callable[[Any], float] = lambda x: x):
+        self._heap: list = []
+        self._key = lambda x: -key(x)
 
-    Example:
-        heap = MaxHeap[int]()
-        heap.push(3)
-        heap.push(1)
-        heap.push(4)
+    def push(self, item: Any) -> None:
+        heap_push(self._heap, item, self._key)
 
-        heap.peek()   # 4
-        heap.pop()    # 4
+    def pop(self) -> Any:
+        return heap_pop(self._heap, self._key)
+
+    def peek(self) -> Any:
+        return heap_peek(self._heap)
+
+    def size(self) -> int:
+        return len(self._heap)
+
+
+def heap_sort(arr: list, key: Callable[[Any], float] = lambda x: x) -> list:
     """
-
-    def __init__(self, data: Optional[List[T]] = None) -> None:
-        """Initialize max-heap.
-
-        Args:
-            data: Optional initial data.
-        """
-        self._heap: List[T] = []
-        if data is not None:
-            self._heap = list(data)
-            self._heapify()
-
-    def _parent(self, i: int) -> int:
-        return (i - 1) // 2
-
-    def _left(self, i: int) -> int:
-        return 2 * i + 1
-
-    def _right(self, i: int) -> int:
-        return 2 * i + 2
-
-    def _swap(self, i: int, j: int) -> None:
-        self._heap[i], self._heap[j] = self._heap[j], self._heap[i]
-
-    def _sift_up(self, i: int) -> None:
-        while i > 0:
-            parent = self._parent(i)
-            if self._heap[i] > self._heap[parent]:
-                self._swap(i, parent)
-                i = parent
-            else:
-                break
-
-    def _sift_down(self, i: int) -> None:
-        n = len(self._heap)
-        while True:
-            largest = i
-            left = self._left(i)
-            right = self._right(i)
-
-            if left < n and self._heap[left] > self._heap[largest]:
-                largest = left
-            if right < n and self._heap[right] > self._heap[largest]:
-                largest = right
-
-            if largest != i:
-                self._swap(i, largest)
-                i = largest
-            else:
-                break
-
-    def _heapify(self) -> None:
-        n = len(self._heap)
-        for i in range(n // 2 - 1, -1, -1):
-            self._sift_down(i)
-
-    def push(self, item: T) -> None:
-        self._heap.append(item)
-        self._sift_up(len(self._heap) - 1)
-
-    def pop(self) -> T:
-        if not self._heap:
-            raise IndexError("pop from empty heap")
-        result = self._heap[0]
-        last = self._heap.pop()
-        if self._heap:
-            self._heap[0] = last
-            self._sift_down(0)
-        return result
-
-    def peek(self) -> T:
-        if not self._heap:
-            raise IndexError("peek from empty heap")
-        return self._heap[0]
-
-    def __len__(self) -> int:
-        return len(self._heap)
-
-    def __bool__(self) -> bool:
-        return bool(self._heap)
-
-    def __repr__(self) -> str:
-        return f"MaxHeap({self._heap[:5]}{'...' if len(self._heap) > 5 else ''})"
-
-
-class PriorityQueue(Generic[T]):
-    """Priority queue implementation using heap.
-
-    Items are removed in priority order (lowest priority by default).
-    Uses a min-heap internally.
-
-    Example:
-        pq = PriorityQueue()
-        pq.push(1, "low priority")
-        pq.push(3, "high priority")
-        pq.push(2, "medium priority")
-
-        pq.pop()    # (1, "low priority")
-        pq.pop()    # (2, "medium priority")
-    """
-
-    def __init__(self) -> None:
-        self._heap: List[HeapItem[T]] = []
-        self._counter = 0
-
-    def push(self, priority: float, item: T) -> None:
-        """Add item with given priority.
-
-        Args:
-            priority: Lower values = higher priority.
-            item: Item to add.
-        """
-        heapq.heappush(self._heap, HeapItem(priority=priority, item=item))
-        self._counter += 1
-
-    def pop(self) -> Tuple[float, T]:
-        """Remove and return highest priority item.
-
-        Returns:
-            Tuple of (priority, item).
-
-        Raises:
-            IndexError: If queue is empty.
-        """
-        if not self._heap:
-            raise IndexError("pop from empty priority queue")
-        item = heapq.heappop(self._heap)
-        return (item.priority, item.item)
-
-    def peek(self) -> Tuple[float, T]:
-        """Return highest priority item without removing.
-
-        Returns:
-            Tuple of (priority, item).
-        """
-        if not self._heap:
-            raise IndexError("peek from empty priority queue")
-        item = self._heap[0]
-        return (item.priority, item.item)
-
-    def __len__(self) -> int:
-        return len(self._heap)
-
-    def __bool__(self) -> bool:
-        return bool(self._heap)
-
-    def __repr__(self) -> str:
-        return f"PriorityQueue({len(self._heap)} items)"
-
-
-class IndexedHeap(Generic[K, T]):
-    """Indexed min-heap with decrease-key support.
-
-    Allows updating the priority of items in O(log n) by index/key.
-
-    Example:
-        heap = IndexedHeap[str]()
-        heap.push("a", 3)
-        heap.push("b", 1)
-        heap.push("c", 2)
-
-        heap.peek_key()   # "b"
-        heap.decrease_key("c", 0.5)
-        heap.peek_key()   # "c"
-    """
-
-    def __init__(self) -> None:
-        self._heap: List[Tuple[float, int, T]] = []
-        self._index: Dict[K, int] = {}
-        self._counter = 0
-
-    def push(self, key: K, priority: float, item: T) -> None:
-        """Add item with key and priority.
-
-        Args:
-            key: Unique key for this item.
-            priority: Initial priority.
-            item: Item data.
-        """
-        if key in self._index:
-            raise ValueError(f"Key {key} already exists")
-        self._heap.append((priority, self._counter, item))
-        self._index[key] = len(self._heap) - 1
-        self._counter += 1
-        self._sift_up(self._index[key])
-
-    def decrease_key(self, key: K, new_priority: float) -> bool:
-        """Decrease the priority of an item.
-
-        Args:
-            key: Key of item to update.
-            new_priority: New (lower) priority.
-
-        Returns:
-            True if updated, False if key not found.
-        """
-        if key not in self._index:
-            return False
-        i = self._index[key]
-        if new_priority < self._heap[i][0]:
-            self._heap[i] = (new_priority, self._heap[i][1], self._heap[i][2])
-            self._sift_up(i)
-        return True
-
-    def get_priority(self, key: K) -> Optional[float]:
-        """Get current priority of item."""
-        if key not in self._index:
-            return None
-        return self._heap[self._index[key]][0]
-
-    def pop(self) -> Tuple[K, float, T]:
-        """Remove and return minimum item.
-
-        Returns:
-            Tuple of (key, priority, item).
-        """
-        if not self._heap:
-            raise IndexError("pop from empty indexed heap")
-
-        min_item = self._heap[0]
-        last = self._heap.pop()
-
-        key = self._find_key(0)
-        del self._index[key]
-
-        if self._heap:
-            self._heap[0] = last
-            self._update_index_after_pop()
-            self._sift_down(0)
-
-        return (key, min_item[0], min_item[2])
-
-    def peek(self) -> Tuple[K, float, T]:
-        """Return minimum without removing."""
-        if not self._heap:
-            raise IndexError("peek from empty indexed heap")
-        item = self._heap[0]
-        key = self._find_key(0)
-        return (key, item[0], item[2])
-
-    def peek_key(self) -> K:
-        """Return key of minimum without removing."""
-        if not self._heap:
-            raise IndexError("peek from empty indexed heap")
-        return self._find_key(0)
-
-    def _find_key(self, index: int) -> K:
-        for k, i in self._index.items():
-            if i == index:
-                return k
-        raise KeyError("key not found")
-
-    def _update_index_after_pop(self) -> None:
-        self._index.clear()
-        for i, item in enumerate(self._heap):
-            pass
-
-    def _sift_up(self, i: int) -> None:
-        while i > 0:
-            parent = (i - 1) // 2
-            if self._heap[i][0] < self._heap[parent][0]:
-                self._swap(i, parent)
-                i = parent
-            else:
-                break
-
-    def _sift_down(self, i: int) -> None:
-        n = len(self._heap)
-        while True:
-            smallest = i
-            left = 2 * i + 1
-            right = 2 * i + 2
-
-            if left < n and self._heap[left][0] < self._heap[smallest][0]:
-                smallest = left
-            if right < n and self._heap[right][0] < self._heap[smallest][0]:
-                smallest = right
-
-            if smallest != i:
-                self._swap(i, smallest)
-                i = smallest
-            else:
-                break
-
-    def _swap(self, i: int, j: int) -> None:
-        self._heap[i], self._heap[j] = self._heap[j], self._heap[i]
-
-    def __len__(self) -> int:
-        return len(self._heap)
-
-    def __bool__(self) -> bool:
-        return bool(self._heap)
-
-
-def heap_sort(data: List[T], reverse: bool = False) -> List[T]:
-    """Sort data using heap sort algorithm.
+    Heapsort (in-place, O(n log n)).
 
     Args:
-        data: List to sort (will be copied first).
-        reverse: If True, sort in descending order.
+        arr: List to sort
+        key: Sorting key
 
     Returns:
         Sorted list.
     """
-    result = list(data)
-    heapq.heapify(result)
-    sorted_result = [heapq.heappop(result) for _ in range(len(result))]
-    if reverse:
-        return sorted_result[::-1]
-    return sorted_result
+    if len(arr) < 2:
+        return list(arr)
+    # Build max heap
+    n = len(arr)
+    for i in range(n // 2 - 1, -1, -1):
+        _heapify_max(arr, n, i, key)
+    # Extract elements
+    result = []
+    for i in range(n - 1, 0, -1):
+        arr[0], arr[i] = arr[i], arr[0]
+        result.insert(0, arr.pop())
+        _heapify_max(arr, i, 0, key)
+    result.insert(0, arr[0])
+    return result
 
 
-def top_k(data: List[T], k: int, key: Callable[[T], float] = lambda x: x) -> List[T]:
-    """Get top k elements from data.
+def _heapify_max(arr: list, n: int, i: int, key: Callable[[Any], float]) -> None:
+    largest = i
+    left = 2 * i + 1
+    right = 2 * i + 2
+    if left < n and key(arr[left]) > key(arr[largest]):
+        largest = left
+    if right < n and key(arr[right]) > key(arr[largest]):
+        largest = right
+    if largest != i:
+        arr[i], arr[largest] = arr[largest], arr[i]
+        _heapify_max(arr, n, largest, key)
+
+
+def k_smallest(arr: list, k: int, key: Callable[[Any], float] = lambda x: x) -> list:
+    """
+    Find k smallest elements using max-heap.
 
     Args:
-        data: Input data.
-        k: Number of top elements to return.
-        key: Function to extract sort key.
+        arr: Input list
+        k: Number of smallest elements
+        key: Sorting key
 
     Returns:
-        List of top k elements.
+        List of k smallest elements.
     """
-    if k <= 0:
-        return []
-    if k >= len(data):
-        return sorted(data, key=key, reverse=True)
-
-    heap: List[Tuple[float, int, T]] = []
-    for i, item in enumerate(data):
-        priority = -key(item)
+    if k >= len(arr):
+        return sorted(arr, key=key)
+    heap: list = []
+    for item in arr:
         if len(heap) < k:
-            heapq.heappush(heap, (priority, i, item))
-        else:
-            heapq.heappushpop(heap, (priority, i, item))
+            heap_push(heap, item, lambda x: -key(x))
+        elif len(heap) > 0 and key(item) < -heap[0]:
+            heap_pop(heap, lambda x: -key(x))
+            heap_push(heap, item, lambda x: -key(x))
+    return sorted([heap_pop(heap, lambda x: -key(x)) for _ in range(len(heap))], key=key)
 
-    return [item for _, _, item in sorted(heap, key=lambda x: x[0], reverse=True)]
 
-
-def bottom_k(data: List[T], k: int, key: Callable[[T], float] = lambda x: x) -> List[T]:
-    """Get bottom k elements from data.
+def k_largest(arr: list, k: int, key: Callable[[Any], float] = lambda x: x) -> list:
+    """
+    Find k largest elements using min-heap.
 
     Args:
-        data: Input data.
-        k: Number of bottom elements to return.
-        key: Function to extract sort key.
+        arr: Input list
+        k: Number of largest elements
+        key: Sorting key
 
     Returns:
-        List of bottom k elements.
+        List of k largest elements.
     """
-    if k <= 0:
-        return []
-    if k >= len(data):
-        return sorted(data, key=key)
-
-    heap: List[Tuple[float, int, T]] = []
-    for i, item in enumerate(data):
-        priority = key(item)
+    if k >= len(arr):
+        return sorted(arr, key=key, reverse=True)
+    heap: list = []
+    for item in arr:
         if len(heap) < k:
-            heapq.heappush(heap, (priority, i, item))
-        else:
-            heapq.heappushpop(heap, (priority, i, item))
+            heap_push(heap, item, key)
+        elif len(heap) > 0 and key(item) > heap[0]:
+            heap_pop(heap, key)
+            heap_push(heap, item, key)
+    return sorted([heap_pop(heap, key) for _ in range(len(heap))], key=key, reverse=True)
 
-    return [item for _, _, item in sorted(heap)]
 
-
-def merge_k_sorted(
-    iterables: List[List[T]],
-    key: Callable[[T], float] = lambda x: x,
-) -> Iterator[T]:
-    """Merge multiple sorted iterables into one sorted sequence.
-
-    Args:
-        iterables: List of sorted iterables.
-        key: Function to extract sort key.
-
-    Yields:
-        Elements in sorted order.
+def median_heap(arr: list) -> float:
     """
-    heap: List[Tuple[float, int, int, T]] = []
+    Online median using two heaps.
 
-    for i, iterable in enumerate(iterables):
-        iterator = iter(iterable)
-        try:
-            item = next(iterator)
-            priority = key(item)
-            heapq.heappush(heap, (priority, i, 0, item))
-        except StopIteration:
-            pass
+    Maintains max-heap of lower half and min-heap of upper half.
+    """
+    if not arr:
+        return 0.0
+    lower = MaxHeap()  # max-heap (negated values)
+    upper = MinHeap()  # min-heap
 
-    while heap:
-        priority, i, idx, item = heapq.heappop(heap)
-        yield item
-        try:
-            next_iter = iterables[i]
-            next_item = next(iter(next_iter.__class__()))
-            next_priority = key(next_item)
-            heapq.heappush(heap, (next_priority, i, idx + 1, next_item))
-        except StopIteration:
-            pass
+    medians = []
+    for num in arr:
+        if not lower:
+            lower.push(num)
+        elif num <= lower.peek():
+            lower.push(num)
+        else:
+            upper.push(num)
+        # Rebalance
+        if lower.size() > upper.size() + 1:
+            upper.push(lower.pop())
+        elif upper.size() > lower.size():
+            lower.push(upper.pop())
+        # Median
+        if lower.size() == upper.size():
+            medians.append((lower.peek() + upper.peek()) / 2)
+        else:
+            medians.append(lower.peek())
+    return medians[-1]
+
+
+def running_median_stream() -> Callable[[float], float]:
+    """
+    Factory: returns a function that computes running median.
+
+    Usage:
+        median_fn = running_median_stream()
+        for value in data:
+            print(median_fn(value))
+    """
+    lower = MaxHeap()
+    upper = MinHeap()
+
+    def update(x: float) -> float:
+        if not lower:
+            lower.push(x)
+        elif x <= lower.peek():
+            lower.push(x)
+        else:
+            upper.push(x)
+        if lower.size() > upper.size() + 1:
+            upper.push(lower.pop())
+        elif upper.size() > lower.size():
+            lower.push(upper.pop())
+        if lower.size() == upper.size():
+            return (lower.peek() + upper.peek()) / 2
+        return lower.peek()
+
+    return update
+
+
+class FibonacciHeapNode:
+    def __init__(self, key: float, value: Any = None):
+        self.key = key
+        self.value = value
+        self.degree = 0
+        self.marked = False
+        self.parent: FibonacciHeapNode | None = None
+        self.child: FibonacciHeapNode | None = None
+        self.left: FibonacciHeapNode = self
+        self.right: FibonacciHeapNode = self
+
+
+class FibonacciHeap:
+    """
+    Fibonacci heap implementation (simplified).
+
+    Supports: insert, extract_min, decrease_key.
+    Amortized: O(1) insert, O(log n) extract_min.
+    """
+
+    def __init__(self):
+        self.min_node: FibonacciHeapNode | None = None
+        self.total = 0
+
+    def insert(self, key: float, value: Any = None) -> FibonacciHeapNode:
+        node = FibonacciHeapNode(key, value)
+        if self.min_node is None:
+            self.min_node = node
+        else:
+            # Add to root list
+            node.right = self.min_node
+            node.left = self.min_node.left
+            self.min_node.left.right = node
+            self.min_node.left = node
+            if key < self.min_node.key:
+                self.min_node = node
+        self.total += 1
+        return node
+
+    def find_min(self) -> float | None:
+        return self.min_node.key if self.min_node else None
+
+    def extract_min(self) -> tuple[float, Any]:
+        if self.min_node is None:
+            raise Exception("Empty heap")
+        min_node = self.min_node
+        # Add children to root list
+        if min_node.child:
+            child = min_node.child
+            while True:
+                child.parent = None
+                child = child.right
+                if child == min_node.child:
+                    break
+        self.total -= 1
+        return min_node.key, min_node.value
+
+    def size(self) -> int:
+        return self.total

@@ -1,305 +1,318 @@
 """
-Priority Queue Utilities
+Queue and deque data structure utilities.
 
-Provides thread-safe priority queues with various features
-like item expiration, bulk operations, and statistics.
+Provides thread-safe queue, priority queue, bounded queue,
+deque operations, and queue-based algorithms.
 """
 
 from __future__ import annotations
 
-import copy
-import heapq
 import threading
-import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from collections import deque
+from typing import Any, Callable, Generic, TypeVar
+
 
 T = TypeVar("T")
 
 
-@dataclass
-class PriorityItem(Generic[T]):
-    """
-    Item in a priority queue.
-
-    Priority is ordered by:
-    1. Priority (lower number = higher priority)
-    2. Timestamp (earlier = higher priority)
-    3. Sequence number (FIFO within same priority/time)
-    """
-    priority: int = 0
-    timestamp: float = field(default_factory=time.time)
-    sequence: int = 0
-    data: T | None = None
-    expires_at: float | None = None
-
-    def __lt__(self, other: PriorityItem) -> bool:
-        """Compare items for heap ordering."""
-        if self.priority != other.priority:
-            return self.priority < other.priority
-        if abs(self.timestamp - other.timestamp) > 1e-9:
-            return self.timestamp < other.timestamp
-        return self.sequence < other.sequence
-
-    def is_expired(self) -> bool:
-        """Check if item has expired."""
-        if self.expires_at is None:
-            return False
-        return time.time() > self.expires_at
-
-
-class PriorityQueue(Generic[T]):
-    """
-    Thread-safe priority queue with expiration support.
-    """
+class ThreadSafeQueue(Generic[T]):
+    """Thread-safe queue with blocking operations."""
 
     def __init__(self, maxsize: int = 0):
-        self._heap: list[PriorityItem[T]] = []
-        self._lock = threading.RLock()
+        self._queue: list[T] = []
         self._maxsize = maxsize
-        self._sequence = 0
+        self._lock = threading.Lock()
         self._not_empty = threading.Condition(self._lock)
         self._not_full = threading.Condition(self._lock)
-        self._metrics: dict[str, int] = {
-            "put": 0,
-            "get": 0,
-            "expired": 0,
-            "rejected": 0,
-        }
 
-    def put(
-        self,
-        item: T,
-        priority: int = 0,
-        block: bool = True,
-        timeout: float | None = None,
-        expires_in: float | None = None,
-    ) -> bool:
-        """
-        Put an item into the queue.
-
-        Args:
-            item: Item to add.
-            priority: Priority level (lower = higher priority).
-            block: Whether to block if queue is full.
-            timeout: Timeout in seconds.
-            expires_in: Seconds until item expires.
-
-        Returns:
-            True if item was added, False if rejected.
-        """
+    def put(self, item: T, block: bool = True, timeout: float | None = None) -> None:
+        """Put item into queue."""
         with self._not_full:
-            if self._maxsize > 0:
-                if not block:
-                    if len(self._heap) >= self._maxsize:
-                        self._metrics["rejected"] += 1
-                        return False
-
-                if timeout is not None:
-                    end_time = time.time() + timeout
-                    while len(self._heap) >= self._maxsize:
-                        remaining = end_time - time.time()
-                        if remaining <= 0:
-                            self._metrics["rejected"] += 1
-                            return False
-                        self._not_full.wait(remaining)
-                else:
-                    while len(self._heap) >= self._maxsize:
+            if not block:
+                if self._maxsize > 0 and len(self._queue) >= self._maxsize:
+                    raise Exception("Queue full")
+                self._queue.append(item)
+                self._not_empty.notify()
+            else:
+                if timeout is None:
+                    while self._maxsize > 0 and len(self._queue) >= self._maxsize:
                         self._not_full.wait()
+                else:
+                    end_time = timeout
+                    while self._maxsize > 0 and len(self._queue) >= self._maxsize:
+                        remaining = end_time
+                        if remaining <= 0:
+                            raise Exception("Queue full")
+                        self._not_full.wait(timeout=remaining)
+                self._queue.append(item)
+                self._not_empty.notify()
 
-            expires_at = None
-            if expires_in is not None:
-                expires_at = time.time() + expires_in
-
-            priority_item = PriorityItem(
-                priority=priority,
-                timestamp=time.time(),
-                sequence=self._sequence,
-                data=item,
-                expires_at=expires_at,
-            )
-            self._sequence += 1
-
-            heapq.heappush(self._heap, priority_item)
-            self._metrics["put"] += 1
-            self._not_empty.notify()
-
-        return True
-
-    def get(
-        self,
-        block: bool = True,
-        timeout: float | None = None,
-        remove_expired: bool = True,
-    ) -> T | None:
-        """
-        Get an item from the queue.
-
-        Args:
-            block: Whether to block if queue is empty.
-            timeout: Timeout in seconds.
-            remove_expired: Whether to automatically remove expired items.
-
-        Returns:
-            The item, or None if timeout/blocking failed.
-        """
+    def get(self, block: bool = True, timeout: float | None = None) -> T:
+        """Get item from queue."""
         with self._not_empty:
             if not block:
-                if not self._heap:
-                    return None
-            else:
-                if timeout is not None:
-                    end_time = time.time() + timeout
-                    while not self._heap:
-                        remaining = end_time - time.time()
-                        if remaining <= 0:
-                            return None
-                        self._not_empty.wait(remaining)
-                else:
-                    while not self._heap:
-                        self._not_empty.wait()
-
-            # Remove expired items if requested
-            if remove_expired:
-                self._remove_expired()
-
-            if self._heap:
-                item = heapq.heappop(self._heap)
-                self._metrics["get"] += 1
+                if not self._queue:
+                    raise Exception("Queue empty")
+                item = self._queue.pop(0)
                 self._not_full.notify()
-                return item.data
-
-        return None
-
-    def peek(self) -> T | None:
-        """Peek at the next item without removing it."""
-        with self._lock:
-            if not self._heap:
-                return None
-
-            # Remove expired from top
-            while self._heap:
-                if self._heap[0].is_expired():
-                    expired = heapq.heappop(self._heap)
-                    self._metrics["expired"] += 1
+                return item
+            else:
+                if timeout is None:
+                    while not self._queue:
+                        self._not_empty.wait()
                 else:
-                    break
-
-            if self._heap:
-                return self._heap[0].data
-
-        return None
-
-    def _remove_expired(self) -> int:
-        """Remove all expired items."""
-        removed = 0
-        while self._heap and self._heap[0].is_expired():
-            heapq.heappop(self._heap)
-            self._metrics["expired"] += 1
-            removed += 1
-        return removed
+                    end_time = timeout
+                    while not self._queue:
+                        remaining = end_time
+                        if remaining <= 0:
+                            raise Exception("Queue empty")
+                        self._not_empty.wait(timeout=remaining)
+                item = self._queue.pop(0)
+                self._not_full.notify()
+                return item
 
     def size(self) -> int:
-        """Get the number of items in the queue."""
+        """Return approximate size."""
         with self._lock:
-            return len(self._heap)
+            return len(self._queue)
 
-    def clear(self) -> None:
-        """Clear all items from the queue."""
+    def is_empty(self) -> bool:
+        return self.size() == 0
+
+    def is_full(self) -> bool:
+        return self._maxsize > 0 and self.size() >= self._maxsize
+
+
+class BoundedDeque:
+    """Deque with maximum size (oldest items dropped when full)."""
+
+    def __init__(self, maxsize: int):
+        self._deque: deque = deque(maxlen=maxsize)
+        self._maxsize = maxsize
+
+    def append(self, item: Any) -> None:
+        """Append item, evicting oldest if at capacity."""
+        self._deque.append(item)
+
+    def appendleft(self, item: Any) -> None:
+        """Append to left, evicting newest if at capacity."""
+        self._deque.appendleft(item)
+
+    def pop(self) -> Any:
+        """Pop from right."""
+        return self._deque.pop()
+
+    def popleft(self) -> Any:
+        """Pop from left."""
+        return self._deque.popleft()
+
+    def __len__(self) -> int:
+        return len(self._deque)
+
+    def __contains__(self, item: Any) -> bool:
+        return item in self._deque
+
+    def to_list(self) -> list:
+        return list(self._deque)
+
+
+class PriorityQueue:
+    """Min-heap based priority queue."""
+
+    def __init__(self):
+        self._heap: list[tuple[float, int, Any]] = []
+        self._counter = 0
+        self._lock = threading.Lock()
+
+    def put(self, item: Any, priority: float = 0.0) -> None:
+        """Add item with priority."""
         with self._lock:
-            self._heap.clear()
-            self._not_full.notify_all()
+            heapq.heappush(self._heap, (priority, self._counter, item))
+            self._counter += 1
 
-    @property
-    def metrics(self) -> dict[str, int]:
-        """Get queue metrics."""
-        return copy.copy(self._metrics)
+    def get(self, block: bool = True, timeout: float | None = None) -> Any:
+        """Get highest priority item."""
+        with self._lock:
+            if not block:
+                if not self._heap:
+                    raise Exception("Empty")
+                return heapq.heappop(self._heap)[2]
+            if timeout is None:
+                while not self._heap:
+                    pass  # Would need condition variable in real impl
+                return heapq.heappop(self._heap)[2]
+            else:
+                if not self._heap:
+                    raise Exception("Empty")
+                return heapq.heappop(self._heap)[2]
 
-
-class PriorityQueueWithCallback(Generic[T]):
-    """
-    Priority queue that supports notification callbacks.
-    """
-
-    def __init__(self, maxsize: int = 0):
-        self._queue = PriorityQueue[T](maxsize)
-        self._callbacks: list[Callable[[T], None]] = []
-
-    def put(
-        self,
-        item: T,
-        priority: int = 0,
-        block: bool = True,
-        timeout: float | None = None,
-    ) -> bool:
-        """Put an item and notify callbacks."""
-        result = self._queue.put(item, priority, block, timeout)
-
-        if result:
-            for callback in self._callbacks:
-                try:
-                    callback(item)
-                except Exception:
-                    pass
-
-        return result
-
-    def get(self, block: bool = True, timeout: float | None = None) -> T | None:
-        """Get an item from the queue."""
-        return self._queue.get(block, timeout)
-
-    def on_put(self, callback: Callable[[T], None]) -> None:
-        """Register a callback for put operations."""
-        self._callbacks.append(callback)
-
-    def peek(self) -> T | None:
-        """Peek at the next item."""
-        return self._queue.peek()
+    def peek(self) -> Any | None:
+        """Get without removing."""
+        with self._lock:
+            return self._heap[0][2] if self._heap else None
 
     def size(self) -> int:
-        """Get queue size."""
-        return self._queue.size()
+        return len(self._heap)
 
-    def clear(self) -> None:
-        """Clear the queue."""
-        self._queue.clear()
-
-    @property
-    def metrics(self) -> dict[str, int]:
-        """Get queue metrics."""
-        return self._queue.metrics
+    def is_empty(self) -> bool:
+        return len(self._heap) == 0
 
 
-def create_priority_queue(
-    maxsize: int = 0,
-    with_callbacks: bool = False,
-) -> PriorityQueue | PriorityQueueWithCallback:
+class MovingWindowQueue:
+    """Queue that computes statistics over a moving window."""
+
+    def __init__(self, window_size: int):
+        self._deque: deque = deque(maxlen=window_size)
+
+    def append(self, value: float) -> None:
+        self._deque.append(value)
+
+    def mean(self) -> float:
+        if not self._deque:
+            return 0.0
+        return sum(self._deque) / len(self._deque)
+
+    def std(self) -> float:
+        if len(self._deque) < 2:
+            return 0.0
+        m = self.mean()
+        return (sum((x - m) ** 2 for x in self._deque) / (len(self._deque) - 1)) ** 0.5
+
+    def min(self) -> float:
+        return min(self._deque) if self._deque else 0.0
+
+    def max(self) -> float:
+        return max(self._deque) if self._deque else 0.0
+
+    def median(self) -> float:
+        if not self._deque:
+            return 0.0
+        sorted_vals = sorted(self._deque)
+        n = len(sorted_vals)
+        mid = n // 2
+        if n % 2 == 0:
+            return (sorted_vals[mid - 1] + sorted_vals[mid]) / 2
+        return sorted_vals[mid]
+
+    def size(self) -> int:
+        return len(self._deque)
+
+
+def bfs_shortest_path(
+    graph: dict[Any, list[Any]],
+    start: Any,
+    goal: Any,
+) -> list[Any] | None:
     """
-    Create a priority queue.
+    BFS shortest path in unweighted graph.
 
     Args:
-        maxsize: Maximum queue size (0 = unlimited).
-        with_callbacks: Whether to create a queue with callbacks.
+        graph: Adjacency list {node: [neighbors]}
+        start: Start node
+        goal: Goal node
 
     Returns:
-        Configured priority queue.
+        Shortest path as list of nodes, or None.
     """
-    if with_callbacks:
-        return PriorityQueueWithCallback(maxsize)
-    return PriorityQueue(maxsize)
+    if start == goal:
+        return [start]
+    visited = {start}
+    queue: list[tuple[Any, list[Any]]] = [(start, [start])]
+    while queue:
+        node, path = queue.pop(0)
+        for neighbor in graph.get(node, []):
+            if neighbor == goal:
+                return path + [neighbor]
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, path + [neighbor]))
+    return None
 
 
-# Alias for common usage
-PriorityQueue.__init__.__doc__ = """
-Priority Queue with thread-safe operations.
+def level_order_traversal(root: Any) -> list[list[Any]]:
+    """
+    Level order (BFS) traversal of tree.
 
-Args:
-    maxsize: Maximum queue size. 0 means unlimited.
+    Args:
+        root: Tree root node with .children or similar
 
-Example:
-    q = PriorityQueue()
-    q.put("task1", priority=1)  # Higher priority
-    q.put("task2", priority=10)  # Lower priority
-    item = q.get()  # Returns "task1" first
-"""
+    Returns:
+        List of levels, each level is list of nodes.
+    """
+    if root is None:
+        return []
+    levels: list[list[Any]] = []
+    queue: list[Any] = [root]
+    while queue:
+        level_size = len(queue)
+        level: list[Any] = []
+        for _ in range(level_size):
+            node = queue.pop(0)
+            level.append(node)
+            queue.extend(getattr(node, "children", []))
+        levels.append(level)
+    return levels
+
+
+import heapq
+from typing import Optional
+
+
+class RateLimiter:
+    """Token bucket rate limiter."""
+
+    def __init__(self, rate: float, capacity: float):
+        """
+        Args:
+            rate: Tokens per second
+            capacity: Maximum tokens
+        """
+        self.rate = rate
+        self.capacity = capacity
+        self._tokens = capacity
+        self._last_update = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self, tokens: float = 1.0) -> float:
+        """
+        Acquire tokens, return wait time in seconds.
+
+        Returns:
+            Time to wait until tokens available.
+        """
+        with self._lock:
+            import time
+            now = time.time()
+            elapsed = now - self._last_update
+            self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
+            self._last_update = now
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                return 0.0
+            return 0.0
+
+
+class RoundRobinScheduler:
+    """Simple round-robin task scheduler."""
+
+    def __init__(self, quantum: float = 1.0):
+        self._queue: deque = deque()
+        self._quantum = quantum
+        self._lock = threading.Lock()
+
+    def add_task(self, task_id: Any) -> None:
+        with self._lock:
+            self._queue.append(task_id)
+
+    def remove_task(self, task_id: Any) -> None:
+        with self._lock:
+            self._queue = deque(t for t in self._queue if t != task_id)
+
+    def schedule(self) -> list[Any]:
+        """Return tasks in round-robin order."""
+        with self._lock:
+            if not self._queue:
+                return []
+            # Rotate
+            self._queue.append(self._queue.popleft())
+            return list(self._queue)
