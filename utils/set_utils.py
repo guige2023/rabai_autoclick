@@ -1,244 +1,101 @@
-"""Set utilities for RabAI AutoClick.
+"""
+Set utilities for advanced set operations.
 
-Provides:
-- Set operations
-- Set algebra
-- Frozen set utilities
-- Set partitions
+Provides power sets, set partitions, and set algebra operations.
 """
 
 from __future__ import annotations
 
-from typing import (
-    Any,
-    Callable,
-    FrozenSet,
-    Iterator,
-    List,
-    Set,
-    Tuple,
-)
+from typing import TypeVar
 
 
-def set_union(*sets: Set[Any]) -> Set[Any]:
-    """Union of multiple sets.
+T = TypeVar("T")
+
+
+def powerset(iterable: list[T]) -> list[list[T]]:
+    """
+    Generate all subsets of a set.
 
     Args:
-        *sets: Sets to union.
+        iterable: Input list
 
     Returns:
-        Union set.
+        List of all subsets
+
+    Example:
+        >>> powerset([1, 2, 3])
+        [[], [1], [2], [3], [1, 2], [1, 3], [2, 3], [1, 2, 3]]
     """
-    result: Set[Any] = set()
+    items = list(iterable)
+    result = [[]]
+    for item in items:
+        result += [subset + [item] for subset in result]
+    return result
+
+
+def set_partitions(collection: list[T]) -> list[list[list[T]]]:
+    """
+    Generate all ways to partition a set.
+
+    Args:
+        collection: Input elements
+
+    Returns:
+        List of partitions (each partition is a list of subsets)
+    """
+    if len(collection) == 0:
+        return [[]]
+    if len(collection) == 1:
+        return [[[collection[0]]]]
+    result = []
+    first = collection[0]
+    rest = collection[1:]
+    for partition in set_partitions(rest):
+        for i in range(len(partition)):
+            result.append(partition[:i] + [[first] + partition[i]] + partition[i + 1 :])
+        result.append([[first]] + partition)
+    return result
+
+
+def symmetric_difference(s1: set, s2: set) -> set:
+    """Elements in either set but not both."""
+    return s1 ^ s2
+
+
+def set_union(*sets: set) -> set:
+    """Union of multiple sets."""
+    result = set()
     for s in sets:
         result |= s
     return result
 
 
-def set_intersection(*sets: Set[Any]) -> Set[Any]:
-    """Intersection of multiple sets.
-
-    Args:
-        *sets: Sets to intersect.
-
-    Returns:
-        Intersection set.
-    """
+def set_intersection(*sets: set) -> set:
+    """Intersection of multiple sets."""
     if not sets:
         return set()
-    result = sets[0].copy()
+    result = sets[0]
     for s in sets[1:]:
         result &= s
     return result
 
 
-def set_difference(base: Set[Any], *others: Set[Any]) -> Set[Any]:
-    """Set difference.
-
-    Args:
-        base: Base set.
-        *others: Sets to subtract.
-
-    Returns:
-        Difference set.
-    """
-    result = base.copy()
-    for s in others:
-        result -= s
-    return result
-
-
-def set_symmetric_difference(a: Set[Any], b: Set[Any]) -> Set[Any]:
-    """Symmetric difference.
-
-    Args:
-        a: First set.
-        b: Second set.
-
-    Returns:
-        Symmetric difference.
-    """
-    return a ^ b
-
-
-def powerset(s: Set[T]) -> List[Set[T]]:
-    """Generate all subsets of a set.
-
-    Args:
-        s: Input set.
-
-    Returns:
-        List of all subsets.
-    """
-    items = list(s)
-    result: List[Set[T]] = []
-    for mask in range(1 << len(items)):
-        subset = {items[i] for i in range(len(items)) if mask & (1 << i)}
-        result.append(subset)
-    return result
-
-
-def partitions(s: Set[T]) -> List[List[Set[T]]]:
-    """Generate all partitions of a set.
-
-    Args:
-        s: Input set.
-
-    Returns:
-        List of partitions (each partition is a list of non-empty subsets).
-    """
-    if not s:
-        return [[]]
-    if len(s) == 1:
-        return [[[next(iter(s))]]]
-
-    result: List[List[Set[T]]] = []
-    first = next(iter(s))
-    rest = s - {first}
-
-    for partition in partitions(rest):
-        result.append([{first}] + partition)
-
-        for subset in partition:
-            new_subset = subset | {first}
-            new_partition = [new_subset if s == subset else s for s in partition]
-            result.append(new_partition)
-
-    return result
-
-
-def disjoint(*sets: Set[Any]) -> bool:
-    """Check if sets are pairwise disjoint.
-
-    Args:
-        *sets: Sets to check.
-
-    Returns:
-        True if all sets are pairwise disjoint.
-    """
-    seen: Set[Any] = set()
+def disjoint(*sets: set) -> bool:
+    """Check if sets are pairwise disjoint (no common elements)."""
+    seen = set()
     for s in sets:
-        if seen & s:
+        intersection = seen & s
+        if intersection:
             return False
         seen |= s
     return True
 
 
-def subset(a: Set[Any], b: Set[Any]) -> bool:
-    """Check if a is subset of b."""
-    return a <= b
+def superset_of(s1: set, s2: set) -> bool:
+    """Check if s1 is a strict superset of s2."""
+    return s1 > s2
 
 
-def proper_subset(a: Set[Any], b: Set[Any]) -> bool:
-    """Check if a is proper subset of b."""
-    return a < b
-
-
-def superset(a: Set[Any], b: Set[Any]) -> bool:
-    """Check if a is superset of b."""
-    return a >= b
-
-
-def set_map(func: Callable[[T], U], s: Set[T]) -> Set[U]:
-    """Apply function to each element of set.
-
-    Args:
-        func: Function to apply.
-        s: Input set.
-
-    Returns:
-        New set with transformed values.
-    """
-    return {func(x) for x in s}
-
-
-def set_filter(predicate: Callable[[T], bool], s: Set[T]) -> Set[T]:
-    """Filter set by predicate.
-
-    Args:
-        predicate: Filter function.
-        s: Input set.
-
-    Returns:
-        Filtered set.
-    """
-    return {x for x in s if predicate(x)}
-
-
-def cartesian_product(*sets: Set[T]) -> Set[Tuple[T, ...]]:
-    """Cartesian product of sets.
-
-    Args:
-        *sets: Sets to product.
-
-    Returns:
-        Set of tuples.
-    """
-    if not sets:
-        return {()}
-    result: Set[Tuple[T, ...]] = {()}
-    for s in sets:
-        result = {x + (item,) for x in result for item in s}
-    return result
-
-
-def set_zip(a: Set[T], b: Set[U]) -> List[Tuple[T, U]]:
-    """Zip two sets into list of tuples.
-
-    Args:
-        a: First set.
-        b: Second set.
-
-    Returns:
-        List of tuples.
-    """
-    return list(zip(sorted(a), sorted(b)))
-
-
-def frozen(s: Set[T]) -> FrozenSet[T]:
-    """Convert set to frozenset."""
-    return frozenset(s)
-
-
-def to_sorted_list(s: Set[T]) -> List[T]:
-    """Convert set to sorted list."""
-    return sorted(s)
-
-
-def intersection_cardinality(*sets: Set[Any]) -> int:
-    """Get cardinality of intersection."""
-    if not sets:
-        return 0
-    return len(set_intersection(*sets))
-
-
-def union_cardinality(*sets: Set[Any]) -> int:
-    """Get cardinality of union."""
-    seen: Set[Any] = set()
-    total = 0
-    for s in sets:
-        for x in s:
-            if x not in seen:
-                total += 1
-                seen.add(x)
-    return total
+def subset_of(s1: set, s2: set) -> bool:
+    """Check if s1 is a strict subset of s2."""
+    return s1 < s2
