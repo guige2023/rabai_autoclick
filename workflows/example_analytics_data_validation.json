@@ -1,0 +1,117 @@
+{
+  "name": "Analytics Data Validation Workflow",
+  "description": "Automate data validation process",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "datasets_to_validate": 50,
+    "current_dataset": 0,
+    "validated_datasets": 0,
+    "failed_validations": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "validation_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize validation counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open data validation tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "data_validation_loop",
+      "count": "{{datasets_to_validate}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start data validation loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select dataset for validation"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for validation"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/data_validation_{{validation_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture validation screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "validation_counter",
+      "value": "{{validation_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment validation counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{validation_counter < datasets_to_validate}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more datasets"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next dataset"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/analytics_data_validation_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
