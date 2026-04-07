@@ -912,32 +912,33 @@ class StepListWidget(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.list_widget = QListWidget()
         self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
         self.list_widget.currentRowChanged.connect(self.step_selected.emit)
         layout.addWidget(self.list_widget)
-        
+
         btn_layout = QHBoxLayout()
-        
+
         self.add_btn = QPushButton("添加步骤")
         self.remove_btn = QPushButton("删除")
         self.clear_btn = QPushButton("清空")
-        self.clear_btn.setStyleSheet("background-color: #ff9800; color: white;")
+        colors = theme_manager.colors
+        self.clear_btn.setStyleSheet(f"background-color: {colors['warning']}; color: white;")
         self.up_btn = QPushButton("↑")
         self.down_btn = QPushButton("↓")
-        
+
         self.up_btn.setMaximumWidth(40)
         self.down_btn.setMaximumWidth(40)
-        
+
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.remove_btn)
         btn_layout.addWidget(self.clear_btn)
         btn_layout.addWidget(self.up_btn)
         btn_layout.addWidget(self.down_btn)
-        
+
         layout.addLayout(btn_layout)
     
     def _show_context_menu(self, position):
@@ -967,9 +968,10 @@ class StepListWidget(QWidget):
     
     def remove_step(self, index: int):
         self.list_widget.takeItem(index)
-    
+
     def clear(self):
-        self.list_widget.clear()
+        with batch_updates(self.list_widget):
+            self.list_widget.clear()
     
     def get_step_count(self) -> int:
         return self.list_widget.count()
