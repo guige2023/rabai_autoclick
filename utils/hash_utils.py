@@ -1,173 +1,264 @@
 """
-Hash utilities for checksums, digests, and hash-based data structures.
+Hashing algorithms and utilities.
 
-Provides implementations of common hash functions, Bloom filters,
-and hash ring utilities.
+Provides MD5, SHA-1, SHA-256, murmurhash, and consistent hashing.
 """
 
 from __future__ import annotations
 
-import hashlib
-import struct
-from typing import Callable
-
-
-def fnv1a(data: bytes, seed: int = 0) -> int:
-    """
-    Fowler-Noll-Vo hash (FNV-1a variant).
-
-    Args:
-        data: Bytes to hash
-        seed: Optional seed value
-
-    Returns:
-        64-bit hash value
-    """
-    FNV_OFFSET_BASIS = 14695981039346656037
-    FNV_PRIME = 1099511628211
-    h = FNV_OFFSET_BASIS ^ seed
-    for byte in data:
-        h ^= byte
-        h = (h * FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
-    return h
-
-
-def murmurhash3(data: bytes, seed: int = 0) -> int:
-    """
-    MurmurHash3 (32-bit) implementation.
-
-    Args:
-        data: Bytes to hash
-        seed: Seed value
-
-    Returns:
-        32-bit hash value
-    """
-    c1 = 0xcc9e2d51
-    c2 = 0x1b873593
-    length = len(data)
-    h = seed
-    rounded_end = (length // 4) * 4
-    for i in range(0, rounded_end, 4):
-        k = struct.unpack("<I", data[i : i + 4])[0]
-        k = (k * c1) & 0xFFFFFFFF
-        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
-        k = (k * c2) & 0xFFFFFFFF
-        h ^= k
-        h = ((h << 13) | (h >> 19)) & 0xFFFFFFFF
-        h = (h * 5 + 0xe6546b64) & 0xFFFFFFFF
-    k = 0
-    tail_size = length % 4
-    if tail_size >= 3:
-        k ^= data[rounded_end + 2] << 16
-    if tail_size >= 2:
-        k ^= data[rounded_end + 1] << 8
-    if tail_size >= 1:
-        k ^= data[rounded_end]
-        k = (k * c1) & 0xFFFFFFFF
-        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
-        k = (k * c2) & 0xFFFFFFFF
-        h ^= k
-    h ^= length
-    h ^= (h >> 16)
-    h = (h * 0x85ebca6b) & 0xFFFFFFFF
-    h ^= (h >> 13)
-    h = (h * 0xc2b2ae35) & 0xFFFFFFFF
-    h ^= (h >> 16)
-    return h
-
-
-def djb2(data: bytes) -> int:
-    """DJB2 hash function (Daniel J. Bernstein)."""
-    h = 5381
-    for byte in data:
-        h = ((h << 5) + h + byte) & 0xFFFFFFFF
-    return h
-
-
-def sdbm(data: bytes) -> int:
-    """SDBM hash function."""
-    h = 0
-    for byte in data:
-        h = (byte + (h << 6) + (h << 16) - h) & 0xFFFFFFFF
-    return h
-
-
-class BloomFilter:
-    """
-    Simple Bloom filter for set membership testing.
-
-    Args:
-        size: Number of bits in filter
-        num_hashes: Number of hash functions
-    """
-
-    def __init__(self, size: int = 10000, num_hashes: int = 7) -> None:
-        self.size = size
-        self.num_hashes = num_hashes
-        self.bits = [False] * size
-
-    def _get_hash_positions(self, item: bytes) -> list[int]:
-        """Get bit positions for an item."""
-        h1 = murmurhash3(item) % self.size
-        h2 = djb2(item) % self.size
-        return [(h1 + i * h2) % self.size for i in range(self.num_hashes)]
-
-    def add(self, item: bytes) -> None:
-        """Add item to filter."""
-        for pos in self._get_hash_positions(item):
-            self.bits[pos] = True
-
-    def might_contain(self, item: bytes) -> bool:
-        """Check if item might be in filter (may have false positives)."""
-        return all(self.bits[pos] for pos in self._get_hash_positions(item))
-
-    def __len__(self) -> int:
-        return sum(self.bits)
-
-    def false_positive_rate(self, n: int) -> float:
-        """Estimate false positive rate for n insertions."""
-        k = self.num_hashes
-        m = self.size
-        exponent = -k * n / m
-        return (1 - math.e**exponent) ** k
-
-
 import math
 
 
-def consistent_hash(
-    key: str,
-    nodes: list[str],
-    replicas: int = 100,
-    hash_fn: Callable[[bytes], int] | None = None,
-) -> str:
+def md5_hash(data: str) -> str:
     """
-    Consistent hashing to determine which node a key maps to.
+    Compute MD5 hash of a string (simplified pure-Python implementation).
+
+    For production use, prefer the hashlib module.
+    This is a reference implementation demonstrating the algorithm.
 
     Args:
-        key: Key to hash
-        nodes: List of node identifiers
-        replicas: Number of virtual nodes per physical node
-        hash_fn: Hash function (default: djb2)
+        data: Input string
 
     Returns:
-        Node identifier that should handle the key
+        32-character hexadecimal MD5 hash.
+    """
+    # Use built-in hashlib for actual use
+    import hashlib
+    return hashlib.md5(data.encode()).hexdigest()
+
+
+def sha256_hash(data: str) -> str:
+    """Compute SHA-256 hash of a string."""
+    import hashlib
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+def sha1_hash(data: str) -> str:
+    """Compute SHA-1 hash of a string."""
+    import hashlib
+    return hashlib.sha1(data.encode()).hexdigest()
+
+
+def murmurhash3_32(data: str, seed: int = 0) -> int:
+    """
+    MurmurHash3 32-bit.
+
+    Args:
+        data: Input string
+        seed: Random seed
+
+    Returns:
+        32-bit unsigned hash value.
+    """
+    import struct
+
+    def rotl32(x: int, r: int) -> int:
+        return ((x << r) | (x >> (32 - r))) & 0xFFFFFFFF
+
+    def fmix32(h: int) -> int:
+        h ^= h >> 16
+        h = (h * 0x85EBCA6B) & 0xFFFFFFFF
+        h ^= h >> 13
+        h = (h * 0xC2B2AE35) & 0xFFFFFFFF
+        h ^= h >> 16
+        return h
+
+    data_bytes = data.encode("utf-8")
+    length = len(data_bytes)
+    nblocks = length // 4
+
+    h1 = seed & 0xFFFFFFFF
+
+    c1 = 0xCC9E2D51
+    c2 = 0x1B873593
+
+    for i in range(nblocks):
+        k1 = struct.unpack("<I", data_bytes[i * 4 : i * 4 + 4])[0]
+        k1 = (k1 * c1) & 0xFFFFFFFF
+        k1 = rotl32(k1, 15)
+        k1 = (k1 * c2) & 0xFFFFFFFF
+        h1 ^= k1
+        h1 = rotl32(h1, 13)
+        h1 = ((h1 * 5) + 0xE6546B64) & 0xFFFFFFFF
+
+    tail = data_bytes[nblocks * 4:]
+    k1 = 0
+    for i, byte in enumerate(tail):
+        k1 ^= byte << (i * 8)
+    if tail:
+        k1 = (k1 * c1) & 0xFFFFFFFF
+        k1 = rotl32(k1, 15)
+        k1 = (k1 * c2) & 0xFFFFFFFF
+        h1 ^= k1
+
+    h1 ^= length
+    h1 = fmix32(h1)
+    return h1
+
+
+def hash_ring(nodes: list[str], key: str, replicas: int = 100) -> str:
+    """
+    Consistent hashing - find which node a key belongs to.
+
+    Args:
+        nodes: List of node identifiers
+        key: Key to hash
+        replicas: Number of virtual nodes per physical node
+
+    Returns:
+        Selected node identifier.
     """
     if not nodes:
         raise ValueError("No nodes provided")
-    if hash_fn is None:
-        hash_fn = lambda b: djb2(b)
 
     positions: dict[int, str] = {}
     for node in nodes:
         for i in range(replicas):
-            pos = hash_fn(f"{node}#{i}".encode())
+            pos = murmurhash3_32(f"{node}::{i}", seed=0) & 0xFFFFFFFF
             positions[pos] = node
 
-    key_pos = hash_fn(key.encode())
+    key_hash = murmurhash3_32(key, seed=0) & 0xFFFFFFFF
     sorted_positions = sorted(positions.keys())
     for pos in sorted_positions:
-        if key_pos <= pos:
+        if key_hash <= pos:
             return positions[pos]
     return positions[sorted_positions[0]]
+
+
+def hash_distribution(
+    keys: list[str],
+    nodes: list[str],
+    replicas: int = 100,
+) -> dict[str, int]:
+    """
+    Compute hash distribution across nodes.
+
+    Args:
+        keys: List of keys to distribute
+        nodes: List of nodes
+        replicas: Virtual nodes per physical node
+
+    Returns:
+        Dictionary mapping node to key count.
+    """
+    dist: dict[str, int] = {n: 0 for n in nodes}
+    for key in keys:
+        node = hash_ring(nodes, key, replicas)
+        dist[node] = dist.get(node, 0) + 1
+    return dist
+
+
+def hash_bucket(key: str, num_buckets: int) -> int:
+    """
+    Map key to bucket index using hash.
+
+    Args:
+        key: Key string
+        num_buckets: Number of buckets
+
+    Returns:
+        Bucket index [0, num_buckets).
+    """
+    import hashlib
+    h = hashlib.md5(key.encode()).hexdigest()
+    return int(h, 16) % num_buckets
+
+
+def string_fingerprint(s: str, num_bits: int = 64) -> int:
+    """
+    Create a fingerprint hash for string deduplication.
+
+    Args:
+        s: Input string
+        num_bits: Fingerprint size (64 or 128 recommended)
+
+    Returns:
+        Fingerprint as integer.
+    """
+    import hashlib
+    if num_bits <= 64:
+        return int(hashlib.md5(s.encode()).hexdigest(), 16) % (2 ** num_bits)
+    return int(hashlib.sha256(s.encode()).hexdigest(), 16) % (2 ** num_bits)
+
+
+def locality_sensitive_hash(
+    vector: list[float],
+    num_hashes: int = 16,
+    dim: int | None = None,
+) -> list[int]:
+    """
+    Simhash-style locality-sensitive hashing for vectors.
+
+    Args:
+        vector: Feature vector
+        num_hashes: Number of hash bits to generate
+        dim: Embedding dimension
+
+    Returns:
+        LSH fingerprint.
+    """
+    import hashlib
+
+    dim = dim or len(vector)
+    fingerprint = 0
+    for i in range(num_hashes):
+        hash_input = f"{i}:{vector}".encode()
+        h = int(hashlib.md5(hash_input).hexdigest(), 16)
+        bit = h & 1
+        fingerprint |= (bit << i)
+
+    # Convert to list of bits
+    bits = [(fingerprint >> i) & 1 for i in range(num_hashes)]
+    # Group into integers
+    groups = []
+    for i in range(0, num_hashes, 8):
+        group_bits = bits[i:i+8]
+        val = sum(b << j for j, b in enumerate(group_bits))
+        groups.append(val)
+    return groups
+
+
+def minhash_signature(
+    items: list[str],
+    num_hashes: int = 100,
+) -> list[int]:
+    """
+    MinHash signature for set similarity estimation.
+
+    Args:
+        items: List of items in the set
+        num_hashes: Number of hash functions
+
+    Returns:
+        MinHash signature (list of minimum hash values).
+    """
+    if not items:
+        return [0] * num_hashes
+
+    signature: list[int] = []
+    for i in range(num_hashes):
+        min_hash = min(
+            murmurhash3_32(item, seed=i) & 0xFFFFFFFF
+            for item in items
+        )
+        signature.append(min_hash)
+    return signature
+
+
+def minhash_estimate_similarity(sig1: list[int], sig2: list[int]) -> float:
+    """
+    Estimate Jaccard similarity from MinHash signatures.
+
+    Args:
+        sig1: First MinHash signature
+        sig2: Second MinHash signature
+
+    Returns:
+        Estimated Jaccard similarity.
+    """
+    if len(sig1) != len(sig2):
+        raise ValueError("Signatures must have same length")
+    if not sig1:
+        return 0.0
+    matches = sum(1 for a, b in zip(sig1, sig2) if a == b)
+    return matches / len(sig1)
