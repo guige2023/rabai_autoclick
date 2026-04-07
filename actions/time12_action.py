@@ -1,361 +1,440 @@
-"""Time12 action module for RabAI AutoClick.
-
-Provides additional time operations:
-- TimeNowAction: Get current time
-- TimeSleepAction: Sleep for seconds
-- TimeTimestampAction: Get current timestamp
-- TimeFromTimestampAction: Convert timestamp to datetime
-- TimeFormatAction: Format time
-- TimeParseAction: Parse time string
 """
+Time and datetime advanced utilities.
+"""
+from __future__ import annotations
 
-from typing import Any, Dict, List
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class TimeNowAction(BaseAction):
-    """Get current time."""
-    action_type = "time12_now"
-    display_name = "当前时间"
-    description = "获取当前时间"
-    version = "12.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute now.
-
-        Args:
-            context: Execution context.
-            params: Dict with format, output_var.
-
-        Returns:
-            ActionResult with current time.
-        """
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'current_time')
-
-        try:
-            from datetime import datetime
-
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
-
-            now = datetime.now()
-            result = now.strftime(resolved_format)
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"当前时间: {result}",
-                data={
-                    'datetime': now.isoformat(),
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取当前时间失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'current_time'}
-
-
-class TimeSleepAction(BaseAction):
-    """Sleep for seconds."""
-    action_type = "time12_sleep"
-    display_name = "休眠"
-    description = "休眠指定秒数"
-    version = "12.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sleep.
-
-        Args:
-            context: Execution context.
-            params: Dict with seconds, output_var.
-
-        Returns:
-            ActionResult with sleep status.
-        """
-        seconds = params.get('seconds', 1)
-        output_var = params.get('output_var', 'sleep_status')
-
-        try:
-            import time
-
-            resolved_seconds = float(context.resolve_value(seconds)) if seconds else 1
-
-            time.sleep(resolved_seconds)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message=f"休眠完成: {resolved_seconds}秒",
-                data={
-                    'seconds': resolved_seconds,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"休眠失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['seconds']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'sleep_status'}
-
-
-class TimeTimestampAction(BaseAction):
-    """Get current timestamp."""
-    action_type = "time12_timestamp"
-    display_name = "获取时间戳"
-    description = "获取当前时间戳"
-    version = "12.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute timestamp.
-
-        Args:
-            context: Execution context.
-            params: Dict with output_var.
-
-        Returns:
-            ActionResult with timestamp.
-        """
-        output_var = params.get('output_var', 'timestamp')
-
-        try:
-            import time
-
-            result = time.time()
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"时间戳: {result}",
-                data={
-                    'timestamp': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取时间戳失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'timestamp'}
-
-
-class TimeFromTimestampAction(BaseAction):
-    """Convert timestamp to datetime."""
-    action_type = "time12_from_timestamp"
-    display_name = "从时间戳转换"
-    description = "从时间戳转换为日期时间"
-    version = "12.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute from timestamp.
-
-        Args:
-            context: Execution context.
-            params: Dict with timestamp, output_var.
-
-        Returns:
-            ActionResult with datetime.
-        """
-        timestamp = params.get('timestamp', 0)
-        output_var = params.get('output_var', 'datetime')
-
-        try:
-            from datetime import datetime
-
-            resolved_timestamp = float(context.resolve_value(timestamp)) if timestamp else time.time()
-
-            dt = datetime.fromtimestamp(resolved_timestamp)
-            result = dt.isoformat()
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"日期时间: {result}",
-                data={
-                    'timestamp': resolved_timestamp,
-                    'datetime': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"从时间戳转换失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['timestamp']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'datetime'}
-
-
-class TimeFormatAction(BaseAction):
-    """Format time."""
-    action_type = "time12_format"
-    display_name: "格式化时间"
-    description: "格式化时间"
-    version = "12.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute format.
-
-        Args:
-            context: Execution context.
-            params: Dict with datetime, format, output_var.
-
-        Returns:
-            ActionResult with formatted time.
-        """
-        datetime_str = params.get('datetime', 'now')
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'formatted_time')
-
-        try:
-            from datetime import datetime
-
-            resolved_datetime = context.resolve_value(datetime_str) if datetime_str else 'now'
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
-
-            if resolved_datetime == 'now':
-                dt = datetime.now()
-            elif isinstance(resolved_datetime, str):
-                dt = datetime.fromisoformat(resolved_datetime)
-            else:
-                dt = resolved_datetime
-
-            result = dt.strftime(resolved_format)
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"格式化时间: {result}",
-                data={
-                    'datetime': dt.isoformat(),
-                    'format': resolved_format,
-                    'result': result,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"格式化时间失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['datetime']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d %H:%M:%S', 'output_var': 'formatted_time'}
-
-
-class TimeParseAction(BaseAction):
-    """Parse time string."""
-    action_type = "time12_parse"
-    display_name = "解析时间"
-    description = "解析时间字符串"
-    version = "12.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute parse.
-
-        Args:
-            context: Execution context.
-            params: Dict with time_str, format, output_var.
-
-        Returns:
-            ActionResult with parsed datetime.
-        """
-        time_str = params.get('time_str', '')
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'parsed_time')
-
-        try:
-            from datetime import datetime
-
-            resolved_str = context.resolve_value(time_str)
-            resolved_format = context.resolve_value(format_str) if format_str else '%Y-%m-%d %H:%M:%S'
-
-            dt = datetime.strptime(resolved_str, resolved_format)
-            result = dt.isoformat()
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"解析时间: {result}",
-                data={
-                    'time_str': resolved_str,
-                    'format': resolved_format,
-                    'datetime': result,
-                    'output_var': output_var
-                }
-            )
-        except ValueError as e:
-            return ActionResult(
-                success=False,
-                message=f"时间格式错误: {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"解析时间失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['time_str', 'format']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'parsed_time'}
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union
+
+
+def get_elapsed_seconds(start: Union[datetime, str]) -> float:
+    """
+    Get elapsed seconds since start.
+
+    Args:
+        start: Start datetime.
+
+    Returns:
+        Elapsed seconds.
+    """
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start.replace('Z', '+00:00'))
+
+    return (datetime.now() - start).total_seconds()
+
+
+def get_remaining_seconds(end: Union[datetime, str]) -> float:
+    """
+    Get remaining seconds until end.
+
+    Args:
+        end: End datetime.
+
+    Returns:
+        Remaining seconds (negative if past).
+    """
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end.replace('Z', '+00:00'))
+
+    return (end - datetime.now()).total_seconds()
+
+
+def format_elapsed(seconds: float) -> str:
+    """
+    Format elapsed seconds as readable string.
+
+    Args:
+        seconds: Seconds to format.
+
+    Returns:
+        Human-readable string.
+    """
+    if seconds < 0:
+        return 'negative'
+
+    if seconds < 60:
+        return f'{int(seconds)}s'
+
+    minutes = int(seconds // 60)
+    seconds = int(seconds % 60)
+
+    if minutes < 60:
+        return f'{minutes}m {seconds}s'
+
+    hours = minutes // 60
+    minutes = minutes % 60
+
+    if hours < 24:
+        return f'{hours}h {minutes}m'
+
+    days = hours // 24
+    hours = hours % 24
+    return f'{days}d {hours}h'
+
+
+def get_current_time_ms() -> int:
+    """Get current time in milliseconds."""
+    return int(datetime.now().timestamp() * 1000)
+
+
+def get_timezone_offset(tz_name: str) -> float:
+    """
+    Get UTC offset for timezone in hours.
+
+    Args:
+        tz_name: Timezone name.
+
+    Returns:
+        Offset in hours.
+    """
+    try:
+        from datetime import timezone as tz_module
+        import zoneinfo
+
+        tz = zoneinfo.ZoneInfo(tz_name)
+        now = datetime.now()
+        offset = tz.utcoffset(now)
+        return offset.total_seconds() / 3600 if offset else 0.0
+    except Exception:
+        return 0.0
+
+
+def get_timestamp_for_date(
+    year: int,
+    month: int,
+    day: int,
+    hour: int = 0,
+    minute: int = 0,
+    second: int = 0
+) -> float:
+    """
+    Get timestamp for specific date.
+
+    Args:
+        year, month, day: Date components.
+        hour, minute, second: Time components.
+
+    Returns:
+        Unix timestamp.
+    """
+    dt = datetime(year, month, day, hour, minute, second)
+    return dt.timestamp()
+
+
+def get_datetime_now() -> Dict[str, int]:
+    """
+    Get current datetime as components.
+
+    Returns:
+        Dictionary with datetime components.
+    """
+    now = datetime.now()
+    return {
+        'year': now.year,
+        'month': now.month,
+        'day': now.day,
+        'hour': now.hour,
+        'minute': now.minute,
+        'second': now.second,
+        'microsecond': now.microsecond,
+    }
+
+
+def format_datetime_custom(
+    dt: Union[datetime, str],
+    format_str: str
+) -> str:
+    """
+    Format datetime with custom format.
+
+    Args:
+        dt: Datetime or ISO string.
+        format_str: strftime format string.
+
+    Returns:
+        Formatted string.
+    """
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+
+    return dt.strftime(format_str)
+
+
+def get_start_of_day(dt: Optional[datetime] = None) -> datetime:
+    """
+    Get start of day (midnight).
+
+    Args:
+        dt: Datetime (defaults to now).
+
+    Returns:
+        Start of day.
+    """
+    if dt is None:
+        dt = datetime.now()
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def get_end_of_day(dt: Optional[datetime] = None) -> datetime:
+    """
+    Get end of day (23:59:59).
+
+    Args:
+        dt: Datetime (defaults to now).
+
+    Returns:
+        End of day.
+    """
+    if dt is None:
+        dt = datetime.now()
+    return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+
+def get_start_of_week(dt: Optional[datetime] = None) -> datetime:
+    """
+    Get start of week (Monday).
+
+    Args:
+        dt: Datetime (defaults to now).
+
+    Returns:
+        Start of week.
+    """
+    if dt is None:
+        dt = datetime.now()
+    days_since_monday = dt.weekday()
+    return get_start_of_day(dt - timedelta(days=days_since_monday))
+
+
+def get_start_of_month(dt: Optional[datetime] = None) -> datetime:
+    """
+    Get start of month.
+
+    Args:
+        dt: Datetime (defaults to now).
+
+    Returns:
+        Start of month.
+    """
+    if dt is None:
+        dt = datetime.now()
+    return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def get_start_of_year(dt: Optional[datetime] = None) -> datetime:
+    """
+    Get start of year.
+
+    Args:
+        dt: Datetime (defaults to now).
+
+    Returns:
+        Start of year.
+    """
+    if dt is None:
+        dt = datetime.now()
+    return datetime(dt.year, 1, 1)
+
+
+def get_time_until_hour(target_hour: int) -> Dict[str, int]:
+    """
+    Get time until target hour.
+
+    Args:
+        target_hour: Target hour (0-23).
+
+    Returns:
+        Hours, minutes, seconds until target.
+    """
+    now = datetime.now()
+    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+
+    if target <= now:
+        target += timedelta(days=1)
+
+    diff = target - now
+    total_seconds = int(diff.total_seconds())
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+
+    return {
+        'hours': hours,
+        'minutes': minutes,
+        'seconds': seconds,
+        'total_seconds': total_seconds,
+    }
+
+
+def get_timezone_now(tz_name: str) -> datetime:
+    """
+    Get current datetime in timezone.
+
+    Args:
+        tz_name: Timezone name.
+
+    Returns:
+        Datetime in timezone.
+    """
+    try:
+        from dateutil import tz
+        return datetime.now(tz.gettz(tz_name))
+    except ImportError:
+        return datetime.now()
+
+
+def get_utc_now() -> datetime:
+    """Get current UTC datetime."""
+    return datetime.now(timezone.utc)
+
+
+def get_local_now() -> datetime:
+    """Get current local datetime."""
+    return datetime.now()
+
+
+def get_timestamp_utc() -> int:
+    """Get current UTC timestamp."""
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def get_timestamp_local() -> int:
+    """Get current local timestamp."""
+    return int(datetime.now().timestamp())
+
+
+def get_date_range(
+    start: Union[datetime, str],
+    end: Union[datetime, str],
+    step_days: int = 1
+) -> List[datetime]:
+    """
+    Generate list of dates between start and end.
+
+    Args:
+        start: Start datetime.
+        end: End datetime.
+        step_days: Step size in days.
+
+    Returns:
+        List of datetimes.
+    """
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start.replace('Z', '+00:00'))
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end.replace('Z', '+00:00'))
+
+    dates = []
+    current = get_start_of_day(start)
+
+    while current <= end:
+        dates.append(current)
+        current += timedelta(days=step_days)
+
+    return dates
+
+
+def get_week_dates(year: int, week: int) -> List[datetime]:
+    """
+    Get all dates in a week.
+
+    Args:
+        year: Year.
+        week: Week number (1-53).
+
+    Returns:
+        List of 7 datetimes for the week.
+    """
+    jan4 = datetime(year, 1, 4)
+    week1_monday = jan4 - timedelta(days=jan4.weekday())
+
+    week_start = week1_monday + timedelta(weeks=week - 1)
+
+    return [week_start + timedelta(days=i) for i in range(7)]
+
+
+def get_month_dates(year: int, month: int) -> List[datetime]:
+    """
+    Get all dates in a month.
+
+    Args:
+        year: Year.
+        month: Month (1-12).
+
+    Returns:
+        List of datetimes for the month.
+    """
+    start = datetime(year, month, 1)
+
+    if month == 12:
+        end = datetime(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end = datetime(year, month + 1, 1) - timedelta(days=1)
+
+    return get_date_range(start, end, step_days=1)
+
+
+def is_same_date(
+    dt1: Union[datetime, str],
+    dt2: Union[datetime, str]
+) -> bool:
+    """
+    Check if two datetimes are same date.
+
+    Args:
+        dt1: First datetime.
+        dt2: Second datetime.
+
+    Returns:
+        True if same date.
+    """
+    if isinstance(dt1, str):
+        dt1 = datetime.fromisoformat(dt1.replace('Z', '+00:00'))
+    if isinstance(dt2, str):
+        dt2 = datetime.fromisoformat(dt2.replace('Z', '+00:00'))
+
+    return dt1.date() == dt2.date()
+
+
+def get_days_between(
+    dt1: Union[datetime, str],
+    dt2: Union[datetime, str]
+) -> int:
+    """
+    Get number of days between two datetimes.
+
+    Args:
+        dt1: First datetime.
+        dt2: Second datetime.
+
+    Returns:
+        Number of days.
+    """
+    if isinstance(dt1, str):
+        dt1 = datetime.fromisoformat(dt1.replace('Z', '+00:00'))
+    if isinstance(dt2, str):
+        dt2 = datetime.fromisoformat(dt2.replace('Z', '+00:00'))
+
+    return abs((dt2 - dt1).days)
+
+
+def get_hours_between(
+    dt1: Union[datetime, str],
+    dt2: Union[datetime, str]
+) -> float:
+    """
+    Get number of hours between two datetimes.
+
+    Args:
+        dt1: First datetime.
+        dt2: Second datetime.
+
+    Returns:
+        Number of hours.
+    """
+    if isinstance(dt1, str):
+        dt1 = datetime.fromisoformat(dt1.replace('Z', '+00:00'))
+    if isinstance(dt2, str):
+        dt2 = datetime.fromisoformat(dt2.replace('Z', '+00:00'))
+
+    return abs((dt2 - dt1).total_seconds() / 3600)
