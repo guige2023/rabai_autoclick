@@ -1,0 +1,117 @@
+{
+  "name": "Finance Cost Optimization Workflow",
+  "description": "Automate cost optimization analysis",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "cost_items_to_analyze": 48,
+    "current_item": 0,
+    "analyzed_items": 0,
+    "optimization_savings": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "cost_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize cost counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open cost optimization tool"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for tool"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "cost_optimization_loop",
+      "count": "{{cost_items_to_analyze}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start cost optimization loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select cost item for analysis"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for analysis"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/cost_optimization_{{cost_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture optimization screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "cost_counter",
+      "value": "{{cost_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment cost counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{cost_counter < cost_items_to_analyze}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more items"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next item"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/finance_cost_optimization_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
