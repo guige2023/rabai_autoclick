@@ -472,12 +472,12 @@ class ThemeManager(QObject):
                 }}
             """,
             "message_success": f"""
-                QMessageBox {{ background-color: #f0f9eb; }}
+                QMessageBox {{ background-color: {c['bg_widget']}; }}
                 QPushButton {{ background-color: {c['success']}; color: white; padding: 8px 20px; border: none; border-radius: 4px; transition: background-color 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['success_hover']}; }}
             """,
             "message_error": f"""
-                QMessageBox {{ background-color: #fef0f0; }}
+                QMessageBox {{ background-color: {c['bg_widget']}; }}
                 QPushButton {{ background-color: {c['error']}; color: white; padding: 8px 20px; border: none; border-radius: 4px; transition: background-color 0.2s ease; }}
                 QPushButton:hover {{ background-color: {c['error_hover']}; }}
             """,
