@@ -7,7 +7,7 @@ workflow controls and common actions.
 from typing import Optional
 
 from PyQt5.QtCore import Qt, QPoint, pyqtSignal
-from PyQt5.QtGui import QFont, QPainter, QPen, QColor, QBrush, QRadialGradient
+from PyQt5.QtGui import QFont, QGraphicsDropShadowEffect, QPainter, QPen, QColor, QBrush, QRadialGradient
 from PyQt5.QtWidgets import (
     QAction, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QWidget
 )
@@ -60,6 +60,13 @@ class MiniToolbar(QWidget):
         self.setMinimumWidth(400)
 
         self._apply_stylesheet()
+
+        # Add shadow effect for floating appearance
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(15)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        shadow.setOffset(0, 3)
+        self.setGraphicsEffect(shadow)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
