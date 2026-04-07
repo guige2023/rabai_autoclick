@@ -1,0 +1,164 @@
+{
+  "name": "Content Aggregator Workflow",
+  "description": "Aggregate content from multiple RSS feeds into a single digest",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "sources": [
+      "https://news.example.com/feed.xml",
+      "https://tech.example.com/feed.xml",
+      "https://blog.example.com/feed.xml"
+    ],
+    "articles_per_source": 5,
+    "current_source": 0,
+    "total_articles": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "source_index",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize source index"
+    },
+    {
+      "id": 2,
+      "type": "loop",
+      "loop_id": "sources_loop",
+      "count": 3,
+      "loop_start": 3,
+      "pre_delay": 0.3,
+      "comment": "Loop through sources"
+    },
+    {
+      "id": 3,
+      "type": "click",
+      "x": 50,
+      "y": 50,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click address bar"
+    },
+    {
+      "id": 4,
+      "type": "type_text",
+      "text": "{{sources[source_index]}}",
+      "enter_after": true,
+      "pre_delay": 0.3,
+      "comment": "Navigate to feed URL"
+    },
+    {
+      "id": 5,
+      "type": "delay",
+      "seconds": 3.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for feed"
+    },
+    {
+      "id": 6,
+      "type": "loop",
+      "loop_id": "articles_loop",
+      "count": "{{articles_per_source}}",
+      "loop_start": 7,
+      "pre_delay": 0.3,
+      "comment": "Loop through articles"
+    },
+    {
+      "id": 7,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.5,
+      "comment": "Click on article"
+    },
+    {
+      "id": 8,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for article"
+    },
+    {
+      "id": 9,
+      "type": "screenshot",
+      "save_path": "./screenshots/article_s{{source_index}}_a{{total_articles}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture article"
+    },
+    {
+      "id": 10,
+      "type": "set_variable",
+      "name": "total_articles",
+      "value": "{{total_articles + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment article counter"
+    },
+    {
+      "id": 11,
+      "type": "key_press",
+      "key": "backspace",
+      "pre_delay": 0.3,
+      "comment": "Go back to feed"
+    },
+    {
+      "id": 12,
+      "type": "click",
+      "x": 200,
+      "y": 250,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Click next article"
+    },
+    {
+      "id": 13,
+      "type": "set_variable",
+      "name": "source_index",
+      "value": "{{source_index + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment source index"
+    },
+    {
+      "id": 14,
+      "type": "condition",
+      "condition": "{{source_index < 3}}",
+      "true_next": 15,
+      "false_next": 16,
+      "pre_delay": 0.1,
+      "comment": "Check if more sources"
+    },
+    {
+      "id": 15,
+      "type": "goto",
+      "step_id": 2,
+      "pre_delay": 0.1,
+      "comment": "Continue to next source"
+    },
+    {
+      "id": 16,
+      "type": "screenshot",
+      "save_path": "./screenshots/aggregated_content.png",
+      "pre_delay": 0.5,
+      "comment": "Capture aggregated content"
+    },
+    {
+      "id": 17,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
