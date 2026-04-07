@@ -1,15 +1,15 @@
 """Message and notification utilities for RabAI AutoClick.
 
 Provides toast notifications, message boxes, and a centralized
-message manager for user feedback.
+message manager for user feedback with animations.
 """
 
 from typing import Dict, Optional
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEasingCurve, QPropertyAnimation
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QApplication, QLabel, QMessageBox, QWidget
+    QApplication, QLabel, QMessageBox, QWidget, QGraphicsOpacityEffect
 )
 
 from ui.theme import theme_manager, ThemeType
@@ -20,7 +20,7 @@ MessageLevel = str  # Literal['info', 'success', 'warning', 'error']
 
 
 class ToastWidget(QWidget):
-    """Floating toast notification widget."""
+    """Floating toast notification widget with fade animations."""
 
     closed = pyqtSignal()
 
@@ -59,8 +59,41 @@ class ToastWidget(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
 
+        # Setup fade animations
+        self._setup_animations()
+
         # Auto-close after duration
-        QTimer.singleShot(duration, self.close)
+        QTimer.singleShot(duration, self._fade_out)
+
+    def _setup_animations(self) -> None:
+        """Setup fade in/out animations."""
+        # Opacity effect for fade animations
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
+        self._opacity_effect.setOpacity(0)
+
+        # Fade in animation
+        self._fade_in_animation = QPropertyAnimation(self._opacity_effect, b'opacity')
+        self._fade_in_animation.setDuration(300)
+        self._fade_in_animation.setStartValue(0.0)
+        self._fade_in_animation.setEndValue(1.0)
+        self._fade_in_animation.setEasingCurve(QEasingCurve.InOutQuad)
+
+        # Fade out animation
+        self._fade_out_animation = QPropertyAnimation(self._opacity_effect, b'opacity')
+        self._fade_out_animation.setDuration(200)
+        self._fade_out_animation.setStartValue(1.0)
+        self._fade_out_animation.setEndValue(0.0)
+        self._fade_out_animation.setEasingCurve(QEasingCurve.InOutQuad)
+        self._fade_out_animation.finished.connect(self.close)
+
+    def _fade_in(self) -> None:
+        """Start fade in animation."""
+        self._fade_in_animation.start()
+
+    def _fade_out(self) -> None:
+        """Start fade out animation."""
+        self._fade_out_animation.start()
 
     def _init_ui(self, message: str, level: MessageLevel) -> None:
         """Initialize the toast UI.
@@ -124,6 +157,7 @@ class ToastWidget(QWidget):
                 screen_geometry.height() - self.height() - 60
             )
         self.show()
+        self._fade_in()
 
 
 class MessageManager:
