@@ -1,0 +1,117 @@
+{
+  "name": "Security Vendor Scorecard Workflow",
+  "description": "Automate security vendor performance scoring",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "vendor_performances_to_score": 52,
+    "current_vendor": 0,
+    "high_performers": 0,
+    "low_performers": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "vendor_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize vendor counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open vendor management system"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for system"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "vendor_scorecard_loop",
+      "count": "{{vendor_performances_to_score}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start vendor scorecard loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select vendor"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for vendor scoring"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/vendor_scorecard_{{vendor_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture vendor screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "vendor_counter",
+      "value": "{{vendor_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment vendor counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{vendor_counter < vendor_performances_to_score}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more vendors"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next vendor"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/security_vendor_scorecard_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
