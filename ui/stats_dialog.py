@@ -78,16 +78,16 @@ class StatsDialog(QDialog):
         refresh_btn = QPushButton("🔄 刷新数据")
         refresh_btn.clicked.connect(self._load_data)
         btn_layout.addWidget(refresh_btn)
-        
+
         clear_btn = QPushButton("🗑 清除历史")
         clear_btn.clicked.connect(self._clear_history)
-        clear_btn.setStyleSheet("background-color: #f44336; color: white;")
+        clear_btn.setStyleSheet(f"background-color: {self._colors['error']}; color: white;")
         btn_layout.addWidget(clear_btn)
-        
+
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(close_btn)
-        
+
         layout.addLayout(btn_layout)
     
     def _create_overview_tab(self) -> None:
