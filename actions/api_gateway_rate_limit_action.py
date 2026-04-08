@@ -1,157 +1,175 @@
-"""
-API Gateway Rate Limit Action Module.
+"""API Gateway Rate Limit Action Module.
 
-Rate limiting for API gateway with token bucket, sliding window,
-or fixed window algorithms. Supports per-client and global limits.
+Implements rate limiting policies for API gateways including
+token bucket, sliding window, and fixed window algorithms.
 """
-from typing import Any, Optional
+
+from __future__ import annotations
+
+import sys
+import os
+import time
+from typing import Any, Dict, Optional
 from dataclasses import dataclass, field
-from actions.base_action import BaseAction
+from enum import Enum
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
+
+
+class RateLimitAlgorithm(Enum):
+    """Rate limiting algorithms."""
+    TOKEN_BUCKET = "token_bucket"
+    SLIDING_WINDOW = "sliding_window"
+    FIXED_WINDOW = "fixed_window"
+    LEAKY_BUCKET = "leaky_bucket"
 
 
 @dataclass
 class RateLimitConfig:
     """Rate limit configuration."""
-    algorithm: str = "token_bucket"  # token_bucket, sliding_window, fixed_window
-    max_requests: int = 100
-    window_seconds: int = 60
-    burst_size: int = 10
-
-
-@dataclass
-class RateLimitResult:
-    """Result of rate limit check."""
-    allowed: bool
-    remaining: int
-    reset_at: float
-    retry_after: Optional[float] = None
+    requests_per_second: float = 10.0
+    requests_per_minute: float = 100.0
+    requests_per_hour: float = 1000.0
+    burst_size: int = 20
 
 
 class APIGatewayRateLimitAction(BaseAction):
-    """Rate limiting middleware for API gateway."""
+    """
+    API Gateway rate limiting.
+
+    Implements rate limiting using various algorithms
+    to protect backend services from overload.
+
+    Example:
+        rl = APIGatewayRateLimitAction()
+        result = rl.execute(ctx, {"action": "check", "identity": "user-123", "cost": 1})
+    """
+    action_type = "api_gateway_rate_limit"
+    display_name = "API网关限流"
+    description = "API网关限流：令牌桶、滑动窗口、固定窗口算法"
 
     def __init__(self) -> None:
-        super().__init__("api_gateway_rate_limit")
-        self._buckets: dict[str, dict[str, Any]] = {}
+        super().__init__()
+        self._buckets: Dict[str, Dict[str, Any]] = {}
         self._config = RateLimitConfig()
+        self._algorithm = RateLimitAlgorithm.TOKEN_BUCKET
 
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Check and update rate limit.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        action = params.get("action", "")
+        try:
+            if action == "check":
+                return self._check_rate_limit(params)
+            elif action == "set_config":
+                return self._set_config(params)
+            elif action == "get_remaining":
+                return self._get_remaining(params)
+            elif action == "reset":
+                return self._reset_limit(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Rate limit error: {str(e)}")
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - client_id: Client identifier
-                - request_count: Number of requests in this call
-                - algorithm: token_bucket, sliding_window, fixed_window
-                - max_requests: Max requests per window
-                - window_seconds: Time window in seconds
-                - burst_size: Burst capacity (for token bucket)
-
-        Returns:
-            RateLimitResult with allowed status and metadata
-        """
-        import time
-
-        client_id = params.get("client_id", "default")
-        request_count = params.get("request_count", 1)
+    def _check_rate_limit(self, params: Dict[str, Any]) -> ActionResult:
+        identity = params.get("identity", "default")
+        cost = params.get("cost", 1)
         algorithm = params.get("algorithm", "token_bucket")
-        max_requests = params.get("max_requests", self._config.max_requests)
-        window_seconds = params.get("window_seconds", self._config.window_seconds)
-        burst_size = params.get("burst_size", self._config.burst_size)
 
+        if not identity:
+            return ActionResult(success=False, message="identity is required")
+
+        allowed, remaining, reset_in = self._check_limit(identity, cost, algorithm)
+
+        if allowed:
+            return ActionResult(success=True, message="Request allowed", data={"allowed": True, "remaining": remaining, "reset_in": reset_in})
+        else:
+            return ActionResult(success=False, message="Rate limit exceeded", data={"allowed": False, "remaining": 0, "retry_after": reset_in})
+
+    def _check_limit(self, identity: str, cost: float, algorithm: str) -> tuple[bool, int, int]:
         now = time.time()
+        bucket = self._buckets.get(identity)
 
-        if client_id not in self._buckets:
-            self._buckets[client_id] = {}
+        if algorithm == "token_bucket" or not bucket:
+            if not bucket:
+                bucket = {"tokens": self._config.requests_per_second, "last_update": now}
+                self._buckets[identity] = bucket
 
-        if algorithm == "token_bucket":
-            return self._check_token_bucket(client_id, request_count, max_requests, window_seconds, burst_size, now)
-        elif algorithm == "sliding_window":
-            return self._check_sliding_window(client_id, request_count, max_requests, window_seconds, now)
+            elapsed = now - bucket["last_update"]
+            bucket["tokens"] = min(self._config.requests_per_second, bucket["tokens"] + elapsed)
+
+            if bucket["tokens"] >= cost:
+                bucket["tokens"] -= cost
+                bucket["last_update"] = now
+                remaining = int(bucket["tokens"])
+                return True, remaining, 1
+            else:
+                return False, 0, int(1 / (bucket["tokens"] + 0.001))
+
         elif algorithm == "fixed_window":
-            return self._check_fixed_window(client_id, request_count, max_requests, window_seconds, now)
+            window_start = int(now / 60) * 60
+            count_key = f"{identity}:{window_start}"
+
+            if count_key not in bucket:
+                bucket[count_key] = 0
+
+            bucket[count_key] += cost
+
+            if bucket[count_key] <= self._config.requests_per_minute:
+                remaining = int(self._config.requests_per_minute - bucket[count_key])
+                return True, remaining, int(60 - (now - window_start))
+            else:
+                return False, 0, int(60 - (now - window_start))
+
+        elif algorithm == "sliding_window":
+            window_start = now - 60
+            if "requests" not in bucket:
+                bucket["requests"] = []
+
+            bucket["requests"] = [t for t in bucket.get("requests", []) if t > window_start]
+
+            if len(bucket["requests"]) < self._config.requests_per_minute:
+                bucket["requests"].append(now)
+                remaining = int(self._config.requests_per_minute - len(bucket["requests"]))
+                return True, remaining, 60
+            else:
+                return False, 0, int(bucket["requests"][0] + 60 - now)
+
+        return True, int(self._config.requests_per_second), 1
+
+    def _set_config(self, params: Dict[str, Any]) -> ActionResult:
+        rps = params.get("requests_per_second", 10.0)
+        rpm = params.get("requests_per_minute", 100.0)
+        rh = params.get("requests_per_hour", 1000.0)
+        burst = params.get("burst_size", 20)
+        algorithm = params.get("algorithm", "token_bucket")
+
+        self._config = RateLimitConfig(requests_per_second=rps, requests_per_minute=rpm, requests_per_hour=rh, burst_size=burst)
+
+        try:
+            self._algorithm = RateLimitAlgorithm(algorithm)
+        except ValueError:
+            self._algorithm = RateLimitAlgorithm.TOKEN_BUCKET
+
+        return ActionResult(success=True, message="Rate limit config updated")
+
+    def _get_remaining(self, params: Dict[str, Any]) -> ActionResult:
+        identity = params.get("identity", "default")
+
+        if identity in self._buckets:
+            bucket = self._buckets[identity]
+            tokens = bucket.get("tokens", self._config.requests_per_second)
+            return ActionResult(success=True, data={"identity": identity, "remaining": int(tokens)})
+
+        return ActionResult(success=True, data={"identity": identity, "remaining": int(self._config.requests_per_second)})
+
+    def _reset_limit(self, params: Dict[str, Any]) -> ActionResult:
+        identity = params.get("identity")
+
+        if identity:
+            if identity in self._buckets:
+                del self._buckets[identity]
+            return ActionResult(success=True, message=f"Rate limit reset for {identity}")
         else:
-            return RateLimitResult(allowed=True, remaining=max_requests, reset_at=now + window_seconds).__dict__
-
-    def _check_token_bucket(self, client_id: str, count: int, max_req: int, window: int, burst: int, now: float) -> RateLimitResult:
-        """Token bucket algorithm."""
-        bucket = self._buckets.get(client_id, {})
-        tokens = bucket.get("tokens", float(burst))
-        last_update = bucket.get("last_update", now)
-
-        tokens = min(burst, tokens + (now - last_update) * (max_req / window))
-        if tokens >= count:
-            tokens -= count
-            allowed = True
-        else:
-            allowed = False
-
-        self._buckets[client_id] = {"tokens": tokens, "last_update": now}
-        remaining = int(tokens)
-        retry_after = None if allowed else (count - tokens) * (window / max_req)
-
-        return RateLimitResult(
-            allowed=allowed,
-            remaining=max(0, remaining),
-            reset_at=now + window,
-            retry_after=retry_after
-        )
-
-    def _check_sliding_window(self, client_id: str, count: int, max_req: int, window: int, now: float) -> RateLimitResult:
-        """Sliding window algorithm."""
-        bucket = self._buckets.get(client_id, {})
-        requests = bucket.get("requests", [])
-        cutoff = now - window
-        requests = [r for r in requests if r > cutoff]
-
-        total_count = len(requests) + count
-        if total_count <= max_req:
-            requests.extend([now] * count)
-            allowed = True
-        else:
-            allowed = False
-            total_count = len(requests)
-
-        self._buckets[client_id] = {"requests": requests}
-        remaining = max(0, max_req - total_count)
-        reset_at = now + window
-        retry_after = window if not allowed else None
-
-        return RateLimitResult(allowed=allowed, remaining=remaining, reset_at=reset_at, retry_after=retry_after)
-
-    def _check_fixed_window(self, client_id: str, count: int, max_req: int, window: int, now: float) -> RateLimitResult:
-        """Fixed window algorithm."""
-        import math
-        bucket = self._buckets.get(client_id, {})
-        current_window = math.floor(now / window)
-        window_key = f"w_{current_window}"
-        request_count = bucket.get(window_key, 0)
-
-        if request_count + count <= max_req:
-            bucket[window_key] = request_count + count
-            allowed = True
-        else:
-            allowed = False
-
-        self._buckets[client_id] = bucket
-        remaining = max(0, max_req - request_count - count)
-        reset_at = (current_window + 1) * window
-        retry_after = reset_at - now if not allowed else None
-
-        return RateLimitResult(allowed=allowed, remaining=remaining, reset_at=reset_at, retry_after=retry_after)
-
-    def configure(self, algorithm: str = "token_bucket", max_requests: int = 100, window_seconds: int = 60, burst_size: int = 10) -> None:
-        """Configure rate limit settings."""
-        self._config = RateLimitConfig(
-            algorithm=algorithm,
-            max_requests=max_requests,
-            window_seconds=window_seconds,
-            burst_size=burst_size
-        )
-
-    def reset_client(self, client_id: str) -> None:
-        """Reset rate limit for a client."""
-        if client_id in self._buckets:
-            del self._buckets[client_id]
+            self._buckets.clear()
+            return ActionResult(success=True, message="All rate limits reset")

@@ -1,119 +1,146 @@
-"""
-API Gateway Metrics Action Module.
+"""API Gateway Metrics Action Module.
 
-Collects and aggregates API gateway metrics: request counts, latencies,
-error rates, and bandwidth usage with percentiles.
+Collects and aggregates API gateway metrics including
+request counts, latency, error rates, and throughput.
 """
-from typing import Any, Optional
+
+from __future__ import annotations
+
+import sys
+import os
+import time
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from collections import defaultdict
-from actions.base_action import BaseAction
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
 @dataclass
-class MetricsSnapshot:
-    """A snapshot of gateway metrics."""
+class MetricPoint:
+    """A single metric data point."""
+    name: str
+    value: float
     timestamp: float
-    request_count: int
-    error_count: int
-    total_latency_ms: float
-    bandwidth_bytes: int
+    labels: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class AggregatedMetrics:
+    """Aggregated metric values."""
+    metric_name: str
+    count: int = 0
+    sum: float = 0.0
+    min: float = 0.0
+    max: float = 0.0
+    avg: float = 0.0
 
 
 class APIGatewayMetricsAction(BaseAction):
-    """Collect and aggregate API gateway metrics."""
+    """
+    API Gateway metrics collection and aggregation.
+
+    Collects request metrics, latency, error rates,
+    and provides time-series aggregation.
+
+    Example:
+        metrics = APIGatewayMetricsAction()
+        result = metrics.execute(ctx, {"action": "record", "metric": "request_count", "value": 1})
+    """
+    action_type = "api_gateway_metrics"
+    display_name = "API网关指标"
+    description = "API网关指标收集：请求数、延迟、错误率"
 
     def __init__(self) -> None:
-        super().__init__("api_gateway_metrics")
-        self._request_counts: dict[str, int] = defaultdict(int)
-        self._error_counts: dict[str, int] = defaultdict(int)
-        self._latencies: dict[str, list[float]] = defaultdict(list)
-        self._bandwidth: dict[str, int] = defaultdict(int)
-        self._snapshots: list[MetricsSnapshot] = []
+        super().__init__()
+        self._metrics: List[MetricPoint] = []
+        self._counters: Dict[str, float] = defaultdict(float)
+        self._gauges: Dict[str, float] = {}
+        self._histograms: Dict[str, List[float]] = defaultdict(list)
 
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Record or retrieve gateway metrics.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        action = params.get("action", "")
+        try:
+            if action == "record":
+                return self._record_metric(params)
+            elif action == "increment":
+                return self._increment_counter(params)
+            elif action == "set_gauge":
+                return self._set_gauge(params)
+            elif action == "observe":
+                return self._observe_histogram(params)
+            elif action == "query":
+                return self._query_metrics(params)
+            elif action == "get_summary":
+                return self._get_summary(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Metrics error: {str(e)}")
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - action: record or report
-                - endpoint: Endpoint identifier
-                - latency_ms: Request latency in milliseconds
-                - status_code: HTTP status code
-                - response_size: Response size in bytes
-                - window_seconds: Aggregation window for reporting
+    def _record_metric(self, params: Dict[str, Any]) -> ActionResult:
+        metric = params.get("metric", "")
+        value = params.get("value", 0.0)
+        labels = params.get("labels", {})
 
-        Returns:
-            For record: confirmation
-            For report: aggregated metrics
-        """
-        import time
+        if not metric:
+            return ActionResult(success=False, message="metric is required")
 
-        action = params.get("action", "record")
-        endpoint = params.get("endpoint", "all")
-        window_seconds = params.get("window_seconds", 60)
+        point = MetricPoint(name=metric, value=value, timestamp=time.time(), labels=labels)
+        self._metrics.append(point)
 
-        if action == "record":
-            latency_ms = params.get("latency_ms", 0)
-            status_code = params.get("status_code", 200)
-            response_size = params.get("response_size", 0)
+        return ActionResult(success=True, message=f"Recorded: {metric}={value}")
 
-            self._request_counts[endpoint] += 1
-            self._latencies[endpoint].append(latency_ms)
-            self._bandwidth[endpoint] += response_size
-            if status_code >= 400:
-                self._error_counts[endpoint] += 1
+    def _increment_counter(self, params: Dict[str, Any]) -> ActionResult:
+        counter = params.get("counter", "")
+        value = params.get("value", 1.0)
 
-            return {"recorded": True, "endpoint": endpoint}
+        if not counter:
+            return ActionResult(success=False, message="counter is required")
 
-        elif action == "report":
-            now = time.time()
-            cutoff = now - window_seconds
+        self._counters[counter] += value
 
-            snapshot = MetricsSnapshot(
-                timestamp=now,
-                request_count=sum(self._request_counts.values()),
-                error_count=sum(self._error_counts.values()),
-                total_latency_ms=sum(sum(v) for v in self._latencies.values()),
-                bandwidth_bytes=sum(self._bandwidth.values())
-            )
-            self._snapshots.append(snapshot)
+        return ActionResult(success=True, data={"counter": counter, "value": self._counters[counter]})
 
-            all_latencies = []
-            for lat_list in self._latencies.values():
-                all_latencies.extend(lat_list[-100:])
+    def _set_gauge(self, params: Dict[str, Any]) -> ActionResult:
+        gauge = params.get("gauge", "")
+        value = params.get("value", 0.0)
 
-            all_latencies.sort()
-            n = len(all_latencies)
+        if not gauge:
+            return ActionResult(success=False, message="gauge is required")
 
-            return {
-                "period_seconds": window_seconds,
-                "total_requests": snapshot.request_count,
-                "total_errors": snapshot.error_count,
-                "error_rate": snapshot.error_count / snapshot.request_count if snapshot.request_count > 0 else 0.0,
-                "avg_latency_ms": snapshot.total_latency_ms / n if n > 0 else 0.0,
-                "p50_latency_ms": all_latencies[int(n * 0.5)] if n > 0 else 0.0,
-                "p95_latency_ms": all_latencies[int(n * 0.95)] if n > 0 else 0.0,
-                "p99_latency_ms": all_latencies[int(n * 0.99)] if n > 0 else 0.0,
-                "total_bandwidth_bytes": snapshot.bandwidth_bytes,
-                "endpoints": {
-                    ep: {
-                        "requests": self._request_counts[ep],
-                        "errors": self._error_counts[ep],
-                        "bandwidth": self._bandwidth[ep]
-                    }
-                    for ep in self._request_counts
-                }
-            }
+        self._gauges[gauge] = value
 
-        return {"error": f"Unknown action: {action}"}
+        return ActionResult(success=True, data={"gauge": gauge, "value": value})
 
-    def reset(self) -> None:
-        """Reset all metrics."""
-        self._request_counts.clear()
-        self._error_counts.clear()
-        self._latencies.clear()
-        self._bandwidth.clear()
-        self._snapshots.clear()
+    def _observe_histogram(self, params: Dict[str, Any]) -> ActionResult:
+        histogram = params.get("histogram", "")
+        value = params.get("value", 0.0)
+
+        if not histogram:
+            return ActionResult(success=False, message="histogram is required")
+
+        self._histograms[histogram].append(value)
+
+        return ActionResult(success=True, message=f"Observed: {histogram}={value}")
+
+    def _query_metrics(self, params: Dict[str, Any]) -> ActionResult:
+        metric_name = params.get("metric_name", "")
+        start_time = params.get("start_time", time.time() - 3600)
+        end_time = params.get("end_time", time.time())
+
+        points = [p for p in self._metrics if p.name == metric_name and start_time <= p.timestamp <= end_time]
+
+        return ActionResult(success=True, data={"count": len(points), "points": [{"value": p.value, "timestamp": p.timestamp} for p in points[:100]]})
+
+    def _get_summary(self, params: Dict[str, Any]) -> ActionResult:
+        counters = dict(self._counters)
+        gauges = dict(self._gauges)
+
+        histogram_summary = {}
+        for name, values in self._histograms.items():
+            if values:
+                histogram_summary[name] = {"count": len(values), "avg": sum(values) / len(values), "min": min(values), "max": max(values)}
+
+        return ActionResult(success=True, data={"counters": counters, "gauges": gauges, "histograms": histogram_summary})

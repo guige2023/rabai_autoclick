@@ -1,207 +1,223 @@
-"""
-API Key Action Module.
+"""API Key Action Module.
 
-API key management with generation, validation,
-rotation, and access control.
+Manages API key lifecycle including generation,
+rotation, revocation, and access control.
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional
-from dataclasses import dataclass, field
-import logging
-import secrets
-import hashlib
+import sys
+import os
 import time
+import hashlib
+import secrets
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
 from enum import Enum
 
-logger = logging.getLogger(__name__)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-class KeyPermission(Enum):
-    """API key permission levels."""
-    READ = "read"
-    WRITE = "write"
-    ADMIN = "admin"
+class KeyStatus(Enum):
+    """API key status."""
+    ACTIVE = "active"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+    SUSPENDED = "suspended"
 
 
 @dataclass
 class APIKey:
-    """API key metadata."""
+    """An API key record."""
     key_id: str
+    key_prefix: str
     key_hash: str
-    name: str
-    permissions: list[KeyPermission]
+    client_id: str
+    status: KeyStatus
     created_at: float
     expires_at: Optional[float] = None
-    last_used: Optional[float] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    last_used_at: Optional[float] = None
+    scopes: List[str] = field(default_factory=list)
 
 
-class APIKeyAction:
+class APIKeyAction(BaseAction):
     """
-    API key generation and management.
+    API key lifecycle management.
 
-    Generates secure API keys, manages permissions,
-    handles rotation and revocation.
+    Generates, rotates, revokes API keys and
+    manages access scopes and permissions.
 
     Example:
         key_mgr = APIKeyAction()
-        key, key_id = key_mgr.generate_key("MyApp", [KeyPermission.READ])
-        is_valid = key_mgr.validate_key(key)
+        result = key_mgr.execute(ctx, {"action": "generate", "client_id": "app-123"})
     """
+    action_type = "api_key"
+    display_name = "API密钥管理"
+    description = "API密钥生成、轮换、撤销和访问控制"
 
-    def __init__(
-        self,
-        key_prefix: str = "sk",
-        key_length: int = 32,
-        hash_algorithm: str = "sha256",
-    ) -> None:
-        self.key_prefix = key_prefix
-        self.key_length = key_length
-        self.hash_algorithm = hash_algorithm
-        self._keys: dict[str, APIKey] = {}
-        self._key_lookup: dict[str, str] = {}
+    def __init__(self) -> None:
+        super().__init__()
+        self._keys: Dict[str, APIKey] = {}
+        self._prefix_index: Dict[str, str] = {}
 
-    def generate_key(
-        self,
-        name: str,
-        permissions: Optional[list[KeyPermission]] = None,
-        expires_in: Optional[float] = None,
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> tuple[str, str]:
-        """Generate a new API key."""
-        raw_key = secrets.token_urlsafe(self.key_length)
-        key = f"{self.key_prefix}_{raw_key}"
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        action = params.get("action", "")
+        try:
+            if action == "generate":
+                return self._generate_key(params)
+            elif action == "revoke":
+                return self._revoke_key(params)
+            elif action == "validate":
+                return self._validate_key(params)
+            elif action == "rotate":
+                return self._rotate_key(params)
+            elif action == "list":
+                return self._list_keys(params)
+            elif action == "update":
+                return self._update_key(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"API Key error: {str(e)}")
 
-        key_id = self._generate_key_id(raw_key)
-        key_hash = self._hash_key(raw_key)
+    def _generate_key(self, params: Dict[str, Any]) -> ActionResult:
+        client_id = params.get("client_id", "")
+        scopes = params.get("scopes", [])
+        expires_in = params.get("expires_in")
+        prefix_length = params.get("prefix_length", 8)
+
+        if not client_id:
+            return ActionResult(success=False, message="client_id is required")
+
+        key_raw = secrets.token_urlsafe(32)
+        key_prefix = key_raw[:prefix_length]
+        key_hash = hashlib.sha256(key_raw.encode()).hexdigest()
+        key_id = secrets.token_urlsafe(16)
+
+        expires_at = None
+        if expires_in:
+            expires_at = time.time() + expires_in
 
         api_key = APIKey(
             key_id=key_id,
+            key_prefix=key_prefix,
             key_hash=key_hash,
-            name=name,
-            permissions=permissions or [KeyPermission.READ],
+            client_id=client_id,
+            status=KeyStatus.ACTIVE,
             created_at=time.time(),
-            expires_at=time.time() + expires_in if expires_in else None,
-            metadata=metadata or {},
+            expires_at=expires_at,
+            scopes=scopes,
         )
 
         self._keys[key_id] = api_key
-        self._key_lookup[key_hash] = key_id
+        self._prefix_index[key_prefix] = key_id
 
-        logger.info("Generated API key for %s", name)
+        return ActionResult(success=True, message=f"API key generated for {client_id}", data={"key_id": key_id, "key_prefix": key_prefix, "key": key_raw, "scopes": scopes})
 
-        return key, key_id
+    def _revoke_key(self, params: Dict[str, Any]) -> ActionResult:
+        key_id = params.get("key_id", "")
 
-    def validate_key(
-        self,
-        key: str,
-        required_permission: Optional[KeyPermission] = None,
-    ) -> tuple[bool, Optional[str]]:
-        """Validate an API key."""
-        if not key or "_" not in key:
-            return False, None
-
-        parts = key.split("_", 1)
-        if len(parts) != 2 or parts[0] != self.key_prefix:
-            return False, None
-
-        raw_key = parts[1]
-        key_hash = self._hash_key(raw_key)
-
-        key_id = self._key_lookup.get(key_hash)
-        if not key_id:
-            return False, None
-
-        api_key = self._keys.get(key_id)
-        if not api_key:
-            return False, None
-
-        if api_key.expires_at and time.time() > api_key.expires_at:
-            return False, "Key expired"
-
-        if required_permission and required_permission not in api_key.permissions:
-            return False, "Insufficient permissions"
-
-        api_key.last_used = time.time()
-
-        return True, key_id
-
-    def revoke_key(self, key_id: str) -> bool:
-        """Revoke an API key."""
         if key_id not in self._keys:
-            return False
+            return ActionResult(success=False, message=f"Key not found: {key_id}")
 
+        self._keys[key_id].status = KeyStatus.REVOKED
+
+        return ActionResult(success=True, message=f"Key revoked: {key_id}")
+
+    def _validate_key(self, params: Dict[str, Any]) -> ActionResult:
+        key_raw = params.get("key", "")
+
+        if not key_raw:
+            return ActionResult(success=False, message="key is required")
+
+        key_prefix = key_raw[:8]
+
+        if key_prefix not in self._prefix_index:
+            return ActionResult(success=False, message="Invalid key")
+
+        key_id = self._prefix_index[key_prefix]
         api_key = self._keys[key_id]
-        del self._key_lookup[api_key.key_hash]
-        del self._keys[key_id]
 
-        logger.info("Revoked API key %s", key_id)
+        if api_key.status == KeyStatus.REVOKED:
+            return ActionResult(success=False, message="Key has been revoked")
+        if api_key.status == KeyStatus.SUSPENDED:
+            return ActionResult(success=False, message="Key is suspended")
+        if api_key.expires_at and api_key.expires_at < time.time():
+            api_key.status = KeyStatus.EXPIRED
+            return ActionResult(success=False, message="Key has expired")
 
-        return True
+        api_key.last_used_at = time.time()
 
-    def get_key_info(self, key_id: str) -> Optional[dict[str, Any]]:
-        """Get API key metadata."""
-        api_key = self._keys.get(key_id)
-        if not api_key:
-            return None
+        return ActionResult(success=True, message="Key valid", data={"client_id": api_key.client_id, "scopes": api_key.scopes})
 
-        return {
-            "key_id": api_key.key_id,
-            "name": api_key.name,
-            "permissions": [p.value for p in api_key.permissions],
-            "created_at": api_key.created_at,
-            "expires_at": api_key.expires_at,
-            "last_used": api_key.last_used,
-            "metadata": api_key.metadata,
-        }
+    def _rotate_key(self, params: Dict[str, Any]) -> ActionResult:
+        key_id = params.get("key_id", "")
 
-    def rotate_key(
-        self,
-        key_id: str,
-        expires_in: Optional[float] = None,
-    ) -> Optional[str]:
-        """Rotate an API key."""
-        api_key = self._keys.get(key_id)
-        if not api_key:
-            return None
+        if key_id not in self._keys:
+            return ActionResult(success=False, message=f"Key not found: {key_id}")
 
-        new_key, _ = self.generate_key(
-            name=api_key.name,
-            permissions=[p for p in api_key.permissions],
-            expires_in=expires_in,
-            metadata=api_key.metadata,
+        old_key = self._keys[key_id]
+        old_key.status = KeyStatus.REVOKED
+
+        new_key_raw = secrets.token_urlsafe(32)
+        new_key_prefix = new_key_raw[:8]
+        new_key_hash = hashlib.sha256(new_key_raw.encode()).hexdigest()
+        new_key_id = secrets.token_urlsafe(16)
+
+        new_key = APIKey(
+            key_id=new_key_id,
+            key_prefix=new_key_prefix,
+            key_hash=new_key_hash,
+            client_id=old_key.client_id,
+            status=KeyStatus.ACTIVE,
+            created_at=time.time(),
+            expires_at=old_key.expires_at,
+            scopes=old_key.scopes,
         )
 
-        self.revoke_key(key_id)
+        self._keys[new_key_id] = new_key
+        self._prefix_index[new_key_prefix] = new_key_id
 
-        return new_key
+        return ActionResult(success=True, message="Key rotated", data={"new_key_id": new_key_id, "new_key": new_key_raw})
 
-    def list_keys(self) -> list[dict[str, Any]]:
-        """List all API keys."""
-        return [
-            self.get_key_info(key_id)
-            for key_id in self._keys
-        ]
+    def _list_keys(self, params: Dict[str, Any]) -> ActionResult:
+        client_id = params.get("client_id")
+        status_filter = params.get("status")
 
-    def _generate_key_id(self, raw_key: str) -> str:
-        """Generate a short key ID."""
-        return hashlib.sha256(raw_key.encode()).hexdigest()[:16]
+        keys = list(self._keys.values())
 
-    def _hash_key(self, raw_key: str) -> str:
-        """Hash a key for storage."""
-        return hashlib.sha256(raw_key.encode()).hexdigest()
+        if client_id:
+            keys = [k for k in keys if k.client_id == client_id]
 
-    def cleanup_expired(self) -> int:
-        """Remove expired keys."""
-        now = time.time()
-        expired = [
-            key_id for key_id, key in self._keys.items()
-            if key.expires_at and key.expires_at < now
-        ]
+        if status_filter:
+            try:
+                status = KeyStatus(status_filter)
+                keys = [k for k in keys if k.status == status]
+            except ValueError:
+                pass
 
-        for key_id in expired:
-            self.revoke_key(key_id)
+        return ActionResult(success=True, data={"keys": [{"key_id": k.key_id, "client_id": k.client_id, "status": k.status.value, "created_at": k.created_at} for k in keys], "count": len(keys)})
 
-        return len(expired)
+    def _update_key(self, params: Dict[str, Any]) -> ActionResult:
+        key_id = params.get("key_id", "")
+        scopes = params.get("scopes")
+        expires_at = params.get("expires_at")
+        status = params.get("status")
+
+        if key_id not in self._keys:
+            return ActionResult(success=False, message=f"Key not found: {key_id}")
+
+        api_key = self._keys[key_id]
+
+        if scopes is not None:
+            api_key.scopes = scopes
+        if expires_at is not None:
+            api_key.expires_at = expires_at
+        if status:
+            try:
+                api_key.status = KeyStatus(status)
+            except ValueError:
+                pass
+
+        return ActionResult(success=True, message=f"Key updated: {key_id}")

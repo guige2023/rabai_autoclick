@@ -1,109 +1,119 @@
-"""
-API Gateway CORS Action Module.
+"""API Gateway CORS Action Module.
 
-Handles Cross-Origin Resource Sharing (CORS) preflight requests,
-configures allowed origins, methods, headers, and credentials.
+Handles Cross-Origin Resource Sharing (CORS) configuration
+and preflight request handling for API gateways.
 """
-from typing import Any, Optional
+
+from __future__ import annotations
+
+import sys
+import os
+import time
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
-from actions.base_action import BaseAction
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
 @dataclass
 class CORSConfig:
     """CORS configuration."""
-    allowed_origins: list[str] = field(default_factory=lambda: ["*"])
-    allowed_methods: list[str] = field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-    allowed_headers: list[str] = field(default_factory=lambda: ["Content-Type", "Authorization"])
-    exposed_headers: list[str] = field(default_factory=list)
-    max_age: int = 86400
-    allow_credentials: bool = False
-
-
-@dataclass
-class CORSResult:
-    """Result of CORS evaluation."""
-    allowed: bool
-    response_headers: dict[str, str]
-    error: Optional[str] = None
+    allowed_origins: List[str] = field(default_factory=list)
+    allowed_methods: List[str] = field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE"])
+    allowed_headers: List[str] = field(default_factory=lambda: ["Content-Type", "Authorization"])
+    exposed_headers: List[str] = field(default_factory=list)
+    max_age: int = 3600
+    allow_credentials: bool = True
 
 
 class APIGatewayCORSAction(BaseAction):
-    """Handle CORS for API gateway."""
+    """
+    API Gateway CORS handling.
+
+    Manages CORS configuration, validates origins,
+    and handles preflight requests.
+
+    Example:
+        cors = APIGatewayCORSAction()
+        result = cors.execute(ctx, {"action": "handle_preflight", "origin": "http://example.com"})
+    """
+    action_type = "api_gateway_cors"
+    display_name = "API网关CORS"
+    description = "API网关CORS配置和预检请求处理"
 
     def __init__(self) -> None:
-        super().__init__("api_gateway_cors")
-        self._config = CORSConfig()
+        super().__init__()
+        self._config = CORSConfig(allowed_origins=["*"])
 
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Evaluate and handle CORS request.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        action = params.get("action", "")
+        try:
+            if action == "handle_preflight":
+                return self._handle_preflight(params)
+            elif action == "validate_origin":
+                return self._validate_origin(params)
+            elif action == "set_config":
+                return self._set_config(params)
+            elif action == "get_config":
+                return self._get_config(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"CORS error: {str(e)}")
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - request: Incoming request
-                - origin: Origin header value
-                - method: Preflight method
-                - allowed_origins: Override allowed origins
-                - allowed_methods: Override allowed methods
-                - allowed_headers: Override allowed headers
-                - max_age: Preflight cache duration
+    def _handle_preflight(self, params: Dict[str, Any]) -> ActionResult:
+        origin = params.get("origin", "")
+        method = params.get("method", "GET")
+        request_headers = params.get("request_headers", [])
 
-        Returns:
-            CORSResult with appropriate headers
-        """
-        request = params.get("request", {})
-        headers = request.get("headers", {})
-        origin = headers.get("Origin", headers.get("origin", ""))
-        access_control_request_method = headers.get("Access-Control-Request-Method", "")
-        access_control_request_headers = headers.get("Access-Control-Request-Headers", "")
+        allowed = self._is_origin_allowed(origin)
 
-        allowed_origins = params.get("allowed_origins", self._config.allowed_origins)
-        allowed_methods = params.get("allowed_methods", self._config.allowed_methods)
-        allowed_headers = params.get("allowed_headers", self._config.allowed_headers)
-        max_age = params.get("max_age", self._config.max_age)
-        allow_credentials = params.get("allow_credentials", self._config.allow_credentials)
+        if not allowed:
+            return ActionResult(success=False, message="Origin not allowed")
 
-        response_headers: dict[str, str] = {}
+        response_headers = {
+            "Access-Control-Allow-Origin": origin if origin != "*" else "*",
+            "Access-Control-Allow-Methods": ", ".join(self._config.allowed_methods),
+            "Access-Control-Allow-Headers": ", ".join(self._config.allowed_headers),
+            "Access-Control-Max-Age": str(self._config.max_age),
+            "Access-Control-Allow-Credentials": "true" if self._config.allow_credentials else "false",
+        }
 
-        if "*" in allowed_origins:
-            response_headers["Access-Control-Allow-Origin"] = origin or "*"
-        elif origin and origin in allowed_origins:
-            response_headers["Access-Control-Allow-Origin"] = origin
-        else:
-            return CORSResult(
-                allowed=False,
-                response_headers={},
-                error=f"Origin '{origin}' not allowed"
-            )
+        return ActionResult(success=True, message="Preflight handled", data={"headers": response_headers, "allowed": True})
 
-        if access_control_request_method and access_control_request_method.upper() in [m.upper() for m in allowed_methods]:
-            response_headers["Access-Control-Allow-Methods"] = access_control_request_method.upper()
-        else:
-            response_headers["Access-Control-Allow-Methods"] = ", ".join(allowed_methods)
+    def _validate_origin(self, params: Dict[str, Any]) -> ActionResult:
+        origin = params.get("origin", "")
+        allowed = self._is_origin_allowed(origin)
+        return ActionResult(success=True, data={"origin": origin, "allowed": allowed})
 
-        if access_control_request_headers:
-            req_headers = [h.strip() for h in access_control_request_headers.split(",")]
-            response_headers["Access-Control-Allow-Headers"] = ", ".join(req_headers)
-        else:
-            response_headers["Access-Control-Allow-Headers"] = ", ".join(allowed_headers)
+    def _set_config(self, params: Dict[str, Any]) -> ActionResult:
+        allowed_origins = params.get("allowed_origins", ["*"])
+        allowed_methods = params.get("allowed_methods", ["GET", "POST"])
+        allowed_headers = params.get("allowed_headers", ["Content-Type"])
+        max_age = params.get("max_age", 3600)
+        allow_credentials = params.get("allow_credentials", True)
 
-        response_headers["Access-Control-Max-Age"] = str(max_age)
+        self._config = CORSConfig(
+            allowed_origins=allowed_origins,
+            allowed_methods=allowed_methods,
+            allowed_headers=allowed_headers,
+            max_age=max_age,
+            allow_credentials=allow_credentials,
+        )
 
-        if allow_credentials:
-            response_headers["Access-Control-Allow-Credentials"] = "true"
+        return ActionResult(success=True, message="CORS config updated")
 
-        if self._config.exposed_headers:
-            response_headers["Access-Control-Expose-Headers"] = ", ".join(self._config.exposed_headers)
+    def _get_config(self, params: Dict[str, Any]) -> ActionResult:
+        return ActionResult(success=True, data={
+            "allowed_origins": self._config.allowed_origins,
+            "allowed_methods": self._config.allowed_methods,
+            "allowed_headers": self._config.allowed_headers,
+            "max_age": self._config.max_age,
+            "allow_credentials": self._config.allow_credentials,
+        })
 
-        return CORSResult(allowed=True, response_headers=response_headers)
-
-    def configure(self, allowed_origins: list[str], allowed_methods: list[str], allowed_headers: list[str],
-                  max_age: int = 86400, allow_credentials: bool = False) -> None:
-        """Configure CORS settings."""
-        self._config.allowed_origins = allowed_origins
-        self._config.allowed_methods = allowed_methods
-        self._config.allowed_headers = allowed_headers
-        self._config.max_age = max_age
-        self._config.allow_credentials = allow_credentials
+    def _is_origin_allowed(self, origin: str) -> bool:
+        if "*" in self._config.allowed_origins:
+            return True
+        return origin in self._config.allowed_origins
