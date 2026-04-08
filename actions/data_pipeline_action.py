@@ -1,25 +1,18 @@
 """
-Data Pipeline Action.
+Data pipeline module for building ETL/ELT data processing workflows.
 
-Provides data pipeline orchestration with support for:
-- Stage-based processing
-- Parallel and sequential execution
-- Error handling and retries
-- Progress tracking and monitoring
+Supports multi-stage pipelines, branching, merging, error handling,
+checkpointing, and backpressure handling.
 """
+from __future__ import annotations
 
-from typing import Dict, List, Optional, Any, Callable, Awaitable
+import time
+import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-import threading
-import asyncio
-import logging
-import json
-import time
-from concurrent.futures import ThreadPoolExecutor, Future
-
-logger = logging.getLogger(__name__)
+from typing import Any, Callable, Generator, Optional
 
 
 class PipelineStatus(Enum):
@@ -32,370 +25,317 @@ class PipelineStatus(Enum):
     PAUSED = "paused"
 
 
-class StageStatus(Enum):
-    """Stage execution status."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    RETRYING = "retrying"
+class StageType(Enum):
+    """Type of pipeline stage."""
+    EXTRACT = "extract"
+    TRANSFORM = "transform"
+    LOAD = "load"
+    FILTER = "filter"
+    AGGREGATE = "aggregate"
+    JOIN = "join"
+    BRANCH = "branch"
+    MERGE = "merge"
 
 
 @dataclass
-class StageResult:
-    """Result of a stage execution."""
-    stage_name: str
-    status: StageStatus
+class PipelineStage:
+    """A stage in a data pipeline."""
+    id: str
+    name: str
+    stage_type: StageType
+    processor: Callable
+    input_key: str = "default"
+    output_key: str = "default"
+    error_handler: Optional[Callable] = None
+    skip_on_error: bool = False
+    timeout_seconds: int = 3600
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(uuid.uuid4())[:8]
+
+
+@dataclass
+class PipelineBranch:
+    """A branch in a pipeline."""
+    condition: Callable
+    output_key: str
+
+
+@dataclass
+class StageExecution:
+    """Execution state of a pipeline stage."""
+    stage: PipelineStage
     input_data: Any = None
     output_data: Any = None
     error: Optional[str] = None
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
-    retry_count: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    status: str = "pending"
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    records_in: int = 0
+    records_out: int = 0
 
-    @property
-    def duration_ms(self) -> Optional[float]:
-        """Get stage duration in milliseconds."""
+    def duration_ms(self) -> float:
         if self.start_time and self.end_time:
-            return (self.end_time - self.start_time).total_seconds() * 1000
+            return (self.end_time - self.start_time) * 1000
+        return 0.0
+
+
+@dataclass
+class DataPipeline:
+    """A complete data pipeline."""
+    id: str
+    name: str
+    stages: list[PipelineStage]
+    description: str = ""
+    version: str = "1.0.0"
+    checkpoint_enabled: bool = True
+    parallel_execution: bool = False
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(uuid.uuid4())[:8]
+
+    def get_stage(self, stage_id: str) -> Optional[PipelineStage]:
+        for stage in self.stages:
+            if stage.id == stage_id:
+                return stage
         return None
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        return {
-            "stage_name": self.stage_name,
-            "status": self.status.value,
-            "duration_ms": self.duration_ms,
-            "error": self.error,
-            "retry_count": self.retry_count,
-            "metadata": self.metadata
+
+@dataclass
+class PipelineExecution:
+    """A pipeline execution instance."""
+    id: str
+    pipeline: DataPipeline
+    status: PipelineStatus = PipelineStatus.PENDING
+    stage_executions: dict[str, StageExecution] = field(default_factory=dict)
+    context: dict = field(default_factory=dict)
+    start_time: float = field(default_factory=time.time)
+    end_time: Optional[float] = None
+    error: Optional[str] = None
+    checkpoint_data: dict = field(default_factory=dict)
+
+    def duration_seconds(self) -> float:
+        if self.start_time and self.end_time:
+            return self.end_time - self.start_time
+        return 0.0
+
+
+class DataPipelineExecutor:
+    """
+    Data pipeline executor for ETL/ELT workflows.
+
+    Supports multi-stage pipelines, branching, merging,
+    error handling, and checkpointing.
+    """
+
+    def __init__(self):
+        self._pipelines: dict[str, DataPipeline] = {}
+        self._executions: dict[str, PipelineExecution] = {}
+        self._checkpoints: dict[str, dict] = {}
+
+    def create_pipeline(
+        self,
+        name: str,
+        stages: list[PipelineStage],
+        description: str = "",
+        checkpoint_enabled: bool = True,
+        parallel_execution: bool = False,
+    ) -> DataPipeline:
+        """Create a new data pipeline."""
+        pipeline = DataPipeline(
+            id=str(uuid.uuid4())[:12],
+            name=name,
+            stages=stages,
+            description=description,
+            checkpoint_enabled=checkpoint_enabled,
+            parallel_execution=parallel_execution,
+        )
+        self._pipelines[pipeline.id] = pipeline
+        return pipeline
+
+    def execute(
+        self,
+        pipeline_id: str,
+        initial_data: Any = None,
+        execution_id: Optional[str] = None,
+    ) -> PipelineExecution:
+        """Execute a pipeline."""
+        pipeline = self._pipelines.get(pipeline_id)
+        if not pipeline:
+            raise ValueError(f"Pipeline not found: {pipeline_id}")
+
+        execution = PipelineExecution(
+            id=execution_id or str(uuid.uuid4())[:8],
+            pipeline=pipeline,
+            context={"data": initial_data},
+        )
+        self._executions[execution.id] = execution
+
+        return self._execute_pipeline(execution)
+
+    def _execute_pipeline(self, execution: PipelineExecution) -> PipelineExecution:
+        """Execute a pipeline's stages."""
+        execution.status = PipelineStatus.RUNNING
+        pipeline = execution.pipeline
+
+        checkpoint = self._checkpoints.get(execution.id) if pipeline.checkpoint_enabled else None
+        start_idx = checkpoint.get("last_completed_stage_idx", 0) if checkpoint else 0
+
+        try:
+            for i, stage in enumerate(pipeline.stages):
+                if i < start_idx:
+                    continue
+
+                if execution.status == PipelineStatus.CANCELLED:
+                    break
+
+                stage_exec = self._execute_stage(stage, execution)
+                execution.stage_executions[stage.id] = stage_exec
+
+                if stage_exec.error and not stage.skip_on_error:
+                    execution.status = PipelineStatus.FAILED
+                    execution.error = stage_exec.error
+                    execution.end_time = time.time()
+                    return execution
+
+                if pipeline.checkpoint_enabled and (i + 1) % 5 == 0:
+                    self._save_checkpoint(execution, i)
+
+            execution.status = PipelineStatus.COMPLETED
+
+        except Exception as e:
+            execution.status = PipelineStatus.FAILED
+            execution.error = str(e)
+
+        execution.end_time = time.time()
+        return execution
+
+    def _execute_stage(
+        self,
+        stage: PipelineStage,
+        execution: PipelineExecution,
+    ) -> StageExecution:
+        """Execute a single pipeline stage."""
+        stage_exec = StageExecution(stage=stage)
+        stage_exec.start_time = time.time()
+
+        input_data = execution.context.get(stage.input_key)
+        stage_exec.input_data = input_data
+
+        if input_data is not None and hasattr(input_data, "__len__"):
+            stage_exec.records_in = len(input_data)
+
+        try:
+            if stage.stage_type == StageType.FILTER:
+                result = [item for item in input_data if stage.processor(item)]
+            elif stage.stage_type == StageType.AGGREGATE:
+                result = stage.processor(input_data)
+            elif stage.stage_type == StageType.JOIN:
+                result = stage.processor(
+                    execution.context.get("left", []),
+                    execution.context.get("right", []),
+                )
+            elif stage.stage_type == StageType.BRANCH:
+                branches = stage.processor(input_data)
+                for branch_output in branches:
+                    output_key = branch_output.get("key", "default")
+                    execution.context[output_key] = branch_output.get("data")
+                result = branches
+            else:
+                result = stage.processor(input_data)
+
+            stage_exec.output_data = result
+            execution.context[stage.output_key] = result
+
+            if hasattr(result, "__len__"):
+                stage_exec.records_out = len(result)
+
+            stage_exec.status = "completed"
+
+        except Exception as e:
+            stage_exec.error = str(e)
+            stage_exec.status = "failed"
+
+            if stage.error_handler:
+                stage_exec.output_data = stage.error_handler(input_data, e)
+                stage_exec.status = "completed_with_error"
+
+        stage_exec.end_time = time.time()
+        return stage_exec
+
+    def _save_checkpoint(self, execution: PipelineExecution, stage_idx: int) -> None:
+        """Save a pipeline checkpoint."""
+        self._checkpoints[execution.id] = {
+            "last_completed_stage_idx": stage_idx,
+            "context": execution.context,
+            "timestamp": time.time(),
         }
 
-
-@dataclass
-class PipelineConfig:
-    """Configuration for a data pipeline."""
-    name: str
-    stages: List[str]
-    parallel_stages: Optional[Dict[str, List[str]]] = None
-    max_retries: int = 3
-    retry_delay: float = 1.0
-    timeout: Optional[float] = None
-    continue_on_error: bool = False
-
-
-@dataclass
-class PipelineContext:
-    """Context passed through pipeline stages."""
-    data: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    results: Dict[str, StageResult] = field(default_factory=dict)
-    
-    def get_result(self, stage_name: str) -> Optional[StageResult]:
-        """Get the result of a specific stage."""
-        return self.results.get(stage_name)
-    
-    def get_stage_output(self, stage_name: str) -> Any:
-        """Get the output of a specific stage."""
-        result = self.results.get(stage_name)
-        return result.output_data if result else None
-
-
-StageProcessor = Callable[[Any, PipelineContext], Awaitable[Any]]
-
-
-class DataPipelineAction:
-    """
-    Data Pipeline Action.
-    
-    Orchestrates multi-stage data processing with support for:
-    - Sequential and parallel stage execution
-    - Configurable retry logic
-    - Progress tracking and monitoring
-    - Error handling with continue-on-error mode
-    - Async and sync stage processors
-    """
-    
-    def __init__(self, config: PipelineConfig):
-        """
-        Initialize the Data Pipeline Action.
-        
-        Args:
-            config: Pipeline configuration
-        """
-        self.config = config
-        self.stages: Dict[str, StageProcessor] = {}
-        self.status = PipelineStatus.PENDING
-        self.context: Optional[PipelineContext] = None
-        self.start_time: Optional[datetime] = None
-        self.end_time: Optional[datetime] = None
-        self._cancel_event = threading.Event()
-        self._pause_event = threading.Event()
-        self._pause_event.set()  # Not paused by default
-        self._executors: Dict[str, ThreadPoolExecutor] = {}
-    
-    def register_stage(
+    def resume(
         self,
-        stage_name: str,
-        processor: StageProcessor,
-        description: Optional[str] = None
-    ) -> "DataPipelineAction":
-        """
-        Register a stage processor.
-        
-        Args:
-            stage_name: Name of the stage
-            processor: Async function to process the stage
-            description: Optional stage description
-        
-        Returns:
-            Self for chaining
-        """
-        if stage_name not in self.config.stages:
-            raise ValueError(f"Stage '{stage_name}' not defined in pipeline config")
-        
-        self.stages[stage_name] = processor
-        return self
-    
-    async def execute(
+        execution_id: str,
+    ) -> PipelineExecution:
+        """Resume a failed or paused pipeline execution."""
+        execution = self._executions.get(execution_id)
+        if not execution:
+            raise ValueError(f"Execution not found: {execution_id}")
+
+        execution.status = PipelineStatus.RUNNING
+        return self._execute_pipeline(execution)
+
+    def cancel(self, execution_id: str) -> bool:
+        """Cancel a pipeline execution."""
+        execution = self._executions.get(execution_id)
+        if execution and execution.status == PipelineStatus.RUNNING:
+            execution.status = PipelineStatus.CANCELLED
+            execution.end_time = time.time()
+            return True
+        return False
+
+    def get_execution(self, execution_id: str) -> Optional[PipelineExecution]:
+        """Get a pipeline execution."""
+        return self._executions.get(execution_id)
+
+    def list_executions(
         self,
-        initial_data: Any,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> PipelineContext:
-        """
-        Execute the pipeline.
-        
-        Args:
-            initial_data: Initial data to pass to the first stage
-            metadata: Optional metadata to include in context
-        
-        Returns:
-            Pipeline execution context with all stage results
-        """
-        if self.status == PipelineStatus.RUNNING:
-            raise RuntimeError("Pipeline is already running")
-        
-        self.status = PipelineStatus.RUNNING
-        self.start_time = datetime.utcnow()
-        self.context = PipelineContext(
-            data={"initial": initial_data},
-            metadata=metadata or {}
-        )
-        self._cancel_event.clear()
-        self._pause_event.set()
-        
-        logger.info(f"Starting pipeline: {self.config.name}")
-        
-        try:
-            await self._execute_stages(initial_data)
-            
-            if self._cancel_event.is_set():
-                self.status = PipelineStatus.CANCELLED
-            else:
-                self.status = PipelineStatus.COMPLETED
-            
-        except Exception as e:
-            logger.error(f"Pipeline failed: {e}")
-            self.status = PipelineStatus.FAILED
-            if self.context:
-                self.context.metadata["error"] = str(e)
-        
-        finally:
-            self.end_time = datetime.utcnow()
-            logger.info(f"Pipeline finished with status: {self.status.value}")
-        
-        return self.context
-    
-    async def _execute_stages(self, initial_data: Any) -> None:
-        """Execute all pipeline stages."""
-        current_data = initial_data
-        
-        for stage_name in self.config.stages:
-            if self._cancel_event.is_set():
-                break
-            
-            self._pause_event.wait()
-            
-            if stage_name not in self.stages:
-                logger.warning(f"Stage '{stage_name}' has no processor, skipping")
-                continue
-            
-            result = await self._execute_stage(stage_name, current_data)
-            self.context.results[stage_name] = result
-            
-            if result.status == StageStatus.FAILED:
-                if not self.config.continue_on_error:
-                    raise RuntimeError(f"Stage '{stage_name}' failed: {result.error}")
-                logger.warning(f"Stage '{stage_name}' failed, continuing: {result.error}")
-            
-            if result.output_data is not None:
-                current_data = result.output_data
-                self.context.data[stage_name] = current_data
-    
-    async def _execute_stage(
-        self,
-        stage_name: str,
-        input_data: Any,
-        retry_count: int = 0
-    ) -> StageResult:
-        """Execute a single stage with retry logic."""
-        result = StageResult(
-            stage_name=stage_name,
-            status=StageStatus.RUNNING,
-            input_data=input_data,
-            start_time=datetime.utcnow()
-        )
-        
-        try:
-            if self.config.timeout:
-                output = await asyncio.wait_for(
-                    self.stages[stage_name](input_data, self.context),
-                    timeout=self.config.timeout
-                )
-            else:
-                output = await self.stages[stage_name](input_data, self.context)
-            
-            result.output_data = output
-            result.status = StageStatus.COMPLETED
-            logger.debug(f"Stage '{stage_name}' completed")
-            
-        except asyncio.TimeoutError:
-            result.error = f"Stage timed out after {self.config.timeout}s"
-            result.status = StageStatus.FAILED
-            logger.error(f"Stage '{stage_name}' timed out")
-            
-        except Exception as e:
-            result.error = str(e)
-            
-            if retry_count < self.config.max_retries:
-                result.status = StageStatus.RETRYING
-                result.retry_count = retry_count + 1
-                logger.warning(
-                    f"Stage '{stage_name}' failed, retrying "
-                    f"({retry_count + 1}/{self.config.max_retries})"
-                )
-                await asyncio.sleep(self.config.retry_delay)
-                return await self._execute_stage(
-                    stage_name,
-                    input_data,
-                    retry_count + 1
-                )
-            
-            result.status = StageStatus.FAILED
-            logger.error(f"Stage '{stage_name}' failed after {retry_count} retries: {e}")
-        
-        result.end_time = datetime.utcnow()
-        return result
-    
-    def cancel(self) -> None:
-        """Cancel the pipeline execution."""
-        self._cancel_event.set()
-        logger.info(f"Pipeline '{self.config.name}' cancellation requested")
-    
-    def pause(self) -> None:
-        """Pause the pipeline execution."""
-        self._pause_event.clear()
-        self.status = PipelineStatus.PAUSED
-        logger.info(f"Pipeline '{self.config.name}' paused")
-    
-    def resume(self) -> None:
-        """Resume a paused pipeline."""
-        self._pause_event.set()
-        self.status = PipelineStatus.RUNNING
-        logger.info(f"Pipeline '{self.config.name}' resumed")
-    
-    def get_progress(self) -> Dict[str, Any]:
-        """Get pipeline execution progress."""
-        if not self.context:
-            return {"status": "not_started"}
-        
-        total = len(self.config.stages)
-        completed = sum(
-            1 for r in self.context.results.values()
-            if r.status == StageStatus.COMPLETED
-        )
-        
-        return {
-            "status": self.status.value,
-            "name": self.config.name,
-            "total_stages": total,
-            "completed_stages": completed,
-            "progress_percent": (completed / total * 100) if total > 0 else 0,
-            "stage_results": {
-                name: result.to_dict()
-                for name, result in self.context.results.items()
+        pipeline_id: Optional[str] = None,
+        status: Optional[PipelineStatus] = None,
+    ) -> list[dict]:
+        """List pipeline executions."""
+        executions = list(self._executions.values())
+
+        if pipeline_id:
+            executions = [e for e in executions if e.pipeline.id == pipeline_id]
+        if status:
+            executions = [e for e in executions if e.status == status]
+
+        return [
+            {
+                "id": e.id,
+                "pipeline_id": e.pipeline.id,
+                "pipeline_name": e.pipeline.name,
+                "status": e.status.value,
+                "start_time": e.start_time,
+                "end_time": e.end_time,
+                "duration_seconds": e.duration_seconds(),
             }
-        }
-    
-    def get_summary(self) -> Dict[str, Any]:
-        """Get pipeline execution summary."""
-        progress = self.get_progress()
-        
-        duration_ms = None
-        if self.start_time:
-            end = self.end_time or datetime.utcnow()
-            duration_ms = (end - self.start_time).total_seconds() * 1000
-        
-        return {
-            "name": self.config.name,
-            "status": self.status.value,
-            "duration_ms": duration_ms,
-            "stages": {
-                "total": progress["total_stages"],
-                "completed": progress["completed_stages"],
-                "failed": sum(
-                    1 for r in self.context.results.values()
-                    if r.status == StageStatus.FAILED
-                ) if self.context else 0
-            },
-            "progress_percent": progress["progress_percent"]
-        }
+            for e in sorted(executions, key=lambda x: x.start_time, reverse=True)
+        ]
 
+    def get_pipeline(self, pipeline_id: str) -> Optional[DataPipeline]:
+        """Get a pipeline by ID."""
+        return self._pipelines.get(pipeline_id)
 
-# Example stage processors
-async def extract_stage(data: Any, ctx: PipelineContext) -> Any:
-    """Example: Extract data stage."""
-    await asyncio.sleep(0.1)  # Simulate processing
-    return {"extracted": data, "timestamp": datetime.utcnow().isoformat()}
+    def list_pipelines(self) -> list[DataPipeline]:
+        """List all pipelines."""
+        return list(self._pipelines.values())
 
-
-async def transform_stage(data: Any, ctx: PipelineContext) -> Any:
-    """Example: Transform data stage."""
-    await asyncio.sleep(0.1)  # Simulate processing
-    return {"transformed": True, "original": data}
-
-
-async def load_stage(data: Any, ctx: PipelineContext) -> Any:
-    """Example: Load data stage."""
-    await asyncio.sleep(0.1)  # Simulate processing
-    return {"loaded": True, "data": data}
-
-
-# Standalone execution
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    async def main():
-        # Create pipeline
-        config = PipelineConfig(
-            name="etl-pipeline",
-            stages=["extract", "transform", "load"],
-            max_retries=2,
-            timeout=30.0
-        )
-        
-        pipeline = DataPipelineAction(config)
-        pipeline.register_stage("extract", extract_stage)
-        pipeline.register_stage("transform", transform_stage)
-        pipeline.register_stage("load", load_stage)
-        
-        # Execute
-        result = await pipeline.execute({"source": "database", "query": "SELECT *"})
-        
-        print(f"Pipeline status: {pipeline.status.value}")
-        print(f"Summary: {json.dumps(pipeline.get_summary(), indent=2, default=str)}")
-        print(f"Progress: {json.dumps(pipeline.get_progress(), indent=2, default=str)}")
-    
-    asyncio.run(main())
+    def delete_pipeline(self, pipeline_id: str) -> bool:
+        """Delete a pipeline."""
+        if pipeline_id in self._pipelines:
+            del self._pipelines[pipeline_id]
+            return True
+        return False
