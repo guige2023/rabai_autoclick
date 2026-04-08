@@ -1,202 +1,109 @@
-"""
-API Cost Action Module.
+"""API Cost Action Module.
 
-Tracks API usage costs with rate limiting,
-budget management, and cost allocation.
+Tracks and allocates API usage costs by client,
+endpoint, and time period.
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional
-from dataclasses import dataclass, field
-import logging
+import sys
+import os
 import time
-from enum import Enum
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
 
-logger = logging.getLogger(__name__)
-
-
-class CostAllocation(Enum):
-    """How costs are allocated."""
-    PER_REQUEST = "per_request"
-    PER_BYTE = "per_byte"
-    PER_MINUTE = "per_minute"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
 @dataclass
-class CostRecord:
-    """Single cost record."""
-    endpoint: str
-    cost: float
+class CostEntry:
+    """A cost entry."""
     timestamp: float
-    metadata: dict[str, Any] = field(default_factory=dict)
+    client_id: str
+    endpoint: str
+    requests: int
+    cost_usd: float
 
 
-@dataclass
-class CostBudget:
-    """Budget configuration."""
-    name: str
-    limit: float
-    period_seconds: float
-    alert_threshold: float = 0.8
-
-
-@dataclass
-class CostStatus:
-    """Current cost status."""
-    budget_name: str
-    spent: float
-    limit: float
-    remaining: float
-    percent_used: float
-    reset_at: float
-    is_exceeded: bool
-
-
-class APICostAction:
+class APICostAction(BaseAction):
     """
-    API cost tracking and budget management.
+    API cost tracking and allocation.
 
-    Tracks costs per endpoint, manages budgets,
-    and alerts when thresholds are exceeded.
+    Tracks API usage costs by client, endpoint,
+    and time period for billing and optimization.
 
     Example:
         cost_tracker = APICostAction()
-        cost_tracker.set_budget("monthly", limit=1000.0, period=30*24*3600)
-        cost_tracker.record_cost("/api/users", cost=0.001)
-        status = cost_tracker.get_status("monthly")
+        result = cost_tracker.execute(ctx, {"action": "record", "client_id": "app-1", "requests": 1000})
     """
+    action_type = "api_cost"
+    display_name = "API成本跟踪"
+    description = "API使用成本跟踪和分配"
 
-    def __init__(
-        self,
-        default_currency: str = "USD",
-        cost_per_request: float = 0.0001,
-    ) -> None:
-        self.default_currency = default_currency
-        self.cost_per_request = cost_per_request
-        self._budgets: dict[str, CostBudget] = {}
-        self._spending: dict[str, list[CostRecord]] = {}
-        self._reset_times: dict[str, float] = {}
+    def __init__(self) -> None:
+        super().__init__()
+        self._entries: List[CostEntry] = []
+        self._rate_per_request: float = 0.0001
 
-    def set_budget(
-        self,
-        name: str,
-        limit: float,
-        period_seconds: float,
-        alert_threshold: float = 0.8,
-    ) -> None:
-        """Configure a budget."""
-        self._budgets[name] = CostBudget(
-            name=name,
-            limit=limit,
-            period_seconds=period_seconds,
-            alert_threshold=alert_threshold,
-        )
-        self._spending[name] = []
-        self._reset_times[name] = time.time() + period_seconds
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        action = params.get("action", "")
+        try:
+            if action == "record":
+                return self._record_cost(params)
+            elif action == "get_cost":
+                return self._get_cost(params)
+            elif action == "set_rate":
+                return self._set_rate(params)
+            elif action == "get_report":
+                return self._get_report(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cost error: {str(e)}")
 
-    def record_cost(
-        self,
-        endpoint: str,
-        cost: float,
-        metadata: Optional[dict[str, Any]] = None,
-        budget_name: str = "default",
-    ) -> None:
-        """Record an API cost."""
-        self._prune_expired(budget_name)
+    def _record_cost(self, params: Dict[str, Any]) -> ActionResult:
+        client_id = params.get("client_id", "")
+        endpoint = params.get("endpoint", "/")
+        requests = params.get("requests", 1)
 
-        record = CostRecord(
-            endpoint=endpoint,
-            cost=cost,
-            timestamp=time.time(),
-            metadata=metadata or {},
-        )
+        cost = requests * self._rate_per_request
 
-        if budget_name not in self._spending:
-            self._spending[budget_name] = []
+        entry = CostEntry(timestamp=time.time(), client_id=client_id, endpoint=endpoint, requests=requests, cost_usd=cost)
+        self._entries.append(entry)
 
-        self._spending[budget_name].append(record)
+        return ActionResult(success=True, message=f"Recorded: {requests} requests for {client_id}", data={"cost_usd": cost})
 
-        budget = self._budgets.get(budget_name)
-        if budget:
-            total_spent = self.get_total_spent(budget_name)
-            if total_spent / budget.limit >= budget.alert_threshold:
-                logger.warning(
-                    "Budget '%s' at %.1f%% threshold",
-                    budget_name,
-                    (total_spent / budget.limit) * 100
-                )
+    def _get_cost(self, params: Dict[str, Any]) -> ActionResult:
+        client_id = params.get("client_id", "")
+        start_time = params.get("start_time", time.time() - 86400)
+        end_time = params.get("end_time", time.time())
 
-    def get_status(self, budget_name: str) -> Optional[CostStatus]:
-        """Get current status for a budget."""
-        self._prune_expired(budget_name)
+        filtered = [e for e in self._entries if e.client_id == client_id and start_time <= e.timestamp <= end_time]
+        total_cost = sum(e.cost_usd for e in filtered)
+        total_requests = sum(e.requests for e in filtered)
 
-        if budget_name not in self._budgets:
-            return None
+        return ActionResult(success=True, data={"client_id": client_id, "total_cost_usd": total_cost, "total_requests": total_requests, "period_requests": len(filtered)})
 
-        budget = self._budgets[budget_name]
-        spent = self.get_total_spent(budget_name)
+    def _set_rate(self, params: Dict[str, Any]) -> ActionResult:
+        rate = params.get("rate_per_request", 0.0001)
+        self._rate_per_request = rate
+        return ActionResult(success=True, message=f"Rate set: ${rate}/request")
 
-        return CostStatus(
-            budget_name=budget_name,
-            spent=spent,
-            limit=budget.limit,
-            remaining=max(0, budget.limit - spent),
-            percent_used=(spent / budget.limit * 100) if budget.limit > 0 else 0,
-            reset_at=self._reset_times.get(budget_name, 0),
-            is_exceeded=spent >= budget.limit,
-        )
+    def _get_report(self, params: Dict[str, Any]) -> ActionResult:
+        start_time = params.get("start_time", time.time() - 86400)
+        end_time = params.get("end_time", time.time())
 
-    def get_total_spent(self, budget_name: str) -> float:
-        """Calculate total spent in budget."""
-        self._prune_expired(budget_name)
+        filtered = [e for e in self._entries if start_time <= e.timestamp <= end_time]
 
-        records = self._spending.get(budget_name, [])
-        return sum(r.cost for r in records)
+        by_client: Dict[str, Dict[str, Any]] = {}
+        for entry in filtered:
+            if entry.client_id not in by_client:
+                by_client[entry.client_id] = {"cost_usd": 0.0, "requests": 0}
+            by_client[entry.client_id]["cost_usd"] += entry.cost_usd
+            by_client[entry.client_id]["requests"] += entry.requests
 
-    def get_cost_by_endpoint(
-        self,
-        budget_name: str = "default",
-    ) -> dict[str, float]:
-        """Get cost breakdown by endpoint."""
-        self._prune_expired(budget_name)
+        total_cost = sum(e.cost_usd for e in filtered)
+        total_requests = sum(e.requests for e in filtered)
 
-        costs: dict[str, float] = {}
-        records = self._spending.get(budget_name, [])
-
-        for record in records:
-            costs[record.endpoint] = costs.get(record.endpoint, 0) + record.cost
-
-        return costs
-
-    def check_limit(
-        self,
-        cost: float,
-        budget_name: str = "default",
-    ) -> bool:
-        """Check if adding cost would exceed budget."""
-        status = self.get_status(budget_name)
-        if status is None:
-            return True
-
-        return (status.spent + cost) <= status.limit
-
-    def reset_budget(self, budget_name: str) -> None:
-        """Reset spending for a budget."""
-        if budget_name in self._spending:
-            self._spending[budget_name] = []
-
-        if budget_name in self._budgets:
-            budget = self._budgets[budget_name]
-            self._reset_times[budget_name] = time.time() + budget.period_seconds
-
-    def _prune_expired(self, budget_name: str) -> None:
-        """Remove expired records."""
-        if budget_name not in self._budgets:
-            return
-
-        budget = self._budgets[budget_name]
-        cutoff = time.time() - budget.period_seconds
-
-        records = self._spending.get(budget_name, [])
-        self._spending[budget_name] = [r for r in records if r.timestamp >= cutoff]
+        return ActionResult(success=True, data={"total_cost_usd": total_cost, "total_requests": total_requests, "by_client": by_client})
