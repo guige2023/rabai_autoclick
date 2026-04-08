@@ -1,171 +1,106 @@
-"""
-Trie (prefix tree) utilities.
+"""Trie utilities for RabAI AutoClick.
 
-Provides Trie and Radix Trie implementations for
-efficient string storage and prefix-based operations.
+Provides:
+- Trie data structure implementation
+- Prefix matching
+- Auto-complete helpers
 """
 
 from __future__ import annotations
 
+from typing import (
+    Dict,
+    List,
+    Optional,
+)
+
 
 class TrieNode:
-    """Node in a Trie."""
-
-    __slots__ = ("children", "is_word", "frequency")
+    """A node in the trie."""
 
     def __init__(self) -> None:
-        self.children: dict[str, TrieNode] = {}
-        self.is_word: bool = False
-        self.frequency: int = 0
+        self.children: Dict[str, TrieNode] = {}
+        self.is_end: bool = False
+        self.value: Optional[str] = None
 
 
 class Trie:
-    """
-    Prefix tree for efficient string operations.
-
-    Supports insert, search, prefix match, and autocomplete.
-    """
+    """A trie (prefix tree) for string operations."""
 
     def __init__(self) -> None:
-        self.root = TrieNode()
+        self._root = TrieNode()
 
     def insert(self, word: str) -> None:
-        """Insert word into trie."""
-        node = self.root
+        """Insert a word into the trie.
+
+        Args:
+            word: Word to insert.
+        """
+        node = self._root
         for char in word:
             if char not in node.children:
                 node.children[char] = TrieNode()
             node = node.children[char]
-        node.is_word = True
-        node.frequency += 1
+        node.is_end = True
+        node.value = word
 
     def search(self, word: str) -> bool:
-        """Check if word exists in trie."""
+        """Check if a word exists in the trie.
+
+        Args:
+            word: Word to search for.
+
+        Returns:
+            True if word is found.
+        """
         node = self._find_node(word)
-        return node is not None and node.is_word
+        return node is not None and node.is_end
 
     def starts_with(self, prefix: str) -> bool:
-        """Check if any word starts with prefix."""
+        """Check if any word starts with prefix.
+
+        Args:
+            prefix: Prefix to check.
+
+        Returns:
+            True if prefix exists.
+        """
         return self._find_node(prefix) is not None
 
-    def _find_node(self, prefix: str) -> TrieNode | None:
-        """Find node for prefix, return None if not found."""
-        node = self.root
+    def _find_node(self, prefix: str) -> Optional[TrieNode]:
+        """Find node for prefix."""
+        node = self._root
         for char in prefix:
             if char not in node.children:
                 return None
             node = node.children[char]
         return node
 
-    def autocomplete(self, prefix: str, max_results: int = 10) -> list[str]:
-        """
-        Return words starting with prefix.
+    def autocomplete(self, prefix: str) -> List[str]:
+        """Get all words starting with prefix.
 
         Args:
-            prefix: Prefix to match
-            max_results: Maximum number of results
+            prefix: Prefix to match.
 
         Returns:
-            List of matching words
+            List of matching words.
         """
         node = self._find_node(prefix)
-        if node is None:
+        if not node:
             return []
-        results: list[str] = []
+        return self._collect_words(node)
 
-        def dfs(n: TrieNode, path: list[str]) -> None:
-            if len(results) >= max_results:
-                return
-            if n.is_word:
-                results.append("".join(path))
-            for char, child in n.children.items():
-                path.append(char)
-                dfs(child, path)
-                path.pop()
-
-        dfs(node, list(prefix))
+    def _collect_words(self, node: TrieNode) -> List[str]:
+        """Collect all words from node."""
+        results: List[str] = []
+        if node.is_end:
+            results.append(node.value)  # type: ignore
+        for child in node.children.values():
+            results.extend(self._collect_words(child))
         return results
 
-    def all_words(self) -> list[str]:
-        """Return all words in trie."""
-        results: list[str] = []
 
-        def dfs(node: TrieNode, path: list[str]) -> None:
-            if node.is_word:
-                results.append("".join(path))
-            for char, child in node.children.items():
-                path.append(char)
-                dfs(child, path)
-                path.pop()
-
-        dfs(self.root, [])
-        return results
-
-    def remove(self, word: str) -> bool:
-        """Remove word from trie. Returns True if removed."""
-        node = self.root
-        stack: list[tuple[TrieNode, str]] = []
-        for char in word:
-            if char not in node.children:
-                return False
-            stack.append((node, char))
-            node = node.children[char]
-        if not node.is_word:
-            return False
-        node.is_word = False
-        node.frequency = 0
-        while stack and not node.children and not node.is_word:
-            node, char = stack.pop()
-            del node.children[char]
-            node = node
-        return True
-
-    def word_count(self, word: str) -> int:
-        """Get frequency count of word (how many times inserted)."""
-        node = self._find_node(word)
-        return node.frequency if node and node.is_word else 0
-
-
-class RadixTrie(Trie):
-    """
-    Radix Trie (compact prefix tree) that compresses single-child chains.
-    """
-
-    def insert(self, word: str) -> None:
-        """Insert word with path compression."""
-        if not word:
-            self.root.is_word = True
-            return
-        node = self.root
-        i = 0
-        while i < len(word):
-            char = word[i]
-            if char not in node.children:
-                node.children[char] = TrieNode()
-            child = node.children[char]
-            j = i
-            while j < len(word) and hasattr(child, "label"):
-                j += 1
-            if not hasattr(child, "label"):
-                child.label = ""
-                child.children = child.children if hasattr(child, "children") else {}
-            common_len = 0
-            for k in range(min(len(child.label), len(word) - i)):
-                if child.label[k] == word[i + k]:
-                    common_len += 1
-                else:
-                    break
-            if common_len < len(child.label):
-                split_node = TrieNode()
-                split_node.label = child.label[:common_len]
-                split_node.children[child.label[common_len]] = child
-                split_node.children = {child.label[common_len]: child}
-                child.label = child.label[common_len:]
-                node.children[char] = split_node
-                node = split_node
-                i += common_len
-            else:
-                node = child
-                i += common_len
-        node.is_word = True
-        node.frequency += 1
+__all__ = [
+    "TrieNode",
+    "Trie",
+]
