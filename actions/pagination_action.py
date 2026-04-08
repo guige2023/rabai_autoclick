@@ -1,334 +1,352 @@
-"""
-Pagination Action Module.
+"""Pagination action module for RabAI AutoClick.
 
-Handles API pagination across different strategies: cursor-based, offset-based,
-page-based, and time-based. Provides unified interface for paginated data retrieval.
-
-Author: RabAi Team
+Handles paginated API responses with support for offset, cursor,
+and page-based pagination strategies.
 """
 
-from __future__ import annotations
+import sys
+import os
+from typing import Any, Dict, List, Optional, Callable, Union
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+from urllib.parse import urlencode
 
-import math
-import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
-
-
-class PaginationStrategy(Enum):
-    """Pagination strategy types."""
-    CURSOR = "cursor"
-    OFFSET = "offset"
-    PAGE = "page"
-    TIME = "time"
-    ID = "id"
-    LINK_HEADER = "link_header"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class PaginationState:
-    """Tracks current pagination state."""
-    strategy: PaginationStrategy
-    page: int = 1
-    offset: int = 0
-    cursor: Optional[str] = None
-    since_id: Optional[int] = None
-    until_id: Optional[int] = None
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
-    has_more: bool = True
-    total_count: Optional[int] = None
-    rate_limit_remaining: Optional[int] = None
-    rate_limit_reset: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "strategy": self.strategy.value,
-            "page": self.page,
-            "offset": self.offset,
-            "cursor": self.cursor,
-            "since_id": self.since_id,
-            "until_id": self.until_id,
-            "start_time": self.start_time.isoformat() if self.start_time else None,
-            "end_time": self.end_time.isoformat() if self.end_time else None,
-            "has_more": self.has_more,
-            "total_count": self.total_count,
-            "rate_limit_remaining": self.rate_limit_remaining,
-            "rate_limit_reset": self.rate_limit_reset,
-            "metadata": self.metadata,
-        }
-
-
-@dataclass
-class PageResult:
-    """Result of a single page fetch."""
-    items: List[Any]
-    page_size: int
-    is_last_page: bool
-    next_page_params: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class PaginationConfig:
-    """Configuration for pagination behavior."""
-    page_size: int = 100
-    max_pages: Optional[int] = None
-    max_total_items: Optional[int] = None
-    max_retries: int = 3
-    retry_delay: float = 1.0
-    backoff_factor: float = 2.0
-    rate_limit_delay: float = 0.0
-    timeout_seconds: float = 30.0
-
-
-class CursorPaginator:
-    """Cursor-based pagination handler."""
-
-    def __init__(self, config: PaginationConfig):
-        self.config = config
-        self.state = PaginationState(strategy=PaginationStrategy.CURSOR)
-        self._fetch_fn: Optional[Callable] = None
-
-    def pages(self, fetch_fn: Callable[[Dict], List]) -> Iterator[PageResult]:
-        """Iterate over pages using cursor pagination."""
-        self._fetch_fn = fetch_fn
-        self.state = PaginationState(strategy=PaginationStrategy.CURSOR)
-
-        while self.state.has_more:
-            params = self._build_params()
-            items = self._fetch_with_retry(params)
-
-            is_last = len(items) < self.config.page_size
-            self.state.has_more = not is_last and self._check_limits()
-
-            yield PageResult(
-                items=items,
-                page_size=len(items),
-                is_last_page=is_last,
-                next_page_params=params,
-            )
-
-            if self.state.has_more and items:
-                self.state.cursor = self._extract_cursor(items[-1])
-                self.state.page += 1
-
-    def _build_params(self) -> Dict[str, Any]:
-        params = {"limit": self.config.page_size}
-        if self.state.cursor:
-            params["cursor"] = self.state.cursor
-        return params
-
-    def _extract_cursor(self, item: Any) -> str:
-        """Extract cursor from item."""
-        if isinstance(item, dict):
-            return item.get("cursor") or item.get("id", "")
-        return getattr(item, "cursor", str(getattr(item, "id", "")))
-
-    def _fetch_with_retry(self, params: Dict) -> List:
-        for attempt in range(self.config.max_retries):
-            try:
-                result = self._fetch_fn(params)
-                return result if isinstance(result, list) else []
-            except Exception as e:
-                if attempt == self.config.max_retries - 1:
-                    raise
-                time.sleep(self.config.retry_delay * (self.config.backoff_factor ** attempt))
-
-    def _check_limits(self) -> bool:
-        if self.config.max_pages and self.state.page >= self.config.max_pages:
-            return False
-        if self.config.max_total_items and self.state.page * self.config.page_size >= self.config.max_total_items:
-            return False
-        return True
-
-
-class OffsetPaginator:
-    """Offset-based pagination handler."""
-
-    def __init__(self, config: PaginationConfig):
-        self.config = config
-        self.state = PaginationState(strategy=PaginationStrategy.OFFSET)
-        self._total_fetched = 0
-
-    def pages(self, fetch_fn: Callable[[Dict], Tuple[List, int]]) -> Iterator[PageResult]:
-        """Iterate over pages using offset pagination."""
-        self.state = PaginationState(strategy=PaginationStrategy.OFFSET)
-        self._total_fetched = 0
-
-        while self.state.has_more:
-            params = self._build_params()
-            items, total = fetch_fn(params)
-
-            if self.state.total_count is None:
-                self.state.total_count = total
-
-            self._total_fetched += len(items)
-            is_last = self._total_fetched >= self.state.total_count or len(items) == 0
-            self.state.has_more = not is_last and self._check_limits()
-
-            yield PageResult(
-                items=items,
-                page_size=len(items),
-                is_last_page=is_last,
-                next_page_params=params,
-            )
-
-            if self.state.has_more:
-                self.state.offset += self.config.page_size
-                self.state.page += 1
-
-    def _build_params(self) -> Dict[str, Any]:
-        return {
-            "offset": self.state.offset,
-            "limit": self.config.page_size,
-        }
-
-    def _check_limits(self) -> bool:
-        if self.config.max_pages and self.state.page >= self.config.max_pages:
-            return False
-        if self.config.max_total_items and self._total_fetched >= self.config.max_total_items:
-            return False
-        return True
-
-
-class TimeBasedPaginator:
-    """Time-based pagination handler for chronological APIs."""
-
-    def __init__(self, config: PaginationConfig, time_field: str = "created_at"):
-        self.config = config
-        self.state = PaginationState(strategy=PaginationStrategy.TIME)
-        self.time_field = time_field
-        self._total_fetched = 0
-
-    def pages(
-        self,
-        fetch_fn: Callable[[Dict], List],
-        start_time: Optional[datetime] = None,
-        end_time: Optional[Optional[datetime]] = None,
-    ) -> Iterator[PageResult]:
-        """Iterate over time-bounded pages."""
-        self.state.start_time = start_time or datetime.now()
-        self.state.end_time = end_time
-        self._total_fetched = 0
-
-        while self.state.has_more:
-            params = self._build_params()
-            items = fetch_fn(params)
-
-            self._total_fetched += len(items)
-            is_last = len(items) < self.config.page_size
-            self.state.has_more = not is_last and self._check_limits()
-
-            if items and self.state.has_more:
-                last_item_time = self._extract_time(items[-1])
-                if last_item_time:
-                    self.state.metadata["last_time"] = last_item_time
-
-            yield PageResult(
-                items=items,
-                page_size=len(items),
-                is_last_page=is_last,
-                next_page_params=params,
-            )
-
-            if self.state.has_more and items:
-                self.state.start_time = self._extract_time(items[-1])
-
-    def _build_params(self) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"limit": self.config.page_size}
-        if self.state.start_time:
-            params["since"] = self.state.start_time.isoformat()
-        if self.state.end_time:
-            params["until"] = self.state.end_time.isoformat()
-        return params
-
-    def _extract_time(self, item: Any) -> Optional[datetime]:
-        if isinstance(item, dict):
-            ts = item.get(self.time_field)
-            if isinstance(ts, str):
-                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            return ts
-        return getattr(item, self.time_field, None)
-
-    def _check_limits(self) -> bool:
-        if self.config.max_pages and self.state.page >= self.config.max_pages:
-            return False
-        if self.config.max_total_items and self._total_fetched >= self.config.max_total_items:
-            return False
-        return True
-
-
-class APIPaginator:
+class PaginationAction(BaseAction):
+    """Pagination action for traversing paginated API resources.
+    
+    Supports multiple pagination strategies:
+    - offset: skip/limit based pagination
+    - cursor: opaque cursor-based pagination
+    - page: page number based pagination
+    - link: Hypermedia link-based pagination (RFC 5988)
     """
-    Unified API pagination interface supporting multiple strategies.
-
-    Handles cursor, offset, page, time-based, and link-header pagination
-    with automatic rate limiting and retry logic.
-
-    Example:
-        >>> paginator = APIPaginator(strategy=PaginationStrategy.CURSOR)
-        >>> for page in paginator.fetch_all(lambda p: api.call(**p)):
-        >>>     process(page.items)
-    """
-
-    def __init__(
+    action_type = "pagination"
+    display_name = "分页遍历"
+    description = "支持offset/cursor/page/link分页策略"
+    
+    def execute(
         self,
-        strategy: PaginationStrategy = PaginationStrategy.CURSOR,
-        config: Optional[PaginationConfig] = None,
-    ):
-        self.strategy = strategy
-        self.config = config or PaginationConfig()
-
-        self._paginators = {
-            PaginationStrategy.CURSOR: CursorPaginator(self.config),
-            PaginationStrategy.OFFSET: OffsetPaginator(self.config),
-            PaginationStrategy.TIME: TimeBasedPaginator(self.config),
-        }
-
-    def fetch_all(self, fetch_fn: Callable) -> List[Any]:
-        """Fetch all items across all pages."""
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute paginated API request.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                url, strategy (offset|cursor|page|link),
+                offset_key, limit_key, cursor_key, page_key,
+                max_pages, max_items, headers, body.
+        
+        Returns:
+            ActionResult with all collected items and pagination info.
+        """
+        strategy = params.get('strategy', 'offset')
+        max_pages = params.get('max_pages', 100)
+        max_items = params.get('max_items', 10000)
+        
+        if strategy == 'offset':
+            return self._paginate_offset(params, max_pages, max_items)
+        elif strategy == 'cursor':
+            return self._paginate_cursor(params, max_pages, max_items)
+        elif strategy == 'page':
+            return self._paginate_page(params, max_pages, max_items)
+        elif strategy == 'link':
+            return self._paginate_link(params, max_pages, max_items)
+        else:
+            return ActionResult(
+                success=False,
+                message=f"Unknown pagination strategy: {strategy}"
+            )
+    
+    def _paginate_offset(
+        self,
+        params: Dict[str, Any],
+        max_pages: int,
+        max_items: int
+    ) -> ActionResult:
+        """Paginate using offset/limit pattern."""
+        base_url = params['url']
+        headers = params.get('headers', {})
+        body = params.get('body')
+        offset_key = params.get('offset_key', 'offset')
+        limit_key = params.get('limit_key', 'limit')
+        limit = params.get('limit', 100)
+        items_key = params.get('items_key', 'data')
+        
         all_items = []
-        for page in self.pages(fetch_fn):
-            all_items.extend(page.items)
-            if page.is_last_page:
+        offset = params.get('offset', 0)
+        
+        for page in range(max_pages):
+            if len(all_items) >= max_items:
                 break
-        return all_items
-
-    def pages(self, fetch_fn: Callable) -> Iterator[PageResult]:
-        """Iterate over pages using configured strategy."""
-        paginator = self._paginators.get(self.strategy)
-        if not paginator:
-            raise ValueError(f"Unsupported strategy: {self.strategy}")
-        yield from paginator.pages(fetch_fn)
-
-    @property
-    def state(self) -> PaginationState:
-        """Get current pagination state."""
-        paginator = self._paginators.get(self.strategy)
-        return paginator.state if paginator else PaginationState(strategy=self.strategy)
-
-    def reset(self) -> None:
-        """Reset pagination state."""
-        for p in self._paginators.values():
-            p.state = PaginationState(strategy=p.state.strategy)
-        self._paginators[self.strategy].state = PaginationState(strategy=self.strategy)
-
-
-def create_paginator(
-    strategy: str = "cursor",
-    page_size: int = 100,
-    max_pages: Optional[int] = None,
-) -> APIPaginator:
-    """Factory to create a configured paginator."""
-    config = PaginationConfig(
-        page_size=page_size,
-        max_pages=max_pages,
-    )
-    return APIPaginator(
-        strategy=PaginationStrategy(strategy),
-        config=config,
-    )
+            
+            page_limit = min(limit, max_items - len(all_items))
+            url = self._build_offset_url(base_url, offset, page_limit, offset_key, limit_key)
+            
+            response = self._fetch_page(url, headers, body, params.get('method', 'GET'))
+            if not response['success']:
+                return response
+            
+            items = self._extract_items(response['data'], items_key)
+            if not items:
+                break
+            
+            all_items.extend(items)
+            offset += len(items)
+            
+            if len(items) < page_limit:
+                break
+        
+        return ActionResult(
+            success=True,
+            message=f"Collected {len(all_items)} items across {page + 1} pages",
+            data={
+                'items': all_items,
+                'total': len(all_items),
+                'pages': page + 1
+            }
+        )
+    
+    def _paginate_cursor(
+        self,
+        params: Dict[str, Any],
+        max_pages: int,
+        max_items: int
+    ) -> ActionResult:
+        """Paginate using cursor pattern."""
+        base_url = params['url']
+        headers = params.get('headers', {})
+        body = params.get('body')
+        cursor_key = params.get('cursor_key', 'cursor')
+        items_key = params.get('items_key', 'data')
+        next_key = params.get('next_key', 'next_cursor')
+        
+        all_items = []
+        cursor = params.get('cursor')
+        
+        for page in range(max_pages):
+            if len(all_items) >= max_items:
+                break
+            
+            url = self._build_cursor_url(base_url, cursor, cursor_key)
+            
+            response = self._fetch_page(url, headers, body, params.get('method', 'GET'))
+            if not response['success']:
+                return response
+            
+            data = response['data']
+            items = self._extract_items(data, items_key)
+            if not items:
+                break
+            
+            all_items.extend(items)
+            
+            next_cursor = self._get_nested(data, next_key)
+            if not next_cursor or next_cursor == cursor:
+                break
+            
+            cursor = next_cursor
+        
+        return ActionResult(
+            success=True,
+            message=f"Collected {len(all_items)} items across {page + 1} pages",
+            data={
+                'items': all_items,
+                'total': len(all_items),
+                'pages': page + 1,
+                'next_cursor': cursor
+            }
+        )
+    
+    def _paginate_page(
+        self,
+        params: Dict[str, Any],
+        max_pages: int,
+        max_items: int
+    ) -> ActionResult:
+        """Paginate using page number pattern."""
+        base_url = params['url']
+        headers = params.get('headers', {})
+        body = params.get('body')
+        page_key = params.get('page_key', 'page')
+        per_page_key = params.get('per_page_key', 'per_page')
+        per_page = params.get('per_page', 100)
+        items_key = params.get('items_key', 'data')
+        
+        all_items = []
+        page = params.get('page', 1)
+        
+        for page_num in range(page, page + max_pages):
+            if len(all_items) >= max_items:
+                break
+            
+            page_limit = min(per_page, max_items - len(all_items))
+            url = self._build_page_url(base_url, page_num, page_limit, page_key, per_page_key)
+            
+            response = self._fetch_page(url, headers, body, params.get('method', 'GET'))
+            if not response['success']:
+                return response
+            
+            items = self._extract_items(response['data'], items_key)
+            if not items:
+                break
+            
+            all_items.extend(items)
+            
+            if len(items) < page_limit:
+                break
+        
+        return ActionResult(
+            success=True,
+            message=f"Collected {len(all_items)} items across {page_num - page + 1} pages",
+            data={
+                'items': all_items,
+                'total': len(all_items),
+                'pages': page_num - page + 1
+            }
+        )
+    
+    def _paginate_link(
+        self,
+        params: Dict[str, Any],
+        max_pages: int,
+        max_items: int
+    ) -> ActionResult:
+        """Paginate using RFC 5988 Link header."""
+        url = params['url']
+        headers = params.get('headers', {})
+        body = params.get('body')
+        items_key = params.get('items_key', 'data')
+        
+        all_items = []
+        
+        for page in range(max_pages):
+            if len(all_items) >= max_items:
+                break
+            
+            response = self._fetch_page(url, headers, body, params.get('method', 'GET'))
+            if not response['success']:
+                return response
+            
+            items = self._extract_items(response['data'], items_key)
+            if not items:
+                break
+            
+            all_items.extend(items)
+            
+            next_url = response.get('headers', {}).get('link', '')
+            if not next_url:
+                break
+            
+            next_url = self._parse_link_header(next_url)
+            if not next_url:
+                break
+            
+            url = next_url
+        
+        return ActionResult(
+            success=True,
+            message=f"Collected {len(all_items)} items across {page + 1} pages",
+            data={
+                'items': all_items,
+                'total': len(all_items),
+                'pages': page + 1
+            }
+        )
+    
+    def _build_offset_url(
+        self,
+        base: str,
+        offset: int,
+        limit: int,
+        offset_key: str,
+        limit_key: str
+    ) -> str:
+        """Build URL with offset/limit params."""
+        sep = '&' if '?' in base else '?'
+        return f"{base}{sep}{offset_key}={offset}&{limit_key}={limit}"
+    
+    def _build_cursor_url(self, base: str, cursor: Optional[str], cursor_key: str) -> str:
+        """Build URL with cursor param."""
+        sep = '&' if '?' in base else '?'
+        if cursor:
+            return f"{base}{sep}{cursor_key}={cursor}"
+        return base
+    
+    def _build_page_url(
+        self,
+        base: str,
+        page: int,
+        per_page: int,
+        page_key: str,
+        per_page_key: str
+    ) -> str:
+        """Build URL with page params."""
+        sep = '&' if '?' in base else '?'
+        return f"{base}{sep}{page_key}={page}&{per_page_key}={per_page}"
+    
+    def _fetch_page(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        body: Optional[Any],
+        method: str
+    ) -> ActionResult:
+        """Fetch a single page."""
+        import json
+        
+        data = None
+        if body:
+            if isinstance(body, dict):
+                data = json.dumps(body).encode('utf-8')
+                headers = {**headers, 'Content-Type': 'application/json'}
+            else:
+                data = body.encode('utf-8') if isinstance(body, str) else body
+        
+        try:
+            req = Request(url, data=data, headers=headers, method=method)
+            with urlopen(req, timeout=30) as resp:
+                body_bytes = resp.read()
+                return {
+                    'success': True,
+                    'data': json.loads(body_bytes.decode('utf-8', errors='replace')),
+                    'headers': dict(resp.headers)
+                }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _extract_items(self, data: Any, key: str) -> List[Any]:
+        """Extract items from response data using dot notation key."""
+        if not key:
+            return data if isinstance(data, list) else []
+        
+        parts = key.split('.')
+        current = data
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part, [])
+            else:
+                return []
+        return current if isinstance(current, list) else []
+    
+    def _get_nested(self, data: Dict, key: str) -> Optional[Any]:
+        """Get nested value from dict using dot notation."""
+        parts = key.split('.')
+        current = data
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+        return current
+    
+    def _parse_link_header(self, link_header: str) -> Optional[str]:
+        """Parse RFC 5988 Link header and extract next URL."""
+        import re
+        match = re.search(r'<([^>]+)>;\s*rel="next"', link_header)
+        return match.group(1) if match else None
