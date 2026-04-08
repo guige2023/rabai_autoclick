@@ -1,39 +1,37 @@
-"""Data filter action module.
+"""
+Data Filter Action - Filters and selects data based on criteria.
 
-Provides filtering operations for lists, dicts, and data frames.
-Supports condition chains, complex predicates, and null handling.
+This module provides data filtering capabilities including
+conditional filtering, complex predicates, and multi-stage filtering.
 """
 
 from __future__ import annotations
 
-import logging
-from typing import Optional, Dict, Any, List, Callable, TypeVar, Union
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Callable, TypeVar
+from enum import Enum
 
-logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
 
 class FilterOperator(Enum):
-    """Comparison operators for filtering."""
-    EQ = "=="
-    NE = "!="
-    GT = ">"
-    GE = ">="
-    LT = "<"
-    LE = "<="
+    """Filter operators."""
+    EQ = "eq"
+    NE = "ne"
+    GT = "gt"
+    GTE = "gte"
+    LT = "lt"
+    LTE = "lte"
     IN = "in"
     NOT_IN = "not_in"
     CONTAINS = "contains"
-    NOT_CONTAINS = "not_contains"
     STARTS_WITH = "starts_with"
     ENDS_WITH = "ends_with"
+    REGEX = "regex"
     IS_NULL = "is_null"
     IS_NOT_NULL = "is_not_null"
-
-
-from enum import Enum
+    BETWEEN = "between"
 
 
 @dataclass
@@ -42,211 +40,271 @@ class FilterCondition:
     field: str
     operator: FilterOperator
     value: Any = None
+    combine_with: str = "and"
+
+
+@dataclass
+class FilterSpec:
+    """Specification for filtering data."""
+    conditions: list[FilterCondition]
+    combine_mode: str = "and"
+
+
+@dataclass
+class FilterResult:
+    """Result of filtering operation."""
+    total_records: int
+    matching_records: int
+    filtered_records: list[dict[str, Any]]
+    excluded_count: int
+
+
+class DataFilter:
+    """
+    Filters data based on conditions and predicates.
+    
+    Example:
+        filter = DataFilter()
+        result = filter.filter(
+            records,
+            FilterSpec([
+                FilterCondition("age", FilterOperator.GTE, 18),
+                FilterCondition("status", FilterOperator.EQ, "active"),
+            ])
+        )
+    """
+    
+    def __init__(self) -> None:
+        self._operator_funcs = {
+            FilterOperator.EQ: lambda a, b: a == b,
+            FilterOperator.NE: lambda a, b: a != b,
+            FilterOperator.GT: lambda a, b: a > b,
+            FilterOperator.GTE: lambda a, b: a >= b,
+            FilterOperator.LT: lambda a, b: a < b,
+            FilterOperator.LTE: lambda a, b: a <= b,
+            FilterOperator.CONTAINS: lambda a, b: b in a if a else False,
+            FilterOperator.STARTS_WITH: lambda a, b: str(a).startswith(b) if a else False,
+            FilterOperator.ENDS_WITH: lambda a, b: str(a).endswith(b) if a else False,
+        }
+    
+    def filter(
+        self,
+        data: list[dict[str, Any]],
+        spec: FilterSpec | list[FilterCondition] | Callable[[dict[str, Any]], bool],
+    ) -> FilterResult:
+        """Filter data based on spec."""
+        if callable(spec):
+            return self._filter_with_predicate(data, spec)
+        
+        if isinstance(spec, list):
+            spec = FilterSpec(conditions=spec)
+        
+        return self._filter_with_spec(data, spec)
+    
+    def _filter_with_predicate(
+        self,
+        data: list[dict[str, Any]],
+        predicate: Callable[[dict[str, Any]], bool],
+    ) -> FilterResult:
+        """Filter using a predicate function."""
+        filtered = []
+        for record in data:
+            try:
+                if predicate(record):
+                    filtered.append(record)
+            except Exception:
+                pass
+        
+        return FilterResult(
+            total_records=len(data),
+            matching_records=len(filtered),
+            filtered_records=filtered,
+            excluded_count=len(data) - len(filtered),
+        )
+    
+    def _filter_with_spec(
+        self,
+        data: list[dict[str, Any]],
+        spec: FilterSpec,
+    ) -> FilterResult:
+        """Filter using a FilterSpec."""
+        filtered = []
+        
+        for record in data:
+            if self._evaluate_conditions(record, spec.conditions, spec.combine_mode):
+                filtered.append(record)
+        
+        return FilterResult(
+            total_records=len(data),
+            matching_records=len(filtered),
+            filtered_records=filtered,
+            excluded_count=len(data) - len(filtered),
+        )
+    
+    def _evaluate_conditions(
+        self,
+        record: dict[str, Any],
+        conditions: list[FilterCondition],
+        combine_mode: str,
+    ) -> bool:
+        """Evaluate conditions against a record."""
+        results = []
+        
+        for condition in conditions:
+            result = self._evaluate_condition(record, condition)
+            results.append(result)
+        
+        if combine_mode == "and":
+            return all(results) if results else True
+        else:
+            return any(results) if results else True
+    
+    def _evaluate_condition(
+        self,
+        record: dict[str, Any],
+        condition: FilterCondition,
+    ) -> bool:
+        """Evaluate a single condition."""
+        value = self._get_nested(record, condition.field)
+        
+        if condition.operator == FilterOperator.IS_NULL:
+            return value is None
+        
+        if condition.operator == FilterOperator.IS_NOT_NULL:
+            return value is not None
+        
+        if condition.operator == FilterOperator.IN:
+            return value in (condition.value or [])
+        
+        if condition.operator == FilterOperator.NOT_IN:
+            return value not in (condition.value or [])
+        
+        if condition.operator == FilterOperator.BETWEEN:
+            if isinstance(condition.value, (list, tuple)) and len(condition.value) == 2:
+                return condition.value[0] <= value <= condition.value[1]
+            return False
+        
+        if condition.operator == FilterOperator.REGEX:
+            import re
+            try:
+                return bool(re.search(condition.value, str(value)))
+            except Exception:
+                return False
+        
+        op_func = self._operator_funcs.get(condition.operator)
+        if op_func and condition.value is not None:
+            return op_func(value, condition.value)
+        
+        return True
+    
+    def _get_nested(self, data: dict[str, Any], path: str) -> Any:
+        """Get nested value using dot notation."""
+        keys = path.split(".")
+        current = data
+        for key in keys:
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                return None
+        return current
+
+
+class MultiStageFilter:
+    """Applies multiple filtering stages in sequence."""
+    
+    def __init__(self) -> None:
+        self._stages: list[tuple[str, FilterSpec | Callable]] = []
+    
+    def add_stage(
+        self,
+        name: str,
+        spec: FilterSpec | Callable,
+    ) -> MultiStageFilter:
+        """Add a filtering stage."""
+        self._stages.append((name, spec))
+        return self
+    
+    def filter(
+        self,
+        data: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, FilterResult]]:
+        """Apply all filtering stages."""
+        current = data
+        results = {}
+        
+        for name, spec in self._stages:
+            result = DataFilter().filter(current, spec)
+            results[name] = result
+            current = result.filtered_records
+        
+        return current, results
 
 
 class DataFilterAction:
-    """Data filtering engine.
-
-    Provides flexible filtering for lists of dicts and objects.
-
-    Example:
-        data = [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}]
-        filtered = DataFilterAction().filter(data, "age", FilterOperator.GT, 20)
     """
-
-    def filter(
+    Data filter action for automation workflows.
+    
+    Example:
+        action = DataFilterAction()
+        
+        action.add_stage("adults", [
+            FilterCondition("age", FilterOperator.GTE, 18)
+        ])
+        action.add_stage("active", [
+            FilterCondition("status", FilterOperator.EQ, "active")
+        ])
+        
+        result = await action.filter_records(records)
+    """
+    
+    def __init__(self) -> None:
+        self._filter = DataFilter()
+        self._multi_stage = MultiStageFilter()
+    
+    def add_stage(
         self,
-        data: List[Dict[str, Any]],
-        field: str,
-        operator: FilterOperator,
-        value: Any = None,
-    ) -> List[Dict[str, Any]]:
-        """Filter a list of dicts by a single condition.
-
-        Args:
-            data: List of dicts to filter.
-            field: Field name to check.
-            operator: FilterOperator comparison.
-            value: Value to compare against.
-
-        Returns:
-            Filtered list.
-        """
-        result = []
-        for item in data:
-            if self._matches(item, field, operator, value):
-                result.append(item)
-        return result
-
-    def filter_multiple(
+        name: str,
+        conditions: list[FilterCondition],
+        combine_mode: str = "and",
+    ) -> None:
+        """Add a named filter stage."""
+        spec = FilterSpec(conditions=conditions, combine_mode=combine_mode)
+        self._multi_stage.add_stage(name, spec)
+    
+    async def filter_records(
         self,
-        data: List[Dict[str, Any]],
-        conditions: List[FilterCondition],
-        logic: str = "AND",
-    ) -> List[Dict[str, Any]]:
-        """Filter by multiple conditions.
-
-        Args:
-            data: List of dicts to filter.
-            conditions: List of FilterCondition objects.
-            logic: 'AND' or 'OR' for combining conditions.
-
-        Returns:
-            Filtered list.
-        """
-        result = []
-        for item in data:
-            matches = [self._matches(item, c.field, c.operator, c.value) for c in conditions]
-            if logic == "AND" and all(matches):
-                result.append(item)
-            elif logic == "OR" and any(matches):
-                result.append(item)
-        return result
-
-    def filter_by_predicate(
+        records: list[dict[str, Any]],
+    ) -> FilterResult:
+        """Filter records through all stages."""
+        if not self._multi_stage._stages:
+            return self._filter.filter(records, FilterSpec(conditions=[]))
+        
+        filtered, _ = self._multi_stage.filter(records)
+        return FilterResult(
+            total_records=len(records),
+            matching_records=len(filtered),
+            filtered_records=filtered,
+            excluded_count=len(records) - len(filtered),
+        )
+    
+    def filter_single(
         self,
-        data: List[T],
-        predicate: Callable[[T], bool],
-    ) -> List[T]:
-        """Filter using a custom predicate function.
-
-        Args:
-            data: List to filter.
-            predicate: Function that returns True for items to keep.
-
-        Returns:
-            Filtered list.
-        """
-        return [item for item in data if predicate(item)]
-
-    def exclude_nulls(
-        self,
-        data: List[Dict[str, Any]],
-        fields: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
-        """Exclude records where specified fields are null/empty.
-
-        Args:
-            data: List of dicts.
-            fields: Fields to check (None = all fields).
-
-        Returns:
-            Filtered list without null values.
-        """
-        result = []
-        for item in data:
-            if fields is None:
-                if all(v is not None and v != "" for v in item.values()):
-                    result.append(item)
-            else:
-                if all(item.get(f) is not None and item.get(f) != "" for f in fields):
-                    result.append(item)
-        return result
-
-    def filter_by_range(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        min_val: Optional[Any] = None,
-        max_val: Optional[Any] = None,
-        inclusive: bool = True,
-    ) -> List[Dict[str, Any]]:
-        """Filter by numeric or comparable range.
-
-        Args:
-            data: List of dicts.
-            field: Field to check.
-            min_val: Minimum value (None = no minimum).
-            max_val: Maximum value (None = no maximum).
-            inclusive: Whether bounds are inclusive.
-
-        Returns:
-            Filtered list.
-        """
-        result = []
-        for item in data:
-            val = item.get(field)
-            if val is None:
-                continue
-            if min_val is not None:
-                if inclusive and val < min_val:
-                    continue
-                if not inclusive and val <= min_val:
-                    continue
-            if max_val is not None:
-                if inclusive and val > max_val:
-                    continue
-                if not inclusive and val >= max_val:
-                    continue
-            result.append(item)
-        return result
-
-    def filter_unique(
-        self,
-        data: List[Dict[str, Any]],
-        key: str,
-        keep: str = "first",
-    ) -> List[Dict[str, Any]]:
-        """Filter to unique values by a key field.
-
-        Args:
-            data: List of dicts.
-            key: Field to check for uniqueness.
-            keep: 'first' or 'last' occurrence to keep.
-
-        Returns:
-            List with unique values.
-        """
-        seen: Dict[Any, Dict[str, Any]] = {}
-        for item in data:
-            val = item.get(key)
-            if val is None:
-                continue
-            if keep == "first" and val in seen:
-                continue
-            if keep == "last":
-                seen[val] = item
-        if keep == "last":
-            return list(seen.values())
-        return [item for k, item in seen.items()]
-
-    def _matches(
-        self,
-        item: Dict[str, Any],
-        field: str,
-        operator: FilterOperator,
-        value: Any,
+        record: dict[str, Any],
+        conditions: list[FilterCondition],
     ) -> bool:
-        """Check if an item matches a condition."""
-        field_val = item.get(field)
+        """Check if a single record matches conditions."""
+        spec = FilterSpec(conditions=conditions)
+        result = self._filter.filter([record], spec)
+        return len(result.filtered_records) > 0
 
-        if operator == FilterOperator.IS_NULL:
-            return field_val is None or field_val == ""
-        elif operator == FilterOperator.IS_NOT_NULL:
-            return field_val is not None and field_val != ""
-        elif operator == FilterOperator.EQ:
-            return field_val == value
-        elif operator == FilterOperator.NE:
-            return field_val != value
-        elif operator == FilterOperator.GT:
-            return field_val is not None and field_val > value
-        elif operator == FilterOperator.GE:
-            return field_val is not None and field_val >= value
-        elif operator == FilterOperator.LT:
-            return field_val is not None and field_val < value
-        elif operator == FilterOperator.LE:
-            return field_val is not None and field_val <= value
-        elif operator == FilterOperator.IN:
-            return field_val in value if value else False
-        elif operator == FilterOperator.NOT_IN:
-            return field_val not in value if value else True
-        elif operator == FilterOperator.CONTAINS:
-            return value in str(field_val) if field_val else False
-        elif operator == FilterOperator.NOT_CONTAINS:
-            return value not in str(field_val) if field_val else True
-        elif operator == FilterOperator.STARTS_WITH:
-            return str(field_val).startswith(str(value)) if field_val else False
-        elif operator == FilterOperator.ENDS_WITH:
-            return str(field_val).endswith(str(value)) if field_val else False
 
-        return False
+# Export public API
+__all__ = [
+    "FilterOperator",
+    "FilterCondition",
+    "FilterSpec",
+    "FilterResult",
+    "DataFilter",
+    "MultiStageFilter",
+    "DataFilterAction",
+]
