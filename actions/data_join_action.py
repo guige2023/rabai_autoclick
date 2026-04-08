@@ -1,281 +1,304 @@
-"""Data join action module for RabAI AutoClick.
+"""Data join action module.
 
-Provides data joining with support for inner, left, right,
-outer, and cross joins on multiple datasets.
+Provides SQL-style join operations for lists of dicts.
+Supports inner, left, right, full, and cross joins with deduplication.
 """
 
-import sys
-import os
-import json
-from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from __future__ import annotations
+
+import logging
+from typing import Optional, Dict, Any, List, Callable
 from collections import defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
 class JoinType(Enum):
-    """Join types."""
+    """Type of join operation."""
     INNER = "inner"
     LEFT = "left"
     RIGHT = "right"
-    OUTER = "outer"
+    FULL = "full"
     CROSS = "cross"
-    ANTI = "anti"
-    SEMI = "semi"
 
 
-class DataJoinAction(BaseAction):
-    """Join multiple datasets with various join types.
-    
-    Supports inner, left, right, outer, cross, anti,
-    and semi joins on key fields.
+from enum import Enum
+
+
+class DataJoinAction:
+    """Data join engine.
+
+    Provides SQL-style join operations for list-of-dict data structures.
+
+    Example:
+        left = [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+        right = [{"id": 1, "dept": "A"}, {"id": 3, "dept": "C"}]
+        result = DataJoinAction().join(left, right, "id", JoinType.LEFT)
     """
-    action_type = "data_join"
-    display_name = "数据连接"
-    description = "数据连接：内连接/左连接/右连接/全连接/交叉连接"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Join datasets.
-        
+    def join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        key: str,
+        join_type: JoinType = JoinType.INNER,
+        left_key: Optional[str] = None,
+        right_key: Optional[str] = None,
+        prefix_left: str = "",
+        prefix_right: str = "",
+        how: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Join two lists of dicts on a key field.
+
         Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: str (join/union/concat/lookup)
-                - left_data: list of dicts
-                - right_data: list of dicts
-                - join_type: str (inner/left/right/outer/cross/anti/semi)
-                - left_key: str, key field from left dataset
-                - right_key: str, key field from right dataset
-                - select_fields: list of {table, field, alias} specs
-                - save_to_var: str
-        
+            left: Left dataset.
+            right: Right dataset.
+            key: Join key (field name in both datasets).
+            join_type: Type of join.
+            left_key: Override key name in left dataset.
+            right_key: Override key name in right dataset.
+            prefix_left: Prefix for left field names.
+            prefix_right: Prefix for right field names.
+            how: Alias for join_type (inner, left, right, full, cross).
+
         Returns:
-            ActionResult with joined data.
+            Joined list of dicts.
         """
-        operation = params.get('operation', 'join')
-        left_data = params.get('left_data', [])
-        right_data = params.get('right_data', [])
-        join_type = params.get('join_type', 'inner')
-        left_key = params.get('left_key', '')
-        right_key = params.get('right_key', '')
-        select_fields = params.get('select_fields', [])
-        save_to_var = params.get('save_to_var', None)
+        if how:
+            join_type = JoinType(how)
 
-        if operation == 'join':
-            return self._join(
-                left_data, right_data, join_type, left_key, right_key,
-                select_fields, save_to_var
-            )
-        elif operation == 'union':
-            return self._union(left_data, right_data, save_to_var)
-        elif operation == 'concat':
-            return self._concat(params.get('datasets', []), save_to_var)
-        elif operation == 'lookup':
-            return self._lookup(left_data, right_data, left_key, right_key, save_to_var)
-        else:
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
+        lk = left_key or key
+        rk = right_key or key
 
-    def _join(
-        self, left_data: List[Dict], right_data: List[Dict],
-        join_type: str, left_key: str, right_key: str,
-        select_fields: List, save_to_var: Optional[str]
-    ) -> ActionResult:
-        """Perform join operation."""
-        if not left_data or not right_data:
-            return ActionResult(success=False, message="Both datasets required")
+        if join_type == JoinType.CROSS:
+            return self._cross_join(left, right, prefix_left, prefix_right)
+        elif join_type == JoinType.INNER:
+            return self._inner_join(left, right, lk, rk, prefix_left, prefix_right)
+        elif join_type == JoinType.LEFT:
+            return self._left_join(left, right, lk, rk, prefix_left, prefix_right)
+        elif join_type == JoinType.RIGHT:
+            return self._right_join(left, right, lk, rk, prefix_left, prefix_right)
+        elif join_type == JoinType.FULL:
+            return self._full_join(left, right, lk, rk, prefix_left, prefix_right)
 
-        if join_type == 'cross':
-            return self._cross_join(left_data, right_data, save_to_var)
+        return []
 
-        if not left_key or not right_key:
-            return ActionResult(success=False, message="left_key and right_key required for non-cross join")
+    def _build_index(
+        self,
+        data: List[Dict[str, Any]],
+        key: str,
+    ) -> Dict[Any, List[Dict[str, Any]]]:
+        """Build a lookup index for a dataset."""
+        index: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
+        for item in data:
+            val = item.get(key)
+            if val is not None:
+                index[val].append(item)
+        return index
 
-        # Build index on right dataset
-        right_index = defaultdict(list)
-        for record in right_data:
-            key = record.get(right_key)
-            right_index[key].append(record)
+    def _inner_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        lk: str,
+        rk: str,
+        pl: str,
+        pr: str,
+    ) -> List[Dict[str, Any]]:
+        """Inner join: only matching keys from both sides."""
+        right_index = self._build_index(right, rk)
+        result = []
 
-        results = []
-        left_matches = defaultdict(bool)
+        for l_item in left:
+            l_val = l_item.get(lk)
+            if l_val is None:
+                continue
+            r_items = right_index.get(l_val, [])
+            for r_item in r_items:
+                merged = self._merge_items(l_item, r_item, pl, pr, lk)
+                result.append(merged)
 
-        for left_record in left_data:
-            left_val = left_record.get(left_key)
-            matched_right = right_index.get(left_val, [])
+        return result
 
-            if not matched_right:
-                if join_type in ('left', 'outer'):
-                    results.append({**left_record, **{f'_right_{k}': None for k in right_data[0].keys()}})
+    def _left_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        lk: str,
+        rk: str,
+        pl: str,
+        pr: str,
+    ) -> List[Dict[str, Any]]:
+        """Left join: all left rows, matching right rows."""
+        right_index = self._build_index(right, rk)
+        result = []
+
+        for l_item in left:
+            l_val = l_item.get(lk)
+            r_items = right_index.get(l_val, []) if l_val is not None else []
+            if r_items:
+                for r_item in r_items:
+                    result.append(self._merge_items(l_item, r_item, pl, pr, lk))
             else:
-                left_matches[left_val] = True
-                for right_record in matched_right:
-                    merged = {**left_record, **right_record}
-                    results.append(merged)
+                result.append(self._prefix_item(dict(l_item), pl))
 
-        # Right-only and outer joins
-        if join_type in ('right', 'outer'):
-            for right_record in right_data:
-                right_val = right_record.get(right_key)
-                if not left_matches[right_val]:
-                    results.append({**right_record, **{f'_left_{k}': None for k in left_data[0].keys()}})
+        return result
 
-        if join_type == 'anti':
-            matched_keys = set()
-            for lr in left_data:
-                lv = lr.get(left_key)
-                for rr in right_data:
-                    if rr.get(right_key) == lv:
-                        matched_keys.add(lv)
-            results = [lr for lr in left_data if lr.get(left_key) not in matched_keys]
-        elif join_type == 'semi':
-            matched_keys = set()
-            for lr in left_data:
-                lv = lr.get(left_key)
-                for rr in right_data:
-                    if rr.get(right_key) == lv:
-                        matched_keys.add(lv)
-                        break
-            results = [lr for lr in left_data if lr.get(left_key) in matched_keys]
+    def _right_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        lk: str,
+        rk: str,
+        pl: str,
+        pr: str,
+    ) -> List[Dict[str, Any]]:
+        """Right join: all right rows, matching left rows."""
+        left_index = self._build_index(left, lk)
+        result = []
 
-        # Apply field selection
-        if select_fields:
-            results = self._select_fields(results, select_fields)
+        for r_item in right:
+            r_val = r_item.get(rk)
+            l_items = left_index.get(r_val, []) if r_val is not None else []
+            if l_items:
+                for l_item in l_items:
+                    result.append(self._merge_items(l_item, r_item, pl, pr, lk))
+            else:
+                result.append(self._prefix_item(dict(r_item), pr))
 
-        if save_to_var and hasattr(context, 'vars'):
-            context.vars[save_to_var] = results
+        return result
 
-        return ActionResult(
-            success=True,
-            message=f"Joined {len(results)} records ({join_type})",
-            data=results
-        )
+    def _full_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        lk: str,
+        rk: str,
+        pl: str,
+        pr: str,
+    ) -> List[Dict[str, Any]]:
+        """Full join: all rows from both sides."""
+        right_index = self._build_index(right, rk)
+        left_index = self._build_index(left, lk)
+        result = []
+        used_right = set()
+
+        for l_item in left:
+            l_val = l_item.get(lk)
+            r_items = right_index.get(l_val, []) if l_val is not None else []
+            if r_items:
+                for r_item in r_items:
+                    result.append(self._merge_items(l_item, r_item, pl, pr, lk))
+                    used_right.add(id(r_item))
+            else:
+                result.append(self._prefix_item(dict(l_item), pl))
+
+        for r_item in right:
+            if id(r_item) not in used_right:
+                result.append(self._prefix_item(dict(r_item), pr))
+
+        return result
 
     def _cross_join(
-        self, left_data: List[Dict], right_data: List[Dict], save_to_var: Optional[str]
-    ) -> ActionResult:
-        """Cartesian product of both datasets."""
-        results = [
-            {**left_record, **right_record}
-            for left_record in left_data
-            for right_record in right_data
-        ]
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        pl: str,
+        pr: str,
+    ) -> List[Dict[str, Any]]:
+        """Cross join: Cartesian product of both sides."""
+        result = []
+        for l_item in left:
+            for r_item in right:
+                result.append(self._merge_items(l_item, r_item, pl, pr))
+        return result
 
-        if save_to_var and hasattr(context, 'vars'):
-            context.vars[save_to_var] = results
+    def join_multiple(
+        self,
+        datasets: List[tuple],
+        keys: List[str],
+        join_type: JoinType = JoinType.INNER,
+    ) -> List[Dict[str, Any]]:
+        """Join multiple datasets sequentially.
 
-        return ActionResult(
-            success=True,
-            message=f"Cross join: {len(results)} records",
-            data=results
-        )
+        Args:
+            datasets: List of (data, key) tuples.
+            keys: Join keys for each step.
+            join_type: Type of join.
 
-    def _union(
-        self, left_data: List[Dict], right_data: List[Dict], save_to_var: Optional[str]
-    ) -> ActionResult:
-        """Union of two datasets (no duplicates)."""
-        left_keys = set()
-        results = []
+        Returns:
+            Final joined dataset.
+        """
+        if not datasets:
+            return []
 
-        for record in left_data:
-            key = self._record_key(record)
-            if key not in left_keys:
-                left_keys.add(key)
-                results.append(record)
+        result = datasets[0][0]
+        for i in range(1, len(datasets)):
+            result = self.join(result, datasets[i][0], keys[i - 1], join_type=join_type)
 
-        for record in right_data:
-            key = self._record_key(record)
-            if key not in left_keys:
-                left_keys.add(key)
-                results.append(record)
+        return result
 
-        if save_to_var and hasattr(context, 'vars'):
-            context.vars[save_to_var] = results
+    def semi_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        key: str,
+    ) -> List[Dict[str, Any]]:
+        """Semi join: left rows that have a match in right.
 
-        return ActionResult(
-            success=True,
-            message=f"Union: {len(results)} unique records",
-            data=results
-        )
+        Args:
+            left: Left dataset.
+            right: Right dataset.
+            key: Join key.
 
-    def _concat(self, datasets: List[List[Dict]], save_to_var: Optional[str]) -> ActionResult:
-        """Concatenate multiple datasets (allow duplicates)."""
-        results = []
-        for ds in datasets:
-            results.extend(ds)
+        Returns:
+            Filtered left dataset.
+        """
+        right_keys = {item.get(key) for item in right if item.get(key) is not None}
+        return [item for item in left if item.get(key) in right_keys]
 
-        if save_to_var and hasattr(context, 'vars'):
-            context.vars[save_to_var] = results
+    def anti_join(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        key: str,
+    ) -> List[Dict[str, Any]]:
+        """Anti join: left rows that have NO match in right.
 
-        return ActionResult(
-            success=True,
-            message=f"Concatenated {len(results)} records from {len(datasets)} datasets",
-            data=results
-        )
+        Args:
+            left: Left dataset.
+            right: Right dataset.
+            key: Join key.
 
-    def _lookup(
-        self, left_data: List[Dict], lookup_data: List[Dict],
-        left_key: str, lookup_key: str, save_to_var: Optional[str]
-    ) -> ActionResult:
-        """Lookup values from second dataset into first."""
-        lookup_index = {r.get(lookup_key): r for r in lookup_data}
+        Returns:
+            Filtered left dataset.
+        """
+        right_keys = {item.get(key) for item in right if item.get(key) is not None}
+        return [item for item in left if item.get(key) not in right_keys]
 
-        results = []
-        for record in left_data:
-            lv = record.get(left_key)
-            matched = lookup_index.get(lv, {})
-            new_record = {**record, '_lookup': matched}
-            results.append(new_record)
+    def _merge_items(
+        self,
+        left: Dict[str, Any],
+        right: Dict[str, Any],
+        pl: str,
+        pr: str,
+        overlap_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Merge two dicts with optional prefixing."""
+        result = {}
 
-        if save_to_var and hasattr(context, 'vars'):
-            context.vars[save_to_var] = results
+        for k, v in left.items():
+            result[f"{pl}{k}"] = v
 
-        return ActionResult(
-            success=True,
-            message=f"Lookup: {len(results)} records enriched",
-            data=results
-        )
+        for k, v in right.items():
+            prefixed = f"{pr}{k}" if pr else k
+            if k != overlap_key or overlap_key not in result:
+                result[prefixed] = v
 
-    def _record_key(self, record: Dict) -> str:
-        """Generate hashable key for a record."""
-        return json.dumps(record, sort_keys=True, default=str)
+        return result
 
-    def _select_fields(self, results: List[Dict], select_fields: List) -> List[Dict]:
-        """Apply field selection to results."""
-        if not select_fields:
-            return results
-
-        selected = []
-        for record in results:
-            new_record = {}
-            for spec in select_fields:
-                table = spec.get('table', '')
-                field_name = spec.get('field', '')
-                alias = spec.get('alias', field_name)
-
-                if table:
-                    prefixed = f'_{table}_{field_name}'
-                    if prefixed in record:
-                        new_record[alias] = record[prefixed]
-                else:
-                    if field_name in record:
-                        new_record[alias] = record[field_name]
-            selected.append(new_record)
-
-        return selected
-
-    def get_required_params(self) -> List[str]:
-        return ['operation']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'left_data': [],
-            'right_data': [],
-            'datasets': [],
-            'join_type': 'inner',
-            'left_key': '',
-            'right_key': '',
-            'select_fields': [],
-            'save_to_var': None,
-        }
+    def _prefix_item(self, item: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+        """Add prefix to all keys in an item."""
+        if not prefix:
+            return item
+        return {f"{prefix}{k}": v for k, v in item.items()}
