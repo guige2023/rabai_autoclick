@@ -1,14 +1,13 @@
 """Data pivot action module for RabAI AutoClick.
 
-Provides pivot table and reshaping operations:
-- PivotAction: Create pivot tables
-- UnpivotAction: Unpivot/melt data
-- TransposeAction: Transpose rows and columns
-- WideToLongAction: Reshape wide to long format
+Provides data pivoting operations:
+- PivotCreateAction: Create pivot table
+- PivotRotateAction: Rotate pivot axes
+- PivotAggregateAction: Pivot with aggregation
+- PivotUnpivotAction: Unpivot data
 """
 
-from typing import Any, Dict, List, Optional, Set
-from collections import defaultdict
+from typing import Any, Dict, List
 
 import sys
 import os
@@ -18,226 +17,167 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class PivotAction(BaseAction):
-    """Create pivot tables."""
-    action_type = "pivot"
-    display_name = "数据透视"
+class PivotCreateAction(BaseAction):
+    """Create a pivot table."""
+    action_type = "pivot_create"
+    display_name = "创建透视表"
     description = "创建数据透视表"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
-            rows = params.get("rows", [])
+            index = params.get("index", [])
             columns = params.get("columns", [])
             values = params.get("values", [])
-            aggregation = params.get("aggregation", "sum")
-            fill_value = params.get("fill_value", 0)
+            aggfunc = params.get("aggfunc", "sum")
 
-            if not isinstance(data, list):
-                data = [data]
+            if not data:
+                return ActionResult(success=False, message="data is required")
 
-            if not rows or not values:
-                return ActionResult(success=False, message="rows and values are required")
-
-            pivot: Dict[Tuple, Dict[Tuple, List]] = defaultdict(lambda: defaultdict(list))
-
+            pivot: Dict = {}
             for item in data:
-                if not isinstance(item, dict):
-                    continue
-                row_key = tuple(item.get(r) for r in rows)
-                col_key = tuple(item.get(c) for c in columns) if columns else (None,)
+                idx_val = tuple(item.get(i) for i in index)
+                col_val = tuple(item.get(c) for c in columns)
+                if idx_val not in pivot:
+                    pivot[idx_val] = {}
+                if col_val not in pivot[idx_val]:
+                    pivot[idx_val][col_val] = []
+                for v in values:
+                    pivot[idx_val][col_val].append(item.get(v, 0))
 
-                for val_field in values:
-                    val = item.get(val_field, 0)
-                    if isinstance(val, (int, float)):
-                        pivot[row_key][col_key].append(val)
-
-            all_col_keys = set()
-            for col_dict in pivot.values():
-                all_col_keys.update(col_dict.keys())
-            all_col_keys.discard((None,))
-
-            results = []
-            for row_key in sorted(pivot.keys()):
-                row_data = {rows[i]: row_key[i] for i in range(len(rows))}
-
-                for col_key in all_col_keys:
-                    col_label_parts = [str(k) for k in col_key]
-                    col_label = "_".join(col_label_parts) if col_key != (None,) else "total"
-
-                    vals = pivot[row_key].get(col_key, [])
-                    if aggregation == "sum":
-                        agg_val = sum(vals)
-                    elif aggregation == "count":
-                        agg_val = len(vals)
-                    elif aggregation == "avg":
-                        agg_val = sum(vals) / len(vals) if vals else 0
-                    elif aggregation == "min":
-                        agg_val = min(vals) if vals else None
-                    elif aggregation == "max":
-                        agg_val = max(vals) if vals else None
-                    elif aggregation == "first":
-                        agg_val = vals[0] if vals else None
-                    elif aggregation == "last":
-                        agg_val = vals[-1] if vals else None
-                    else:
-                        agg_val = sum(vals)
-
-                    row_data[f"{val_field}_{col_label}" if len(values) > 1 else col_label] = agg_val
-
-                results.append(row_data)
+            result_rows = []
+            for idx, col_data in pivot.items():
+                row = dict(zip(index, idx))
+                for col, vals in col_data.items():
+                    col_key = "_".join(str(c) for c in col)
+                    if aggfunc == "sum":
+                        row[col_key] = sum(vals)
+                    elif aggfunc == "avg":
+                        row[col_key] = sum(vals) / len(vals) if vals else 0
+                    elif aggfunc == "count":
+                        row[col_key] = len(vals)
+                    elif aggfunc == "min":
+                        row[col_key] = min(vals) if vals else None
+                    elif aggfunc == "max":
+                        row[col_key] = max(vals) if vals else None
+                result_rows.append(row)
 
             return ActionResult(
                 success=True,
-                message=f"Pivot table: {len(results)} rows x {len(all_col_keys)} columns",
-                data={"pivot_table": results, "row_count": len(results), "column_count": len(all_col_keys)},
+                data={"pivot_table": result_rows, "row_count": len(result_rows), "index": index, "columns": columns},
+                message=f"Pivot table created: {len(result_rows)} rows",
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Pivot error: {e}")
+            return ActionResult(success=False, message=f"Pivot create failed: {e}")
 
 
-class UnpivotAction(BaseAction):
-    """Unpivot/melt data."""
-    action_type = "unpivot"
+class PivotRotateAction(BaseAction):
+    """Rotate pivot axes."""
+    action_type = "pivot_rotate"
+    display_name = "旋转透视"
+    description = "旋转透视表轴"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            pivot_data = params.get("pivot_data", [])
+            swap_axes = params.get("swap_axes", True)
+
+            if not pivot_data:
+                return ActionResult(success=False, message="pivot_data is required")
+
+            rotated = []
+            if swap_axes and pivot_data:
+                keys = list(pivot_data[0].keys())
+                for k in keys:
+                    row = {"axis": k}
+                    for item in pivot_data:
+                        row[f"val_{k}"] = item.get(k)
+                    rotated.append(row)
+
+            return ActionResult(
+                success=True,
+                data={"rotated": rotated, "axis_count": len(rotated)},
+                message=f"Rotated pivot: {len(rotated)} axes",
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Pivot rotate failed: {e}")
+
+
+class PivotAggregateAction(BaseAction):
+    """Pivot with aggregation."""
+    action_type = "pivot_aggregate"
+    display_name = "透视聚合"
+    description = "透视聚合操作"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            group_by = params.get("group_by", [])
+            agg_field = params.get("agg_field", "value")
+            agg_funcs = params.get("agg_funcs", ["sum", "avg", "count"])
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+
+            groups: Dict = {}
+            for item in data:
+                key = tuple(item.get(g) for g in group_by)
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append(item.get(agg_field, 0))
+
+            results = []
+            for key, vals in groups.items():
+                row = dict(zip(group_by, key))
+                for func in agg_funcs:
+                    if func == "sum":
+                        row[f"{agg_field}_{func}"] = sum(vals)
+                    elif func == "avg":
+                        row[f"{agg_field}_{func}"] = sum(vals) / len(vals) if vals else 0
+                    elif func == "count":
+                        row[f"{agg_field}_{func}"] = len(vals)
+                    elif func == "min":
+                        row[f"{agg_field}_{func}"] = min(vals) if vals else None
+                    elif func == "max":
+                        row[f"{agg_field}_{func}"] = max(vals) if vals else None
+                results.append(row)
+
+            return ActionResult(
+                success=True,
+                data={"results": results, "group_count": len(results), "agg_funcs": agg_funcs},
+                message=f"Pivot aggregate: {len(results)} groups with {[f + '=' + agg_field for f in agg_funcs]}",
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Pivot aggregate failed: {e}")
+
+
+class PivotUnpivotAction(BaseAction):
+    """Unpivot data."""
+    action_type = "pivot_unpivot"
     display_name = "逆透视"
-    description = "将宽格式数据逆透视为长格式"
+    description = "逆透视数据"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
             id_vars = params.get("id_vars", [])
             value_vars = params.get("value_vars", [])
-            var_name = params.get("var_name", "variable")
-            value_name = params.get("value_name", "value")
 
-            if not isinstance(data, list):
-                data = [data]
-
-            if not value_vars:
-                if data and isinstance(data[0], dict):
-                    if id_vars:
-                        value_vars = [k for k in data[0].keys() if k not in id_vars]
-                    else:
-                        value_vars = list(data[0].keys())
+            if not data:
+                return ActionResult(success=False, message="data is required")
 
             unpivoted = []
             for item in data:
-                if not isinstance(item, dict):
-                    continue
-                for var in value_vars:
-                    unpivoted.append({
-                        **{k: item.get(k) for k in id_vars if k in item},
-                        var_name: var,
-                        value_name: item.get(var),
-                    })
+                id_values = {k: item.get(k) for k in id_vars if k in item}
+                for v in value_vars:
+                    if v in item:
+                        new_row = {**id_values, "variable": v, "value": item.get(v)}
+                        unpivoted.append(new_row)
 
             return ActionResult(
                 success=True,
-                message=f"Unpivoted {len(data)} rows into {len(unpivoted)} rows",
-                data={"unpivoted": unpivoted, "row_count": len(unpivoted), "column_count": len(id_vars) + 2},
+                data={"unpivoted": unpivoted, "row_count": len(unpivoted), "variable_count": len(value_vars)},
+                message=f"Unpivoted: {len(data)} rows → {len(unpivoted)} rows",
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Unpivot error: {e}")
-
-
-class TransposeAction(BaseAction):
-    """Transpose rows and columns."""
-    action_type = "transpose"
-    display_name = "转置"
-    description = "转置数据的行和列"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            index_field = params.get("index_field", None)
-
-            if not isinstance(data, list):
-                data = [data]
-
-            if not data:
-                return ActionResult(success=False, message="data is empty")
-
-            if not isinstance(data[0], dict):
-                data = [{"value": item} for item in data]
-
-            if index_field:
-                index_values = [item.get(index_field) for item in data]
-                data = [{k: v for k, v in item.items() if k != index_field} for item in data]
-            else:
-                index_values = [f"row_{i}" for i in range(len(data))]
-
-            all_columns = set()
-            for item in data:
-                all_columns.update(item.keys())
-            all_columns = sorted(all_columns)
-
-            transposed = []
-            for col in all_columns:
-                row_data = {index_field: col} if index_field else {}
-                for i, item in enumerate(data):
-                    row_data[index_values[i]] = item.get(col)
-                transposed.append(row_data)
-
-            return ActionResult(
-                success=True,
-                message=f"Transposed {len(data)}x{len(all_columns)} to {len(all_columns)}x{len(data)}",
-                data={"transposed": transposed, "rows": len(transposed), "columns": len(data)},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Transpose error: {e}")
-
-
-class WideToLongAction(BaseAction):
-    """Reshape wide to long format."""
-    action_type = "wide_to_long"
-    display_name = "宽转长"
-    description = "将宽格式数据转换为长格式"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            id_vars = params.get("id_vars", [])
-            stubnames = params.get("stubnames", [])
-            i = params.get("i", None)
-            j = params.get("j", "time")
-
-            if not isinstance(data, list):
-                data = [data]
-
-            if not data:
-                return ActionResult(success=False, message="data is empty")
-
-            if not stubnames and data and isinstance(data[0], dict):
-                all_keys = set(data[0].keys())
-                stubnames = [k for k in all_keys if any(k.startswith(s) for s in ["value", "measure", "var"])]
-
-            if not stubnames:
-                return ActionResult(success=False, message="stubnames required")
-
-            long_data = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-
-                id_data = {k: item.get(k) for k in id_vars if k in item}
-
-                for stub in stubnames:
-                    for key, val in item.items():
-                        if key == stub:
-                            continue
-                        if key.startswith(stub):
-                            suffix = key[len(stub) :]
-                            long_item = {
-                                **id_data,
-                                j: suffix,
-                                stub: val,
-                            }
-                            long_data.append(long_item)
-
-            return ActionResult(
-                success=True,
-                message=f"Reshaped {len(data)} wide rows to {len(long_data)} long rows",
-                data={"long_data": long_data, "row_count": len(long_data)},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"WideToLong error: {e}")
+            return ActionResult(success=False, message=f"Pivot unpivot failed: {e}")
