@@ -2,23 +2,29 @@
 
 Provides:
 - XML parsing and manipulation
-- XML building utilities
-- XML validation helpers
+- Element creation
+- XPath queries
 """
 
-import re
+from __future__ import annotations
+
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional, Union
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+)
 
 
 def parse_xml(xml_string: str) -> Optional[ET.Element]:
-    """Parse XML string to Element tree.
+    """Parse an XML string.
 
     Args:
-        xml_string: XML string to parse.
+        xml_string: XML content as string.
 
     Returns:
-        Root element or None if parsing fails.
+        Root element or None on error.
     """
     try:
         return ET.fromstring(xml_string)
@@ -26,391 +32,23 @@ def parse_xml(xml_string: str) -> Optional[ET.Element]:
         return None
 
 
-def escape_xml(text: str) -> str:
-    """Escape XML special characters.
+def parse_xml_file(path: str) -> Optional[ET.Element]:
+    """Parse an XML file.
 
     Args:
-        text: Text to escape.
+        path: Path to XML file.
 
     Returns:
-        Escaped text.
-    """
-    xml_escape_table = {
-        "&": "&amp;",
-        '"': "&quot;",
-        "'": "&apos;",
-        ">": "&gt;",
-        "<": "&lt;",
-    }
-    return "".join(xml_escape_table.get(c, c) for c in text)
-
-
-def unescape_xml(text: str) -> str:
-    """Unescape XML entities.
-
-    Args:
-        text: XML text to unescape.
-
-    Returns:
-        Unescaped text.
-    """
-    xml_unescape_table = {
-        "&amp;": "&",
-        "&quot;": '"',
-        "&apos;": "'",
-        "&gt;": ">",
-        "&lt;": "<",
-    }
-    result = text
-    for entity, char in xml_unescape_table.items():
-        result = result.replace(entity, char)
-    return result
-
-
-def element_to_dict(element: ET.Element) -> Dict[str, Any]:
-    """Convert XML element to dictionary.
-
-    Args:
-        element: XML element.
-
-    Returns:
-        Dictionary representation.
-    """
-    result: Dict[str, Any] = {}
-    if element.attrib:
-        result["@attributes"] = dict(element.attrib)
-    if element.text and element.text.strip():
-        if len(element) == 0:
-            return element.text.strip()
-        result["#text"] = element.text.strip()
-    for child in element:
-        child_data = element_to_dict(child)
-        if child.tag in result:
-            if not isinstance(result[child.tag], list):
-                result[child.tag] = [result[child.tag]]
-            result[child.tag].append(child_data)
-        else:
-            result[child.tag] = child_data
-    return result
-
-
-def dict_to_element(data: Dict[str, Any], root_tag: str = "root") -> ET.Element:
-    """Convert dictionary to XML element.
-
-    Args:
-        data: Dictionary to convert.
-        root_tag: Root element tag name.
-
-    Returns:
-        XML element.
-    """
-    root = ET.Element(root_tag)
-    for key, value in data.items():
-        if key.startswith("@"):
-            continue
-        child = ET.SubElement(root, key)
-        if isinstance(value, dict):
-            child.extend(dict_to_element(value, key).findall(key))
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    child.extend(dict_to_element(item, key).findall(key))
-                else:
-                    child.text = str(item)
-        else:
-            child.text = str(value)
-    return root
-
-
-def pretty_print_xml(element: ET.Element, indent: str = "  ") -> str:
-    """Pretty print XML element.
-
-    Args:
-        element: XML element.
-        indent: Indentation string.
-
-    Returns:
-        Formatted XML string.
-    """
-    def format_element(el: ET.Element, level: int) -> str:
-        result = [indent * level + f"<{el.tag}"]
-        if el.attrib:
-            for key, value in el.attrib.items():
-                result[0] += f' {key}="{value}"'
-        if len(el) == 0 and not el.text:
-            result[0] += " />"
-        else:
-            result[0] += ">"
-            if el.text and el.text.strip():
-                result.append(indent * (level + 1) + el.text.strip())
-            for child in el:
-                result.extend(format_element(child, level + 1))
-            result.append(indent * level + f"</{el.tag}>")
-        return result
-
-    lines = format_element(element, 0)
-    return "\n".join(lines)
-
-
-def strip_xml_tags(xml_string: str) -> str:
-    """Remove XML tags from string.
-
-    Args:
-        xml_string: XML string.
-
-    Returns:
-        Text without XML tags.
-    """
-    return re.sub(r'<[^>]+>', '', xml_string)
-
-
-def get_xpath(element: ET.Element, path: str) -> List[ET.Element]:
-    """Get elements by XPath.
-
-    Args:
-        element: Root element.
-        path: XPath expression.
-
-    Returns:
-        List of matching elements.
+        Root element or None on error.
     """
     try:
-        return element.findall(path)
-    except SyntaxError:
-        return []
-
-
-def get_element_text(element: ET.Element, path: str = None) -> Optional[str]:
-    """Get element text by path.
-
-    Args:
-        element: Root element.
-        path: Optional path to child element.
-
-    Returns:
-        Element text or None.
-    """
-    if path:
-        target = element.find(path)
-        if target is not None:
-            return target.text
+        return ET.parse(path).getroot()
+    except (ET.ParseError, FileNotFoundError):
         return None
-    return element.text
 
 
-def set_element_text(element: ET.Element, path: str, text: str) -> bool:
-    """Set element text by path.
-
-    Args:
-        element: Root element.
-        path: Path to element.
-        text: Text to set.
-
-    Returns:
-        True if successful.
-    """
-    target = element.find(path)
-    if target is not None:
-        target.text = text
-        return True
-    return False
-
-
-def get_attribute(element: ET.Element, path: str, attr: str) -> Optional[str]:
-    """Get element attribute by path.
-
-    Args:
-        element: Root element.
-        path: Path to element.
-        attr: Attribute name.
-
-    Returns:
-        Attribute value or None.
-    """
-    target = element.find(path)
-    if target is not None:
-        return target.get(attr)
-    return None
-
-
-def set_attribute(element: ET.Element, path: str, attr: str, value: str) -> bool:
-    """Set element attribute by path.
-
-    Args:
-        element: Root element.
-        path: Path to element.
-        attr: Attribute name.
-        value: Attribute value.
-
-    Returns:
-        True if successful.
-    """
-    target = element.find(path)
-    if target is not None:
-        target.set(attr, value)
-        return True
-    return False
-
-
-def create_element(tag: str, text: str = None, attributes: Dict[str, str] = None) -> ET.Element:
-    """Create XML element.
-
-    Args:
-        tag: Element tag.
-        text: Optional text content.
-        attributes: Optional attributes.
-
-    Returns:
-        New XML element.
-    """
-    element = ET.Element(tag)
-    if text:
-        element.text = text
-    if attributes:
-        for key, value in attributes.items():
-            element.set(key, value)
-    return element
-
-
-def add_child(parent: ET.Element, tag: str, text: str = None, attributes: Dict[str, str] = None) -> ET.Element:
-    """Add child element to parent.
-
-    Args:
-        parent: Parent element.
-        tag: Child tag.
-        text: Optional text content.
-        attributes: Optional attributes.
-
-    Returns:
-        New child element.
-    """
-    child = create_element(tag, text, attributes)
-    parent.append(child)
-    return child
-
-
-def remove_element(element: ET.Element, path: str) -> bool:
-    """Remove element by path.
-
-    Args:
-        element: Root element.
-        path: Path to element to remove.
-
-    Returns:
-        True if removed.
-    """
-    parent = element.find("..")
-    if parent is not None:
-        target = element.find(path)
-        if target is not None:
-            parent.remove(target)
-            return True
-    return False
-
-
-def get_all_text(element: ET.Element) -> str:
-    """Get all text content including nested elements.
-
-    Args:
-        element: XML element.
-
-    Returns:
-        All text content.
-    """
-    texts = []
-    if element.text:
-        texts.append(element.text)
-    for child in element:
-        texts.append(get_all_text(child))
-        if child.tail:
-            texts.append(child.tail)
-    return "".join(texts)
-
-
-def count_elements(element: ET.Element, tag: str = None) -> int:
-    """Count elements by tag.
-
-    Args:
-        element: Root element.
-        tag: Optional tag to count (None for all).
-
-    Returns:
-        Number of elements.
-    """
-    if tag is None:
-        return len(list(element.iter()))
-    return len(element.findall(f".//{tag}"))
-
-
-def validate_xml_syntax(xml_string: str) -> bool:
-    """Validate XML syntax.
-
-    Args:
-        xml_string: XML string to validate.
-
-    Returns:
-        True if valid XML syntax.
-    """
-    try:
-        ET.fromstring(xml_string)
-        return True
-    except ET.ParseError:
-        return False
-
-
-def merge_xml(elements: List[ET.Element], root_tag: str = "merged") -> ET.Element:
-    """Merge multiple XML elements.
-
-    Args:
-        elements: List of elements to merge.
-        root_tag: Tag for merged root.
-
-    Returns:
-        Merged root element.
-    """
-    root = ET.Element(root_tag)
-    for element in elements:
-        root.append(element)
-    return root
-
-
-def filter_elements(element: ET.Element, tag: str, predicate: callable) -> List[ET.Element]:
-    """Filter elements by predicate.
-
-    Args:
-        element: Root element.
-        tag: Element tag to filter.
-        predicate: Function that returns True to keep element.
-
-    Returns:
-        List of matching elements.
-    """
-    results = []
-    for el in element.findall(f".//{tag}"):
-        if predicate(el):
-            results.append(el)
-    return results
-
-
-def transform_xml(xml_string: str, transformer: callable) -> str:
-    """Transform XML string using function.
-
-    Args:
-        xml_string: XML string.
-        transformer: Function that takes element and returns element.
-
-    Returns:
-        Transformed XML string.
-    """
-    root = parse_xml(xml_string)
-    if root is None:
-        return xml_string
-    transformed = transformer(root)
-    return ET.tostring(transformed, encoding='unicode')
-
-
-def element_to_string(element: ET.Element) -> str:
-    """Convert element to string.
+def to_string(element: ET.Element) -> str:
+    """Convert element to XML string.
 
     Args:
         element: XML element.
@@ -418,20 +56,136 @@ def element_to_string(element: ET.Element) -> str:
     Returns:
         XML string.
     """
-    return ET.tostring(element, encoding='unicode')
+    return ET.tostring(element, encoding="unicode")
 
 
-def create_xml_document(root_tag: str, declaration: bool = True) -> str:
-    """Create new XML document.
+def find_all(element: ET.Element, xpath: str) -> List[ET.Element]:
+    """Find all elements matching xpath.
 
     Args:
-        root_tag: Root element tag.
-        declaration: Include XML declaration.
+        element: Root element.
+        xpath: XPath expression.
 
     Returns:
-        XML document string.
+        List of matching elements.
     """
-    root = ET.Element(root_tag)
-    if declaration:
-        return '<?xml version="1.0" encoding="UTF-8"?>\n' + element_to_string(root)
-    return element_to_string(root)
+    return element.findall(xpath)
+
+
+def find_first(element: ET.Element, xpath: str) -> Optional[ET.Element]:
+    """Find first element matching xpath.
+
+    Args:
+        element: Root element.
+        xpath: XPath expression.
+
+    Returns:
+        First matching element or None.
+    """
+    return element.find(xpath)
+
+
+def get_text(element: ET.Element, path: Optional[str] = None) -> Optional[str]:
+    """Get text content.
+
+    Args:
+        element: Element or subelement.
+        path: Optional subelement path.
+
+    Returns:
+        Text content or None.
+    """
+    target = element if path is None else element.find(path)
+    return target.text if target is not None else None
+
+
+def set_text(element: ET.Element, text: str) -> None:
+    """Set text content of element.
+
+    Args:
+        element: Element to modify.
+        text: Text to set.
+    """
+    element.text = text
+
+
+def get_attr(element: ET.Element, name: str) -> Optional[str]:
+    """Get an attribute value.
+
+    Args:
+        element: Element.
+        name: Attribute name.
+
+    Returns:
+        Attribute value or None.
+    """
+    return element.attrib.get(name)
+
+
+def set_attr(element: ET.Element, name: str, value: str) -> None:
+    """Set an attribute value.
+
+    Args:
+        element: Element to modify.
+        name: Attribute name.
+        value: Attribute value.
+    """
+    element.set(name, value)
+
+
+def create_element(
+    tag: str,
+    text: Optional[str] = None,
+    attrib: Optional[Dict[str, str]] = None,
+) -> ET.Element:
+    """Create a new XML element.
+
+    Args:
+        tag: Element tag name.
+        text: Optional text content.
+        attrib: Optional attributes dict.
+
+    Returns:
+        New element.
+    """
+    el = ET.Element(tag, attrib or {})
+    if text is not None:
+        el.text = text
+    return el
+
+
+def add_child(
+    parent: ET.Element,
+    tag: str,
+    text: Optional[str] = None,
+    attrib: Optional[Dict[str, str]] = None,
+) -> ET.Element:
+    """Add a child element to parent.
+
+    Args:
+        parent: Parent element.
+        tag: Child tag name.
+        text: Optional text content.
+        attrib: Optional attributes dict.
+
+    Returns:
+        New child element.
+    """
+    child = create_element(tag, text, attrib)
+    parent.append(child)
+    return child
+
+
+__all__ = [
+    "parse_xml",
+    "parse_xml_file",
+    "to_string",
+    "find_all",
+    "find_first",
+    "get_text",
+    "set_text",
+    "get_attr",
+    "set_attr",
+    "create_element",
+    "add_child",
+]
