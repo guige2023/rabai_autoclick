@@ -1,381 +1,295 @@
-"""API gateway action module for RabAI AutoClick.
+"""API Gateway action module for RabAI AutoClick.
 
-Provides API gateway functionality with routing, load balancing,
-request/response transformation, and authentication.
+Provides API gateway functionality: routing, load balancing,
+rate limiting, and request/response transformation.
 """
 
+import json
+import time
 import sys
 import os
-import time
-import hashlib
-from typing import Any, Dict, List, Optional, Callable, Union
-from dataclasses import dataclass, field
-from enum import Enum
-from threading import Lock
-from random import choice
+from typing import Any, Dict, List, Optional
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class LoadBalanceStrategy(Enum):
-    """Load balancing strategies."""
-    ROUND_ROBIN = "round_robin"
-    RANDOM = "random"
-    LEAST_CONNECTIONS = "least_connections"
-    WEIGHTED = "weighted"
-    IP_HASH = "ip_hash"
+class ApiGatewayRouterAction(BaseAction):
+    """Route API requests to backends based on rules.
 
-
-@dataclass
-class Route:
-    """A route definition."""
-    path: str
-    method: str
-    backend: str
-    backend_path: Optional[str] = None
-    timeout: float = 30.0
-    retries: int = 0
-    weight: int = 1
-
-
-@dataclass
-class BackendPool:
-    """Backend server pool."""
-    name: str
-    servers: List[str]
-    strategy: LoadBalanceStrategy = LoadBalanceStrategy.ROUND_ROBIN
-    health_check_path: str = "/health"
-    weights: Dict[str, int] = field(default_factory=dict)
-
-
-class APIGatewayAction(BaseAction):
-    """Route requests to backends with load balancing and transformation.
-    
-    Supports path-based routing, multiple load balancing strategies,
-    automatic retries, and request/response transformation.
+    Pattern-based routing with header manipulation
+    and backend selection.
     """
-    action_type = "api_gateway"
-    display_name = "API网关"
-    description = "请求路由和负载均衡"
-    
-    def __init__(self):
-        super().__init__()
-        self._routes: Dict[str, Route] = {}
-        self._pools: Dict[str, BackendPool] = {}
-        self._round_robin_counters: Dict[str, int] = {}
-        self._connection_counts: Dict[str, int] = {}
-        self._lock = Lock()
-    
+    action_type = "api_gateway_router"
+    display_name = "API网关路由"
+    description = "基于规则将API请求路由到后端"
+
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute gateway operation.
-        
+        """Route API request.
+
         Args:
             context: Execution context.
-            params: Dict with keys:
-                - operation: 'route', 'register', 'add_pool'
-                - path: Request path
-                - method: HTTP method
-                - request: Request data
-                - pool: Backend pool name (for add_pool)
-                - servers: List of server URLs (for add_pool)
-        
+            params: Dict with keys: request, routes,
+                   default_backend, sticky_session.
+
         Returns:
-            ActionResult with routing result.
+            ActionResult with routed response.
         """
-        operation = params.get('operation', 'route').lower()
-        
-        if operation == 'route':
-            return self._route(params)
-        elif operation == 'register':
-            return self._register(params)
-        elif operation == 'add_pool':
-            return self._add_pool(params)
-        else:
+        start_time = time.time()
+        try:
+            request_url = params.get('request_url', '')
+            request_method = params.get('request_method', 'GET').upper()
+            request_headers = params.get('request_headers', {})
+            request_body = params.get('request_body')
+            routes = params.get('routes', [])
+            default_backend = params.get('default_backend')
+            sticky_session = params.get('sticky_session', False)
+
+            if not request_url:
+                return ActionResult(
+                    success=False,
+                    message="request_url is required",
+                    duration=time.time() - start_time,
+                )
+
+            # Find matching route
+            matched_backend = default_backend
+            route_params = {}
+            for route in routes:
+                path_pattern = route.get('path_pattern', '')
+                header_conditions = route.get('headers', {})
+
+                if self._match_path(request_url, path_pattern):
+                    if self._match_headers(request_headers, header_conditions):
+                        matched_backend = route.get('backend', default_backend)
+                        route_params = self._extract_params(request_url, path_pattern)
+                        break
+
+            if not matched_backend:
+                return ActionResult(
+                    success=False,
+                    message="No matching route found",
+                    duration=time.time() - start_time,
+                )
+
+            # Build backend URL
+            backend_url = matched_backend
+            if not backend_url.endswith('/'):
+                backend_url += '/'
+            path = request_url.split('?', 1)[0]
+            backend_url += path.lstrip('/')
+
+            # Add route params as query params
+            if route_params:
+                qs = '&'.join(f"{k}={v}" for k, v in route_params.items())
+                backend_url = backend_url + ('?' if '?' not in backend_url else '&') + qs
+
+            # Forward request
+            body_bytes = None
+            if request_body:
+                if isinstance(request_body, str):
+                    body_bytes = request_body.encode('utf-8')
+                else:
+                    body_bytes = json.dumps(request_body).encode('utf-8')
+
+            headers = {**request_headers}
+            if request_body:
+                headers.setdefault('Content-Type', 'application/json')
+
+            req = Request(backend_url, data=body_bytes, headers=headers, method=request_method)
+            try:
+                with urlopen(req, timeout=30) as resp:
+                    response_body = resp.read()
+                    response_data = None
+                    try:
+                        response_data = json.loads(response_body)
+                    except Exception:
+                        response_data = response_body.decode('utf-8', errors='ignore')
+
+                    duration = time.time() - start_time
+                    return ActionResult(
+                        success=True,
+                        message=f"Routed to {matched_backend}",
+                        data={
+                            'backend': matched_backend,
+                            'backend_url': backend_url,
+                            'status': resp.status,
+                            'response': response_data,
+                        },
+                        duration=duration,
+                    )
+            except HTTPError as e:
+                duration = time.time() - start_time
+                return ActionResult(
+                    success=False,
+                    message=f"Backend error: {e.code}",
+                    data={
+                        'backend': matched_backend,
+                        'status': e.code,
+                        'error': e.read().decode('utf-8', errors='ignore') if e.fp else str(e),
+                    },
+                    duration=duration,
+                )
+
+        except Exception as e:
+            duration = time.time() - start_time
             return ActionResult(
                 success=False,
-                message=f"Unknown operation: {operation}"
+                message=f"Gateway router error: {str(e)}",
+                duration=duration,
             )
-    
-    def _route(self, params: Dict[str, Any]) -> ActionResult:
-        """Route a request to appropriate backend."""
-        path = params.get('path', '/')
-        method = params.get('method', 'GET').upper()
-        request = params.get('request', {})
-        
-        # Find matching route
-        route = self._find_route(path, method)
-        
-        if not route:
-            return ActionResult(
-                success=False,
-                message=f"No route found for {method} {path}",
-                data={'path': path, 'method': method}
-            )
-        
-        # Select backend from pool
-        pool_name = route.backend
-        pool = self._pools.get(pool_name)
-        
-        if not pool:
-            return ActionResult(
-                success=False,
-                message=f"Backend pool '{pool_name}' not found"
-            )
-        
-        server = self._select_server(pool)
-        
-        if not server:
-            return ActionResult(
-                success=False,
-                message=f"No healthy servers in pool '{pool_name}'"
-            )
-        
-        # Build backend URL
-        backend_path = route.backend_path or path
-        backend_url = f"{server}{backend_path}"
-        
-        # Apply transformations if any
-        transformed_request = self._transform_request(request, route)
-        
-        return ActionResult(
-            success=True,
-            message=f"Routed to {server}",
-            data={
-                'backend_url': backend_url,
-                'server': server,
-                'pool': pool_name,
-                'route': path,
-                'method': method,
-                'timeout': route.timeout,
-                'retries': route.retries,
-                'transformed_request': transformed_request
-            }
-        )
-    
-    def _register(self, params: Dict[str, Any]) -> ActionResult:
-        """Register a new route."""
-        path = params.get('path')
-        method = params.get('method', 'GET').upper()
-        backend = params.get('backend')
-        backend_path = params.get('backend_path')
-        timeout = params.get('timeout', 30.0)
-        retries = params.get('retries', 0)
-        weight = params.get('weight', 1)
-        
-        if not path or not backend:
-            return ActionResult(
-                success=False,
-                message="path and backend are required"
-            )
-        
-        route = Route(
-            path=path,
-            method=method,
-            backend=backend,
-            backend_path=backend_path,
-            timeout=timeout,
-            retries=retries,
-            weight=weight
-        )
-        
-        key = f"{method}:{path}"
-        self._routes[key] = route
-        
-        return ActionResult(
-            success=True,
-            message=f"Registered route {method} {path} -> {backend}",
-            data={'route': path, 'backend': backend}
-        )
-    
-    def _add_pool(self, params: Dict[str, Any]) -> ActionResult:
-        """Add a backend server pool."""
-        name = params.get('pool')
-        servers = params.get('servers', [])
-        strategy = params.get('strategy', 'round_robin')
-        weights = params.get('weights', {})
-        
-        if not name or not servers:
-            return ActionResult(
-                success=False,
-                message="pool and servers are required"
-            )
-        
-        pool = BackendPool(
-            name=name,
-            servers=servers,
-            strategy=LoadBalanceStrategy(strategy),
-            weights=weights
-        )
-        
-        self._pools[name] = pool
-        self._round_robin_counters[name] = 0
-        
-        return ActionResult(
-            success=True,
-            message=f"Added pool '{name}' with {len(servers)} servers",
-            data={'pool': name, 'servers': servers}
-        )
-    
-    def _find_route(self, path: str, method: str) -> Optional[Route]:
-        """Find best matching route for path and method."""
-        key = f"{method}:{path}"
-        
-        # Exact match
-        if key in self._routes:
-            return self._routes[key]
-        
-        # Prefix match
-        for route_key, route in self._routes.items():
-            if route.method == method and path.startswith(route.path):
-                return route
-        
-        return None
-    
-    def _select_server(self, pool: BackendPool) -> Optional[str]:
-        """Select a server based on load balancing strategy."""
-        servers = pool.servers
-        if not servers:
-            return None
-        
-        strategy = pool.strategy
-        
-        if strategy == LoadBalanceStrategy.ROUND_ROBIN:
-            counter = self._round_robin_counters.get(pool.name, 0)
-            server = servers[counter % len(servers)]
-            self._round_robin_counters[pool.name] = counter + 1
-            return server
-        
-        elif strategy == LoadBalanceStrategy.RANDOM:
-            return choice(servers)
-        
-        elif strategy == LoadBalanceStrategy.WEIGHTED:
-            weighted = []
-            for server in servers:
-                weight = pool.weights.get(server, 1)
-                weighted.extend([server] * weight)
-            return choice(weighted) if weighted else choice(servers)
-        
-        elif strategy == LoadBalanceStrategy.LEAST_CONNECTIONS:
-            min_connections = float('inf')
-            selected = servers[0]
-            for server in servers:
-                connections = self._connection_counts.get(server, 0)
-                if connections < min_connections:
-                    min_connections = connections
-                    selected = server
-            self._connection_counts[selected] = min_connections + 1
-            return selected
-        
-        elif strategy == LoadBalanceStrategy.IP_HASH:
-            # Would need client IP from request
-            return servers[0]
-        
-        return servers[0]
-    
-    def _transform_request(
-        self,
-        request: Dict,
-        route: Route
-    ) -> Dict:
-        """Transform request before forwarding."""
-        # Basic transformation - in real impl would do more
-        return {
-            'headers': request.get('headers', {}),
-            'body': request.get('body'),
-            'query': request.get('query', {}),
-            'timeout': route.timeout
-        }
+
+    def _match_path(self, url: str, pattern: str) -> bool:
+        """Match URL against path pattern."""
+        import re
+        regex = pattern.replace('{', '(?P<').replace('}', '>[^/]+)')
+        regex = '^' + regex.replace('*', '[^/]*') + '$'
+        return bool(re.match(regex, url))
+
+    def _match_headers(self, headers: Dict, conditions: Dict) -> bool:
+        """Check if headers match conditions."""
+        for key, value in conditions.items():
+            if headers.get(key) != value:
+                return False
+        return True
+
+    def _extract_params(self, url: str, pattern: str) -> Dict:
+        """Extract path parameters."""
+        import re
+        params = {}
+        regex = pattern.replace('{', '(?P<').replace('}', '>[^/]+)')
+        regex = '^' + regex + '$'
+        match = re.match(regex, url.split('?')[0])
+        if match:
+            params = match.groupdict()
+        return params
 
 
-class RequestTransformAction(BaseAction):
-    """Transform requests and responses in the gateway."""
-    action_type = "request_transform"
-    display_name = "请求转换"
-    description = "网关请求响应转换"
-    
+class ApiGatewayLoadBalancerAction(BaseAction):
+    """Load balance requests across multiple backends.
+
+    Supports round-robin, least-connections, and
+    weighted distribution.
+    """
+    action_type = "api_gateway_load_balancer"
+    display_name = "API网关负载均衡"
+    description = "跨多个后端负载均衡请求"
+
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute transformation.
-        
+        """Balance request across backends.
+
         Args:
             context: Execution context.
-            params: Dict with keys:
-                - operation: 'transform_request', 'transform_response'
-                - data: Data to transform
-                - rules: Transformation rules
-        
+            params: Dict with keys: backends, strategy (round_robin/least_conn/weighted),
+                   request_url, request_method, request_headers.
+
         Returns:
-            ActionResult with transformed data.
+            ActionResult with backend-selected response.
         """
-        operation = params.get('operation', 'transform_request').lower()
-        data = params.get('data', {})
-        rules = params.get('rules', {})
-        
-        if operation == 'transform_request':
-            return self._transform_request(data, rules)
-        elif operation == 'transform_response':
-            return self._transform_response(data, rules)
-        else:
+        start_time = time.time()
+        try:
+            backends = params.get('backends', [])
+            strategy = params.get('strategy', 'round_robin')
+            request_url = params.get('request_url', '')
+            request_method = params.get('request_method', 'GET').upper()
+            request_headers = params.get('request_headers', {})
+            request_body = params.get('request_body')
+
+            if not backends:
+                return ActionResult(
+                    success=False,
+                    message="At least one backend is required",
+                    duration=time.time() - start_time,
+                )
+
+            # Initialize state
+            if not hasattr(context, '_gateway_state'):
+                context._gateway_state = {
+                    'round_robin_index': 0,
+                    'connections': {},
+                }
+            state = context._gateway_state
+
+            # Select backend
+            if strategy == 'round_robin':
+                idx = state['round_robin_index'] % len(backends)
+                state['round_robin_index'] += 1
+                selected = backends[idx]
+            elif strategy == 'least_conn':
+                connections = state['connections']
+                min_conn = float('inf')
+                selected = backends[0]
+                for backend in backends:
+                    conn_count = connections.get(backend.get('url', backend), 0)
+                    if conn_count < min_conn:
+                        min_conn = conn_count
+                        selected = backend
+                backend_url = selected.get('url', selected) if isinstance(selected, dict) else selected
+                state['connections'][backend_url] = state['connections'].get(backend_url, 0) + 1
+            else:
+                selected = backends[0]
+
+            if isinstance(selected, dict):
+                backend_url = selected.get('url', '')
+            else:
+                backend_url = selected
+
+            # Forward request to selected backend
+            full_url = backend_url
+            if not full_url.endswith('/') and request_url:
+                full_url += '/'
+            full_url += request_url.lstrip('/')
+
+            body_bytes = None
+            if request_body:
+                if isinstance(request_body, str):
+                    body_bytes = request_body.encode('utf-8')
+                else:
+                    body_bytes = json.dumps(request_body).encode('utf-8')
+
+            headers = {**request_headers}
+            if request_body:
+                headers.setdefault('Content-Type', 'application/json')
+
+            req = Request(full_url, data=body_bytes, headers=headers, method=request_method)
+            try:
+                with urlopen(req, timeout=30) as resp:
+                    response_data = json.loads(resp.read())
+                    duration = time.time() - start_time
+                    return ActionResult(
+                        success=True,
+                        message=f"Balanced to {backend_url}",
+                        data={
+                            'backend': backend_url,
+                            'strategy': strategy,
+                            'status': resp.status,
+                            'response': response_data,
+                        },
+                        duration=duration,
+                    )
+            except HTTPError as e:
+                duration = time.time() - start_time
+                return ActionResult(
+                    success=False,
+                    message=f"Backend error: {e.code}",
+                    data={'backend': backend_url, 'status': e.code},
+                    duration=duration,
+                )
+
+        except Exception as e:
+            duration = time.time() - start_time
             return ActionResult(
                 success=False,
-                message=f"Unknown operation: {operation}"
+                message=f"Load balancer error: {str(e)}",
+                duration=duration,
             )
-    
-    def _transform_request(
-        self,
-        data: Dict,
-        rules: Dict
-    ) -> ActionResult:
-        """Transform outgoing request."""
-        result = dict(data)
-        
-        # Header transformations
-        headers = result.get('headers', {})
-        header_map = rules.get('headers', {})
-        for target, source in header_map.items():
-            if source in headers:
-                result.setdefault('headers', {})[target] = headers[source]
-        
-        # Path parameter substitution
-        path = result.get('path', '')
-        path_params = rules.get('path_params', {})
-        for param, path_template in path_params.items():
-            if f'{{{param}}}' in path_template:
-                value = data.get(param)
-                if value:
-                    path = path_template.replace(f'{{{param}}}', str(value))
-        result['path'] = path
-        
-        return ActionResult(
-            success=True,
-            message="Request transformed",
-            data={'result': result}
-        )
-    
-    def _transform_response(
-        self,
-        data: Dict,
-        rules: Dict
-    ) -> ActionResult:
-        """Transform incoming response."""
-        result = dict(data)
-        
-        # Field mapping
-        field_map = rules.get('fields', {})
-        for target, source in field_map.items():
-            if source in data:
-                result[target] = data[source]
-        
-        return ActionResult(
-            success=True,
-            message="Response transformed",
-            data={'result': result}
-        )
