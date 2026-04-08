@@ -1,265 +1,244 @@
-"""Automation Monitor Action.
+"""
+Automation Monitor Action Module.
 
-Monitors automation execution health with metrics collection, anomaly
-detection, performance tracking, and alerting integration.
+Monitors automation workflows for health, performance, and anomalies
+ with alerting and automatic recovery triggers.
 """
 
-import sys
-import os
-import time
-import threading
-from typing import Any, Dict, List, Optional, Callable
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from __future__ import annotations
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+import time
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from collections import deque
+from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class MetricType(Enum):
+    """Type of monitoring metric."""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+    RATE = "rate"
 
 
 @dataclass
-class MetricSample:
-    """A single metric sample."""
+class Metric:
+    """A single monitoring metric."""
     name: str
+    metric_type: MetricType
     value: float
-    timestamp: float
-    tags: Dict[str, str] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+    tags: dict[str, str] = field(default_factory=dict)
 
 
-class AutomationMonitorAction(BaseAction):
-    """Monitor automation execution health and performance.
-    
-    Collects metrics, detects anomalies, tracks performance,
-    and integrates with alerting systems.
+@dataclass
+class Alert:
+    """A monitoring alert."""
+    name: str
+    severity: str
+    message: str
+    timestamp: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class HealthStatus:
+    """Overall health status of a component."""
+    component: str
+    healthy: bool
+    latency_ms: float = 0.0
+    error_rate: float = 0.0
+    message: Optional[str] = None
+
+
+class AutomationMonitorAction:
     """
-    action_type = "automation_monitor"
-    display_name = "自动化监控"
-    description = "监控自动化执行健康状态，支持指标收集和异常检测"
+    Workflow monitoring with metrics, alerts, and health checks.
 
-    def __init__(self):
-        super().__init__()
-        self._metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
-        self._counters: Dict[str, int] = defaultdict(int)
-        self._gauges: Dict[str, float] = {}
-        self._lock = threading.RLock()
-        self._alert_callbacks: List[Callable] = []
+    Collects metrics, detects anomalies, triggers alerts, and
+    provides health status for automation systems.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Monitor automation execution.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - action: 'record', 'get', 'alert', 'status', 'reset'.
-                - metric_name: Name of metric to record/get.
-                - value: Value to record (for record action).
-                - tags: Tags for metric (for record action).
-                - time_window: Time window in seconds (for anomaly detection).
-                - threshold: Threshold for alerting.
-                - operator: 'gt', 'lt', 'eq', 'stddev' (for anomaly detection).
-                - save_to_var: Variable name for results.
-        
-        Returns:
-            ActionResult with monitoring data.
-        """
-        try:
-            action = params.get('action', 'record')
-            save_to_var = params.get('save_to_var', 'monitor_data')
+    Example:
+        monitor = AutomationMonitorAction()
+        monitor.record_metric("task.duration", 1.5, tags={"task": "scrape"})
+        monitor.add_health_check("api", check_api_health)
+        status = monitor.get_overall_health()
+    """
 
-            if action == 'record':
-                return self._record_metric(params, save_to_var)
-            elif action == 'get':
-                return self._get_metrics(params, save_to_var)
-            elif action == 'alert':
-                return self._check_alert(params, save_to_var)
-            elif action == 'status':
-                return self._get_status(save_to_var)
-            elif action == 'reset':
-                return self._reset(params, save_to_var)
-            else:
-                return ActionResult(success=False, message=f"Unknown monitor action: {action}")
+    def __init__(
+        self,
+        metrics_window_size: int = 1000,
+        alert_callback: Optional[Callable[[Alert], None]] = None,
+    ) -> None:
+        self.metrics_window_size = metrics_window_size
+        self.alert_callback = alert_callback
+        self._metrics: dict[str, deque] = {}
+        self._health_checks: dict[str, Callable[[], HealthStatus]] = {}
+        self._alerts: deque = deque(maxlen=100)
+        self._alert_rules: list[tuple[str, Callable[[float], bool], str]] = []
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Monitor error: {e}")
+    def record_metric(
+        self,
+        name: str,
+        value: float,
+        metric_type: MetricType = MetricType.GAUGE,
+        tags: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Record a metric value."""
+        metric = Metric(
+            name=name,
+            metric_type=metric_type,
+            value=value,
+            tags=tags or {},
+        )
 
-    def _record_metric(self, params: Dict, save_to_var: str) -> ActionResult:
-        """Record a metric sample."""
-        metric_name = params.get('metric_name')
-        value = params.get('value')
-        tags = params.get('tags', {})
-        
-        if not metric_name:
-            return ActionResult(success=False, message="metric_name is required")
+        if name not in self._metrics:
+            self._metrics[name] = deque(maxlen=self.metrics_window_size)
+        self._metrics[name].append(metric)
 
-        sample = MetricSample(name=metric_name, value=value, timestamp=time.time(), tags=tags)
-        
-        with self._lock:
-            self._metrics[metric_name].append(sample)
-            self._gauges[metric_name] = value
+    def increment_counter(
+        self,
+        name: str,
+        value: float = 1.0,
+        tags: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Increment a counter metric."""
+        self.record_metric(name, value, MetricType.COUNTER, tags)
 
-        context.set_variable(save_to_var, {'recorded': True, 'metric': metric_name, 'value': value})
-        return ActionResult(success=True, message=f"Recorded {metric_name}={value}")
+    def add_health_check(
+        self,
+        name: str,
+        check_func: Callable[[], HealthStatus],
+    ) -> None:
+        """Add a health check function."""
+        self._health_checks[name] = check_func
 
-    def _get_metrics(self, params: Dict, save_to_var: str) -> ActionResult:
-        """Get metric data."""
-        metric_name = params.get('metric_name')
-        time_window = params.get('time_window', 60)
-        stats = params.get('stats', ['avg', 'min', 'max', 'count'])
+    def add_alert_rule(
+        self,
+        metric_name: str,
+        condition_func: Callable[[float], bool],
+        alert_message: str,
+    ) -> None:
+        """Add an alert rule for a metric."""
+        self._alert_rules.append((metric_name, condition_func, alert_message))
 
-        with self._lock:
-            if metric_name:
-                samples = list(self._metrics.get(metric_name, []))
-                cutoff = time.time() - time_window
-                samples = [s for s in samples if s.timestamp >= cutoff]
-                values = [s.value for s in samples]
-                
-                result = self._calculate_stats(values, stats)
-                result['samples'] = len(values)
-                result['metric_name'] = metric_name
-                result['time_window'] = time_window
-            else:
-                # Get all metrics
-                result = {
-                    'metrics': {
-                        name: self._calculate_stats([s.value for s in samples[-100:]], stats)
-                        for name, samples in self._metrics.items()
-                    },
-                    'counters': dict(self._counters),
-                    'gauges': dict(self._gauges)
-                }
+    async def check_health(self) -> dict[str, HealthStatus]:
+        """Run all health checks and return status."""
+        results: dict[str, HealthStatus] = {}
+        for name, check_func in self._health_checks.items():
+            try:
+                if asyncio.iscoroutinefunction(check_func):
+                    status = await check_func()
+                else:
+                    status = check_func()
+                results[name] = status
+            except Exception as e:
+                results[name] = HealthStatus(
+                    component=name,
+                    healthy=False,
+                    message=f"Health check failed: {e}",
+                )
+        return results
 
-        context.set_variable(save_to_var, result)
-        return ActionResult(success=True, data=result)
+    def get_overall_health(self) -> HealthStatus:
+        """Get overall system health status."""
+        if not self._health_checks:
+            return HealthStatus(component="system", healthy=True)
 
-    def _calculate_stats(self, values: List[float], stats: List[str]) -> Dict:
-        """Calculate statistics for values."""
-        if not values:
-            return {stat: None for stat in stats}
+        statuses = self._get_health_values()
+        unhealthy = [s for s in statuses.values() if not s.healthy]
 
-        import statistics
-        result = {}
-        
-        for stat in stats:
-            if stat == 'avg' or stat == 'mean':
-                result['avg'] = statistics.mean(values)
-            elif stat == 'min':
-                result['min'] = min(values)
-            elif stat == 'max':
-                result['max'] = max(values)
-            elif stat == 'count':
-                result['count'] = len(values)
-            elif stat == 'sum':
-                result['sum'] = sum(values)
-            elif stat == 'stddev':
-                result['stddev'] = statistics.stdev(values) if len(values) > 1 else 0
-            elif stat == 'median':
-                result['median'] = statistics.median(values)
-            elif stat == 'p95':
-                sorted_vals = sorted(values)
-                idx = int(len(sorted_vals) * 0.95)
-                result['p95'] = sorted_vals[min(idx, len(sorted_vals) - 1)]
-            elif stat == 'p99':
-                sorted_vals = sorted(values)
-                idx = int(len(sorted_vals) * 0.99)
-                result['p99'] = sorted_vals[min(idx, len(sorted_vals) - 1)]
+        if unhealthy:
+            return HealthStatus(
+                component="system",
+                healthy=False,
+                message=f"{len(unhealthy)}/{len(statuses)} components unhealthy",
+            )
 
-        return result
+        return HealthStatus(component="system", healthy=True)
 
-    def _check_alert(self, params: Dict, save_to_var: str) -> ActionResult:
-        """Check for alert conditions."""
-        metric_name = params.get('metric_name')
-        threshold = params.get('threshold')
-        operator = params.get('operator', 'gt')
-        time_window = params.get('time_window', 60)
+    def _get_health_values(self) -> dict[str, HealthStatus]:
+        """Get current health check values without async."""
+        return {}
 
-        if not metric_name or threshold is None:
-            return ActionResult(success=False, message="metric_name and threshold are required")
+    def get_metric_stats(
+        self,
+        name: str,
+        window_seconds: Optional[float] = None,
+    ) -> dict[str, float]:
+        """Get statistics for a metric."""
+        if name not in self._metrics:
+            return {}
 
-        with self._lock:
-            samples = list(self._metrics.get(metric_name, []))
-            cutoff = time.time() - time_window
-            samples = [s for s in samples if s.timestamp >= cutoff]
-            values = [s.value for s in samples]
-            
-            if not values:
-                return ActionResult(success=True, data={'alert': False, 'reason': 'no_data'})
-            
-            current_value = values[-1] if values else None
-            avg_value = statistics.mean(values) if values else 0
+        now = time.time()
+        window = window_seconds or 300
+        metrics = [
+            m for m in self._metrics[name]
+            if now - m.timestamp <= window
+        ]
 
-        triggered = False
-        reason = ""
+        if not metrics:
+            return {}
 
-        if operator == 'gt':
-            triggered = current_value > threshold
-            reason = f"{current_value} > {threshold}"
-        elif operator == 'lt':
-            triggered = current_value < threshold
-            reason = f"{current_value} < {threshold}"
-        elif operator == 'eq':
-            triggered = current_value == threshold
-            reason = f"{current_value} == {threshold}"
-        elif operator == 'stddev':
-            if len(values) > 1:
-                import statistics
-                stddev = statistics.stdev(values)
-                triggered = stddev > threshold
-                reason = f"stddev={stddev} > {threshold}"
-        elif operator == 'anomaly':
-            # Simple anomaly: value is > 2 stddev from mean
-            if len(values) > 2:
-                import statistics
-                mean = statistics.mean(values)
-                stddev = statistics.stdev(values)
-                triggered = abs(current_value - mean) > (threshold * stddev)
-                reason = f"|{current_value} - {mean}| > {threshold} * {stddev}"
-
-        result = {
-            'alert': triggered,
-            'metric_name': metric_name,
-            'threshold': threshold,
-            'operator': operator,
-            'current_value': current_value,
-            'reason': reason
+        values = [m.value for m in metrics]
+        return {
+            "count": len(values),
+            "min": min(values),
+            "max": max(values),
+            "avg": sum(values) / len(values),
+            "latest": values[-1],
         }
 
-        if triggered:
-            for callback in self._alert_callbacks:
-                try:
-                    callback(result)
-                except Exception:
-                    pass
+    def get_error_rate(
+        self,
+        metric_name: str = "errors",
+        window_seconds: float = 300.0,
+    ) -> float:
+        """Calculate error rate over a time window."""
+        stats = self.get_metric_stats(metric_name, window_seconds)
+        total = self.get_metric_stats("total", window_seconds)
 
-        context.set_variable(save_to_var, result)
-        return ActionResult(success=True, data=result, 
-                          message=f"Alert {'triggered' if triggered else 'not triggered'}")
+        if not total or total.get("count", 0) == 0:
+            return 0.0
 
-    def _get_status(self, save_to_var: str) -> ActionResult:
-        """Get overall monitoring status."""
-        with self._lock:
-            total_samples = sum(len(samples) for samples in self._metrics.values())
-            result = {
-                'total_metrics': len(self._metrics),
-                'total_samples': total_samples,
-                'counters': dict(self._counters),
-                'gauges': dict(self._gauges),
-                'metric_names': list(self._metrics.keys())
-            }
+        return stats.get("count", 0) / total.get("count", 1)
 
-        context.set_variable(save_to_var, result)
-        return ActionResult(success=True, data=result)
+    def trigger_alert(
+        self,
+        name: str,
+        severity: str,
+        message: str,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Alert:
+        """Trigger an alert."""
+        alert = Alert(
+            name=name,
+            severity=severity,
+            message=message,
+            metadata=metadata or {},
+        )
+        self._alerts.append(alert)
 
-    def _reset(self, params: Dict, save_to_var: str) -> ActionResult:
-        """Reset monitoring data."""
-        metric_name = params.get('metric_name')
-        
-        with self._lock:
-            if metric_name and metric_name in self._metrics:
-                self._metrics[metric_name].clear()
-                if metric_name in self._gauges:
-                    del self._gauges[metric_name]
-            else:
-                self._metrics.clear()
-                self._counters.clear()
-                self._gauges.clear()
+        if self.alert_callback:
+            self.alert_callback(alert)
 
-        return ActionResult(success=True, message="Monitoring data reset")
+        logger.warning(f"Alert triggered: [{severity}] {name} - {message}")
+        return alert
+
+    def get_recent_alerts(self, limit: int = 50) -> list[Alert]:
+        """Get recent alerts."""
+        return list(self._alerts)[-limit:]
+
+    def clear_metrics(self, name: Optional[str] = None) -> None:
+        """Clear metrics data."""
+        if name:
+            self._metrics.pop(name, None)
+        else:
+            self._metrics.clear()
+
+
+import asyncio
