@@ -1,496 +1,352 @@
-"""
-API Gateway Proxy Action Module.
+"""API Gateway Proxy Action Module.
 
-Provides reverse proxy functionality with load balancing,
-circuit breaking, request caching, and SSL termination.
+Provides API gateway capabilities including routing, authentication,
+rate limiting, and request/response transformation.
 """
+from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Union
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-import asyncio
-import hashlib
-import hmac
-import json
-import logging
 import time
 import uuid
-from collections import defaultdict
-from urllib.parse import urlparse
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+import sys
+import os
 
-
-class LoadBalancingStrategy(Enum):
-    """Load balancing strategies."""
-    ROUND_ROBIN = "round_robin"
-    LEAST_CONNECTIONS = "least_connections"
-    IP_HASH = "ip_hash"
-    WEIGHTED = "weighted"
-    RANDOM = "random"
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
 
 
-class HealthCheckMode(Enum):
-    """Health check modes."""
-    PASSIVE = "passive"
-    ACTIVE = "active"
-    BOTH = "both"
+class AuthType(Enum):
+    """Authentication type."""
+    NONE = "none"
+    API_KEY = "api_key"
+    BEARER = "bearer"
+    BASIC = "basic"
+    OAUTH2 = "oauth2"
 
 
 @dataclass
-class UpstreamServer:
-    """Represents a backend server."""
-    id: str
-    url: str
-    weight: int = 1
-    max_failures: int = 3
-    timeout: float = 30.0
-    health: bool = True
-    active_connections: int = 0
-    total_requests: int = 0
-    failed_requests: int = 0
-    last_health_check: Optional[datetime] = None
-    last_failure: Optional[datetime] = None
+class Route:
+    """API route definition."""
+    path: str
+    method: str
+    backend: str
+    auth: AuthType
+    rate_limit: Optional[str] = None
+    timeout_seconds: float = 30.0
+    transforms: Dict[str, Any] = field(default_factory=dict)
 
-    @property
-    def failure_rate(self) -> float:
-        """Get failure rate."""
-        if self.total_requests == 0:
-            return 0.0
-        return self.failed_requests / self.total_requests
 
-    @property
-    def is_healthy(self) -> bool:
-        """Check if server is healthy."""
-        return self.health and self.failure_rate < 0.5
+@dataclass
+class APIKey:
+    """API key information."""
+    key: str
+    name: str
+    routes: List[str]
+    rate_limit: Optional[str] = None
+    enabled: bool = True
+    created_at: float = field(default_factory=time.time)
 
 
 @dataclass
 class ProxyRequest:
-    """Incoming proxy request."""
-    request_id: str
-    method: str
+    """Proxy request details."""
     path: str
+    method: str
     headers: Dict[str, str]
-    body: Optional[bytes]
     query_params: Dict[str, str]
-    source_ip: str
-    timestamp: datetime = field(default_factory=datetime.now)
+    body: Optional[Any] = None
+    auth: Optional[Dict[str, Any]] = None
 
 
 @dataclass
 class ProxyResponse:
-    """Outgoing proxy response."""
-    request_id: str
+    """Proxy response details."""
     status_code: int
     headers: Dict[str, str]
-    body: bytes
-    upstream: str
-    response_time: float
-    cached: bool = False
+    body: Any
+    from_cache: bool = False
+    latency_ms: float = 0.0
 
 
-@dataclass
-class CacheEntry:
-    """Cache entry for responses."""
-    key: str
-    response: ProxyResponse
-    created_at: datetime
-    expires_at: datetime
-    hit_count: int = 0
+class APIGatewayStore:
+    """In-memory API gateway store."""
 
-    @property
-    def is_expired(self) -> bool:
-        """Check if entry is expired."""
-        return datetime.now() > self.expires_at
+    def __init__(self):
+        self._routes: List[Route] = []
+        self._api_keys: Dict[str, APIKey] = {}
+        self._cache: Dict[str, ProxyResponse] = {}
+        self._request_counts: Dict[str, List[float]] = {}
 
+    def add_route(self, route: Route) -> None:
+        """Add route."""
+        self._routes.append(route)
 
-@dataclass
-class CircuitBreakerState:
-    """Circuit breaker state for upstream group."""
-    failures: int = 0
-    successes: int = 0
-    state: str = "closed"
-    next_retry: Optional[datetime] = None
-
-
-class ResponseCache:
-    """HTTP response cache."""
-
-    def __init__(self, max_size: int = 1000, default_ttl: int = 300):
-        self.max_size = max_size
-        self.default_ttl = default_ttl
-        self._cache: Dict[str, CacheEntry] = {}
-        self._access_order: List[str] = []
-
-    def _make_key(self, request: ProxyRequest) -> str:
-        """Generate cache key for request."""
-        key_data = f"{request.method}:{request.path}:{json.dumps(request.query_params, sort_keys=True)}"
-        return hashlib.sha256(key_data.encode()).hexdigest()
-
-    def get(self, request: ProxyRequest) -> Optional[ProxyResponse]:
-        """Get cached response."""
-        key = self._make_key(request)
-        entry = self._cache.get(key)
-
-        if entry and not entry.is_expired:
-            entry.hit_count += 1
-            entry.response.cached = True
-            return entry.response
-
-        if entry:
-            del self._cache[key]
-            if key in self._access_order:
-                self._access_order.remove(key)
-
+    def match_route(self, path: str, method: str) -> Optional[Route]:
+        """Match route to path/method."""
+        for route in self._routes:
+            if route.method == method and self._path_matches(route.path, path):
+                return route
         return None
 
-    def put(self, request: ProxyRequest, response: ProxyResponse, ttl: Optional[int] = None):
-        """Cache a response."""
-        if "cache-control" in response.headers:
-            cc = response.headers["cache-control"].lower()
-            if "no-store" in cc or "no-cache" in cc:
-                return
+    def _path_matches(self, pattern: str, path: str) -> bool:
+        """Simple path matching with params."""
+        pattern_parts = pattern.strip("/").split("/")
+        path_parts = path.strip("/").split("/")
 
-        key = self._make_key(request)
-        expires_at = datetime.now() + timedelta(seconds=ttl or self.default_ttl)
+        if len(pattern_parts) != len(path_parts):
+            return False
 
-        entry = CacheEntry(
-            key=key,
-            response=response,
-            created_at=datetime.now(),
-            expires_at=expires_at
-        )
-
-        if len(self._cache) >= self.max_size:
-            oldest = self._access_order.pop(0)
-            if oldest in self._cache:
-                del self._cache[oldest]
-
-        self._cache[key] = entry
-        self._access_order.append(key)
-
-    def invalidate(self, pattern: str):
-        """Invalidate cache entries matching pattern."""
-        keys_to_delete = [
-            k for k, v in self._cache.items()
-            if pattern in k
-        ]
-        for key in keys_to_delete:
-            del self._cache[key]
-            if key in self._access_order:
-                self._access_order.remove(key)
-
-    def clear(self):
-        """Clear all cache entries."""
-        self._cache.clear()
-        self._access_order.clear()
-
-
-class CircuitBreaker:
-    """Circuit breaker for upstream servers."""
-
-    def __init__(
-        self,
-        failure_threshold: int = 5,
-        success_threshold: int = 2,
-        timeout: float = 60.0
-    ):
-        self.failure_threshold = failure_threshold
-        self.success_threshold = success_threshold
-        self.timeout = timeout
-        self._states: Dict[str, CircuitBreakerState] = defaultdict(CircuitBreakerState)
-
-    def is_open(self, upstream_id: str) -> bool:
-        """Check if circuit is open."""
-        state = self._states[upstream_id]
-        if state.state == "open":
-            if state.next_retry and datetime.now() >= state.next_retry:
-                state.state = "half_open"
+        for p, a in zip(pattern_parts, path_parts):
+            if p.startswith(":") or p == "*":
+                continue
+            if p != a:
                 return False
-            return True
-        return False
 
-    def record_success(self, upstream_id: str):
-        """Record successful request."""
-        state = self._states[upstream_id]
-        if state.state == "half_open":
-            state.successes += 1
-            if state.successes >= self.success_threshold:
-                state.state = "closed"
-                state.failures = 0
-                state.successes = 0
-        elif state.state == "closed":
-            state.failures = max(0, state.failures - 1)
+        return True
 
-    def record_failure(self, upstream_id: str):
-        """Record failed request."""
-        state = self._states[upstream_id]
-        state.failures += 1
-        if state.failures >= self.failure_threshold:
-            state.state = "open"
-            state.next_retry = datetime.now() + timedelta(seconds=self.timeout)
+    def add_api_key(self, key: str, name: str, routes: List[str],
+                    rate_limit: Optional[str] = None) -> APIKey:
+        """Add API key."""
+        api_key = APIKey(key=key, name=name, routes=routes, rate_limit=rate_limit)
+        self._api_keys[key] = api_key
+        return api_key
 
-    def get_state(self, upstream_id: str) -> str:
-        """Get circuit state."""
-        return self._states[upstream_id].state
+    def get_api_key(self, key: str) -> Optional[APIKey]:
+        """Get API key."""
+        return self._api_keys.get(key)
 
+    def check_rate_limit(self, key: str, limit: str) -> bool:
+        """Check rate limit."""
+        now = time.time()
+        if key not in self._request_counts:
+            self._request_counts[key] = []
 
-class LoadBalancer:
-    """Load balancer for upstream servers."""
+        self._request_counts[key] = [
+            t for t in self._request_counts[key]
+            if now - t < 60
+        ]
 
-    def __init__(self, strategy: LoadBalancingStrategy = LoadBalancingStrategy.ROUND_ROBIN):
-        self.strategy = strategy
-        self._round_robin_counters: Dict[str, int] = defaultdict(int)
+        max_requests = 100
+        if limit == "low":
+            max_requests = 10
+        elif limit == "medium":
+            max_requests = 100
+        elif limit == "high":
+            max_requests = 1000
 
-    def select(
-        self,
-        servers: List[UpstreamServer],
-        request: Optional[ProxyRequest] = None
-    ) -> Optional[UpstreamServer]:
-        """Select a server based on strategy."""
-        healthy = [s for s in servers if s.is_healthy]
-        if not healthy:
-            return None
+        if len(self._request_counts[key]) >= max_requests:
+            return False
 
-        if self.strategy == LoadBalancingStrategy.ROUND_ROBIN:
-            return self._round_robin(healthy)
-        elif self.strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
-            return min(healthy, key=lambda s: s.active_connections)
-        elif self.strategy == LoadBalancingStrategy.IP_HASH:
-            return self._ip_hash(healthy, request)
-        elif self.strategy == LoadBalancingStrategy.WEIGHTED:
-            return self._weighted(healthy)
-        elif self.strategy == LoadBalancingStrategy.RANDOM:
-            import random
-            return healthy[int(random.random() * len(healthy))]
-        return healthy[0]
+        self._request_counts[key].append(now)
+        return True
 
-    def _round_robin(self, servers: List[UpstreamServer]) -> UpstreamServer:
-        """Round robin selection."""
-        group_id = id(servers)
-        idx = self._round_robin_counters[group_id] % len(servers)
-        self._round_robin_counters[group_id] += 1
-        return servers[idx]
+    def get_cached(self, key: str) -> Optional[ProxyResponse]:
+        """Get cached response."""
+        return self._cache.get(key)
 
-    def _ip_hash(self, servers: List[UpstreamServer], request: Optional[ProxyRequest]) -> UpstreamServer:
-        """IP hash based selection."""
-        if not request:
-            return servers[0]
-        hash_val = int(hashlib.md5(request.source_ip.encode()).hexdigest(), 16)
-        return servers[hash_val % len(servers)]
-
-    def _weighted(self, servers: List[UpstreamServer]) -> UpstreamServer:
-        """Weighted selection."""
-        total_weight = sum(s.weight for s in servers)
-        import random
-        r = random.randint(1, total_weight)
-        cumulative = 0
-        for server in servers:
-            cumulative += server.weight
-            if r <= cumulative:
-                return server
-        return servers[-1]
+    def set_cached(self, key: str, response: ProxyResponse, ttl_seconds: float = 60) -> None:
+        """Cache response."""
+        self._cache[key] = response
 
 
-class ReverseProxy:
-    """Main reverse proxy implementation."""
+_global_gateway = APIGatewayStore()
 
-    def __init__(
-        self,
-        name: str = "proxy",
-        load_balancer: Optional[LoadBalancer] = None,
-        circuit_breaker: Optional[CircuitBreaker] = None,
-        cache: Optional[ResponseCache] = None
-    ):
-        self.name = name
-        self.load_balancer = load_balancer or LoadBalancer()
-        self.circuit_breaker = circuit_breaker or CircuitBreaker()
-        self.cache = cache or ResponseCache()
-        self.upstreams: Dict[str, List[UpstreamServer]] = defaultdict(list)
-        self.routes: Dict[str, str] = {}
-        self.middleware: List[Callable] = []
-        self._metrics: Dict[str, Any] = defaultdict(int)
 
-    def add_upstream(self, upstream_id: str, server: UpstreamServer):
-        """Add server to upstream group."""
-        self.upstreams[upstream_id].append(server)
+class APIGatewayProxyAction:
+    """API Gateway proxy action.
 
-    def add_route(self, path_prefix: str, upstream_id: str):
-        """Add route mapping."""
-        self.routes[path_prefix] = upstream_id
+    Example:
+        action = APIGatewayProxyAction()
 
-    def add_middleware(self, middleware: Callable):
-        """Add middleware function."""
-        self.middleware.append(middleware)
+        action.add_route("/api/users/:id", "GET", "http://users-service")
+        action.add_api_key("sk_xxx", "MyApp", ["/api/*"])
 
-    def _find_upstream(self, path: str) -> Optional[str]:
-        """Find upstream for path."""
-        for prefix, upstream_id in sorted(self.routes.items(), key=lambda x: len(x[0]), reverse=True):
-            if path.startswith(prefix):
-                return upstream_id
-        return None
+        result = action.proxy(request)
+    """
 
-    async def handle_request(
-        self,
-        method: str,
-        path: str,
-        headers: Dict[str, str],
-        body: Optional[bytes],
-        query_params: Dict[str, str],
-        source_ip: str
-    ) -> ProxyResponse:
-        """Handle incoming proxy request."""
-        request = ProxyRequest(
-            request_id=str(uuid.uuid4()),
-            method=method,
-            path=path,
-            headers=headers,
-            body=body,
-            query_params=query_params,
-            source_ip=source_ip
-        )
+    def __init__(self, store: Optional[APIGatewayStore] = None):
+        self._store = store or _global_gateway
 
-        for mw in self.middleware:
-            result = await mw(request)
-            if result is not None:
-                return result
-
-        cached = self.cache.get(request)
-        if cached:
-            self._metrics["cache_hits"] += 1
-            return cached
-
-        self._metrics["cache_misses"] += 1
-
-        upstream_id = self._find_upstream(path)
-        if not upstream_id:
-            return ProxyResponse(
-                request_id=request.request_id,
-                status_code=404,
-                headers={},
-                body=b"Not Found",
-                upstream="",
-                response_time=0.0
-            )
-
-        if self.circuit_breaker.is_open(upstream_id):
-            return ProxyResponse(
-                request_id=request.request_id,
-                status_code=503,
-                headers={"Retry-After": "60"},
-                body=b"Service Unavailable",
-                upstream=upstream_id,
-                response_time=0.0
-            )
-
-        server = self.load_balancer.select(self.upstreams.get(upstream_id, []), request)
-        if not server:
-            return ProxyResponse(
-                request_id=request.request_id,
-                status_code=503,
-                headers={},
-                body=b"No healthy upstream",
-                upstream=upstream_id,
-                response_time=0.0
-            )
-
-        start_time = time.time()
+    def add_route(self, path: str, method: str, backend: str,
+                  auth: str = "none",
+                  rate_limit: Optional[str] = None,
+                  timeout_seconds: float = 30.0) -> Dict[str, Any]:
+        """Add route."""
         try:
-            server.active_connections += 1
-            server.total_requests += 1
+            auth_type = AuthType(auth)
+        except ValueError:
+            auth_type = AuthType.NONE
 
-            response = await self._proxy_to_upstream(server, request)
+        route = Route(
+            path=path,
+            method=method,
+            backend=backend,
+            auth=auth_type,
+            rate_limit=rate_limit,
+            timeout_seconds=timeout_seconds
+        )
+        self._store.add_route(route)
 
-            self.circuit_breaker.record_success(upstream_id)
-            self.cache.put(request, response)
+        return {
+            "success": True,
+            "path": path,
+            "method": method,
+            "backend": backend,
+            "message": f"Added route {method} {path}"
+        }
 
-            return response
+    def add_api_key(self, key: str, name: str,
+                   routes: Optional[List[str]] = None,
+                   rate_limit: Optional[str] = None) -> Dict[str, Any]:
+        """Add API key."""
+        api_key = self._store.add_api_key(key, name, routes or ["*"], rate_limit)
 
-        except Exception as e:
-            server.failed_requests += 1
-            server.last_failure = datetime.now()
-            self.circuit_breaker.record_failure(upstream_id)
-            logger.error(f"Proxy error: {e}")
-            return ProxyResponse(
-                request_id=request.request_id,
-                status_code=502,
-                headers={},
-                body=str(e).encode(),
-                upstream=server.id,
-                response_time=time.time() - start_time
-            )
+        return {
+            "success": True,
+            "key_id": key[:8] + "...",
+            "name": name,
+            "routes": routes,
+            "message": f"Added API key for {name}"
+        }
 
-        finally:
-            server.active_connections -= 1
+    def proxy(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Proxy request to backend."""
+        start = time.time()
+        path = request.get("path", "/")
+        method = request.get("method", "GET")
+        headers = request.get("headers", {})
+        api_key = headers.get("X-API-Key") or headers.get("Authorization", "").replace("Bearer ", "")
 
-    async def _proxy_to_upstream(
-        self,
-        server: UpstreamServer,
-        request: ProxyRequest
-    ) -> ProxyResponse:
-        """Proxy request to upstream server."""
-        await asyncio.sleep(0.01)
+        route = self._store.match_route(path, method)
+        if not route:
+            return {
+                "success": False,
+                "status_code": 404,
+                "message": "Route not found"
+            }
 
-        parsed = urlparse(server.url)
+        if route.auth != AuthType.NONE:
+            if not api_key:
+                return {
+                    "success": False,
+                    "status_code": 401,
+                    "message": "Authentication required"
+                }
+
+            key_obj = self._store.get_api_key(api_key)
+            if not key_obj or not key_obj.enabled:
+                return {
+                    "success": False,
+                    "status_code": 401,
+                    "message": "Invalid API key"
+                }
+
+        if route.rate_limit:
+            if not self._store.check_rate_limit(api_key or "anonymous", route.rate_limit):
+                return {
+                    "success": False,
+                    "status_code": 429,
+                    "message": "Rate limit exceeded"
+                }
+
         response = ProxyResponse(
-            request_id=request.request_id,
             status_code=200,
             headers={"Content-Type": "application/json"},
-            body=json.dumps({"proxied": True, "upstream": server.id}).encode(),
-            upstream=server.id,
-            response_time=0.0,
-            cached=False
+            body={"simulated": True, "path": path, "backend": route.backend},
+            latency_ms=(time.time() - start) * 1000
         )
-        return response
 
-    def get_metrics(self) -> Dict[str, Any]:
-        """Get proxy metrics."""
         return {
-            "requests_total": self._metrics["cache_hits"] + self._metrics["cache_misses"],
-            "cache_hits": self._metrics["cache_hits"],
-            "cache_misses": self._metrics["cache_misses"],
-            "upstreams": {
-                upstream_id: {
-                    "servers": [
-                        {
-                            "id": s.id,
-                            "healthy": s.is_healthy,
-                            "connections": s.active_connections,
-                            "failure_rate": s.failure_rate
-                        }
-                        for s in servers
-                    ]
+            "success": True,
+            "status_code": response.status_code,
+            "headers": response.headers,
+            "body": response.body,
+            "latency_ms": response.latency_ms,
+            "message": f"Proxied to {route.backend}"
+        }
+
+    def list_routes(self) -> Dict[str, Any]:
+        """List all routes."""
+        return {
+            "success": True,
+            "routes": [
+                {
+                    "path": r.path,
+                    "method": r.method,
+                    "backend": r.backend,
+                    "auth": r.auth.value,
+                    "timeout_seconds": r.timeout_seconds
                 }
-                for upstream_id, servers in self.upstreams.items()
-            }
+                for r in self._store._routes
+            ],
+            "count": len(self._store._routes)
+        }
+
+    def list_api_keys(self) -> Dict[str, Any]:
+        """List API keys."""
+        return {
+            "success": True,
+            "api_keys": [
+                {
+                    "name": k.name,
+                    "key_id": k.key[:8] + "...",
+                    "routes": k.routes,
+                    "enabled": k.enabled
+                }
+                for k in self._store._api_keys.values()
+            ],
+            "count": len(self._store._api_keys)
         }
 
 
-async def main():
-    """Demonstrate reverse proxy."""
-    proxy = ReverseProxy()
+def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute API gateway proxy action."""
+    operation = params.get("operation", "")
+    action = APIGatewayProxyAction()
 
-    proxy.add_upstream("api", UpstreamServer(id="api1", url="http://localhost:8001"))
-    proxy.add_upstream("api", UpstreamServer(id="api2", url="http://localhost:8002", weight=2))
+    try:
+        if operation == "add_route":
+            path = params.get("path", "")
+            method = params.get("method", "GET")
+            backend = params.get("backend", "")
+            if not path or not backend:
+                return {"success": False, "message": "path and backend required"}
+            return action.add_route(
+                path=path,
+                method=method,
+                backend=backend,
+                auth=params.get("auth", "none"),
+                rate_limit=params.get("rate_limit"),
+                timeout_seconds=params.get("timeout_seconds", 30.0)
+            )
 
-    proxy.add_route("/api/", "api")
+        elif operation == "add_api_key":
+            key = params.get("key", "")
+            name = params.get("name", "")
+            if not key or not name:
+                return {"success": False, "message": "key and name required"}
+            return action.add_api_key(
+                key=key,
+                name=name,
+                routes=params.get("routes"),
+                rate_limit=params.get("rate_limit")
+            )
 
-    response = await proxy.handle_request(
-        method="GET",
-        path="/api/users",
-        headers={"Host": "example.com"},
-        body=None,
-        query_params={},
-        source_ip="127.0.0.1"
-    )
+        elif operation == "proxy":
+            request = params.get("request", params)
+            return action.proxy(request)
 
-    print(f"Status: {response.status_code}")
-    print(f"Upstream: {response.upstream}")
-    print(f"Cached: {response.cached}")
-    print(f"Metrics: {proxy.get_metrics()}")
+        elif operation == "list_routes":
+            return action.list_routes()
 
+        elif operation == "list_api_keys":
+            return action.list_api_keys()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        else:
+            return {"success": False, "message": f"Unknown operation: {operation}"}
+
+    except Exception as e:
+        return {"success": False, "message": f"API gateway error: {str(e)}"}
