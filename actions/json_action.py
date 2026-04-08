@@ -1,335 +1,311 @@
-"""JSON action module for RabAI AutoClick.
-
-Provides JSON operations:
-- JsonParseAction: Parse JSON string
-- JsonDumpAction: Dump to JSON string
-- JsonReadAction: Read JSON file
-- JsonWriteAction: Write JSON file
-- JsonValidateAction: Validate JSON
-- JsonMergeAction: Merge JSON objects
 """
-
+JSON utilities - parsing, query, merge, diff, schema validation, transformation.
+"""
+from typing import Any, Dict, List, Optional, Union
 import json
-import os
-from typing import Any, Dict, List
+import logging
+import re
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class JsonParseAction(BaseAction):
-    """Parse JSON string."""
-    action_type = "json_parse"
-    display_name = "JSON解析"
-    description = "解析JSON字符串"
-    version = "1.0"
+class BaseAction:
+    """Base class for all actions."""
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute parse.
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-        Args:
-            context: Execution context.
-            params: Dict with json_string, output_var.
 
-        Returns:
-            ActionResult with parsed object.
-        """
-        json_string = params.get('json_string', '')
-        output_var = params.get('output_var', 'json_parsed')
+def _get_path(data: Any, path: str) -> Optional[Any]:
+    parts = path.split(".")
+    current = data
+    for part in parts:
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list) and part.isdigit():
+            idx = int(part)
+            current = current[idx] if 0 <= idx < len(current) else None
+        else:
+            return None
+        if current is None:
+            return None
+    return current
 
-        valid, msg = self.validate_type(json_string, str, 'json_string')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+
+def _set_path(data: Dict[str, Any], path: str, value: Any) -> None:
+    parts = path.split(".")
+    current = data
+    for part in parts[:-1]:
+        if part not in current:
+            current[part] = {}
+        current = current[part]
+    current[parts[-1]] = value
+
+
+def _delete_path(data: Union[Dict, List], path: str) -> bool:
+    parts = path.split(".")
+    current = data
+    for part in parts[:-1]:
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list) and part.isdigit():
+            idx = int(part)
+            current = current[idx] if 0 <= idx < len(current) else None
+        else:
+            return False
+        if current is None:
+            return False
+    if isinstance(current, dict):
+        if parts[-1] in current:
+            del current[parts[-1]]
+            return True
+    elif isinstance(current, list) and parts[-1].isdigit():
+        idx = int(parts[-1])
+        if 0 <= idx < len(current):
+            current.pop(idx)
+            return True
+    return False
+
+
+def _json_diff(obj1: Any, obj2: Any, path: str = "") -> List[Dict[str, Any]]:
+    diffs: List[Dict[str, Any]] = []
+    if type(obj1) != type(obj2):
+        diffs.append({"op": "replace", "path": path, "old": obj1, "new": obj2})
+        return diffs
+    if isinstance(obj1, dict):
+        all_keys = set(obj1.keys()) | set(obj2.keys())
+        for key in all_keys:
+            new_path = f"{path}.{key}" if path else key
+            if key not in obj1:
+                diffs.append({"op": "add", "path": new_path, "value": obj2[key]})
+            elif key not in obj2:
+                diffs.append({"op": "remove", "path": new_path, "value": obj1[key]})
+            else:
+                diffs.extend(_json_diff(obj1[key], obj2[key], new_path))
+    elif isinstance(obj1, list):
+        len1, len2 = len(obj1), len(obj2)
+        max_len = max(len1, len2)
+        for i in range(max_len):
+            p = f"{path}[{i}]"
+            if i >= len1:
+                diffs.append({"op": "add", "path": p, "value": obj2[i]})
+            elif i >= len2:
+                diffs.append({"op": "remove", "path": p, "value": obj1[i]})
+            else:
+                diffs.extend(_json_diff(obj1[i], obj2[i], p))
+    else:
+        if obj1 != obj2:
+            diffs.append({"op": "replace", "path": path, "old": obj1, "new": obj2})
+    return diffs
+
+
+def _merge_json(base: Any, *updates: Any) -> Any:
+    if isinstance(base, dict):
+        result = dict(base)
+        for update in updates:
+            if isinstance(update, dict):
+                for key, value in update.items():
+                    if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                        result[key] = _merge_json(result[key], value)
+                    else:
+                        result[key] = value
+        return result
+    elif isinstance(base, list):
+        return base + [u for u in updates if u not in base]
+    return updates[-1] if updates else base
+
+
+class JSONAction(BaseAction):
+    """JSON operations.
+
+    Provides parsing, querying, merging, diffing, schema validation, transformation.
+    """
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "parse")
+        data = params.get("data")
+        text = params.get("text", "")
+        path = params.get("path", "")
 
         try:
-            resolved_str = context.resolve_value(json_string)
+            if operation == "parse":
+                if not text:
+                    return {"success": False, "error": "text required"}
+                parsed = json.loads(text)
+                return {"success": True, "data": parsed}
 
-            parsed = json.loads(resolved_str)
-            context.set(output_var, parsed)
+            elif operation == "dumps":
+                if data is None:
+                    return {"success": False, "error": "data required"}
+                indent = int(params.get("indent", 2))
+                compact = params.get("compact", False)
+                result = json.dumps(data, indent=None if compact else indent, ensure_ascii=False)
+                return {"success": True, "json": result}
 
-            return ActionResult(
-                success=True,
-                message=f"JSON已解析",
-                data={'parsed': parsed, 'output_var': output_var}
-            )
+            elif operation == "get":
+                if data is None:
+                    return {"success": False, "error": "data required"}
+                value = _get_path(data, path)
+                return {"success": True, "value": value, "path": path, "found": value is not None}
+
+            elif operation == "set":
+                if data is None:
+                    data = {}
+                if not isinstance(data, dict):
+                    return {"success": False, "error": "data must be a dict for set"}
+                value = params.get("value")
+                _set_path(data, path, value)
+                return {"success": True, "data": data}
+
+            elif operation == "delete":
+                if data is None:
+                    return {"success": False, "error": "data required"}
+                deleted = _delete_path(data, path)
+                return {"success": True, "deleted": deleted, "data": data}
+
+            elif operation == "merge":
+                if data is None:
+                    return {"success": False, "error": "base data required"}
+                updates = params.get("updates", [])
+                result = _merge_json(data, *updates)
+                return {"success": True, "data": result}
+
+            elif operation == "diff":
+                obj1 = data if data is not None else json.loads(text) if text else {}
+                obj2 = params.get("other", {})
+                diffs = _json_diff(obj1, obj2, path)
+                return {"success": True, "diffs": diffs, "count": len(diffs), "has_changes": len(diffs) > 0}
+
+            elif operation == "patch":
+                obj = data if data is not None else {}
+                diffs = params.get("diffs", [])
+                for d in diffs:
+                    op = d.get("op")
+                    p = d.get("path", "")
+                    if op == "add" or op == "replace":
+                        _set_path(obj, p, d.get("value"))
+                    elif op == "remove":
+                        _delete_path(obj, p)
+                return {"success": True, "data": obj}
+
+            elif operation == "flatten":
+                if not isinstance(data, dict):
+                    return {"success": False, "error": "data must be a dict"}
+                flat: Dict[str, Any] = {}
+
+                def _flatten(obj: Any, prefix: str = "") -> None:
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            new_key = f"{prefix}.{k}" if prefix else k
+                            _flatten(v, new_key)
+                    elif isinstance(obj, list):
+                        for i, v in enumerate(obj):
+                            _flatten(v, f"{prefix}[{i}]")
+                    else:
+                        flat[prefix] = obj
+
+                _flatten(data)
+                return {"success": True, "data": flat}
+
+            elif operation == "unflatten":
+                if not isinstance(data, dict):
+                    return {"success": False, "error": "data must be a dict"}
+                result: Any = {}
+
+                def _unflatten(src: Dict[str, Any]) -> Any:
+                    out: Dict[str, Any] = {}
+                    for key, value in src.items():
+                        _set_path(out, key.replace("[", ".").replace("]", ""), value)
+                    return out
+
+                result = _unflatten(data)
+                return {"success": True, "data": result}
+
+            elif operation == "validate_schema":
+                if data is None:
+                    return {"success": False, "error": "data required"}
+                schema = params.get("schema", {})
+                errors: List[str] = []
+                required = schema.get("required", [])
+                properties = schema.get("properties", {})
+                for req_field in required:
+                    if req_field not in data:
+                        errors.append(f"Missing required field: {req_field}")
+                for field, field_schema in properties.items():
+                    if field in data:
+                        expected_type = field_schema.get("type")
+                        value = data[field]
+                        if expected_type == "string" and not isinstance(value, str):
+                            errors.append(f"{field} must be string")
+                        elif expected_type == "number" and not isinstance(value, (int, float)):
+                            errors.append(f"{field} must be number")
+                        elif expected_type == "boolean" and not isinstance(value, bool):
+                            errors.append(f"{field} must be boolean")
+                        elif expected_type == "array" and not isinstance(value, list):
+                            errors.append(f"{field} must be array")
+                        elif expected_type == "object" and not isinstance(value, dict):
+                            errors.append(f"{field} must be object")
+                return {"success": True, "valid": len(errors) == 0, "errors": errors}
+
+            elif operation == "query":
+                if data is None:
+                    return {"success": False, "error": "data required"}
+                query_path = params.get("query", path)
+                results = []
+                selector = query_path.lstrip("$")
+                parts = selector.split(".")
+                current = [data]
+                for part in parts:
+                    if part == "$":
+                        continue
+                    next_level = []
+                    for item in current:
+                        if isinstance(item, dict):
+                            next_level.append(item.get(part))
+                        elif isinstance(item, list) and part.isdigit():
+                            idx = int(part)
+                            if 0 <= idx < len(item):
+                                next_level.append(item[idx])
+                    current = next_level
+                return {"success": True, "results": current, "count": len(current)}
+
+            elif operation == "compact":
+                if data is None:
+                    return {"success": False, "error": "data required"}
+                result = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+                return {"success": True, "json": result}
+
+            elif operation == "pretty":
+                if data is None:
+                    return {"success": False, "error": "data required"}
+                result = json.dumps(data, indent=2, ensure_ascii=False)
+                return {"success": True, "json": result}
+
+            elif operation == "keys":
+                if not isinstance(data, dict):
+                    return {"success": False, "error": "data must be a dict"}
+                return {"success": True, "keys": list(data.keys()), "count": len(data)}
+
+            elif operation == "values":
+                if not isinstance(data, dict):
+                    return {"success": False, "error": "data must be a dict"}
+                return {"success": True, "values": list(data.values()), "count": len(data)}
+
+            elif operation == "items":
+                if not isinstance(data, dict):
+                    return {"success": False, "error": "data must be a dict"}
+                return {"success": True, "items": list(data.items()), "count": len(data)}
+
+            else:
+                return {"success": False, "error": f"Unknown operation: {operation}"}
+
         except json.JSONDecodeError as e:
-            return ActionResult(success=False, message=f"JSON解析失败: {str(e)}")
+            return {"success": False, "error": f"JSON parse error: {e}"}
         except Exception as e:
-            return ActionResult(success=False, message=f"JSON解析失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['json_string']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'json_parsed'}
+            logger.error(f"JSONAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-class JsonDumpAction(BaseAction):
-    """Dump to JSON string."""
-    action_type = "json_dump"
-    display_name = "JSON序列化"
-    description = "对象序列化为JSON"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute dump.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, indent, output_var.
-
-        Returns:
-            ActionResult with JSON string.
-        """
-        data = params.get('data', {})
-        indent = params.get('indent', 2)
-        output_var = params.get('output_var', 'json_dumped')
-
-        try:
-            resolved_data = context.resolve_value(data)
-            resolved_indent = context.resolve_value(indent)
-
-            dumped = json.dumps(resolved_data, indent=resolved_indent, ensure_ascii=False)
-            context.set(output_var, dumped)
-
-            return ActionResult(
-                success=True,
-                message=f"JSON已序列化 ({len(dumped)} 字符)",
-                data={'json': dumped, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"JSON序列化失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'indent': 2, 'output_var': 'json_dumped'}
-
-
-class JsonReadAction(BaseAction):
-    """Read JSON file."""
-    action_type = "json_read"
-    display_name = "JSON读取"
-    description = "读取JSON文件"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute read.
-
-        Args:
-            context: Execution context.
-            params: Dict with file_path, output_var.
-
-        Returns:
-            ActionResult with file content.
-        """
-        file_path = params.get('file_path', '')
-        output_var = params.get('output_var', 'json_data')
-
-        valid, msg = self.validate_type(file_path, str, 'file_path')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_path = context.resolve_value(file_path)
-
-            if not os.path.exists(resolved_path):
-                return ActionResult(success=False, message=f"文件不存在: {resolved_path}")
-
-            with open(resolved_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            context.set(output_var, data)
-
-            return ActionResult(
-                success=True,
-                message=f"JSON已读取: {resolved_path}",
-                data={'data': data, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"JSON读取失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['file_path']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'json_data'}
-
-
-class JsonWriteAction(BaseAction):
-    """Write JSON file."""
-    action_type = "json_write"
-    display_name = "JSON写入"
-    description = "写入JSON文件"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute write.
-
-        Args:
-            context: Execution context.
-            params: Dict with file_path, data, indent.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        file_path = params.get('file_path', '')
-        data = params.get('data', {})
-        indent = params.get('indent', 2)
-
-        valid, msg = self.validate_type(file_path, str, 'file_path')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_path = context.resolve_value(file_path)
-            resolved_data = context.resolve_value(data)
-            resolved_indent = context.resolve_value(indent)
-
-            os.makedirs(os.path.dirname(resolved_path) or '.', exist_ok=True)
-
-            with open(resolved_path, 'w', encoding='utf-8') as f:
-                json.dump(resolved_data, f, indent=resolved_indent, ensure_ascii=False)
-
-            return ActionResult(
-                success=True,
-                message=f"JSON已写入: {resolved_path}",
-                data={'file_path': resolved_path}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"JSON写入失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['file_path', 'data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'indent': 2}
-
-
-class JsonValidateAction(BaseAction):
-    """Validate JSON."""
-    action_type = "json_validate"
-    display_name = "JSON验证"
-    description = "验证JSON格式"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute validate.
-
-        Args:
-            context: Execution context.
-            params: Dict with json_string, output_var.
-
-        Returns:
-            ActionResult with validation result.
-        """
-        json_string = params.get('json_string', '')
-        output_var = params.get('output_var', 'json_valid')
-
-        valid, msg = self.validate_type(json_string, str, 'json_string')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_str = context.resolve_value(json_string)
-
-            json.loads(resolved_str)
-            context.set(output_var, True)
-
-            return ActionResult(
-                success=True,
-                message="JSON有效",
-                data={'valid': True, 'output_var': output_var}
-            )
-        except json.JSONDecodeError:
-            context.set(output_var, False)
-            return ActionResult(
-                success=True,
-                message="JSON无效",
-                data={'valid': False, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"JSON验证失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['json_string']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'json_valid'}
-
-
-class JsonMergeAction(BaseAction):
-    """Merge JSON objects."""
-    action_type = "json_merge"
-    display_name = "JSON合并"
-    description = "合并JSON对象"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute merge.
-
-        Args:
-            context: Execution context.
-            params: Dict with objects, output_var.
-
-        Returns:
-            ActionResult with merged object.
-        """
-        objects = params.get('objects', [])
-        output_var = params.get('output_var', 'json_merged')
-
-        valid, msg = self.validate_type(objects, list, 'objects')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_objects = context.resolve_value(objects)
-
-            merged = {}
-            for obj in resolved_objects:
-                if isinstance(obj, dict):
-                    merged.update(obj)
-
-            context.set(output_var, merged)
-
-            return ActionResult(
-                success=True,
-                message=f"JSON已合并: {len(merged)} 个键",
-                data={'merged': merged, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"JSON合并失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['objects']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'json_merged'}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for JSON operations."""
+    return JSONAction().execute(context, params)

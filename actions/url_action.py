@@ -1,346 +1,193 @@
-"""URL action module for RabAI AutoClick.
-
-Provides URL operations:
-- UrlParseAction: Parse URL
-- UrlBuildAction: Build URL
-- UrlEncodeAction: URL encode
-- UrlDecodeAction: URL decode
-- UrlValidateAction: Validate URL
-- UrlShortenAction: Shorten URL (simulated)
 """
+URL utilities - parsing, building, encoding, validation, query parameter manipulation.
+"""
+from typing import Any, Dict, List, Optional
+import urllib.parse as urlparse
+import re
+import logging
 
-import urllib.parse
-from typing import Any, Dict, List
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class UrlParseAction(BaseAction):
-    """Parse URL."""
-    action_type = "url_parse"
-    display_name = "URL解析"
-    description = "解析URL各部分"
-    version = "1.0"
+class BaseAction:
+    """Base class for all actions."""
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute parse.
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-        Args:
-            context: Execution context.
-            params: Dict with url, output_var.
 
-        Returns:
-            ActionResult with URL components.
-        """
-        url = params.get('url', '')
-        output_var = params.get('output_var', 'url_parsed')
+def _parse_query(qs: str) -> Dict[str, str]:
+    return dict(urlparse.parse_qsl(qs, keep_blank_values=True))
 
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+
+def _build_query(params: Dict[str, Any]) -> str:
+    return urlparse.urlencode(params, doseq=True)
+
+
+class URLAction(BaseAction):
+    """URL operations.
+
+    Provides parsing, building, query manipulation, encoding, validation.
+    """
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "parse")
+        url = params.get("url", "")
+        text = params.get("text", "")
 
         try:
-            resolved_url = context.resolve_value(url)
+            if operation == "parse":
+                if not url:
+                    return {"success": False, "error": "url required"}
+                parsed = urlparse.urlparse(url)
+                return {
+                    "success": True,
+                    "scheme": parsed.scheme,
+                    "netloc": parsed.netloc,
+                    "hostname": parsed.hostname or "",
+                    "port": parsed.port,
+                    "path": parsed.path,
+                    "params": parsed.params,
+                    "query": dict(urlparse.parse_qsl(parsed.query)),
+                    "fragment": parsed.fragment,
+                    "username": parsed.username or "",
+                    "domain": parsed.netloc.split(":")[0] if parsed.netloc else "",
+                }
 
-            parsed = urllib.parse.urlparse(resolved_url)
+            elif operation == "build":
+                scheme = params.get("scheme", "https")
+                host = params.get("host", "")
+                path = params.get("path", "")
+                query_params = params.get("query", {})
+                fragment = params.get("fragment", "")
+                if not host:
+                    return {"success": False, "error": "host required"}
+                port = params.get("port")
+                netloc = host if not port else f"{host}:{port}"
+                query = _build_query(query_params) if query_params else ""
+                result = urlparse.urlunparse((scheme, netloc, path, "", query, fragment))
+                return {"success": True, "url": result}
 
-            result = {
-                'scheme': parsed.scheme,
-                'netloc': parsed.netloc,
-                'hostname': parsed.hostname,
-                'port': parsed.port,
-                'path': parsed.path,
-                'params': parsed.params,
-                'query': parsed.query,
-                'fragment': parsed.fragment,
-            }
+            elif operation == "encode":
+                if not text:
+                    return {"success": False, "error": "text required"}
+                encoded = urlparse.quote(text)
+                return {"success": True, "encoded": encoded}
 
-            context.set(output_var, result)
+            elif operation == "decode":
+                if not text:
+                    return {"success": False, "error": "text required"}
+                decoded = urlparse.unquote(text)
+                return {"success": True, "decoded": decoded}
 
-            return ActionResult(
-                success=True,
-                message=f"URL已解析: {parsed.scheme}://{parsed.hostname}",
-                data={'url': resolved_url, 'parsed': result, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"URL解析失败: {str(e)}")
+            elif operation == "add_query":
+                if not url:
+                    return {"success": False, "error": "url required"}
+                key = params.get("key", "")
+                value = params.get("value", "")
+                parsed = urlparse.urlparse(url)
+                query = dict(urlparse.parse_qsl(parsed.query))
+                query[key] = value
+                new_query = _build_query(query)
+                reconstructed = urlparse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+                return {"success": True, "url": reconstructed}
 
-    def get_required_params(self) -> List[str]:
-        return ['url']
+            elif operation == "remove_query":
+                if not url:
+                    return {"success": False, "error": "url required"}
+                key = params.get("key", "")
+                parsed = urlparse.urlparse(url)
+                query = dict(urlparse.parse_qsl(parsed.query))
+                removed = query.pop(key, None)
+                new_query = _build_query(query)
+                reconstructed = urlparse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+                return {"success": True, "url": reconstructed, "removed": removed is not None}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'url_parsed'}
+            elif operation == "get_query":
+                if not url:
+                    return {"success": False, "error": "url required"}
+                parsed = urlparse.urlparse(url)
+                query = dict(urlparse.parse_qsl(parsed.query))
+                key = params.get("key", "")
+                if key:
+                    value = query.get(key)
+                    return {"success": True, "key": key, "value": value, "found": key in query}
+                return {"success": True, "query": query}
 
+            elif operation == "validate":
+                if not url:
+                    return {"success": False, "error": "url required"}
+                pattern = re.compile(
+                    r"^https?://"
+                    r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|"
+                    r"localhost|"
+                    r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
+                    r"(?::\d+)?"
+                    r"(?:/?|[/?]\S+)$", re.IGNORECASE)
+                valid = bool(pattern.match(url))
+                return {"success": True, "valid": valid, "url": url}
 
-class UrlBuildAction(BaseAction):
-    """Build URL."""
-    action_type = "url_build"
-    display_name = "URL构建"
-    description = "构建URL"
-    version = "1.0"
+            elif operation == "extract_domain":
+                if not url:
+                    return {"success": False, "error": "url required"}
+                parsed = urlparse.urlparse(url)
+                domain = parsed.netloc.split(":")[0]
+                return {"success": True, "domain": domain, "url": url}
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute build.
+            elif operation == "is_absolute":
+                if not url:
+                    return {"success": False, "error": "url required"}
+                parsed = urlparse.urlparse(url)
+                return {"success": True, "absolute": bool(parsed.scheme and parsed.netloc), "url": url}
 
-        Args:
-            context: Execution context.
-            params: Dict with scheme, host, path, query, output_var.
+            elif operation == "join":
+                base = url or params.get("base", "")
+                if not base:
+                    return {"success": False, "error": "base url required"}
+                rel = params.get("relative", "")
+                joined = urlparse.urljoin(base, rel)
+                return {"success": True, "url": joined, "base": base, "relative": rel}
 
-        Returns:
-            ActionResult with built URL.
-        """
-        scheme = params.get('scheme', 'https')
-        host = params.get('host', '')
-        path = params.get('path', '/')
-        query = params.get('query', {})
-        output_var = params.get('output_var', 'url_built')
+            elif operation == "path_segments":
+                if not url:
+                    return {"success": False, "error": "url required"}
+                parsed = urlparse.urlparse(url)
+                segments = [s for s in parsed.path.split("/") if s]
+                return {"success": True, "segments": segments, "count": len(segments), "path": parsed.path}
 
-        valid, msg = self.validate_type(host, str, 'host')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+            elif operation == "encode_component":
+                if not text:
+                    return {"success": False, "error": "text required"}
+                safe = params.get("safe", "")
+                encoded = urlparse.quote(text, safe=safe)
+                return {"success": True, "encoded": encoded}
 
-        try:
-            resolved_scheme = context.resolve_value(scheme)
-            resolved_host = context.resolve_value(host)
-            resolved_path = context.resolve_value(path)
-            resolved_query = context.resolve_value(query) if query else {}
+            elif operation == "decode_component":
+                if not text:
+                    return {"success": False, "error": "text required"}
+                decoded = urlparse.unquote(text)
+                return {"success": True, "decoded": decoded}
 
-            query_str = urllib.parse.urlencode(resolved_query) if resolved_query else ''
+            elif operation == "urlencode":
+                params_dict = params.get("params", {})
+                doseq = params.get("doseq", True)
+                encoded = urlparse.urlencode(params_dict, doseq=doseq)
+                return {"success": True, "encoded": encoded}
 
-            if resolved_path and not resolved_path.startswith('/'):
-                resolved_path = '/' + resolved_path
+            elif operation == "parse_qs":
+                if not text:
+                    return {"success": False, "error": "query string required"}
+                parsed = urlparse.parse_qs(text, keep_blank_values=True)
+                return {"success": True, "params": {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}}
 
-            if query_str:
-                url = f"{resolved_scheme}://{resolved_host}{resolved_path}?{query_str}"
             else:
-                url = f"{resolved_scheme}://{resolved_host}{resolved_path}"
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
-            context.set(output_var, url)
-
-            return ActionResult(
-                success=True,
-                message=f"URL已构建: {url}",
-                data={'url': url, 'output_var': output_var}
-            )
         except Exception as e:
-            return ActionResult(success=False, message=f"URL构建失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['scheme', 'host']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'path': '/', 'query': {}, 'output_var': 'url_built'}
+            logger.error(f"URLAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-class UrlEncodeAction(BaseAction):
-    """URL encode."""
-    action_type = "url_encode"
-    display_name = "URL编码"
-    description = "URL编码"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute encode.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, safe, output_var.
-
-        Returns:
-            ActionResult with encoded URL.
-        """
-        data = params.get('data', '')
-        safe = params.get('safe', '')
-        output_var = params.get('output_var', 'url_encoded')
-
-        valid, msg = self.validate_type(data, str, 'data')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_data = context.resolve_value(data)
-            resolved_safe = context.resolve_value(safe) if safe else ''
-
-            encoded = urllib.parse.quote(resolved_data, safe=resolved_safe)
-            context.set(output_var, encoded)
-
-            return ActionResult(
-                success=True,
-                message=f"URL编码完成",
-                data={'encoded': encoded, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"URL编码失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'safe': '', 'output_var': 'url_encoded'}
-
-
-class UrlDecodeAction(BaseAction):
-    """URL decode."""
-    action_type = "url_decode"
-    display_name = "URL解码"
-    description = "URL解码"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute decode.
-
-        Args:
-            context: Execution context.
-            params: Dict with data, output_var.
-
-        Returns:
-            ActionResult with decoded URL.
-        """
-        data = params.get('data', '')
-        output_var = params.get('output_var', 'url_decoded')
-
-        valid, msg = self.validate_type(data, str, 'data')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_data = context.resolve_value(data)
-
-            decoded = urllib.parse.unquote(resolved_data)
-            context.set(output_var, decoded)
-
-            return ActionResult(
-                success=True,
-                message=f"URL解码完成",
-                data={'decoded': decoded, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"URL解码失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'url_decoded'}
-
-
-class UrlValidateAction(BaseAction):
-    """Validate URL."""
-    action_type = "url_validate"
-    display_name = "URL验证"
-    description = "验证URL格式"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute validate.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, output_var.
-
-        Returns:
-            ActionResult with validation result.
-        """
-        url = params.get('url', '')
-        output_var = params.get('output_var', 'url_valid')
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_url = context.resolve_value(url)
-
-            parsed = urllib.parse.urlparse(resolved_url)
-            is_valid = bool(parsed.scheme and parsed.netloc)
-
-            context.set(output_var, is_valid)
-
-            return ActionResult(
-                success=True,
-                message=f"URL {'有效' if is_valid else '无效'}",
-                data={'url': resolved_url, 'valid': is_valid, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"URL验证失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'url_valid'}
-
-
-class UrlQueryParamsAction(BaseAction):
-    """Get URL query parameters."""
-    action_type = "url_query_params"
-    display_name = "URL查询参数"
-    description = "提取URL查询参数"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute query params.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, output_var.
-
-        Returns:
-            ActionResult with query params.
-        """
-        url = params.get('url', '')
-        output_var = params.get('output_var', 'url_params')
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_url = context.resolve_value(url)
-
-            parsed = urllib.parse.urlparse(resolved_url)
-            params_dict = dict(urllib.parse.parse_qsl(parsed.query))
-
-            context.set(output_var, params_dict)
-
-            return ActionResult(
-                success=True,
-                message=f"查询参数: {len(params_dict)} 个",
-                data={'params': params_dict, 'count': len(params_dict), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"URL查询参数提取失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'url_params'}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for URL operations."""
+    return URLAction().execute(context, params)

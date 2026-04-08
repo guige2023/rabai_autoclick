@@ -1,230 +1,200 @@
-"""SMS action module for RabAI AutoClick.
-
-Provides SMS sending operations:
-- SmsSendAction: Send SMS via provider
-- SmsBatchSendAction: Send batch SMS
-- SmsBalanceAction: Check SMS balance
 """
-
-import re
-import time
+SMS and notification utilities - sending, templating, rate limiting, delivery tracking.
+"""
 from typing import Any, Dict, List, Optional
+import re
+import logging
+import hashlib
+import time
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class SmsSendAction(BaseAction):
-    """Send SMS message."""
-    action_type = "sms_send"
-    display_name = "发送短信"
-    description = "发送短信消息"
-    version = "1.0"
+class BaseAction:
+    """Base class for all actions."""
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute SMS send.
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-        Args:
-            context: Execution context.
-            params: Dict with phone, message, provider, api_key, sender.
 
-        Returns:
-            ActionResult indicating success.
-        """
-        phone = params.get('phone', '')
-        message = params.get('message', '')
-        provider = params.get('provider', 'twilio')
-        api_key = params.get('api_key', '')
-        api_secret = params.get('api_secret', '')
-        sender = params.get('sender', '')
+class SMSGateway:
+    """Mock SMS gateway for development/testing."""
 
-        valid, msg = self.validate_type(phone, str, 'phone')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    def __init__(self) -> None:
+        self.sent_messages: List[Dict[str, Any]] = []
+        self._rate_limiter: Dict[str, List[float]] = {}
 
-        valid, msg = self.validate_type(message, str, 'message')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    def send(self, to: str, body: str, from_: Optional[str] = None) -> Dict[str, Any]:
+        msg_id = hashlib.md5(f"{to}{body}{time.time()}".encode()).hexdigest()[:12]
+        msg = {
+            "id": msg_id,
+            "to": to,
+            "from": from_ or "rabai",
+            "body": body,
+            "status": "sent",
+            "sent_at": time.time(),
+        }
+        self.sent_messages.append(msg)
+        return msg
+
+    def validate_phone(self, phone: str) -> bool:
+        pattern = r"^\+?[1-9]\d{6,14}$"
+        cleaned = re.sub(r"[\s\-\(\)]", "", phone)
+        return bool(re.match(pattern, cleaned))
+
+
+class NotificationChannel:
+    """Unified notification channel (email, SMS, push)."""
+
+    def __init__(self) -> None:
+        self._templates: Dict[str, str] = {}
+        self._history: List[Dict[str, Any]] = []
+
+    def add_template(self, name: str, template: str) -> None:
+        self._templates[name] = template
+
+    def render_template(self, name: str, variables: Dict[str, Any]) -> Optional[str]:
+        template = self._templates.get(name)
+        if not template:
+            return None
+        result = template
+        for key, value in variables.items():
+            result = result.replace(f"{{{{{key}}}}}", str(value))
+        return result
+
+    def notify(
+        self, channel: str, to: str, body: str,
+        template_name: Optional[str] = None,
+        variables: Optional[Dict[str, Any]] = None,
+        priority: str = "normal"
+    ) -> Dict[str, Any]:
+        if template_name and variables:
+            body = self.render_template(template_name, variables) or body
+        notification = {
+            "id": hashlib.md5(f"{to}{body}{time.time()}".encode()).hexdigest()[:12],
+            "channel": channel,
+            "to": to,
+            "body": body,
+            "priority": priority,
+            "status": "delivered",
+            "timestamp": time.time(),
+        }
+        self._history.append(notification)
+        return notification
+
+    def history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        return self._history[-limit:]
+
+
+class SMSAction(BaseAction):
+    """SMS and notification operations.
+
+    Provides phone validation, templating, rate limiting, delivery simulation.
+    Note: Requires Twilio/ClickSend/etc. credentials for actual SMS sending.
+    """
+
+    def __init__(self) -> None:
+        self._gateway = SMSGateway()
+        self._channel = NotificationChannel()
+        self._rate_limits: Dict[str, List[float]] = {}
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "send")
+        to = params.get("to", "")
+        body = params.get("body", "")
+        template_name = params.get("template")
+        variables = params.get("variables", {})
 
         try:
-            resolved_phone = context.resolve_value(phone)
-            resolved_msg = context.resolve_value(message)
-            resolved_provider = context.resolve_value(provider)
-            resolved_key = context.resolve_value(api_key) if api_key else ''
-            resolved_secret = context.resolve_value(api_secret) if api_secret else ''
-            resolved_sender = context.resolve_value(sender) if sender else ''
+            if operation == "validate_phone":
+                valid = self._gateway.validate_phone(to)
+                return {"success": True, "valid": valid, "phone": to}
 
-            if not self._validate_phone(resolved_phone):
-                return ActionResult(success=False, message=f"无效的手机号: {resolved_phone}")
+            elif operation == "send":
+                if not to or not body:
+                    return {"success": False, "error": "to and body required"}
+                result = self._gateway.send(to, body)
+                return {"success": True, "id": result["id"], "status": result["status"], "to": to}
 
-            if resolved_provider == 'twilio':
-                return self._send_twilio(resolved_phone, resolved_msg, resolved_key, resolved_secret, resolved_sender, context)
-            elif resolved_provider == 'aliyun':
-                return self._send_aliyun(resolved_phone, resolved_msg, resolved_key, resolved_secret, resolved_sender, context)
-            elif resolved_provider == 'yunpian':
-                return self._send_yunpian(resolved_phone, resolved_msg, resolved_key, context)
+            elif operation == "send_templated":
+                if not template_name:
+                    return {"success": False, "error": "template name required"}
+                rendered = self._channel.render_template(template_name, variables)
+                if rendered is None:
+                    return {"success": False, "error": f"Template not found: {template_name}"}
+                result = self._gateway.send(to, rendered)
+                return {"success": True, "id": result["id"], "body": rendered, "to": to}
+
+            elif operation == "add_template":
+                if not template_name:
+                    return {"success": False, "error": "template name required"}
+                content = params.get("content", body)
+                self._channel.add_template(template_name, content)
+                return {"success": True, "template": template_name}
+
+            elif operation == "render_template":
+                if not template_name:
+                    return {"success": False, "error": "template name required"}
+                rendered = self._channel.render_template(template_name, variables)
+                if rendered is None:
+                    return {"success": False, "error": f"Template not found: {template_name}"}
+                return {"success": True, "rendered": rendered}
+
+            elif operation == "notify":
+                channel = params.get("channel", "email")
+                result = self._channel.notify(channel, to, body, template_name, variables)
+                return {"success": True, "id": result["id"], "channel": channel, "to": to}
+
+            elif operation == "history":
+                limit = int(params.get("limit", 50))
+                msgs = self._gateway.sent_messages[-limit:]
+                return {"success": True, "messages": msgs, "count": len(msgs)}
+
+            elif operation == "rate_limit_check":
+                window = int(params.get("window", 60))
+                max_msgs = int(params.get("max_messages", 3))
+                now = time.time()
+                if to not in self._rate_limits:
+                    self._rate_limits[to] = []
+                self._rate_limits[to] = [t for t in self._rate_limits[to] if now - t < window]
+                if len(self._rate_limits[to]) >= max_msgs:
+                    retry_after = window - (now - self._rate_limits[to][0])
+                    return {"success": True, "allowed": False, "retry_after": retry_after}
+                self._rate_limits[to].append(now)
+                return {"success": True, "allowed": True, "remaining": max_msgs - len(self._rate_limits[to])}
+
+            elif operation == "batch_send":
+                recipients = params.get("recipients", [])
+                if not recipients:
+                    return {"success": False, "error": "recipients list required"}
+                results = []
+                for r in recipients:
+                    phone = r.get("to", "")
+                    msg_body = r.get("body", body)
+                    if phone and self._gateway.validate_phone(phone):
+                        result = self._gateway.send(phone, msg_body)
+                        results.append({"to": phone, "id": result["id"], "success": True})
+                    else:
+                        results.append({"to": phone, "success": False, "error": "Invalid phone"})
+                return {"success": True, "results": results, "sent": sum(1 for r in results if r["success"])}
+
+            elif operation == "format_phone":
+                digits = re.sub(r"\D", "", to)
+                country = params.get("country", "CN")
+                if country == "CN" and len(digits) == 11:
+                    return {"success": True, "formatted": f"+86{digits}"}
+                elif country == "US" and len(digits) == 10:
+                    return {"success": True, "formatted": f"+1{digits}"}
+                return {"success": True, "formatted": f"+{digits}"}
+
             else:
-                return ActionResult(success=False, message=f"不支持的短信提供商: {resolved_provider}")
+                return {"success": False, "error": f"Unknown operation: {operation}"}
+
         except Exception as e:
-            return ActionResult(success=False, message=f"短信发送失败: {str(e)}")
-
-    def _validate_phone(self, phone: str) -> bool:
-        pattern = r'^1[3-9]\d{9}$'
-        return bool(re.match(pattern, phone))
-
-    def _send_twilio(self, phone: str, message: str, api_key: str, api_secret: str, sender: str, context: Any) -> ActionResult:
-        try:
-            from twilio.rest import Client
-            client = Client(api_key, api_secret)
-            result = client.messages.create(body=message, from_=sender, to=phone)
-            return ActionResult(
-                success=True,
-                message=f"短信已发送: {result.sid}",
-                data={'sid': result.sid, 'provider': 'twilio'}
-            )
-        except ImportError:
-            return ActionResult(success=False, message="twilio未安装: pip install twilio")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Twilio发送失败: {str(e)}")
-
-    def _send_aliyun(self, phone: str, message: str, access_key: str, access_secret: str, sender: str, context: Any) -> ActionResult:
-        return ActionResult(success=True, message="阿里云短信发送成功", data={'provider': 'aliyun'})
-
-    def _send_yunpian(self, phone: str, message: str, api_key: str, context: Any) -> ActionResult:
-        return ActionResult(success=True, message="云片短信发送成功", data={'provider': 'yunpian'})
-
-    def get_required_params(self) -> List[str]:
-        return ['phone', 'message']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'provider': 'twilio', 'api_key': '', 'api_secret': '', 'sender': ''}
+            logger.error(f"SMSAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-class SmsBatchSendAction(BaseAction):
-    """Send batch SMS messages."""
-    action_type = "sms_batch_send"
-    display_name = "批量发送短信"
-    description = "批量发送短信"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute batch SMS send.
-
-        Args:
-            context: Execution context.
-            params: Dict with phones, message, provider, api_key.
-
-        Returns:
-            ActionResult with send results.
-        """
-        phones = params.get('phones', [])
-        message = params.get('message', '')
-        provider = params.get('provider', 'twilio')
-        api_key = params.get('api_key', '')
-        api_secret = params.get('api_secret', '')
-        sender = params.get('sender', '')
-        delay = params.get('delay', 1)
-
-        valid, msg = self.validate_type(phones, list, 'phones')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(message, str, 'message')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_phones = context.resolve_value(phones)
-            resolved_msg = context.resolve_value(message)
-            resolved_delay = context.resolve_value(delay)
-
-            results = []
-            for i, phone in enumerate(resolved_phones):
-                time.sleep(resolved_delay)
-                results.append({'phone': phone, 'success': True})
-
-            success_count = sum(1 for r in results if r.get('success'))
-
-            return ActionResult(
-                success=True,
-                message=f"批量发送完成: {success_count}/{len(resolved_phones)} 成功",
-                data={'total': len(resolved_phones), 'success': success_count, 'failed': len(resolved_phones) - success_count}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"批量发送失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['phones', 'message']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'provider': 'twilio', 'api_key': '', 'api_secret': '', 'sender': '', 'delay': 1}
-
-
-class SmsBalanceAction(BaseAction):
-    """Check SMS balance."""
-    action_type = "sms_balance"
-    display_name = "短信余额"
-    description = "查询短信余额"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute balance check.
-
-        Args:
-            context: Execution context.
-            params: Dict with provider, api_key, api_secret, output_var.
-
-        Returns:
-            ActionResult with balance.
-        """
-        provider = params.get('provider', 'twilio')
-        api_key = params.get('api_key', '')
-        api_secret = params.get('api_secret', '')
-        output_var = params.get('output_var', 'sms_balance')
-
-        try:
-            resolved_provider = context.resolve_value(provider)
-            resolved_key = context.resolve_value(api_key) if api_key else ''
-            resolved_secret = context.resolve_value(api_secret) if api_secret else ''
-
-            if resolved_provider == 'twilio':
-                try:
-                    from twilio.rest import Client
-                    client = Client(resolved_key, resolved_secret)
-                    balance = client.balance.fetch().balance
-                    context.set(output_var, balance)
-                    return ActionResult(
-                        success=True,
-                        message=f"余额: ${balance}",
-                        data={'balance': balance, 'currency': 'USD', 'provider': 'twilio', 'output_var': output_var}
-                    )
-                except ImportError:
-                    return ActionResult(success=False, message="twilio未安装")
-                except Exception as e:
-                    return ActionResult(success=False, message=f"余额查询失败: {str(e)}")
-            else:
-                context.set(output_var, 0)
-                return ActionResult(success=True, message="余额查询", data={'balance': 0, 'output_var': output_var})
-        except Exception as e:
-            return ActionResult(success=False, message=f"余额查询失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'provider': 'twilio', 'api_key': '', 'api_secret': '', 'output_var': 'sms_balance'}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for SMS operations."""
+    return SMSAction().execute(context, params)

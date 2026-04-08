@@ -1,399 +1,214 @@
 """
-Markdown processing and formatting actions.
+Markdown utilities - parsing, rendering, table conversion, link extraction, document generation.
 """
-from __future__ import annotations
-
+from typing import Any, Dict, List, Optional
 import re
-from typing import Dict, Any, Optional, List
-from html import escape as html_escape
+import logging
+import html
+
+logger = logging.getLogger(__name__)
 
 
-def render_markdown(markdown: str) -> str:
-    """
-    Render Markdown to HTML.
+class BaseAction:
+    """Base class for all actions."""
 
-    Args:
-        markdown: Markdown text.
-
-    Returns:
-        HTML string.
-    """
-    html = markdown
-
-    html = re.sub(r'^###### (.+)$', r'<h6>\1</h6>', html, flags=re.MULTILINE)
-    html = re.sub(r'^##### (.+)$', r'<h5>\1</h5>', html, flags=re.MULTILINE)
-    html = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', html, flags=re.MULTILINE)
-    html = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
-    html = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
-    html = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
-
-    html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html)
-    html = re.sub(r'__(.+?)__', r'<strong>\1</strong>', html)
-    html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', html)
-    html = re.sub(r'_(.+?)_', r'<em>\1</em>', html)
-
-    html = re.sub(r'~~(.+?)~~', r'<del>\1</del>', html)
-
-    html = re.sub(r'`(.+?)`', r'<code>\1</code>', html)
-
-    lines = html.split('\n')
-    in_list = False
-    result_lines = []
-
-    for line in lines:
-        list_match = re.match(r'^[\-\*] (.+)$', line)
-        if list_match:
-            if not in_list:
-                result_lines.append('<ul>')
-                in_list = True
-            result_lines.append(f'  <li>{list_match.group(1)}</li>')
-        else:
-            if in_list:
-                result_lines.append('</ul>')
-                in_list = False
-            result_lines.append(line)
-
-    if in_list:
-        result_lines.append('</ul>')
-
-    html = '\n'.join(result_lines)
-
-    html = re.sub(
-        r'\[(.+?)\]\((.+?)\)',
-        r'<a href="\2">\1</a>',
-        html
-    )
-
-    html = re.sub(r'!\[(.+?)\]\((.+?)\)', r'<img src="\2" alt="\1">', html)
-
-    html = re.sub(r'^> (.+)$', r'<blockquote>\1</blockquote>', html, flags=re.MULTILINE)
-
-    html = re.sub(r'^---$', '<hr>', html, flags=re.MULTILINE)
-
-    html = html.replace('\n\n', '</p><p>')
-    html = f'<p>{html}</p>'
-
-    return html
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
 
-def extract_headings(markdown: str) -> List[Dict[str, Any]]:
-    """
-    Extract all headings from Markdown.
-
-    Args:
-        markdown: Markdown text.
-
-    Returns:
-        List of heading dictionaries.
-    """
-    headings: List[Dict[str, Any]] = []
-
-    lines = markdown.split('\n')
-
-    for line in lines:
-        match = re.match(r'^(#{1,6}) (.+)$', line)
-        if match:
-            headings.append({
-                'level': len(match.group(1)),
-                'text': match.group(2).strip(),
-            })
-
-    return headings
+def _parse_headings(text: str) -> List[Dict[str, Any]]:
+    pattern = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+    results = []
+    for match in pattern.finditer(text):
+        results.append({"level": len(match.group(1)), "text": match.group(2).strip(), "line": text[:match.start()].count("\n") + 1})
+    return results
 
 
-def extract_links(markdown: str) -> List[Dict[str, str]]:
-    """
-    Extract all links from Markdown.
-
-    Args:
-        markdown: Markdown text.
-
-    Returns:
-        List of link dictionaries.
-    """
-    links: List[Dict[str, str]] = []
-
-    for match in re.finditer(r'\[(.+?)\]\((.+?)\)', markdown):
-        links.append({
-            'text': match.group(1),
-            'url': match.group(2),
-        })
-
-    return links
+def _parse_code_blocks(text: str) -> List[Dict[str, str]]:
+    pattern = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
+    results = []
+    for match in pattern.finditer(text):
+        results.append({"language": match.group(1), "code": match.group(2)})
+    return results
 
 
-def extract_code_blocks(markdown: str) -> List[Dict[str, str]]:
-    """
-    Extract all code blocks from Markdown.
-
-    Args:
-        markdown: Markdown text.
-
-    Returns:
-        List of code block dictionaries.
-    """
-    blocks: List[Dict[str, str]] = []
-
-    pattern = r'```(\w*)\n(.*?)```'
-
-    for match in re.finditer(pattern, markdown, re.DOTALL):
-        blocks.append({
-            'language': match.group(1),
-            'code': match.group(2).strip(),
-        })
-
-    return blocks
+def _extract_links(text: str) -> List[Dict[str, str]]:
+    pattern = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+    return [{"text": m.group(1), "url": m.group(2)} for m in pattern.finditer(text)]
 
 
-def strip_markdown(markdown: str) -> str:
-    """
-    Remove all Markdown formatting from text.
-
-    Args:
-        markdown: Markdown text.
-
-    Returns:
-        Plain text.
-    """
-    text = markdown
-
-    text = re.sub(r'^#{1,6} ', '', text, flags=re.MULTILINE)
-
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    text = re.sub(r'__(.+?)__', r'\1', text)
-    text = re.sub(r'\*(.+?)\*', r'\1', text)
-    text = re.sub(r'_(.+?)_', r'\1', text)
-    text = re.sub(r'~~(.+?)~~', r'\1', text)
-
-    text = re.sub(r'`(.+?)`', r'\1', text)
-
-    text = re.sub(r'```.*?\n(.*?)```', r'\1', text, flags=re.DOTALL)
-
-    text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
-
-    text = re.sub(r'!\[.*?\]\(.+?\)', '', text)
-
-    text = re.sub(r'^> ', '', text, flags=re.MULTILINE)
-
-    text = re.sub(r'^[\-\*] ', '', text, flags=re.MULTILINE)
-
-    text = re.sub(r'^---$', '', text, flags=re.MULTILINE)
-
-    return text.strip()
+def _extract_images(text: str) -> List[Dict[str, str]]:
+    pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+    return [{"alt": m.group(1), "url": m.group(2)} for m in pattern.finditer(text)]
 
 
-def create_markdown_table(
-    headers: List[str],
-    rows: List[List[str]]
-) -> str:
-    """
-    Create a Markdown table.
+def _markdown_to_html(text: str) -> str:
+    html_out = text
+    html_out = re.sub(r"^######\s+(.+)$", r"<h6>\1</h6>", html_out, flags=re.MULTILINE)
+    html_out = re.sub(r"^#####\s+(.+)$", r"<h5>\1</h5>", html_out, flags=re.MULTILINE)
+    html_out = re.sub(r"^####\s+(.+)$", r"<h4>\1</h4>", html_out, flags=re.MULTILINE)
+    html_out = re.sub(r"^###\s+(.+)$", r"<h3>\1</h3>", html_out, flags=re.MULTILINE)
+    html_out = re.sub(r"^##\s+(.+)$", r"<h2>\1</h2>", html_out, flags=re.MULTILINE)
+    html_out = re.sub(r"^#\s+(.+)$", r"<h1>\1</h1>", html_out, flags=re.MULTILINE)
+    html_out = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html_out)
+    html_out = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html_out)
+    html_out = re.sub(r"~~(.+?)~~", r"<del>\1</del>", html_out)
+    html_out = re.sub(r"`([^`]+)`", r"<code>\1</code>", html_out)
+    html_out = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', html_out)
+    html_out = re.sub(r"^>\s+(.+)$", r"<blockquote>\1</blockquote>", html_out, flags=re.MULTILINE)
+    html_out = re.sub(r"^- ", r"<li>", html_out)
+    html_out = re.sub(r"(?<!<li>)\n", r"\n", html_out)
+    return html_out
 
-    Args:
-        headers: Column headers.
-        rows: Data rows.
 
-    Returns:
-        Markdown table string.
-    """
-    lines = []
-
-    lines.append('| ' + ' | '.join(headers) + ' |')
-
-    lines.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
-
+def _table_to_markdown(headers: List[str], rows: List[List[str]]) -> str:
+    lines = ["| " + " | ".join(headers) + " |"]
+    lines.append("| " + " | ".join("---" for _ in headers) + " |")
     for row in rows:
-        lines.append('| ' + ' | '.join(str(cell) for cell in row) + ' |')
-
-    return '\n'.join(lines)
-
-
-def markdown_to_plain_text(markdown: str) -> str:
-    """
-    Convert Markdown to plain text.
-
-    Args:
-        markdown: Markdown text.
-
-    Returns:
-        Plain text.
-    """
-    return strip_markdown(markdown)
+        lines.append("| " + " | ".join(str(c) for c in row) + " |")
+    return "\n".join(lines)
 
 
-def word_count(markdown: str) -> int:
-    """
-    Count words in Markdown (excluding formatting).
-
-    Args:
-        markdown: Markdown text.
-
-    Returns:
-        Word count.
-    """
-    text = strip_markdown(markdown)
-    words = re.findall(r'\b\w+\b', text)
-    return len(words)
-
-
-def extract_images(markdown: str) -> List[Dict[str, str]]:
-    """
-    Extract all images from Markdown.
-
-    Args:
-        markdown: Markdown text.
-
-    Returns:
-        List of image dictionaries.
-    """
-    images: List[Dict[str, str]] = []
-
-    for match in re.finditer(r'!\[(.+?)\]\((.+?)\)', markdown):
-        images.append({
-            'alt': match.group(1),
-            'url': match.group(2),
-        })
-
-    return images
-
-
-def add_syntax_highlighting(
-    code: str,
-    language: str
-) -> str:
-    """
-    Wrap code in a fenced code block with language.
-
-    Args:
-        code: Code content.
-        language: Programming language.
-
-    Returns:
-        Markdown code block.
-    """
-    return f'```{language}\n{code}\n```'
-
-
-def create_link(text: str, url: str) -> str:
-    """
-    Create a Markdown link.
-
-    Args:
-        text: Link text.
-        url: Link URL.
-
-    Returns:
-        Markdown link.
-    """
-    return f'[{text}]({url})'
-
-
-def create_image(alt: str, url: str) -> str:
-    """
-    Create a Markdown image.
-
-    Args:
-        alt: Alt text.
-        url: Image URL.
-
-    Returns:
-        Markdown image.
-    """
-    return f'![{alt}]({url})'
-
-
-def create_heading(text: str, level: int = 1) -> str:
-    """
-    Create a Markdown heading.
-
-    Args:
-        text: Heading text.
-        level: Heading level (1-6).
-
-    Returns:
-        Markdown heading.
-    """
-    level = max(1, min(6, level))
-    return f"{'#' * level} {text}"
-
-
-def create_task_list(items: List[Dict[str, Any]]) -> str:
-    """
-    Create a Markdown task list.
-
-    Args:
-        items: List of items with 'text' and 'checked' keys.
-
-    Returns:
-        Markdown task list.
-    """
-    lines = []
-    for item in items:
-        checkbox = '[x]' if item.get('checked', False) else '[ ]'
-        lines.append(f'- {checkbox} {item.get("text", "")}')
-    return '\n'.join(lines)
-
-
-def extract_table_data(markdown_table: str) -> Dict[str, Any]:
-    """
-    Parse a Markdown table into data.
-
-    Args:
-        markdown_table: Markdown table.
-
-    Returns:
-        Dictionary with headers and rows.
-    """
-    lines = markdown_table.strip().split('\n')
-
-    if len(lines) < 2:
-        return {'headers': [], 'rows': []}
-
-    headers = [h.strip() for h in lines[0].split('|')[1:-1]]
-
+def _parse_table(text: str) -> Optional[Dict[str, Any]]:
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if not lines:
+        return None
     rows = []
-    for line in lines[2:]:
-        cells = [c.strip() for c in line.split('|')[1:-1]]
+    for line in lines:
+        cells = [c.strip() for c in re.split(r"\|", line)]
+        cells = [c for c in cells if c and c != "---"]
         if cells:
             rows.append(cells)
+    if not rows:
+        return None
+    return {"headers": rows[0], "rows": rows[1:] if len(rows) > 1 else []}
 
-    return {'headers': headers, 'rows': rows}
+
+def _count_words(text: str) -> Dict[str, int]:
+    clean = re.sub(r"[#*`~\[\]()>-]", "", text)
+    words = clean.split()
+    return {"words": len(words), "chars": len(clean), "lines": len(text.split("\n"))}
 
 
-def is_valid_markdown_link(text: str) -> bool:
+class MarkdownAction(BaseAction):
+    """Markdown operations.
+
+    Provides parsing, rendering, table conversion, link/image extraction.
     """
-    Check if text is a valid Markdown link.
 
-    Args:
-        text: Text to check.
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "render")
+        text = params.get("text", "")
 
-    Returns:
-        True if valid link format.
-    """
-    return bool(re.match(r'\[.+?\]\(.+?\)', text))
+        try:
+            if operation == "render":
+                html_out = _markdown_to_html(text)
+                return {"success": True, "html": html_out}
+
+            elif operation == "parse_headings":
+                headings = _parse_headings(text)
+                return {"success": True, "headings": headings, "count": len(headings)}
+
+            elif operation == "parse_code_blocks":
+                blocks = _parse_code_blocks(text)
+                return {"success": True, "blocks": blocks, "count": len(blocks)}
+
+            elif operation == "extract_links":
+                links = _extract_links(text)
+                return {"success": True, "links": links, "count": len(links)}
+
+            elif operation == "extract_images":
+                images = _extract_images(text)
+                return {"success": True, "images": images, "count": len(images)}
+
+            elif operation == "parse_table":
+                result = _parse_table(text)
+                if result:
+                    return {"success": True, **result}
+                return {"success": False, "error": "Could not parse table"}
+
+            elif operation == "build_table":
+                headers = params.get("headers", [])
+                rows = params.get("rows", [])
+                table = _table_to_markdown(headers, rows)
+                return {"success": True, "table": table}
+
+            elif operation == "extract_toc":
+                headings = _parse_headings(text)
+                toc = []
+                for h in headings:
+                    indent = "  " * (h["level"] - 1)
+                    toc.append(f"{indent}- [{h['text']}](#{h['text'].lower().replace(' ', '-')})")
+                return {"success": True, "toc": "\n".join(toc), "count": len(toc)}
+
+            elif operation == "word_count":
+                counts = _count_words(text)
+                return {"success": True, **counts}
+
+            elif operation == "strip_markdown":
+                stripped = re.sub(r"[#*`~\[\]()>-_]", "", text)
+                stripped = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", stripped)
+                stripped = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", stripped)
+                return {"success": True, "text": stripped}
+
+            elif operation == "blockquote":
+                content = params.get("content", text)
+                cite = params.get("cite", "")
+                lines = [f"> {line}" for line in content.split("\n")]
+                if cite:
+                    lines.append(f"\n> — *{cite}*")
+                return {"success": True, "blockquote": "\n".join(lines)}
+
+            elif operation == "build_link":
+                text_val = params.get("text", "")
+                url = params.get("url", "")
+                return {"success": True, "markdown": f"[{text_val}]({url})"}
+
+            elif operation == "build_image":
+                alt = params.get("alt", "")
+                url = params.get("url", "")
+                return {"success": True, "markdown": f"![{alt}]({url})"}
+
+            elif operation == "build_task_list":
+                items = params.get("items", [])
+                checked = params.get("checked", [])
+                lines = []
+                for i, item in enumerate(items):
+                    checked_mark = "x" if i in checked else " "
+                    lines.append(f"- [{checked_mark}] {item}")
+                return {"success": True, "markdown": "\n".join(lines)}
+
+            elif operation == "escape_html":
+                escaped = html.escape(text)
+                return {"success": True, "escaped": escaped}
+
+            elif operation == "unescape_html":
+                unescaped = html.unescape(text)
+                return {"success": True, "unescaped": unescaped}
+
+            elif operation == "summary":
+                headings = _parse_headings(text)
+                word_counts = _count_words(text)
+                links = _extract_links(text)
+                images = _extract_images(text)
+                return {
+                    "success": True,
+                    "headings": len(headings),
+                    "words": word_counts["words"],
+                    "chars": word_counts["chars"],
+                    "lines": word_counts["lines"],
+                    "links": len(links),
+                    "images": len(images),
+                }
+
+            else:
+                return {"success": False, "error": f"Unknown operation: {operation}"}
+
+        except Exception as e:
+            logger.error(f"MarkdownAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-def markdown_to_github_issue(body: str) -> str:
-    """
-    Format Markdown for GitHub issues.
-
-    Args:
-        body: Markdown body.
-
-    Returns:
-        GitHub-formatted Markdown.
-    """
-    lines = body.split('\n')
-    result = []
-
-    for line in lines:
-        if re.match(r'^#{1,6} ', line):
-            result.append(line)
-        elif re.match(r'^\- \[ \]', line):
-            result.append(line)
-        elif re.match(r'^\- \[x\]', line):
-            result.append(line)
-        else:
-            result.append(line)
-
-    return '\n'.join(result)
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for markdown operations."""
+    return MarkdownAction().execute(context, params)

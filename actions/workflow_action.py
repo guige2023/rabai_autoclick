@@ -1,442 +1,278 @@
-"""Workflow automation action module for RabAI AutoClick.
-
-Provides workflow automation operations:
-- WorkflowCreateAction: Create workflow
-- WorkflowExecuteAction: Execute workflow steps
-- WorkflowConditionalAction: Conditional branching
-- WorkflowLoopAction: Loop over items
-- WorkflowParallelExecuteAction: Parallel execution
-- WorkflowWaitAction: Wait/delay actions
 """
+Workflow and state machine utilities - FSM, DAG execution, step pipeline, branching.
+"""
+from typing import Any, Dict, List, Optional, Callable, Set
+from enum import Enum
+import logging
 
-import time
-from typing import Any, Callable, Dict, List, Optional
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class WorkflowCreateAction(BaseAction):
-    """Create a workflow."""
-    action_type = "workflow_create"
-    display_name = "创建工作流"
-    description = "创建自动化工作流"
+class BaseAction:
+    """Base class for all actions."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "unnamed")
-            steps = params.get("steps", [])
-            description = params.get("description", "")
-
-            workflow = {
-                "name": name,
-                "description": description,
-                "steps": steps,
-                "step_count": len(steps),
-                "created": time.time()
-            }
-
-            return ActionResult(
-                success=True,
-                message=f"Created workflow '{name}' with {len(steps)} steps",
-                data={"workflow": workflow}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Create workflow error: {str(e)}")
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
 
-class WorkflowExecuteAction(BaseAction):
-    """Execute workflow steps."""
-    action_type = "workflow_execute"
-    display_name = "执行工作流"
-    description = "执行自动化工作流"
+class StateMachine:
+    """Finite State Machine."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            steps = params.get("steps", [])
-            data = params.get("data", {})
-            stop_on_error = params.get("stop_on_error", True)
+    def __init__(self, initial: str) -> None:
+        self.initial = initial
+        self.current = initial
+        self.states: Set[str] = {initial}
+        self.transitions: Dict[str, Dict[str, str]] = {}
+        self.final_states: Set[str] = set()
 
-            if not steps:
-                return ActionResult(success=False, message="No steps to execute")
+    def add_state(self, name: str, final: bool = False) -> None:
+        self.states.add(name)
+        if final:
+            self.final_states.add(name)
 
-            results = []
-            current_data = data.copy()
+    def add_transition(self, from_state: str, event: str, to_state: str, guard: Optional[Callable] = None) -> None:
+        if from_state not in self.transitions:
+            self.transitions[from_state] = {}
+        self.transitions[from_state][event] = to_state
 
-            for i, step in enumerate(steps):
-                step_name = step.get("name", f"step_{i}")
-                step_type = step.get("type", "pass")
-                step_params = step.get("params", {})
-                step_timeout = step.get("timeout", 30)
-
-                try:
-                    result = self._execute_step(step_type, step_params, current_data, step_timeout)
-                    results.append({
-                        "step": step_name,
-                        "success": result.success,
-                        "message": result.message,
-                        "data": result.data
-                    })
-
-                    if result.data:
-                        current_data.update(result.data)
-
-                    if not result.success and stop_on_error:
-                        return ActionResult(
-                            success=False,
-                            message=f"Workflow stopped at step '{step_name}': {result.message}",
-                            data={"results": results, "completed_steps": len(results)}
-                        )
-
-                except Exception as e:
-                    results.append({"step": step_name, "success": False, "error": str(e)})
-                    if stop_on_error:
-                        return ActionResult(
-                            success=False,
-                            message=f"Workflow error at step '{step_name}': {str(e)}",
-                            data={"results": results, "completed_steps": len(results)}
-                        )
-
-            return ActionResult(
-                success=True,
-                message=f"Workflow completed: {len([r for r in results if r.get('success')])}/{len(results)} steps succeeded",
-                data={"results": results, "data": current_data, "completed_steps": len(results)}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Workflow execute error: {str(e)}")
-
-    def _execute_step(self, step_type: str, params: Dict, data: Dict, timeout: int) -> ActionResult:
-        """Execute a single workflow step."""
-        if step_type == "pass":
-            return ActionResult(success=True, message="Pass step")
-
-        elif step_type == "log":
-            message = params.get("message", "")
-            level = params.get("level", "info")
-            return ActionResult(success=True, message=f"[{level}] {message}")
-
-        elif step_type == "set":
-            key = params.get("key", "")
-            value = params.get("value", None)
-            if callable(value):
-                value = value(data)
-            return ActionResult(success=True, message=f"Set {key}", data={key: value})
-
-        elif step_type == "get":
-            key = params.get("key", "")
-            default = params.get("default", None)
-            return ActionResult(success=True, message=f"Get {key}", data={"result": data.get(key, default)})
-
-        elif step_type == "wait":
-            seconds = params.get("seconds", 1)
-            time.sleep(seconds)
-            return ActionResult(success=True, message=f"Waited {seconds}s")
-
-        elif step_type == "condition":
-            condition = params.get("condition", "")
-            then_value = params.get("then", True)
-            else_value = params.get("else", False)
-            result = then_value if self._evaluate_condition(condition, data) else else_value
-            return ActionResult(success=True, message=f"Condition evaluated", data={"result": result})
-
-        elif step_type == "transform":
-            field = params.get("field", "")
-            operation = params.get("operation", "passthrough")
-            value = data.get(field, "")
-
-            if operation == "uppercase":
-                value = str(value).upper()
-            elif operation == "lowercase":
-                value = str(value).lower()
-            elif operation == "trim":
-                value = str(value).strip()
-            elif operation == "length":
-                value = len(value) if hasattr(value, "__len__") else 0
-
-            return ActionResult(success=True, message=f"Transformed {field}", data={field: value})
-
-        else:
-            return ActionResult(success=False, message=f"Unknown step type: {step_type}")
-
-    def _evaluate_condition(self, condition: str, data: Dict) -> bool:
-        """Evaluate a simple condition."""
-        try:
-            for key, value in data.items():
-                condition = condition.replace(key, repr(value))
-            return eval(condition, {"__builtins__": {}}, {})
-        except:
+    def trigger(self, event: str, context: Optional[Dict[str, Any]] = None) -> bool:
+        if self.current not in self.transitions:
             return False
-
-
-class WorkflowConditionalAction(BaseAction):
-    """Conditional branching in workflow."""
-    action_type = "workflow_conditional"
-    display_name = "工作流条件"
-    description = "工作流条件分支"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            condition = params.get("condition", "")
-            data = params.get("data", {})
-            then_steps = params.get("then", [])
-            else_steps = params.get("else", [])
-
-            if not condition:
-                return ActionResult(success=False, message="condition required")
-
-            if self._evaluate_condition(condition, data):
-                executed = then_steps
-                branch = "then"
-            else:
-                executed = else_steps
-                branch = "else"
-
-            results = []
-            for step in executed:
-                step_type = step.get("type", "pass")
-                step_params = step.get("params", {})
-                result = self._execute_simple_step(step_type, step_params, data)
-                results.append(result)
-
-            return ActionResult(
-                success=True,
-                message=f"Executed {branch} branch with {len(results)} steps",
-                data={"branch": branch, "results": results}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Conditional error: {str(e)}")
-
-    def _evaluate_condition(self, condition: str, data: Dict) -> bool:
-        try:
-            for key, value in data.items():
-                condition = condition.replace(key, repr(value))
-            return eval(condition, {"__builtins__": {}}, {})
-        except:
+        if event not in self.transitions[self.current]:
             return False
+        self.current = self.transitions[self.current][event]
+        return True
 
-    def _execute_simple_step(self, step_type: str, params: Dict, data: Dict) -> ActionResult:
-        if step_type == "pass":
-            return ActionResult(success=True, message="Pass")
-        elif step_type == "log":
-            return ActionResult(success=True, message=params.get("message", ""))
-        elif step_type == "set":
-            return ActionResult(success=True, message=f"Set {params.get('key')}", data={params.get("key"): params.get("value")})
-        else:
-            return ActionResult(success=True, message=f"Step: {step_type}")
+    def is_final(self) -> bool:
+        return self.current in self.final_states
+
+    def reset(self) -> None:
+        self.current = self.initial
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "current": self.current,
+            "states": list(self.states),
+            "transitions": self.transitions,
+            "final_states": list(self.final_states),
+        }
 
 
-class WorkflowLoopAction(BaseAction):
-    """Loop over items in workflow."""
-    action_type = "workflow_loop"
-    display_name = "工作流循环"
-    description = "工作流循环执行"
+class DAG:
+    """Directed Acyclic Graph for workflow execution."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+    def __init__(self) -> None:
+        self.graph: Dict[str, List[str]] = {}
+        self.in_degree: Dict[str, int] = {}
+
+    def add_node(self, node: str) -> None:
+        if node not in self.graph:
+            self.graph[node] = []
+            self.in_degree[node] = 0
+
+    def add_edge(self, from_node: str, to_node: str) -> None:
+        self.add_node(from_node)
+        self.add_node(to_node)
+        self.graph[from_node].append(to_node)
+        self.in_degree[to_node] += 1
+
+    def topological_sort(self) -> Optional[List[str]]:
+        queue = [n for n in self.graph if self.in_degree[n] == 0]
+        result = []
+        while queue:
+            node = queue.pop(0)
+            result.append(node)
+            for neighbor in self.graph[node]:
+                self.in_degree[neighbor] -= 1
+                if self.in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+        if len(result) != len(self.graph):
+            return None
+        return result
+
+    def has_cycle(self) -> bool:
+        return self.topological_sort() is None
+
+    def get_execution_order(self) -> Optional[List[str]]:
+        return self.topological_sort()
+
+    def dependencies_of(self, node: str) -> List[str]:
+        deps = []
+        for n, neighbors in self.graph.items():
+            if node in neighbors:
+                deps.append(n)
+        return deps
+
+
+class WorkflowAction(BaseAction):
+    """Workflow and state machine operations.
+
+    Provides FSM creation, DAG execution, step pipeline, conditional branching.
+    """
+
+    def __init__(self) -> None:
+        self._machines: Dict[str, StateMachine] = {}
+        self._dags: Dict[str, DAG] = {}
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "fsm_create")
+        name = params.get("name", "default")
+
         try:
-            items = params.get("items", [])
-            loop_type = params.get("type", "for")
-            steps = params.get("steps", [])
-            max_iterations = params.get("max_iterations", 100)
-            condition = params.get("condition", "")
+            if operation == "fsm_create":
+                initial = params.get("initial", "start")
+                machine = StateMachine(initial)
+                states = params.get("states", [])
+                finals = params.get("final_states", [])
+                for s in states:
+                    machine.add_state(s, final=s in finals)
+                transitions = params.get("transitions", [])
+                for t in transitions:
+                    if len(t) >= 3:
+                        machine.add_transition(str(t[0]), str(t[1]), str(t[2]))
+                self._machines[name] = machine
+                return {"success": True, "name": name, "fsm": machine.to_dict()}
 
-            if not items and loop_type != "while":
-                return ActionResult(success=False, message="No items to iterate")
+            elif operation == "fsm_trigger":
+                if name not in self._machines:
+                    return {"success": False, "error": f"FSM {name} not found"}
+                event = params.get("event", "")
+                success = self._machines[name].trigger(event)
+                return {"success": True, "name": name, "event": event, "current": self._machines[name].current, "triggered": success}
 
-            results = []
-            data = {}
-            iteration = 0
+            elif operation == "fsm_state":
+                if name not in self._machines:
+                    return {"success": False, "error": f"FSM {name} not found"}
+                return {"success": True, "name": name, "current": self._machines[name].current, "is_final": self._machines[name].is_final()}
 
-            if loop_type == "for":
-                for i, item in enumerate(items[:max_iterations]):
-                    iteration = i
-                    data["item"] = item
-                    data["index"] = i
-                    data["key"] = item if isinstance(item, str) else i
+            elif operation == "fsm_reset":
+                if name not in self._machines:
+                    return {"success": False, "error": f"FSM {name} not found"}
+                self._machines[name].reset()
+                return {"success": True, "name": name, "current": self._machines[name].current}
 
-                    for step in steps:
-                        result = self._execute_simple_step(step.get("type", "pass"), step.get("params", {}), data)
-                        results.append({"iteration": i, "step": step.get("name", "step"), "result": result})
+            elif operation == "fsm_list":
+                return {"success": True, "machines": list(self._machines.keys()), "count": len(self._machines)}
 
-            elif loop_type == "while":
-                while self._evaluate_condition(condition, data) and iteration < max_iterations:
-                    iteration += 1
-                    data["iteration"] = iteration
+            elif operation == "dag_create":
+                dag = DAG()
+                nodes = params.get("nodes", [])
+                edges = params.get("edges", [])
+                for n in nodes:
+                    dag.add_node(str(n))
+                for e in edges:
+                    if isinstance(e, (list, tuple)) and len(e) >= 2:
+                        dag.add_edge(str(e[0]), str(e[1]))
+                self._dags[name] = dag
+                return {"success": True, "name": name, "has_cycle": dag.has_cycle(), "nodes": list(dag.graph.keys())}
 
-                    for step in steps:
-                        result = self._execute_simple_step(step.get("type", "pass"), step.get("params", {}), data)
-                        results.append({"iteration": iteration, "step": step.get("name", "step"), "result": result})
+            elif operation == "dag_order":
+                if name not in self._dags:
+                    return {"success": False, "error": f"DAG {name} not found"}
+                dag = self._dags[name]
+                order = dag.get_execution_order()
+                if order is None:
+                    return {"success": False, "error": "DAG has cycle - cannot order"}
+                return {"success": True, "name": name, "order": order}
 
-            elif loop_type == "do_while":
-                while iteration < max_iterations:
-                    iteration += 1
-                    data["iteration"] = iteration
+            elif operation == "dag_dependencies":
+                if name not in self._dags:
+                    return {"success": False, "error": f"DAG {name} not found"}
+                node = params.get("node", "")
+                deps = self._dags[name].dependencies_of(node)
+                return {"success": True, "name": name, "node": node, "dependencies": deps}
 
-                    for step in steps:
-                        result = self._execute_simple_step(step.get("type", "pass"), step.get("params", {}), data)
-                        results.append({"iteration": iteration, "step": step.get("name", "step"), "result": result})
+            elif operation == "dag_add_node":
+                if name not in self._dags:
+                    self._dags[name] = DAG()
+                self._dags[name].add_node(name)
+                return {"success": True, "name": name, "node": name}
 
-                    if not self._evaluate_condition(condition, data):
-                        break
+            elif operation == "dag_add_edge":
+                if name not in self._dags:
+                    self._dags[name] = DAG()
+                from_node = params.get("from", "")
+                to_node = params.get("to", "")
+                self._dags[name].add_edge(from_node, to_node)
+                return {"success": True, "name": name, "from": from_node, "to": to_node}
 
-            return ActionResult(
-                success=True,
-                message=f"Loop completed {iteration} iterations",
-                data={"results": results, "iterations": iteration}
-            )
+            elif operation == "dag_validate":
+                if name not in self._dags:
+                    return {"success": False, "error": f"DAG {name} not found"}
+                has_cycle = self._dags[name].has_cycle()
+                return {"success": True, "name": name, "valid": not has_cycle, "has_cycle": has_cycle}
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Loop error: {str(e)}")
-
-    def _evaluate_condition(self, condition: str, data: Dict) -> bool:
-        try:
-            for key, value in data.items():
-                condition = condition.replace(key, repr(value))
-            return eval(condition, {"__builtins__": {}}, {})
-        except:
-            return False
-
-    def _execute_simple_step(self, step_type: str, params: Dict, data: Dict) -> ActionResult:
-        if step_type == "pass":
-            return ActionResult(success=True, message="Pass")
-        elif step_type == "log":
-            return ActionResult(success=True, message=params.get("message", ""))
-        elif step_type == "set":
-            return ActionResult(success=True, message=f"Set {params.get('key')}", data={params.get("key"): params.get("value")})
-        else:
-            return ActionResult(success=True, message=f"Step: {step_type}")
-
-
-class WorkflowParallelExecuteAction(BaseAction):
-    """Parallel execution in workflow."""
-    action_type = "workflow_parallel"
-    display_name = "并行执行工作流"
-    description = "并行执行工作流步骤"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            branches = params.get("branches", [])
-            wait_all = params.get("wait_all", True)
-
-            if not branches:
-                return ActionResult(success=False, message="No branches to execute")
-
-            import concurrent.futures
-
-            def execute_branch(branch):
+            elif operation == "step_execute":
+                steps = params.get("steps", [])
                 results = []
-                data = {}
-                for step in branch.get("steps", []):
-                    result = self._execute_simple_step(step.get("type", "pass"), step.get("params", {}), data)
-                    results.append(result)
-                    if result.data:
-                        data.update(result.data)
-                return {"branch": branch.get("name", "unnamed"), "results": results, "data": data}
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(branches)) as executor:
-                futures = {executor.submit(execute_branch, branch): branch for branch in branches}
-                branch_results = {}
-
-                for future in concurrent.futures.as_completed(futures, timeout=30):
-                    try:
-                        result = future.result()
-                        branch_results[result["branch"]] = result
-                    except Exception as e:
-                        branch_results[futures[future].get("name", "unnamed")] = {"error": str(e)}
-
-            if wait_all:
-                return ActionResult(
-                    success=True,
-                    message=f"Parallel execution completed: {len(branch_results)} branches",
-                    data={"branches": branch_results, "branch_count": len(branch_results)}
-                )
-            else:
-                first_result = list(branch_results.values())[0]
-                return ActionResult(
-                    success=True,
-                    message=f"First branch completed",
-                    data={"result": first_result}
-                )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Parallel execute error: {str(e)}")
-
-    def _execute_simple_step(self, step_type: str, params: Dict, data: Dict) -> ActionResult:
-        if step_type == "pass":
-            return ActionResult(success=True, message="Pass")
-        elif step_type == "log":
-            return ActionResult(success=True, message=params.get("message", ""))
-        elif step_type == "set":
-            return ActionResult(success=True, message=f"Set {params.get('key')}", data={params.get("key"): params.get("value")})
-        else:
-            return ActionResult(success=True, message=f"Step: {step_type}")
-
-
-class WorkflowWaitAction(BaseAction):
-    """Wait/delay in workflow."""
-    action_type = "workflow_wait"
-    display_name = "工作流等待"
-    description = "工作流等待/延迟"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            wait_type = params.get("type", "time")
-            seconds = params.get("seconds", 1)
-            until = params.get("until", None)
-
-            if wait_type == "time":
-                time.sleep(seconds)
-                return ActionResult(success=True, message=f"Waited {seconds}s")
-
-            elif wait_type == "until":
-                if until:
-                    target = self._parse_time(until)
-                    if target:
-                        now = time.time()
-                        wait_seconds = target - now
-                        if wait_seconds > 0:
-                            time.sleep(wait_seconds)
-                            return ActionResult(success=True, message=f"Waited until {until}")
+                stop_on_error = params.get("stop_on_error", True)
+                for i, step in enumerate(steps):
+                    step_name = step.get("name", f"step_{i}")
+                    step_type = step.get("type", "pass")
+                    result = {"name": step_name, "type": step_type, "success": True}
+                    if step_type == "transform":
+                        input_val = step.get("input")
+                        fn = step.get("fn")
+                        if fn == "upper":
+                            result["output"] = str(input_val).upper()
+                        elif fn == "lower":
+                            result["output"] = str(input_val).lower()
+                        elif fn == "reverse":
+                            result["output"] = str(input_val)[::-1]
                         else:
-                            return ActionResult(success=True, message="Time already passed")
+                            result["output"] = input_val
+                    elif step_type == "filter":
+                        input_data = step.get("data", [])
+                        condition = step.get("condition", "")
+                        result["output"] = input_data
+                        result["filtered_count"] = len(input_data)
+                    elif step_type == "branch":
+                        condition = step.get("condition", "")
+                        branches = step.get("branches", [])
+                        result["branches_executed"] = []
+                        for branch in branches:
+                            result["branches_executed"].append(branch.get("name", "unnamed"))
                     else:
-                        return ActionResult(success=False, message=f"Invalid time format: {until}")
-                else:
-                    return ActionResult(success=False, message="until time required")
+                        result["output"] = step.get("input")
+                    results.append(result)
+                    if stop_on_error and not result["success"]:
+                        break
+                return {"success": True, "results": results, "count": len(results), "all_success": all(r["success"] for r in results)}
 
-            elif wait_type == "random":
-                min_seconds = params.get("min", 1)
-                max_seconds = params.get("max", 5)
-                import random
-                wait_time = random.uniform(min_seconds, max_seconds)
-                time.sleep(wait_time)
-                return ActionResult(success=True, message=f"Waited {wait_time:.2f}s (random)")
+            elif operation == "pipeline":
+                input_val = params.get("input")
+                steps = params.get("steps", [])
+                current = input_val
+                for step in steps:
+                    fn = step.get("fn", "pass")
+                    if fn == "upper":
+                        current = str(current).upper()
+                    elif fn == "lower":
+                        current = str(current).lower()
+                    elif fn == "strip":
+                        current = str(current).strip()
+                    elif fn == "reverse":
+                        current = str(current)[::-1]
+                    elif fn == "len":
+                        current = len(str(current))
+                    elif fn == "json_parse":
+                        import json
+                        current = json.loads(current)
+                    elif fn == "json_dump":
+                        import json
+                        current = json.dumps(current)
+                    else:
+                        pass
+                return {"success": True, "input": input_val, "output": current, "steps_applied": len(steps)}
 
             else:
-                time.sleep(seconds)
-                return ActionResult(success=True, message=f"Waited {seconds}s")
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Wait error: {str(e)}")
+            logger.error(f"WorkflowAction error: {e}")
+            return {"success": False, "error": str(e)}
 
-    def _parse_time(self, time_str: str) -> Optional[float]:
-        """Parse time string to timestamp."""
-        try:
-            if ":" in time_str:
-                from datetime import datetime
-                fmt = "%H:%M:%S" if time_str.count(":") == 2 else "%H:%M"
-                target_dt = datetime.strptime(time_str, fmt)
-                now = datetime.now()
-                target_dt = target_dt.replace(year=now.year, month=now.month, day=now.day)
-                if target_dt < now:
-                    target_dt = target_dt.replace(day=now.day + 1)
-                return target_dt.timestamp()
-        except:
-            pass
-        return None
+
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for workflow operations."""
+    return WorkflowAction().execute(context, params)

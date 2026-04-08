@@ -1,566 +1,230 @@
-"""Calendar action module for RabAI AutoClick.
-
-Provides calendar/schedule operations:
-- CalendarNowAction: Get current datetime
-- CalendarAddDaysAction: Add days to date
-- CalendarDiffAction: Calculate date difference
-- CalendarFormatAction: Format date
-- CalendarParseAction: Parse date string
-- CalendarRangeAction: Generate date range
-- CalendarTodayAction: Get today's date
-- CalendarWeekdayAction: Get day of week
-- CalendarBetweenAction: Generate dates between two dates
 """
-
-import re
-import subprocess
+Calendar and date recurrence utilities - iCal generation, recurrence rules, business days.
+"""
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, date
-from typing import Any, Dict, List, Optional, Union
+import logging
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class CalendarNowAction(BaseAction):
-    """Get current datetime."""
-    action_type = "calendar_now"
-    display_name = "获取当前时间"
-    description = "获取当前日期时间"
-    version = "1.0"
+class BaseAction:
+    """Base class for all actions."""
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute now.
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-        Args:
-            context: Execution context.
-            params: Dict with output_var.
 
-        Returns:
-            ActionResult with current datetime.
-        """
-        output_var = params.get('output_var', 'now')
+def _parse_date(date_str: str) -> date:
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m/%d/%Y"]:
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    return datetime.strptime(date_str, "%Y-%m-%d").date()
 
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+
+def _parse_datetime(dt_str: str) -> datetime:
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"]:
+        try:
+            return datetime.strptime(dt_str, fmt)
+        except ValueError:
+            continue
+    return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+
+
+def _generate_rrule(
+    freq: str, count: Optional[int], until: Optional[date],
+    interval: int, byweekday: Optional[List[int]], bymonthday: Optional[List[int]],
+    bymonth: Optional[List[int]], bysetpos: Optional[List[int]]
+) -> str:
+    parts = [f"FREQ={freq}"]
+    if interval > 1:
+        parts.append(f"INTERVAL={interval}")
+    if count:
+        parts.append(f"COUNT={count}")
+    if until:
+        parts.append(f"UNTIL={until.strftime('%Y%m%dT%H%M%S')}")
+    if byweekday is not None:
+        day_names = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+        parts.append("BYDAY=" + ",".join(day_names[d] for d in byweekday))
+    if bymonthday is not None:
+        parts.append("BYMONTHDAY=" + ",".join(str(d) for d in bymonthday))
+    if bymonth is not None:
+        parts.append("BYMONTH=" + ",".join(str(m) for m in bymonth))
+    if bysetpos is not None:
+        parts.append("BYSETPOS=" + ",".join(str(p) for p in bysetpos))
+    return ";".join(parts)
+
+
+def _occurrences(
+    start: date, freq: str, count: Optional[int], until: Optional[date],
+    interval: int, byweekday: Optional[List[int]], bymonthday: Optional[List[int]],
+    bymonth: Optional[List[int]], bysetpos: Optional[List[int]], limit: int = 100
+) -> List[date]:
+    results = []
+    current = start
+    n = 0
+    delta_map = {"DAILY": 1, "WEEKLY": 7, "MONTHLY": 30, "YEARLY": 365}
+    delta_days = delta_map.get(freq, 1)
+
+    while len(results) < limit:
+        if count and n >= count:
+            break
+        if until and current > until:
+            break
+        include = True
+        if byweekday and current.weekday() not in byweekday:
+            include = False
+        if bymonthday and current.day not in bymonthday:
+            include = False
+        if bymonth and current.month not in bymonth:
+            include = False
+        if include:
+            results.append(current)
+        n += 1
+        current = current + timedelta(days=delta_days * interval)
+    return results
+
+
+def _business_days(start: date, end: date, holidays: Optional[List[date]] = None) -> List[date]:
+    holidays = holidays or []
+    result = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5 and current not in holidays:
+            result.append(current)
+        current += timedelta(days=1)
+    return result
+
+
+class CalendarAction(BaseAction):
+    """Calendar and date recurrence operations.
+
+    Provides iCal format generation, recurrence rule creation, business day calculations.
+    """
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "rrule")
+        start_str = params.get("start")
+        end_str = params.get("end")
+        freq = params.get("freq", "DAILY")
+        interval = int(params.get("interval", 1))
+        byweekday = params.get("byweekday")
+        bymonthday = params.get("bymonthday")
+        bymonth = params.get("bymonth")
+        bysetpos = params.get("bysetpos")
 
         try:
-            now = datetime.now()
-            context.set(output_var, now.isoformat())
+            if operation == "rrule":
+                if not start_str:
+                    return {"success": False, "error": "start date required"}
+                start = _parse_date(start_str)
+                count = params.get("count")
+                until = _parse_date(params["until"]) if params.get("until") else None
+                rule = _generate_rrule(freq, count, until, interval, byweekday, bymonthday, bymonth, bysetpos)
+                return {"success": True, "rrule": rule}
 
-            return ActionResult(
-                success=True,
-                message=f"当前时间: {now.isoformat()}",
-                data={'now': now.isoformat(), 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取当前时间失败: {str(e)}"
-            )
+            elif operation == "occurrences":
+                if not start_str:
+                    return {"success": False, "error": "start date required"}
+                start = _parse_date(start_str)
+                until = _parse_date(end_str) if end_str else None
+                count = params.get("count", 10)
+                limit = int(params.get("limit", 100))
+                occs = _occurrences(
+                    start, freq, count, until, interval,
+                    byweekday, bymonthday, bymonth, bysetpos, limit
+                )
+                return {"success": True, "occurrences": [o.isoformat() for o in occs], "count": len(occs)}
 
-    def get_required_params(self) -> List[str]:
-        return []
+            elif operation == "business_days":
+                if not start_str or not end_str:
+                    return {"success": False, "error": "start and end required"}
+                start = _parse_date(start_str)
+                end = _parse_date(end_str)
+                holidays_str = params.get("holidays", [])
+                holidays = [_parse_date(h) for h in holidays_str]
+                days = _business_days(start, end, holidays)
+                return {"success": True, "days": [d.isoformat() for d in days], "count": len(days)}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'now'}
+            elif operation == "next_business_day":
+                current = _parse_date(start_str) if start_str else date.today()
+                added = int(params.get("add_days", 0))
+                holidays_str = params.get("holidays", [])
+                holidays = {_parse_date(h) for h in holidays_str}
+                result = current
+                days_added = 0
+                while days_added < added + 1:
+                    result += timedelta(days=1)
+                    if result.weekday() < 5 and result not in holidays:
+                        days_added += 1
+                return {"success": True, "date": result.isoformat()}
 
+            elif operation == "ical":
+                start_dt = _parse_datetime(start_str) if start_str else datetime.now()
+                end_dt = _parse_datetime(end_str) if end_str else start_dt + timedelta(hours=1)
+                summary = params.get("summary", "Event")
+                uid = params.get("uid", f"event-{datetime.now().timestamp()}")
+                desc = params.get("description", "")
+                location = params.get("location", "")
+                rrule = params.get("rrule")
+                lines = [
+                    "BEGIN:VCALENDAR",
+                    "VERSION:2.0",
+                    "PRODID:-//rabai_autoclick//EN",
+                    "BEGIN:VEVENT",
+                    f"UID:{uid}",
+                    f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%S')}",
+                    f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%S')}",
+                    f"SUMMARY:{summary}",
+                    f"DESCRIPTION:{desc}",
+                    f"LOCATION:{location}",
+                    f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%S')}",
+                ]
+                if rrule:
+                    lines.append(f"RRULE:{rrule}")
+                lines.extend(["END:VEVENT", "END:VCALENDAR"])
+                return {"success": True, "ical": "\r\n".join(lines)}
 
-class CalendarAddDaysAction(BaseAction):
-    """Add days to date."""
-    action_type = "calendar_add_days"
-    display_name = "日期加天数"
-    description = "向日期添加指定天数"
-    version = "1.0"
+            elif operation == "days_between":
+                if not start_str or not end_str:
+                    return {"success": False, "error": "start and end required"}
+                start = _parse_date(start_str)
+                end = _parse_date(end_str)
+                delta = abs((end - start).days)
+                return {"success": True, "days": delta}
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute add.
+            elif operation == "add_days":
+                if not start_str:
+                    return {"success": False, "error": "start date required"}
+                start = _parse_date(start_str)
+                days = int(params.get("days", 0))
+                result = start + timedelta(days=days)
+                return {"success": True, "date": result.isoformat()}
 
-        Args:
-            context: Execution context.
-            params: Dict with date, days, output_var.
+            elif operation == "week_of_year":
+                if not start_str:
+                    return {"success": False, "error": "start date required"}
+                d = _parse_date(start_str)
+                week = d.isocalendar()[1]
+                return {"success": True, "week": week, "year": d.year}
 
-        Returns:
-            ActionResult with result date.
-        """
-        date_param = params.get('date', '')
-        days = params.get('days', 0)
-        output_var = params.get('output_var', 'result_date')
+            elif operation == "quarter":
+                if not start_str:
+                    return {"success": False, "error": "start date required"}
+                d = _parse_date(start_str)
+                quarter = (d.month - 1) // 3 + 1
+                return {"success": True, "quarter": quarter, "year": d.year}
 
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_date = context.resolve_value(date_param) if date_param else datetime.now().isoformat()
-            resolved_days = context.resolve_value(days)
-
-            # Parse input date
-            if isinstance(resolved_date, str):
-                dt = datetime.fromisoformat(resolved_date.replace('Z', '+00:00'))
             else:
-                dt = resolved_date
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
-            result = dt + timedelta(days=int(resolved_days))
-            context.set(output_var, result.isoformat())
-
-            return ActionResult(
-                success=True,
-                message=f"{resolved_days} 天后: {result.isoformat()}",
-                data={'result': result.isoformat(), 'output_var': output_var}
-            )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期计算失败: {str(e)}"
-            )
+            logger.error(f"CalendarAction error: {e}")
+            return {"success": False, "error": str(e)}
 
-    def get_required_params(self) -> List[str]:
-        return ['date', 'days']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'result_date'}
-
-
-class CalendarDiffAction(BaseAction):
-    """Calculate date difference."""
-    action_type = "calendar_diff"
-    display_name = "日期差计算"
-    description = "计算两个日期之间的差值"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute diff.
-
-        Args:
-            context: Execution context.
-            params: Dict with date1, date2, output_var.
-
-        Returns:
-            ActionResult with difference.
-        """
-        date1 = params.get('date1', '')
-        date2 = params.get('date2', '')
-        output_var = params.get('output_var', 'date_diff')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_d1 = context.resolve_value(date1)
-            resolved_d2 = context.resolve_value(date2)
-
-            dt1 = datetime.fromisoformat(resolved_d1.replace('Z', '+00:00'))
-            dt2 = datetime.fromisoformat(resolved_d2.replace('Z', '+00:00'))
-
-            diff = abs((dt1 - dt2).total_seconds())
-
-            result = {
-                'total_seconds': diff,
-                'days': diff / 86400,
-                'hours': diff / 3600,
-                'minutes': diff / 60
-            }
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"日期差: {result['days']:.1f} 天",
-                data=result
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期差计算失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['date1', 'date2']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'date_diff'}
-
-
-class CalendarFormatAction(BaseAction):
-    """Format date."""
-    action_type = "calendar_format"
-    display_name = "日期格式化"
-    description = "格式化日期"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute format.
-
-        Args:
-            context: Execution context.
-            params: Dict with date, format, output_var.
-
-        Returns:
-            ActionResult with formatted date.
-        """
-        date_param = params.get('date', '')
-        format_str = params.get('format', '%Y-%m-%d %H:%M:%S')
-        output_var = params.get('output_var', 'formatted_date')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_date = context.resolve_value(date_param) if date_param else datetime.now().isoformat()
-            resolved_fmt = context.resolve_value(format_str)
-
-            if isinstance(resolved_date, str):
-                dt = datetime.fromisoformat(resolved_date.replace('Z', '+00:00'))
-            else:
-                dt = resolved_date
-
-            formatted = dt.strftime(resolved_fmt)
-            context.set(output_var, formatted)
-
-            return ActionResult(
-                success=True,
-                message=f"格式化日期: {formatted}",
-                data={'formatted': formatted, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期格式化失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['date', 'format']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'formatted_date'}
-
-
-class CalendarParseAction(BaseAction):
-    """Parse date string."""
-    action_type = "calendar_parse"
-    display_name = "日期解析"
-    description = "解析日期字符串"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute parse.
-
-        Args:
-            context: Execution context.
-            params: Dict with date_str, format, output_var.
-
-        Returns:
-            ActionResult with parsed date.
-        """
-        date_str = params.get('date_str', '')
-        format_str = params.get('format', '%Y-%m-%d')
-        output_var = params.get('output_var', 'parsed_date')
-
-        valid, msg = self.validate_type(date_str, str, 'date_str')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_str = context.resolve_value(date_str)
-            resolved_fmt = context.resolve_value(format_str)
-
-            dt = datetime.strptime(resolved_str, resolved_fmt)
-            context.set(output_var, dt.isoformat())
-
-            return ActionResult(
-                success=True,
-                message=f"解析日期: {dt.isoformat()}",
-                data={'parsed': dt.isoformat(), 'output_var': output_var}
-            )
-        except ValueError as e:
-            return ActionResult(
-                success=False,
-                message=f"日期解析失败: {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"日期解析失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['date_str', 'format']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'parsed_date'}
-
-
-class CalendarRangeAction(BaseAction):
-    """Generate date range."""
-    action_type = "calendar_range"
-    display_name = "生成日期范围"
-    description = "生成两个日期之间的所有日期"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute range.
-
-        Args:
-            context: Execution context.
-            params: Dict with start_date, end_date, format, output_var.
-
-        Returns:
-            ActionResult with date list.
-        """
-        start_date = params.get('start_date', '')
-        end_date = params.get('end_date', '')
-        format_str = params.get('format', '%Y-%m-%d')
-        output_var = params.get('output_var', 'date_range')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_start = context.resolve_value(start_date)
-            resolved_end = context.resolve_value(end_date)
-            resolved_fmt = context.resolve_value(format_str)
-
-            start = datetime.fromisoformat(resolved_start.replace('Z', '+00:00'))
-            end = datetime.fromisoformat(resolved_end.replace('Z', '+00:00'))
-
-            dates = []
-            current = start
-            while current <= end:
-                dates.append(current.strftime(resolved_fmt))
-                current += timedelta(days=1)
-
-            context.set(output_var, dates)
-
-            return ActionResult(
-                success=True,
-                message=f"生成了 {len(dates)} 个日期",
-                data={'count': len(dates), 'dates': dates, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"生成日期范围失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['start_date', 'end_date']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d', 'output_var': 'date_range'}
-
-
-class CalendarTodayAction(BaseAction):
-    """Get today's date."""
-    action_type = "calendar_today"
-    display_name = "获取今天日期"
-    description = "获取今天的日期"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute today.
-
-        Args:
-            context: Execution context.
-            params: Dict with format, output_var.
-
-        Returns:
-            ActionResult with today's date.
-        """
-        format_str = params.get('format', '%Y-%m-%d')
-        output_var = params.get('output_var', 'today')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_fmt = context.resolve_value(format_str)
-            today = date.today()
-            formatted = today.strftime(resolved_fmt)
-            context.set(output_var, formatted)
-
-            return ActionResult(
-                success=True,
-                message=f"今天是: {formatted}",
-                data={'today': formatted, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取今天日期失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'format': '%Y-%m-%d', 'output_var': 'today'}
-
-
-class CalendarWeekdayAction(BaseAction):
-    """Get day of week."""
-    action_type = "calendar_weekday"
-    display_name = "获取星期几"
-    description = "获取日期对应的星期几"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute weekday.
-
-        Args:
-            context: Execution context.
-            params: Dict with date, output_var.
-
-        Returns:
-            ActionResult with weekday.
-        """
-        date_param = params.get('date', '')
-        output_var = params.get('output_var', 'weekday')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            if date_param:
-                resolved_date = context.resolve_value(date_param)
-                if isinstance(resolved_date, str):
-                    dt = datetime.fromisoformat(resolved_date.replace('Z', '+00:00'))
-                else:
-                    dt = resolved_date
-            else:
-                dt = datetime.now()
-
-            weekdays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-            weekday_name = weekdays[dt.weekday()]
-            weekday_num = dt.weekday()  # 0=Monday, 6=Sunday
-
-            result = {
-                'name': weekday_name,
-                'number': weekday_num,
-                'is_weekend': weekday_num >= 5
-            }
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"星期{weekday_num + 1} ({weekday_name})",
-                data=result
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"获取星期失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'date': '', 'output_var': 'weekday'}
-
-
-class CalendarBetweenAction(BaseAction):
-    """Generate dates between two dates."""
-    action_type = "calendar_between"
-    display_name = "生成间隔日期"
-    description = "生成两个日期之间每隔N天的日期"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute between.
-
-        Args:
-            context: Execution context.
-            params: Dict with start_date, end_date, interval, format, output_var.
-
-        Returns:
-            ActionResult with date list.
-        """
-        start_date = params.get('start_date', '')
-        end_date = params.get('end_date', '')
-        interval = params.get('interval', 1)
-        format_str = params.get('format', '%Y-%m-%d')
-        output_var = params.get('output_var', 'between_dates')
-
-        valid, msg = self.validate_type(output_var, str, 'output_var')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_start = context.resolve_value(start_date)
-            resolved_end = context.resolve_value(end_date)
-            resolved_interval = context.resolve_value(interval)
-            resolved_fmt = context.resolve_value(format_str)
-
-            start = datetime.fromisoformat(resolved_start.replace('Z', '+00:00'))
-            end = datetime.fromisoformat(resolved_end.replace('Z', '+00:00'))
-
-            dates = []
-            current = start
-            while current <= end:
-                dates.append(current.strftime(resolved_fmt))
-                current += timedelta(days=int(resolved_interval))
-
-            context.set(output_var, dates)
-
-            return ActionResult(
-                success=True,
-                message=f"生成了 {len(dates)} 个日期 (间隔 {resolved_interval} 天)",
-                data={'count': len(dates), 'dates': dates, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"生成间隔日期失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['start_date', 'end_date']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'interval': 1, 'format': '%Y-%m-%d', 'output_var': 'between_dates'}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for calendar operations."""
+    return CalendarAction().execute(context, params)

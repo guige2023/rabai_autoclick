@@ -1,571 +1,273 @@
-"""Transform action module for RabAI AutoClick.
-
-Provides data transformation operations:
-- TransformMapAction: Transform each element
-- TransformFilterAction: Filter elements
-- TransformFlattenAction: Flatten nested structure
-- TransformGroupByAction: Group elements by key
-- TransformSortAction: Sort elements
-- TransformReverseAction: Reverse order
-- TransformUniqueAction: Get unique elements
-- TransformChunkAction: Chunk elements into groups
 """
+Data transformation utilities - mapping, flattening, pivoting, reshaping, encoding.
+"""
+from typing import Any, Dict, List, Optional, Union, Callable
+import logging
 
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class TransformMapAction(BaseAction):
-    """Transform each element."""
-    action_type = "transform_map"
-    display_name = "转换映射"
-    description = "对每个元素执行转换"
+class BaseAction:
+    """Base class for all actions."""
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute map transformation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, expression, output_var.
-
-        Returns:
-            ActionResult with transformed list.
-        """
-        items = params.get('items', [])
-        expression = params.get('expression', 'x')
-        output_var = params.get('output_var', 'transformed')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(expression, str, 'expression')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_expr = context.resolve_value(expression)
-
-            result = []
-            for i, item in enumerate(resolved_items):
-                context.set('_transform_item', item)
-                context.set('_transform_index', i)
-                try:
-                    transformed = context.safe_exec(f"return_value = {resolved_expr}")
-                    result.append(transformed)
-                except Exception:
-                    result.append(item)
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"转换完成: {len(result)} 项",
-                data={
-                    'result': result,
-                    'count': len(result),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"转换映射失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'expression']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'transformed'}
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
 
-class TransformFilterAction(BaseAction):
-    """Filter elements."""
-    action_type = "transform_filter"
-    display_name = "转换过滤"
-    description = "根据条件过滤元素"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute filter transformation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, condition, output_var.
-
-        Returns:
-            ActionResult with filtered list.
-        """
-        items = params.get('items', [])
-        condition = params.get('condition', 'True')
-        output_var = params.get('output_var', 'filtered')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(condition, str, 'condition')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_cond = context.resolve_value(condition)
-
-            result = []
-            for i, item in enumerate(resolved_items):
-                context.set('_filter_item', item)
-                context.set('_filter_index', i)
-                try:
-                    if context.safe_exec(f"return_value = {resolved_cond}"):
-                        result.append(item)
-                except Exception:
-                    pass
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"过滤完成: {len(result)}/{len(resolved_items)} 项",
-                data={
-                    'result': result,
-                    'count': len(result),
-                    'original_count': len(resolved_items),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"转换过滤失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'condition']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'filtered'}
+def _deep_get(d: Dict[str, Any], path: str, default: Any = None) -> Any:
+    keys = path.split(".")
+    result = d
+    for k in keys:
+        if isinstance(result, dict):
+            result = result.get(k)
+        elif isinstance(result, list) and k.isdigit():
+            idx = int(k)
+            result = result[idx] if 0 <= idx < len(result) else None
+        else:
+            return default
+        if result is None:
+            return default
+    return result
 
 
-class TransformFlattenAction(BaseAction):
-    """Flatten nested structure."""
-    action_type = "transform_flatten"
-    display_name = "转换扁平化"
-    description = "扁平化嵌套结构"
+def _deep_set(d: Dict[str, Any], path: str, value: Any) -> None:
+    keys = path.split(".")
+    current = d
+    for k in keys[:-1]:
+        if k not in current:
+            current[k] = {}
+        current = current[k]
+    current[keys[-1]] = value
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute flatten transformation.
 
-        Args:
-            context: Execution context.
-            params: Dict with items, depth, output_var.
+def _flatten_dict(d: Dict[str, Any], parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
+    items: List[tuple] = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep).items())
+        elif isinstance(v, list):
+            for i, item in enumerate(v):
+                if isinstance(item, dict):
+                    items.extend(_flatten_dict(item, f"{new_key}[{i}]", sep).items())
+                else:
+                    items.append((f"{new_key}[{i}]", item))
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
-        Returns:
-            ActionResult with flattened list.
-        """
-        items = params.get('items', [])
-        depth = params.get('depth', -1)
-        output_var = params.get('output_var', 'flattened')
 
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+def _unflatten_dict(d: Dict[str, Any], sep: str = ".") -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in d.items():
+        _deep_set(result, key.replace("[", ".").replace("]", ""), value)
+    return result
+
+
+def _group_by(data: List[Dict[str, Any]], key: str) -> Dict[Any, List[Dict[str, Any]]]:
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    for item in data:
+        val = item.get(key)
+        if val not in groups:
+            groups[val] = []
+        groups[val].append(item)
+    return groups
+
+
+def _pivot_data(
+    data: List[Dict[str, Any]],
+    index: str,
+    columns: str,
+    values: str,
+    aggfunc: str = "first"
+) -> Dict[str, Any]:
+    groups = _group_by(data, columns)
+    result: Dict[str, Any] = {}
+    for col_val, rows in groups.items():
+        row_map = {r.get(index): r.get(values) for r in rows}
+        if aggfunc == "first" or aggfunc == "last":
+            result[col_val] = row_map
+        elif aggfunc == "count":
+            result[col_val] = {k: len(v) for k, v in groups.items()}
+        elif aggfunc == "sum" and all(isinstance(r.get(values), (int, float)) for r in rows):
+            result[col_val] = sum(r.get(values, 0) for r in rows)
+        else:
+            result[col_val] = row_map
+    return result
+
+
+def _one_hot_encode(values: List[Any], categories: Optional[List[Any]] = None) -> List[List[int]]:
+    cats = categories or sorted(set(values))
+    cat_index = {c: i for i, c in enumerate(cats)}
+    return [[1 if v == c else 0 for c in cats] for v in values]
+
+
+def _label_encode(values: List[Any]) -> Dict[Any, int]:
+    unique = []
+    for v in values:
+        if v not in unique:
+            unique.append(v)
+    return {v: i for i, v in enumerate(unique)}
+
+
+def _normalize(values: List[float], min_val: Optional[float] = None, max_val: Optional[float] = None) -> List[float]:
+    mn = min_val if min_val is not None else min(values)
+    mx = max_val if max_val is not None else max(values)
+    if mx == mn:
+        return [0.0] * len(values)
+    return [(v - mn) / (mx - mn) for v in values]
+
+
+def _standardize(values: List[float]) -> List[float]:
+    if not values:
+        return []
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / len(values)
+    std = variance ** 0.5
+    if std == 0:
+        return [0.0] * len(values)
+    return [(v - mean) / std for v in values]
+
+
+class TransformAction(BaseAction):
+    """Data transformation operations.
+
+    Provides flattening, pivoting, mapping, encoding, normalization, standardization.
+    """
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "map")
+        data = params.get("data", [])
+        key = params.get("key", "")
 
         try:
-            resolved_items = context.resolve_value(items)
-            resolved_depth = context.resolve_value(depth)
+            if operation == "flatten":
+                if isinstance(data, dict):
+                    result = _flatten_dict(data, sep=params.get("sep", "."))
+                    return {"success": True, "data": result}
+                return {"success": False, "error": "data must be a dict for flatten"}
 
-            def flatten(lst, current_depth=0, max_depth=-1):
-                result = []
-                for item in lst:
-                    if isinstance(item, (list, tuple)) and (max_depth == -1 or current_depth < max_depth):
-                        result.extend(flatten(item, current_depth + 1, max_depth))
-                    else:
-                        result.append(item)
-                return result
+            elif operation == "unflatten":
+                if isinstance(data, dict):
+                    result = _unflatten_dict(data, sep=params.get("sep", "."))
+                    return {"success": True, "data": result}
+                return {"success": False, "error": "data must be a dict for unflatten"}
 
-            result = flatten(resolved_items, max_depth=int(resolved_depth))
-            context.set(output_var, result)
+            elif operation == "group_by":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                groups = _group_by(data, key)
+                return {"success": True, "groups": groups, "group_count": len(groups)}
 
-            return ActionResult(
-                success=True,
-                message=f"扁平化完成: {len(result)} 项",
-                data={
-                    'result': result,
-                    'count': len(result),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"转换扁平化失败: {str(e)}"
-            )
+            elif operation == "pivot":
+                index = params.get("index", "")
+                columns = params.get("columns", "")
+                values = params.get("values", "")
+                aggfunc = params.get("aggfunc", "first")
+                if not all([index, columns, values]):
+                    return {"success": False, "error": "index, columns, values required"}
+                result = _pivot_data(data, index, columns, values, aggfunc)
+                return {"success": True, "pivot": result}
 
-    def get_required_params(self) -> List[str]:
-        return ['items']
+            elif operation == "map":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                mapping = params.get("mapping", {})
+                default = params.get("default")
+                results = [mapping.get(item.get(key), default) for item in data]
+                return {"success": True, "results": results, "count": len(results)}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'depth': -1, 'output_var': 'flattened'}
+            elif operation == "filter":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                value = params.get("value")
+                results = [item for item in data if item.get(key) == value]
+                return {"success": True, "results": results, "count": len(results)}
 
+            elif operation == "sort_by":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                reverse = params.get("reverse", False)
+                results = sorted(data, key=lambda x: x.get(key), reverse=reverse)
+                return {"success": True, "data": results, "count": len(results)}
 
-class TransformGroupByAction(BaseAction):
-    """Group elements by key."""
-    action_type = "transform_group_by"
-    display_name = "转换分组"
-    description = "按键分组元素"
+            elif operation == "select":
+                keys = params.get("keys", [])
+                if not keys:
+                    return {"success": False, "error": "keys required"}
+                results = [{k: item.get(k) for k in keys} for item in data]
+                return {"success": True, "data": results, "count": len(results)}
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute group by transformation.
+            elif operation == "rename":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                new_key = params.get("new_key", "")
+                results = []
+                for item in data:
+                    new_item = dict(item)
+                    if new_key and new_key != key:
+                        new_item[new_key] = new_item.pop(key, None)
+                    results.append(new_item)
+                return {"success": True, "data": results}
 
-        Args:
-            context: Execution context.
-            params: Dict with items, key, output_var.
+            elif operation == "one_hot":
+                values = params.get("values", data if isinstance(data, list) else [])
+                categories = params.get("categories")
+                encoded = _one_hot_encode(values, categories)
+                return {"success": True, "encoded": encoded, "shape": [len(encoded), len(encoded[0]) if encoded else 0]}
 
-        Returns:
-            ActionResult with grouped dict.
-        """
-        items = params.get('items', [])
-        key = params.get('key', 'x')
-        output_var = params.get('output_var', 'grouped')
+            elif operation == "label_encode":
+                values = params.get("values", data if isinstance(data, list) else [])
+                mapping = _label_encode(values)
+                encoded = [mapping.get(v, -1) for v in values]
+                return {"success": True, "mapping": mapping, "encoded": encoded}
 
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+            elif operation == "normalize":
+                values = [float(v) for v in (data if isinstance(data, list) else [])]
+                min_val = float(params.get("min_val")) if params.get("min_val") else None
+                max_val = float(params.get("max_val")) if params.get("max_val") else None
+                result = _normalize(values, min_val, max_val)
+                return {"success": True, "data": result}
 
-        valid, msg = self.validate_type(key, str, 'key')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+            elif operation == "standardize":
+                values = [float(v) for v in (data if isinstance(data, list) else [])]
+                result = _standardize(values)
+                return {"success": True, "data": result}
 
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_key = context.resolve_value(key)
-
-            groups = {}
-            for i, item in enumerate(resolved_items):
-                context.set('_group_item', item)
-                context.set('_group_index', i)
-                try:
-                    group_key = context.safe_exec(f"return_value = {resolved_key}")
-                    if group_key not in groups:
-                        groups[group_key] = []
-                    groups[group_key].append(item)
-                except Exception:
-                    pass
-
-            context.set(output_var, groups)
-
-            return ActionResult(
-                success=True,
-                message=f"分组完成: {len(groups)} 组",
-                data={
-                    'result': groups,
-                    'group_count': len(groups),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"转换分组失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'grouped'}
-
-
-class TransformSortAction(BaseAction):
-    """Sort elements."""
-    action_type = "transform_sort"
-    display_name = "转换排序"
-    description = "对元素排序"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sort transformation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, key, reverse, output_var.
-
-        Returns:
-            ActionResult with sorted list.
-        """
-        items = params.get('items', [])
-        key = params.get('key', None)
-        reverse = params.get('reverse', False)
-        output_var = params.get('output_var', 'sorted')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_reverse = context.resolve_value(reverse)
-
-            if key is not None:
-                resolved_key = context.resolve_value(key)
-                sorted_items = sorted(
-                    resolved_items,
-                    key=lambda x: context.safe_exec(f"return_value = {resolved_key}") if False else x,
-                    reverse=resolved_reverse
-                )
-            else:
-                sorted_items = sorted(resolved_items, reverse=resolved_reverse)
-
-            context.set(output_var, sorted_items)
-
-            return ActionResult(
-                success=True,
-                message=f"排序完成: {len(sorted_items)} 项",
-                data={
-                    'result': sorted_items,
-                    'count': len(sorted_items),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"转换排序失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'key': None, 'reverse': False, 'output_var': 'sorted'}
-
-
-class TransformReverseAction(BaseAction):
-    """Reverse order."""
-    action_type = "transform_reverse"
-    display_name = "转换反转"
-    description = "反转元素顺序"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute reverse transformation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, output_var.
-
-        Returns:
-            ActionResult with reversed list.
-        """
-        items = params.get('items', [])
-        output_var = params.get('output_var', 'reversed')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            result = list(resolved_items)[::-1]
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"反转完成: {len(result)} 项",
-                data={
-                    'result': result,
-                    'count': len(result),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"转换反转失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'reversed'}
-
-
-class TransformUniqueAction(BaseAction):
-    """Get unique elements."""
-    action_type = "transform_unique"
-    display_name = "转换去重"
-    description = "获取唯一元素"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute unique transformation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, key, output_var.
-
-        Returns:
-            ActionResult with unique list.
-        """
-        items = params.get('items', [])
-        key = params.get('key', None)
-        output_var = params.get('output_var', 'unique')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-
-            if key is not None:
-                resolved_key = context.resolve_value(key)
+            elif operation == "deduplicate":
                 seen = set()
-                result = []
-                for item in resolved_items:
-                    context.set('_unique_item', item)
-                    try:
-                        k = context.safe_exec(f"return_value = {resolved_key}")
-                        if k not in seen:
-                            seen.add(k)
-                            result.append(item)
-                    except Exception:
-                        if item not in seen:
-                            seen.add(str(item))
-                            result.append(item)
+                results = []
+                for item in data:
+                    key_val = str(item.get(key, item)) if key else str(item)
+                    if key_val not in seen:
+                        seen.add(key_val)
+                        results.append(item)
+                return {"success": True, "data": results, "removed": len(data) - len(results)}
+
+            elif operation == "deep_get":
+                path = params.get("path", key)
+                default_val = params.get("default")
+                if isinstance(data, dict):
+                    result = _deep_get(data, path, default_val)
+                    return {"success": True, "value": result}
+                return {"success": False, "error": "data must be a dict for deep_get"}
+
+            elif operation == "deep_set":
+                path = params.get("path", "")
+                value = params.get("value")
+                if isinstance(data, dict) and path:
+                    _deep_set(data, path, value)
+                    return {"success": True, "data": data}
+                return {"success": False, "error": "data must be a dict and path required"}
+
             else:
-                # Preserve order while removing duplicates
-                seen = set()
-                result = []
-                for item in resolved_items:
-                    if item not in seen:
-                        seen.add(item)
-                        result.append(item)
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"去重完成: {len(result)}/{len(resolved_items)} 项",
-                data={
-                    'result': result,
-                    'count': len(result),
-                    'original_count': len(resolved_items),
-                    'output_var': output_var
-                }
-            )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"转换去重失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'key': None, 'output_var': 'unique'}
+            logger.error(f"TransformAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-class TransformChunkAction(BaseAction):
-    """Chunk elements into groups."""
-    action_type = "transform_chunk"
-    display_name = "转换分块"
-    description = "将元素分块"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute chunk transformation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, size, output_var.
-
-        Returns:
-            ActionResult with chunked list.
-        """
-        items = params.get('items', [])
-        size = params.get('size', 2)
-        output_var = params.get('output_var', 'chunked')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(size, int, 'size')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        if size < 1:
-            return ActionResult(
-                success=False,
-                message=f"块大小必须 >= 1, 收到 {size}"
-            )
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_size = context.resolve_value(size)
-
-            result = [
-                resolved_items[i:i + int(resolved_size)]
-                for i in range(0, len(resolved_items), int(resolved_size))
-            ]
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"分块完成: {len(result)} 块",
-                data={
-                    'result': result,
-                    'chunk_count': len(result),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"转换分块失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'size']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'chunked'}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for transform operations."""
+    return TransformAction().execute(context, params)

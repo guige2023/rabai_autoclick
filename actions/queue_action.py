@@ -1,256 +1,261 @@
-"""Queue operations action module for RabAI AutoClick.
-
-Provides queue operations:
-- QueuePushAction: Push item to queue
-- QueuePopAction: Pop item from queue
-- QueuePeekAction: Peek at queue item
-- QueueSizeAction: Get queue size
-- QueueClearAction: Clear queue
-- QueueListAction: List queue contents
 """
-
-from __future__ import annotations
-
-import sys
-import os
+Queue and message broker utilities - RabbitMQ, Kafka, Redis queue, task queue patterns.
+"""
+from typing import Any, Dict, List, Optional, Callable
 import json
-from typing import Any, Dict, List, Optional, Union
+import logging
+import time
 from collections import deque
+from threading import Lock
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class QueuePushAction(BaseAction):
-    """Push item to queue."""
-    action_type = "queue_push"
-    display_name = "队列推入"
-    description = "向队列推入元素"
-    version = "1.0"
+class BaseAction:
+    """Base class for all actions."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute queue push."""
-        queue_var = params.get('queue_var', 'default_queue')
-        item = params.get('item', '')
-        position = params.get('position', 'back')  # back or front
-        output_var = params.get('output_var', 'queue_result')
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-        if item == '':
-            return ActionResult(success=False, message="item is required")
 
-        try:
-            resolved_item = context.resolve_value(item) if context else item
-            resolved_pos = context.resolve_value(position) if context else position
+class InMemoryQueue:
+    """Simple in-memory FIFO queue with optional persistence simulation."""
 
-            if not hasattr(context, '_queues'):
-                context._queues = {}
+    def __init__(self, name: str = "default") -> None:
+        self.name = name
+        self._queue: deque = deque()
+        self._dead_letter: deque = deque()
+        self._lock = Lock()
+        self._max_size = 10000
+        self._retry_limit = 3
 
-            if queue_var not in context._queues:
-                context._queues[queue_var] = deque()
-
-            queue = context._queues[queue_var]
-            if resolved_pos == 'front':
-                queue.appendleft(resolved_item)
+    def enqueue(self, item: Any, priority: int = 0) -> bool:
+        with self._lock:
+            if len(self._queue) >= self._max_size:
+                return False
+            if priority != 0:
+                self._queue.appendleft((priority, item))
+                self._queue = deque(sorted(self._queue, key=lambda x: x[0], reverse=True))
             else:
-                queue.append(resolved_item)
+                self._queue.append(item)
+            return True
 
-            result = {'size': len(queue), 'queue': queue_var, 'position': resolved_pos}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Pushed to {queue_var}: {len(queue)} items", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Queue push error: {str(e)}")
+    def dequeue(self) -> Optional[Any]:
+        with self._lock:
+            if self._queue:
+                item = self._queue.popleft()
+                if isinstance(item, tuple):
+                    return item[1]
+                return item
+            return None
 
-    def get_required_params(self) -> List[str]:
-        return ['item']
+    def peek(self) -> Optional[Any]:
+        with self._lock:
+            if self._queue:
+                item = self._queue[0]
+                if isinstance(item, tuple):
+                    return item[1]
+                return item
+            return None
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'queue_var': 'default_queue', 'position': 'back', 'output_var': 'queue_result'}
+    def size(self) -> int:
+        with self._lock:
+            return len(self._queue)
 
+    def is_empty(self) -> bool:
+        return self.size() == 0
 
-class QueuePopAction(BaseAction):
-    """Pop item from queue."""
-    action_type = "queue_pop"
-    display_name = "队列弹出"
-    description = "从队列弹出元素"
-    version = "1.0"
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._queue)
+            self._queue.clear()
+            return count
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute queue pop."""
-        queue_var = params.get('queue_var', 'default_queue')
-        position = params.get('position', 'front')  # front or back
-        output_var = params.get('output_var', 'queue_pop_result')
-
-        try:
-            if not hasattr(context, '_queues') or queue_var not in context._queues:
-                return ActionResult(success=False, message=f"Queue '{queue_var}' not found or empty")
-
-            queue = context._queues[queue_var]
-            if not queue:
-                return ActionResult(success=False, message=f"Queue '{queue_var}' is empty")
-
-            if position == 'back':
-                item = queue.pop()
-            else:
-                item = queue.popleft()
-
-            result = {'item': item, 'remaining': len(queue), 'queue': queue_var}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Popped: {str(item)[:50]}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Queue pop error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'queue_var': 'default_queue', 'position': 'front', 'output_var': 'queue_pop_result'}
+    def to_list(self) -> List[Any]:
+        with self._lock:
+            return [item[1] if isinstance(item, tuple) else item for item in self._queue]
 
 
-class QueuePeekAction(BaseAction):
-    """Peek at queue item without removing."""
-    action_type = "queue_peek"
-    display_name = "队列查看"
-    description = "查看队列元素"
-    version = "1.0"
+class MessageBus:
+    """In-memory message bus with pub/sub pattern."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute queue peek."""
-        queue_var = params.get('queue_var', 'default_queue')
-        index = params.get('index', 0)
-        output_var = params.get('output_var', 'queue_peek_result')
+    def __init__(self) -> None:
+        self._subscribers: Dict[str, List[Callable]] = {}
+        self._lock = Lock()
+        self._history: Dict[str, List[Dict[str, Any]]] = {}
+        self._max_history = 100
 
-        try:
-            if not hasattr(context, '_queues') or queue_var not in context._queues:
-                return ActionResult(success=False, message=f"Queue '{queue_var}' not found")
+    def publish(self, topic: str, message: Dict[str, Any]) -> int:
+        with self._lock:
+            if topic not in self._subscribers:
+                return 0
+            count = 0
+            for callback in self._subscribers[topic]:
+                try:
+                    callback(message)
+                    count += 1
+                except Exception as e:
+                    logger.error(f"Subscriber error on topic {topic}: {e}")
+            if topic not in self._history:
+                self._history[topic] = []
+            self._history[topic].append(message)
+            if len(self._history[topic]) > self._max_history:
+                self._history[topic].pop(0)
+            return count
 
-            queue = context._queues[queue_var]
-            if not queue:
-                return ActionResult(success=False, message=f"Queue '{queue_var}' is empty")
+    def subscribe(self, topic: str, callback: Callable) -> None:
+        with self._lock:
+            if topic not in self._subscribers:
+                self._subscribers[topic] = []
+            self._subscribers[topic].append(callback)
 
-            resolved_index = context.resolve_value(index) if context else index
-            if 0 <= resolved_index < len(queue):
-                item = queue[resolved_index]
-                result = {'item': item, 'index': resolved_index, 'queue': queue_var}
-                if context:
-                    context.set(output_var, result)
-                return ActionResult(success=True, message=f"Peek[{resolved_index}]: {str(item)[:50]}", data=result)
-            else:
-                return ActionResult(success=False, message=f"Index {resolved_index} out of range")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Queue peek error: {str(e)}")
+    def unsubscribe(self, topic: str, callback: Callable) -> bool:
+        with self._lock:
+            if topic in self._subscribers:
+                try:
+                    self._subscribers[topic].remove(callback)
+                    return True
+                except ValueError:
+                    pass
+            return False
 
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'queue_var': 'default_queue', 'index': 0, 'output_var': 'queue_peek_result'}
-
-
-class QueueSizeAction(BaseAction):
-    """Get queue size."""
-    action_type = "queue_size"
-    display_name = "队列大小"
-    description = "获取队列大小"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute queue size."""
-        queue_var = params.get('queue_var', 'default_queue')
-        output_var = params.get('output_var', 'queue_size')
-
-        try:
-            if not hasattr(context, '_queues') or queue_var not in context._queues:
-                size = 0
-            else:
-                size = len(context._queues[queue_var])
-
-            result = {'size': size, 'queue': queue_var}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Queue {queue_var}: {size} items", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Queue size error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'queue_var': 'default_queue', 'output_var': 'queue_size'}
+    def history(self, topic: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            return list(self._history.get(topic, []))
 
 
-class QueueClearAction(BaseAction):
-    """Clear queue."""
-    action_type = "queue_clear"
-    display_name = "清空队列"
-    description = "清空队列"
-    version = "1.0"
+class RateLimiter:
+    """Token bucket rate limiter."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute queue clear."""
-        queue_var = params.get('queue_var', 'default_queue')
-        output_var = params.get('output_var', 'queue_clear_result')
+    def __init__(self, rate: float, capacity: int) -> None:
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = float(capacity)
+        self.last_update = time.time()
+        self._lock = Lock()
+
+    def allow_request(self, tokens: int = 1) -> bool:
+        with self._lock:
+            now = time.time()
+            elapsed = now - self.last_update
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            self.last_update = now
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return True
+            return False
+
+    def wait_time(self, tokens: int = 1) -> float:
+        with self._lock:
+            if self.tokens >= tokens:
+                return 0.0
+            return (tokens - self.tokens) / self.rate
+
+
+class QueueAction(BaseAction):
+    """Queue and message broker operations.
+
+    Provides in-memory queue, message bus with pub/sub, rate limiting.
+    """
+
+    def __init__(self) -> None:
+        self._queues: Dict[str, InMemoryQueue] = {}
+        self._bus = MessageBus()
+        self._rate_limiters: Dict[str, RateLimiter] = {}
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "enqueue")
+        queue_name = params.get("queue", "default")
+        topic = params.get("topic", "default")
+        item = params.get("item")
+        limiter_name = params.get("limiter", "default")
 
         try:
-            cleared = 0
-            if hasattr(context, '_queues') and queue_var in context._queues:
-                cleared = len(context._queues[queue_var])
-                del context._queues[queue_var]
+            if operation == "enqueue":
+                if queue_name not in self._queues:
+                    self._queues[queue_name] = InMemoryQueue(queue_name)
+                priority = int(params.get("priority", 0))
+                success = self._queues[queue_name].enqueue(item, priority)
+                return {"success": success, "queue": queue_name, "size": self._queues[queue_name].size()}
 
-            result = {'cleared': cleared, 'queue': queue_var}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Cleared {cleared} items from {queue_var}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Queue clear error: {str(e)}")
+            elif operation == "dequeue":
+                if queue_name not in self._queues:
+                    return {"success": True, "item": None, "queue": queue_name}
+                item = self._queues[queue_name].dequeue()
+                return {"success": True, "item": item, "queue": queue_name, "size": self._queues[queue_name].size()}
 
-    def get_required_params(self) -> List[str]:
-        return []
+            elif operation == "peek":
+                if queue_name not in self._queues:
+                    return {"success": True, "item": None, "queue": queue_name}
+                item = self._queues[queue_name].peek()
+                return {"success": True, "item": item, "queue": queue_name}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'queue_var': 'default_queue', 'output_var': 'queue_clear_result'}
+            elif operation == "size":
+                if queue_name not in self._queues:
+                    return {"success": True, "size": 0, "queue": queue_name}
+                return {"success": True, "size": self._queues[queue_name].size(), "queue": queue_name}
 
+            elif operation == "clear":
+                if queue_name not in self._queues:
+                    return {"success": True, "cleared": 0}
+                cleared = self._queues[queue_name].clear()
+                return {"success": True, "cleared": cleared, "queue": queue_name}
 
-class QueueListAction(BaseAction):
-    """List queue contents."""
-    action_type = "queue_list"
-    display_name = "队列列表"
-    description = "列出队列内容"
-    version = "1.0"
+            elif operation == "list_queues":
+                return {"success": True, "queues": list(self._queues.keys()), "counts": {k: v.size() for k, v in self._queues.items()}}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute queue list."""
-        queue_var = params.get('queue_var', 'default_queue')
-        start = params.get('start', 0)
-        end = params.get('end', None)
-        output_var = params.get('output_var', 'queue_items')
+            elif operation == "publish":
+                message = params.get("message", {})
+                count = self._bus.publish(topic, message)
+                return {"success": True, "topic": topic, "subscribers_notified": count}
 
-        try:
-            if not hasattr(context, '_queues') or queue_var not in context._queues:
+            elif operation == "history":
+                messages = self._bus.history(topic)
+                return {"success": True, "topic": topic, "messages": messages, "count": len(messages)}
+
+            elif operation == "rate_limit_create":
+                rate = float(params.get("rate", 10))
+                capacity = int(params.get("capacity", 10))
+                self._rate_limiters[limiter_name] = RateLimiter(rate, capacity)
+                return {"success": True, "limiter": limiter_name, "rate": rate, "capacity": capacity}
+
+            elif operation == "rate_limit_allow":
+                if limiter_name not in self._rate_limiters:
+                    return {"success": False, "error": f"Limiter {limiter_name} not found"}
+                tokens = int(params.get("tokens", 1))
+                allowed = self._rate_limiters[limiter_name].allow_request(tokens)
+                wait_time = self._rate_limiters[limiter_name].wait_time(tokens) if not allowed else 0.0
+                return {"success": True, "allowed": allowed, "limiter": limiter_name, "wait_time": wait_time}
+
+            elif operation == "batch":
+                items = params.get("items", [])
+                results = []
+                for it in items:
+                    if queue_name not in self._queues:
+                        self._queues[queue_name] = InMemoryQueue(queue_name)
+                    self._queues[queue_name].enqueue(it)
+                    results.append(it)
+                return {"success": True, "enqueued": len(results), "queue": queue_name, "items": results}
+
+            elif operation == "drain":
+                if queue_name not in self._queues:
+                    return {"success": True, "items": [], "drained": 0}
                 items = []
+                q = self._queues[queue_name]
+                while not q.is_empty():
+                    item = q.dequeue()
+                    if item:
+                        items.append(item)
+                return {"success": True, "items": items, "drained": len(items), "queue": queue_name}
+
             else:
-                items = list(context._queues[queue_var])
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
-            resolved_start = context.resolve_value(start) if context else start
-            resolved_end = context.resolve_value(end) if context else end
-
-            if resolved_end is not None:
-                items = items[resolved_start:resolved_end]
-            elif resolved_start > 0:
-                items = items[resolved_start:]
-
-            result = {'items': items, 'count': len(items), 'queue': queue_var, 'total': len(context._queues.get(queue_var, deque()))}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Queue {queue_var}: {len(items)} items shown", data=result)
         except Exception as e:
-            return ActionResult(success=False, message=f"Queue list error: {str(e)}")
+            logger.error(f"QueueAction error: {e}")
+            return {"success": False, "error": str(e)}
 
-    def get_required_params(self) -> List[str]:
-        return []
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'queue_var': 'default_queue', 'start': 0, 'end': None, 'output_var': 'queue_items'}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for queue operations."""
+    return QueueAction().execute(context, params)

@@ -1,403 +1,267 @@
-"""Graph action module for RabAI AutoClick.
-
-Provides graph data structure operations:
-- GraphCreateAction: Create graph
-- GraphAddNodeAction: Add graph node
-- GraphAddEdgeAction: Add graph edge
-- GraphRemoveNodeAction: Remove graph node
-- GraphTraverseAction: Traverse graph
 """
+Graph and network utilities - graph traversal, shortest path, topology, network analysis.
+"""
+from typing import Any, Dict, List, Optional, Set, Tuple, Iterator
+from collections import defaultdict, deque
+import heapq
+import logging
 
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class GraphCreateAction(BaseAction):
-    """Create graph."""
-    action_type = "graph_create"
-    display_name = "创建图"
-    description = "创建图结构"
+class BaseAction:
+    """Base class for all actions."""
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute create.
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-        Args:
-            context: Execution context.
-            params: Dict with name, directed.
 
-        Returns:
-            ActionResult indicating created.
-        """
-        name = params.get('name', '')
-        directed = params.get('directed', False)
+class Graph:
+    """Undirected graph with adjacency list representation."""
 
-        valid, msg = self.validate_type(name, str, 'name')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+    def __init__(self) -> None:
+        self.adj: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+
+    def add_node(self, node: str) -> None:
+        if node not in self.adj:
+            self.adj[node] = []
+
+    def add_edge(self, u: str, v: str, weight: float = 1.0) -> None:
+        self.add_node(u)
+        self.add_node(v)
+        self.adj[u].append((v, weight))
+        self.adj[v].append((u, weight))
+
+    def add_directed_edge(self, u: str, v: str, weight: float = 1.0) -> None:
+        self.add_node(u)
+        self.add_node(v)
+        self.adj[u].append((v, weight))
+
+    def nodes(self) -> List[str]:
+        return list(self.adj.keys())
+
+    def edges(self) -> List[Tuple[str, str, float]]:
+        seen = set()
+        result = []
+        for u in self.adj:
+            for v, w in self.adj[u]:
+                if (v, u) not in seen:
+                    seen.add((u, v))
+                    result.append((u, v, w))
+        return result
+
+    def bfs(self, start: str) -> List[str]:
+        visited: Set[str] = set()
+        queue = deque([start])
+        order = []
+        while queue:
+            node = queue.popleft()
+            if node in visited:
+                continue
+            visited.add(node)
+            order.append(node)
+            for neighbor, _ in self.adj[node]:
+                if neighbor not in visited:
+                    queue.append(neighbor)
+        return order
+
+    def dfs(self, start: str) -> List[str]:
+        visited: Set[str] = set()
+        order = []
+
+        def _dfs(node: str) -> None:
+            if node in visited:
+                return
+            visited.add(node)
+            order.append(node)
+            for neighbor, _ in self.adj[node]:
+                if neighbor not in visited:
+                    _dfs(neighbor)
+
+        _dfs(start)
+        return order
+
+    def dijkstra(self, start: str, end: Optional[str] = None) -> Tuple[Dict[str, float], Dict[str, Optional[str]]]:
+        dist: Dict[str, float] = {start: 0.0}
+        prev: Dict[str, Optional[str]] = {start: None}
+        heap = [(0.0, start)]
+
+        while heap:
+            d, u = heapq.heappop(heap)
+            if d > dist.get(u, float("inf")):
+                continue
+            if end and u == end:
+                break
+            for v, w in self.adj.get(u, []):
+                alt = d + w
+                if alt < dist.get(v, float("inf")):
+                    dist[v] = alt
+                    prev[v] = u
+                    heapq.heappush(heap, (alt, v))
+
+        return dist, prev
+
+    def shortest_path(self, start: str, end: str) -> Optional[List[str]]:
+        dist, prev = self.dijkstra(start, end)
+        if end not in dist or dist[end] == float("inf"):
+            return None
+        path = []
+        node: Optional[str] = end
+        while node is not None:
+            path.append(node)
+            node = prev[node]
+        return path[::-1]
+
+    def has_cycle(self) -> bool:
+        visited: Set[str] = set()
+        rec_stack: Set[str] = set()
+
+        def _has_cycle_from(node: str) -> bool:
+            visited.add(node)
+            rec_stack.add(node)
+            for neighbor, _ in self.adj[node]:
+                if neighbor not in visited:
+                    if _has_cycle_from(neighbor):
+                        return True
+                elif neighbor in rec_stack:
+                    return True
+            rec_stack.remove(node)
+            return False
+
+        for node in self.adj:
+            if node not in visited:
+                if _has_cycle_from(node):
+                    return True
+        return False
+
+    def topological_sort(self) -> Optional[List[str]]:
+        in_degree: Dict[str, int] = defaultdict(int)
+        for u in self.adj:
+            for v, _ in self.adj[u]:
+                in_degree[v] += 1
+        queue = deque([n for n in self.adj if in_degree[n] == 0])
+        order = []
+        while queue:
+            node = queue.popleft()
+            order.append(node)
+            for neighbor, _ in self.adj[node]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+        if len(order) != len(self.adj):
+            return None
+        return order
+
+    def pagerank(self, damping: float = 0.85, iterations: int = 100, tol: float = 1e-6) -> Dict[str, float]:
+        nodes = list(self.adj.keys())
+        n = len(nodes)
+        if n == 0:
+            return {}
+        rank = {node: 1.0 / n for node in nodes}
+        for _ in range(iterations):
+            new_rank: Dict[str, float] = {}
+            for node in nodes:
+                score = 0.0
+                for other in self.adj:
+                    for neighbor, _ in self.adj[other]:
+                        if neighbor == node:
+                            score += damping * rank[other] / len(self.adj[other])
+                new_rank[node] = (1 - damping) / n + score
+            max_diff = max(abs(new_rank[n] - rank[n]) for n in nodes)
+            rank = new_rank
+            if max_diff < tol:
+                break
+        return rank
+
+
+class GraphAction(BaseAction):
+    """Graph and network operations.
+
+    Supports BFS, DFS, Dijkstra's shortest path, cycle detection, topological sort, PageRank.
+    """
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "build")
+        edges = params.get("edges", [])
+        nodes = params.get("nodes", [])
+        directed = params.get("directed", False)
+        start = params.get("start", "")
+        end = params.get("end", "")
 
         try:
-            resolved_name = context.resolve_value(name)
-            resolved_directed = bool(context.resolve_value(directed))
+            graph = Graph()
+            for n in nodes:
+                graph.add_node(str(n))
+            for edge in edges:
+                if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+                    u, v = str(edge[0]), str(edge[1])
+                    w = float(edge[2]) if len(edge) > 2 else 1.0
+                    if directed:
+                        graph.add_directed_edge(u, v, w)
+                    else:
+                        graph.add_edge(u, v, w)
 
-            graph = {
-                'nodes': {},
-                'edges': [],
-                'directed': resolved_directed
-            }
-            context.set(f'_graph_{resolved_name}', graph)
-
-            return ActionResult(
-                success=True,
-                message=f"图 {resolved_name} 创建",
-                data={
-                    'name': resolved_name,
-                    'directed': resolved_directed
+            if operation == "build":
+                return {
+                    "success": True,
+                    "nodes": graph.nodes(),
+                    "edges": [(u, v, w) for u, v, w in graph.edges()],
                 }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"创建图失败: {str(e)}"
-            )
 
-    def get_required_params(self) -> List[str]:
-        return ['name']
+            elif operation == "bfs":
+                if not start:
+                    return {"success": False, "error": "start node required"}
+                return {"success": True, "order": graph.bfs(start), "start": start}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'directed': False}
+            elif operation == "dfs":
+                if not start:
+                    return {"success": False, "error": "start node required"}
+                return {"success": True, "order": graph.dfs(start), "start": start}
 
+            elif operation == "shortest_path":
+                if not start or not end:
+                    return {"success": False, "error": "start and end required"}
+                path = graph.shortest_path(start, end)
+                if path:
+                    dist, _ = graph.dijkstra(start, end)
+                    return {"success": True, "path": path, "distance": dist.get(end, 0)}
+                return {"success": False, "error": "No path found"}
 
-class GraphAddNodeAction(BaseAction):
-    """Add graph node."""
-    action_type = "graph_add_node"
-    display_name = "添加图节点"
-    description = "添加图节点"
+            elif operation == "dijkstra":
+                if not start:
+                    return {"success": False, "error": "start node required"}
+                dist, prev = graph.dijkstra(start)
+                return {"success": True, "distances": dist, "target": end or None}
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute add node.
+            elif operation == "has_cycle":
+                return {"success": True, "has_cycle": graph.has_cycle()}
 
-        Args:
-            context: Execution context.
-            params: Dict with graph_name, node_id, value.
+            elif operation == "topological_sort":
+                order = graph.topological_sort()
+                if order is None:
+                    return {"success": False, "error": "Graph has cycles - cannot topologically sort"}
+                return {"success": True, "order": order}
 
-        Returns:
-            ActionResult indicating added.
-        """
-        graph_name = params.get('graph_name', '')
-        node_id = params.get('node_id', '')
-        value = params.get('value', None)
+            elif operation == "pagerank":
+                damping = float(params.get("damping", 0.85))
+                iterations = int(params.get("iterations", 100))
+                ranks = graph.pagerank(damping, iterations)
+                return {"success": True, "pagerank": ranks}
 
-        valid, msg = self.validate_type(graph_name, str, 'graph_name')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+            elif operation == "nodes":
+                return {"success": True, "nodes": graph.nodes(), "count": len(graph.nodes())}
 
-        valid, msg = self.validate_type(node_id, str, 'node_id')
-        if not valid:
-            return ActionResult(success=False, message=msg)
+            elif operation == "edges":
+                return {"success": True, "edges": [(u, v, w) for u, v, w in graph.edges()], "count": len(graph.edges())}
 
-        try:
-            resolved_graph = context.resolve_value(graph_name)
-            resolved_node = context.resolve_value(node_id)
-            resolved_value = context.resolve_value(value) if value is not None else resolved_node
-
-            graph = context.get(f'_graph_{resolved_graph}')
-            if graph is None:
-                return ActionResult(
-                    success=False,
-                    message=f"图 {resolved_graph} 不存在"
-                )
-
-            graph['nodes'][resolved_node] = resolved_value
-
-            context.set(f'_graph_{resolved_graph}', graph)
-
-            return ActionResult(
-                success=True,
-                message=f"添加图节点 {resolved_node}",
-                data={
-                    'graph_name': resolved_graph,
-                    'node_id': resolved_node,
-                    'value': resolved_value
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"添加图节点失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['graph_name', 'node_id']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'value': None}
-
-
-class GraphAddEdgeAction(BaseAction):
-    """Add graph edge."""
-    action_type = "graph_add_edge"
-    display_name = "添加图边"
-    description = "添加图边"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute add edge.
-
-        Args:
-            context: Execution context.
-            params: Dict with graph_name, from_node, to_node, weight.
-
-        Returns:
-            ActionResult indicating added.
-        """
-        graph_name = params.get('graph_name', '')
-        from_node = params.get('from_node', '')
-        to_node = params.get('to_node', '')
-        weight = params.get('weight', 1)
-
-        valid, msg = self.validate_type(graph_name, str, 'graph_name')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(from_node, str, 'from_node')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(to_node, str, 'to_node')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_graph = context.resolve_value(graph_name)
-            resolved_from = context.resolve_value(from_node)
-            resolved_to = context.resolve_value(to_node)
-            resolved_weight = float(context.resolve_value(weight))
-
-            graph = context.get(f'_graph_{resolved_graph}')
-            if graph is None:
-                return ActionResult(
-                    success=False,
-                    message=f"图 {resolved_graph} 不存在"
-                )
-
-            edge = {
-                'from': resolved_from,
-                'to': resolved_to,
-                'weight': resolved_weight
-            }
-            graph['edges'].append(edge)
-
-            context.set(f'_graph_{resolved_graph}', graph)
-
-            return ActionResult(
-                success=True,
-                message=f"添加图边 {resolved_from} -> {resolved_to}",
-                data={
-                    'graph_name': resolved_graph,
-                    'from': resolved_from,
-                    'to': resolved_to,
-                    'weight': resolved_weight
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"添加图边失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['graph_name', 'from_node', 'to_node']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'weight': 1}
-
-
-class GraphRemoveNodeAction(BaseAction):
-    """Remove graph node."""
-    action_type = "graph_remove_node"
-    display_name = "移除图节点"
-    description = "移除图节点"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute remove node.
-
-        Args:
-            context: Execution context.
-            params: Dict with graph_name, node_id.
-
-        Returns:
-            ActionResult indicating removed.
-        """
-        graph_name = params.get('graph_name', '')
-        node_id = params.get('node_id', '')
-
-        valid, msg = self.validate_type(graph_name, str, 'graph_name')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        valid, msg = self.validate_type(node_id, str, 'node_id')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_graph = context.resolve_value(graph_name)
-            resolved_node = context.resolve_value(node_id)
-
-            graph = context.get(f'_graph_{resolved_graph}')
-            if graph is None:
-                return ActionResult(
-                    success=False,
-                    message=f"图 {resolved_graph} 不存在"
-                )
-
-            if resolved_node in graph['nodes']:
-                del graph['nodes'][resolved_node]
-
-            graph['edges'] = [
-                e for e in graph['edges']
-                if e['from'] != resolved_node and e['to'] != resolved_node
-            ]
-
-            context.set(f'_graph_{resolved_graph}', graph)
-
-            return ActionResult(
-                success=True,
-                message=f"移除图节点 {resolved_node}",
-                data={
-                    'graph_name': resolved_graph,
-                    'node_id': resolved_node
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"移除图节点失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['graph_name', 'node_id']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
-
-
-class GraphTraverseAction(BaseAction):
-    """Traverse graph."""
-    action_type = "graph_traverse"
-    display_name = "遍历图"
-    description = "遍历图结构"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute traverse.
-
-        Args:
-            context: Execution context.
-            params: Dict with graph_name, start_node, mode, output_var.
-
-        Returns:
-            ActionResult with traversal result.
-        """
-        graph_name = params.get('graph_name', '')
-        start_node = params.get('start_node', None)
-        mode = params.get('mode', 'depth')
-        output_var = params.get('output_var', 'traversal_result')
-
-        valid, msg = self.validate_type(graph_name, str, 'graph_name')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_graph = context.resolve_value(graph_name)
-            resolved_start = context.resolve_value(start_node) if start_node is not None else None
-            resolved_mode = context.resolve_value(mode)
-
-            graph = context.get(f'_graph_{resolved_graph}')
-            if graph is None:
-                return ActionResult(
-                    success=False,
-                    message=f"图 {resolved_graph} 不存在"
-                )
-
-            nodes = list(graph['nodes'].keys())
-            if not nodes:
-                context.set(output_var, [])
-                return ActionResult(
-                    success=True,
-                    message=f"图为空",
-                    data={'count': 0}
-                )
-
-            if resolved_mode == 'depth':
-                visited = set()
-                stack = [resolved_start] if resolved_start else [nodes[0]]
-                result = []
-
-                while stack:
-                    node = stack.pop()
-                    if node not in visited:
-                        visited.add(node)
-                        result.append(node)
-                        for edge in graph['edges']:
-                            if edge['from'] == node and edge['to'] not in visited:
-                                stack.append(edge['to'])
             else:
-                visited = set()
-                queue = [resolved_start] if resolved_start else [nodes[0]]
-                result = []
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
-                while queue:
-                    node = queue.pop(0)
-                    if node not in visited:
-                        visited.add(node)
-                        result.append(node)
-                        for edge in graph['edges']:
-                            if edge['from'] == node and edge['to'] not in visited:
-                                queue.append(edge['to'])
-
-            context.set(output_var, result)
-
-            return ActionResult(
-                success=True,
-                message=f"图遍历完成: {len(result)} 节点",
-                data={
-                    'graph_name': resolved_graph,
-                    'mode': resolved_mode,
-                    'count': len(result),
-                    'output_var': output_var
-                }
-            )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"遍历图失败: {str(e)}"
-            )
+            logger.error(f"GraphAction error: {e}")
+            return {"success": False, "error": str(e)}
 
-    def get_required_params(self) -> List[str]:
-        return ['graph_name']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'start_node': None, 'mode': 'depth', 'output_var': 'traversal_result'}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for graph operations."""
+    return GraphAction().execute(context, params)
