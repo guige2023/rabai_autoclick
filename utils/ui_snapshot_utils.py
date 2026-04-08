@@ -1,334 +1,195 @@
-"""
-UI snapshot utilities for state capture and comparison.
+"""UI snapshot utilities.
 
-Provides full UI state capture including element trees,
-screenshots, and state diffing for automation testing.
+This module provides utilities for capturing and comparing
+UI state snapshots.
 """
 
 from __future__ import annotations
 
-import json
 import time
 import hashlib
-from typing import Optional, List, Dict, Any, Tuple
+import json
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
-from datetime import datetime
-import os
 
 
 @dataclass
 class ElementSnapshot:
-    """Single UI element snapshot."""
+    """Snapshot of a single UI element."""
     role: str
-    title: str
+    name: str
     value: str
-    position: Tuple[int, int]
-    size: Tuple[int, int]
+    rect: tuple[int, int, int, int]  # x, y, width, height
+    visible: bool
     enabled: bool
     focused: bool
-    children_count: int
-    subrole: Optional[str] = None
-    identifier: Optional[str] = None
+    attributes: Dict[str, Any] = field(default_factory=dict)
+    children: List["ElementSnapshot"] = field(default_factory=list)
 
 
 @dataclass
 class UISnapshot:
-    """Complete UI state snapshot."""
-    id: str
+    """A complete UI snapshot."""
     timestamp: float
-    app_bundle_id: Optional[str]
     app_name: str
-    focused_window_title: str
-    elements: List[ElementSnapshot]
-    screenshot_path: Optional[str] = None
-    hash: Optional[str] = None
+    window_title: str
+    elements: List[ElementSnapshot] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def element_count(self) -> int:
+        """Count total elements including nested."""
+        count = len(self.elements)
+        for elem in self.elements:
+            count += _count_nested(elem)
+        return count
+
+    def find_by_role(self, role: str) -> List[ElementSnapshot]:
+        """Find elements by role."""
+        results: List[ElementSnapshot] = []
+        for elem in self.elements:
+            _find_by_role(elem, role, results)
+        return results
+
+    def find_by_name(self, name: str) -> List[ElementSnapshot]:
+        """Find elements by name (substring match)."""
+        results: List[ElementSnapshot] = []
+        for elem in self.elements:
+            _find_by_name(elem, name, results)
+        return results
+
+    def hash(self) -> str:
+        """Generate a hash of the snapshot."""
+        data = self._serialize()
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
+    def _serialize(self) -> Dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "app_name": self.app_name,
+            "window_title": self.window_title,
+            "elements": [self._serialize_element(e) for e in self.elements],
+        }
+
+    def _serialize_element(self, elem: ElementSnapshot) -> Dict[str, Any]:
+        return {
+            "role": elem.role,
+            "name": elem.name,
+            "value": elem.value,
+            "rect": elem.rect,
+            "visible": elem.visible,
+            "enabled": elem.enabled,
+            "focused": elem.focused,
+            "attributes": elem.attributes,
+            "children": [self._serialize_element(c) for c in elem.children],
+        }
+
+
+def _count_nested(elem: ElementSnapshot) -> int:
+    count = len(elem.children)
+    for child in elem.children:
+        count += _count_nested(child)
+    return count
+
+
+def _find_by_role(elem: ElementSnapshot, role: str, results: List[ElementSnapshot]) -> None:
+    if elem.role == role:
+        results.append(elem)
+    for child in elem.children:
+        _find_by_role(child, role, results)
+
+
+def _find_by_name(elem: ElementSnapshot, name: str, results: List[ElementSnapshot]) -> None:
+    if name.lower() in elem.name.lower():
+        results.append(elem)
+    for child in elem.children:
+        _find_by_name(child, name, results)
+
+
+class SnapshotComparator:
+    """Compares UI snapshots for changes."""
+
+    def __init__(self) -> None:
+        self._snapshots: List[UISnapshot] = []
+
+    def add(self, snapshot: UISnapshot) -> None:
+        self._snapshots.append(snapshot)
+
+    def has_changed_since(self, index: int) -> bool:
+        if index >= len(self._snapshots):
+            return False
+        return self._snapshots[-1].hash() != self._snapshots[index].hash()
+
+    def diff_since(self, index: int) -> Optional[SnapshotDiff]:
+        if index >= len(self._snapshots):
+            return None
+        old = self._snapshots[index]
+        new = self._snapshots[-1]
+        return compare_snapshots(old, new)
 
 
 @dataclass
 class SnapshotDiff:
-    """Difference between two snapshots."""
+    """Differences between two snapshots."""
     added: List[ElementSnapshot]
     removed: List[ElementSnapshot]
-    changed: List[Tuple[ElementSnapshot, ElementSnapshot]]
-    timestamp: float
-    duration: float
+    changed: List[tuple[ElementSnapshot, ElementSnapshot]]
+    timestamp_delta: float
 
 
-def capture_snapshot(app_bundle_id: Optional[str] = None,
-                    include_screenshot: bool = True) -> UISnapshot:
-    """
-    Capture complete UI snapshot.
-    
+def compare_snapshots(old: UISnapshot, new: UISnapshot) -> SnapshotDiff:
+    """Compare two snapshots.
+
     Args:
-        app_bundle_id: Optional app to capture.
-        include_screenshot: Whether to include screenshot.
-        
+        old: Previous snapshot.
+        new: Current snapshot.
+
     Returns:
-        UISnapshot with current UI state.
+        SnapshotDiff with changes.
     """
-    import subprocess
-    
-    elements = []
-    app_name = "Unknown"
-    
-    script = f'''
-    tell application "System Events"
-        {"set targetApp to first process whose bundle identifier is \"" + app_bundle_id + "\"" if app_bundle_id else "set targetApp to first process whose frontmost is true"}
-        set appName to name of targetApp
-        set frontWin to first window of targetApp
-        set winTitle to title of frontWin
-        set elemList to every UI element of frontWin
-        set resultData to {{}}
-        repeat with elem in elemList
-            set elemRole to role of elem
-            set elemTitle to title of elem
-            set elemValue to value of elem
-            set elemPos to position of elem
-            set elemSize to size of elem
-            set elemEnabled to enabled of elem
-            set elemFocused to focused of elem
-            set elemChildren to count of UI elements of elem
-            set end of resultData to {{elemRole, elemTitle, elemValue, elemPos, elemSize, elemEnabled, elemFocused, elemChildren}}
-        end repeat
-        return {{appName, winTitle, resultData}}
-    end tell
-    '''
-    
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        
-        if result.stdout.strip():
-            lines = result.stdout.strip().split('\n')
-            if len(lines) >= 2:
-                app_name = lines[0].strip()
-                window_title = lines[1].strip()
-    except Exception:
-        pass
-    
-    screenshot_path = None
-    if include_screenshot:
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            screenshot_path = f"/tmp/snapshot_{timestamp}.png"
-            subprocess.run(
-                ["screencapture", "-x", screenshot_path],
-                check=True,
-                capture_output=True
-            )
-        except Exception:
-            screenshot_path = None
-    
-    snapshot = UISnapshot(
-        id=f"snap_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-        timestamp=time.time(),
-        app_bundle_id=app_bundle_id,
-        app_name=app_name,
-        focused_window_title="",
-        elements=elements,
-        screenshot_path=screenshot_path
-    )
-    
-    snapshot.hash = compute_snapshot_hash(snapshot)
-    return snapshot
+    old_map = {e.name: e for e in _flatten_elements(old.elements)}
+    new_map = {e.name: e for e in _flatten_elements(new.elements)}
 
-
-def compute_snapshot_hash(snapshot: UISnapshot) -> str:
-    """
-    Compute hash of snapshot state.
-    
-    Args:
-        snapshot: Snapshot to hash.
-        
-    Returns:
-        MD5 hash string.
-    """
-    state = {
-        'app': snapshot.app_name,
-        'window': snapshot.focused_window_title,
-        'elements': [
-            {
-                'role': e.role,
-                'title': e.title,
-                'position': e.position,
-                'size': e.size,
-            }
-            for e in snapshot.elements
-        ]
-    }
-    json_str = json.dumps(state, sort_keys=True)
-    return hashlib.md5(json_str.encode()).hexdigest()
-
-
-def compare_snapshots(before: UISnapshot, after: UISnapshot) -> SnapshotDiff:
-    """
-    Compare two snapshots and return differences.
-    
-    Args:
-        before: Earlier snapshot.
-        after: Later snapshot.
-        
-    Returns:
-        SnapshotDiff with all differences.
-    """
-    start = time.time()
-    
-    before_map = {
-        (e.role, e.title, e.position): e
-        for e in before.elements
-    }
-    after_map = {
-        (e.role, e.title, e.position): e
-        for e in after.elements
-    }
-    
-    added = []
-    removed = []
+    added = [new_map[k] for k in new_map if k not in old_map]
+    removed = [old_map[k] for k in old_map if k not in new_map]
     changed = []
-    
-    for key, elem in after_map.items():
-        if key not in before_map:
-            added.append(elem)
-    
-    for key, elem in before_map.items():
-        if key not in after_map:
-            removed.append(elem)
-    
-    for key, after_elem in after_map.items():
-        if key in before_map:
-            before_elem = before_map[key]
-            if (before_elem.value != after_elem.value or
-                before_elem.enabled != after_elem.enabled or
-                before_elem.focused != after_elem.focused):
-                changed.append((before_elem, after_elem))
-    
+
+    for name in old_map:
+        if name in new_map:
+            if not _elements_equal(old_map[name], new_map[name]):
+                changed.append((old_map[name], new_map[name]))
+
     return SnapshotDiff(
         added=added,
         removed=removed,
         changed=changed,
-        timestamp=time.time(),
-        duration=time.time() - start
+        timestamp_delta=new.timestamp - old.timestamp,
     )
 
 
-def save_snapshot(snapshot: UISnapshot, path: str) -> bool:
-    """
-    Save snapshot to file.
-    
-    Args:
-        snapshot: Snapshot to save.
-        path: Output file path.
-        
-    Returns:
-        True if successful, False otherwise.
-    """
-    try:
-        data = {
-            'id': snapshot.id,
-            'timestamp': snapshot.timestamp,
-            'app_bundle_id': snapshot.app_bundle_id,
-            'app_name': snapshot.app_name,
-            'focused_window_title': snapshot.focused_window_title,
-            'screenshot_path': snapshot.screenshot_path,
-            'hash': snapshot.hash,
-            'metadata': snapshot.metadata,
-            'elements': [
-                {
-                    'role': e.role,
-                    'title': e.title,
-                    'value': e.value,
-                    'position': list(e.position),
-                    'size': list(e.size),
-                    'enabled': e.enabled,
-                    'focused': e.focused,
-                    'children_count': e.children_count,
-                    'subrole': e.subrole,
-                    'identifier': e.identifier,
-                }
-                for e in snapshot.elements
-            ]
-        }
-        
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
-        return True
-    except Exception:
-        return False
+def _flatten_elements(elems: List[ElementSnapshot]) -> List[ElementSnapshot]:
+    result: List[ElementSnapshot] = []
+    for elem in elems:
+        result.append(elem)
+        result.extend(_flatten_elements(elem.children))
+    return result
 
 
-def load_snapshot(path: str) -> Optional[UISnapshot]:
-    """
-    Load snapshot from file.
-    
-    Args:
-        path: Snapshot file path.
-        
-    Returns:
-        UISnapshot if successful, None otherwise.
-    """
-    try:
-        with open(path, 'r') as f:
-            data = json.load(f)
-        
-        elements = [
-            ElementSnapshot(
-                role=e['role'],
-                title=e['title'],
-                value=e['value'],
-                position=tuple(e['position']),
-                size=tuple(e['size']),
-                enabled=e['enabled'],
-                focused=e['focused'],
-                children_count=e['children_count'],
-                subrole=e.get('subrole'),
-                identifier=e.get('identifier'),
-            )
-            for e in data.get('elements', [])
-        ]
-        
-        return UISnapshot(
-            id=data['id'],
-            timestamp=data['timestamp'],
-            app_bundle_id=data.get('app_bundle_id'),
-            app_name=data['app_name'],
-            focused_window_title=data.get('focused_window_title', ''),
-            elements=elements,
-            screenshot_path=data.get('screenshot_path'),
-            hash=data.get('hash'),
-            metadata=data.get('metadata', {})
-        )
-    except Exception:
-        return None
+def _elements_equal(a: ElementSnapshot, b: ElementSnapshot) -> bool:
+    return (
+        a.role == b.role
+        and a.name == b.name
+        and a.value == b.value
+        and a.rect == b.rect
+        and a.visible == b.visible
+        and a.enabled == b.enabled
+        and a.focused == b.focused
+    )
 
 
-def wait_for_snapshot_change(initial: UISnapshot,
-                              timeout: float = 10.0,
-                              poll_interval: float = 0.5) -> Optional[SnapshotDiff]:
-    """
-    Wait for UI snapshot to change.
-    
-    Args:
-        initial: Initial snapshot to compare against.
-        timeout: Maximum wait time in seconds.
-        poll_interval: Time between checks.
-        
-    Returns:
-        SnapshotDiff if changed, None on timeout.
-    """
-    start = time.time()
-    
-    while time.time() - start < timeout:
-        current = capture_snapshot(include_screenshot=False)
-        diff = compare_snapshots(initial, current)
-        
-        if diff.added or diff.removed or diff.changed:
-            return diff
-        
-        time.sleep(poll_interval)
-    
-    return None
+__all__ = [
+    "ElementSnapshot",
+    "UISnapshot",
+    "SnapshotComparator",
+    "SnapshotDiff",
+    "compare_snapshots",
+]
