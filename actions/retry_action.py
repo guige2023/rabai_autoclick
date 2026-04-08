@@ -1,229 +1,146 @@
-"""Retry action module for RabAI AutoClick.
-
-Provides retry operations:
-- RetryAction: Retry action
-- RetryUntilSuccessAction: Retry until success
-- RetryMaxAttemptsAction: Max retry attempts
-- RetryEndAction: End retry block
 """
+Retry and backoff utilities - retry with backoff, circuit breaker, timeout handling.
+"""
+from typing import Any, Dict, Optional, Callable
+import time
+import logging
+import threading
 
-from typing import Any, Dict, List, Optional
+logger = logging.getLogger(__name__)
 
-import sys
-import os
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+
+class BaseAction:
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+class CircuitBreaker:
+    """Circuit breaker pattern implementation."""
+
+    STATES = {"closed": 0, "open": 1, "half_open": 2}
+
+    def __init__(self, failure_threshold: int = 5, timeout: float = 60.0) -> None:
+        self._failure_threshold = failure_threshold
+        self._timeout = timeout
+        self._state = self.STATES["closed"]
+        self._failure_count = 0
+        self._last_failure_time: Optional[float] = None
+        self._lock = threading.Lock()
+
+    def call(self, fn: Callable, *args, **kwargs) -> Any:
+        with self._lock:
+            if self._state == self.STATES["open"]:
+                if time.time() - self._last_failure_time >= self._timeout:
+                    self._state = self.STATES["half_open"]
+                else:
+                    raise Exception("Circuit breaker is OPEN")
+        result = fn(*args, **kwargs)
+        with self._lock:
+            self._failure_count = 0
+            self._state = self.STATES["closed"]
+        return result
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.time()
+            if self._failure_count >= self._failure_threshold:
+                self._state = self.STATES["open"]
+
+    def state(self) -> str:
+        with self._lock:
+            return {v: k for k, v in self.STATES.items()}[self._state]
 
 
 class RetryAction(BaseAction):
-    """Retry action."""
-    action_type = "retry"
-    display_name = "重试"
-    description = "重试操作"
+    """Retry and backoff operations.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute retry.
+    Provides retry with exponential backoff, circuit breaker, timeout simulation.
+    """
 
-        Args:
-            context: Execution context.
-            params: Dict with max_attempts, delay, backoff.
+    def __init__(self) -> None:
+        self._breakers: Dict[str, CircuitBreaker] = {}
 
-        Returns:
-            ActionResult with retry status.
-        """
-        max_attempts = params.get('max_attempts', 3)
-        delay = params.get('delay', 1)
-        backoff = params.get('backoff', 1)
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "backoff")
+        name = params.get("name", "default")
 
         try:
-            resolved_max = int(context.resolve_value(max_attempts))
-            resolved_delay = float(context.resolve_value(delay))
-            resolved_backoff = float(context.resolve_value(backoff))
+            if operation == "backoff":
+                attempt = int(params.get("attempt", 0))
+                base_delay = float(params.get("base_delay", 1.0))
+                max_delay = float(params.get("max_delay", 60.0))
+                exponential = params.get("exponential", True)
+                jitter = params.get("jitter", True)
+                if exponential:
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                else:
+                    delay = min(base_delay * (attempt + 1), max_delay)
+                if jitter:
+                    import random
+                    delay = delay * (0.5 + random.random())
+                return {"success": True, "delay_seconds": round(delay, 3), "attempt": attempt}
 
-            context.set('_retry_max_attempts', resolved_max)
-            context.set('_retry_delay', resolved_delay)
-            context.set('_retry_backoff', resolved_backoff)
-            context.set('_retry_attempt', 0)
-            context.set('_retry_exhausted', False)
+            elif operation == "retry_config":
+                max_attempts = int(params.get("max_attempts", 3))
+                base_delay = float(params.get("base_delay", 1.0))
+                return {"success": True, "max_attempts": max_attempts, "base_delay": base_delay}
 
-            return ActionResult(
-                success=True,
-                message=f"重试设置: 最多{resolved_max}次",
-                data={
-                    'max_attempts': resolved_max,
-                    'delay': resolved_delay,
-                    'backoff': resolved_backoff
-                }
-            )
+            elif operation == "circuit_breaker_create":
+                failure_threshold = int(params.get("failure_threshold", 5))
+                timeout = float(params.get("timeout", 60.0))
+                self._breakers[name] = CircuitBreaker(failure_threshold, timeout)
+                return {"success": True, "name": name, "state": "closed"}
+
+            elif operation == "circuit_breaker_state":
+                if name not in self._breakers:
+                    return {"success": False, "error": f"Circuit breaker {name} not found"}
+                state = self._breakers[name].state()
+                return {"success": True, "name": name, "state": state}
+
+            elif operation == "circuit_breaker_record":
+                if name not in self._breakers:
+                    return {"success": False, "error": f"Circuit breaker {name} not found"}
+                self._breakers[name].record_failure()
+                return {"success": True, "name": name, "state": self._breakers[name].state()}
+
+            elif operation == "should_retry":
+                attempt = int(params.get("attempt", 0))
+                max_attempts = int(params.get("max_attempts", 3))
+                error_type = params.get("error_type", "transient")
+                retryable = error_type in ("transient", "timeout", "network")
+                should_retry = attempt < max_attempts - 1 and retryable
+                return {"success": True, "should_retry": should_retry, "attempt": attempt, "max_attempts": max_attempts}
+
+            elif operation == "timeout":
+                timeout_seconds = float(params.get("timeout_seconds", 5))
+                start_time = time.time()
+                return {"success": True, "timeout_seconds": timeout_seconds, "started_at": start_time}
+
+            elif operation == "check_timeout":
+                started_at = float(params.get("started_at", time.time()))
+                timeout_seconds = float(params.get("timeout_seconds", 5))
+                elapsed = time.time() - started_at
+                exceeded = elapsed > timeout_seconds
+                remaining = max(0, timeout_seconds - elapsed)
+                return {"success": True, "elapsed": round(elapsed, 3), "remaining": round(remaining, 3), "exceeded": exceeded}
+
+            elif operation == "delayed_retry":
+                attempt = int(params.get("attempt", 0))
+                base_delay = float(params.get("base_delay", 1.0))
+                max_delay = float(params.get("max_delay", 30.0))
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                import random
+                delay = delay * (0.5 + random.random())
+                return {"success": True, "delay_seconds": round(delay, 3), "attempt": attempt, "can_retry": True}
+
+            else:
+                return {"success": False, "error": f"Unknown operation: {operation}"}
+
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"设置重试失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'max_attempts': 3, 'delay': 1, 'backoff': 1}
+            logger.error(f"RetryAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-class RetryUntilSuccessAction(BaseAction):
-    """Retry until success."""
-    action_type = "retry_until_success"
-    display_name = "重试直到成功"
-    description = "重试直到成功"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute retry until success.
-
-        Args:
-            context: Execution context.
-            params: Dict with condition.
-
-        Returns:
-            ActionResult with retry status.
-        """
-        condition = params.get('condition', 'False')
-
-        valid, msg = self.validate_type(condition, str, 'condition')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_condition = context.resolve_value(condition)
-            result = context.safe_exec(f"return_value = {resolved_condition}")
-
-            current_attempt = context.get('_retry_attempt', 0) + 1
-            context.set('_retry_attempt', current_attempt)
-
-            if result:
-                context.set('_retry_exhausted', True)
-
-            return ActionResult(
-                success=True,
-                message=f"重试条件: {'满足' if result else '不满足'}",
-                data={
-                    'condition': resolved_condition,
-                    'result': result,
-                    'attempt': current_attempt
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"重试条件判断失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['condition']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
-
-
-class RetryMaxAttemptsAction(BaseAction):
-    """Max retry attempts."""
-    action_type = "retry_max_attempts"
-    display_name = "最大重试次数"
-    description = "检查最大重试次数"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute max attempts check.
-
-        Args:
-            context: Execution context.
-            params: Dict with.
-
-        Returns:
-            ActionResult with attempts status.
-        """
-        current_attempt = context.get('_retry_attempt', 0)
-        max_attempts = context.get('_retry_max_attempts', 3)
-        exhausted = context.get('_retry_exhausted', False)
-
-        if exhausted or current_attempt >= max_attempts:
-            context.set('_retry_exhausted', True)
-            return ActionResult(
-                success=True,
-                message=f"重试次数已用尽: {current_attempt}/{max_attempts}",
-                data={
-                    'exhausted': True,
-                    'attempt': current_attempt,
-                    'max_attempts': max_attempts
-                }
-            )
-
-        return ActionResult(
-            success=True,
-            message=f"继续重试: {current_attempt}/{max_attempts}",
-            data={
-                'exhausted': False,
-                'attempt': current_attempt,
-                'max_attempts': max_attempts
-            }
-        )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
-
-
-class RetryEndAction(BaseAction):
-    """End retry block."""
-    action_type = "retry_end"
-    display_name = "结束重试"
-    description = "结束重试块"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute end retry.
-
-        Args:
-            context: Execution context.
-            params: Dict with.
-
-        Returns:
-            ActionResult indicating end.
-        """
-        final_attempt = context.get('_retry_attempt', 0)
-        exhausted = context.get('_retry_exhausted', False)
-
-        context.delete('_retry_max_attempts')
-        context.delete('_retry_delay')
-        context.delete('_retry_backoff')
-        context.delete('_retry_attempt')
-        context.delete('_retry_exhausted')
-
-        return ActionResult(
-            success=True,
-            message=f"重试块结束: {final_attempt}次尝试",
-            data={
-                'total_attempts': final_attempt,
-                'exhausted': exhausted
-            }
-        )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    return RetryAction().execute(context, params)
