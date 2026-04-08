@@ -1,371 +1,285 @@
-"""
-API Request Signer Action Module.
+"""API request signer action module for RabAI AutoClick.
 
-Signs API requests with HMAC, AWS Signature v4, OAuth 1.0a,
-and other cryptographic signature schemes.
-
-Author: RabAi Team
+Provides API request signing with support for HMAC,
+AWS Signature, OAuth, and JWT authentication.
 """
 
-from __future__ import annotations
-
-import base64
 import hashlib
 import hmac
-import json
+import time
 import sys
 import os
-import time
-import urllib.parse
-from collections import OrderedDict
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+import base64
+import json
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode, quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class SignatureAlgorithm(Enum):
-    """Supported signature algorithms."""
-    HMAC_SHA256 = "hmac_sha256"
-    HMAC_SHA1 = "hmac_sha1"
-    AWS_V4 = "aws_v4"
-    OAUTH1 = "oauth1"
-    PLAINTEXT = "plaintext"
-
-
-@dataclass
-class SigningCredentials:
-    """API signing credentials."""
-    access_key: Optional[str] = None
-    secret_key: Optional[str] = None
-    session_token: Optional[str] = None
-    region: str = "us-east-1"
-    service: str = "execute-api"
-
-
-@dataclass
-class SignedRequest:
-    """A signed HTTP request."""
-    url: str
-    method: str
-    headers: Dict[str, str]
-    body: Optional[bytes]
-    signature: str
-    signature_type: str
-
-
 class ApiRequestSignerAction(BaseAction):
-    """API request signer action.
+    """API request signer action for authenticating requests.
     
-    Signs HTTP requests with various cryptographic signature
-    schemes for authenticated API access.
+    Supports HMAC, AWS Signature v4, OAuth 1.0, and JWT signing.
     """
     action_type = "api_request_signer"
-    display_name = "API请求签名"
-    description = "API请求加密签名"
+    display_name = "API签名器"
+    description = "API请求签名与认证"
     
-    def __init__(self):
-        super().__init__()
-        self._credentials: Dict[str, SigningCredentials] = {}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Sign an API request.
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute signing operation.
         
         Args:
-            context: The execution context.
-            params: Dictionary containing:
-                - url: The request URL
-                - method: HTTP method
-                - headers: Request headers
-                - body: Request body
-                - algorithm: Signature algorithm to use
-                - credentials: Signing credentials dict
-                - credential_name: Named credential set to use
-                
+            context: Execution context.
+            params: Dict with keys:
+                operation: hmac|aws4|oauth1|jwt
+                method: HTTP method
+                url: Request URL
+                headers: Request headers
+                body: Request body
+                secret: Secret key
+                access_key: Access key (for AWS)
+                secret_key: Secret key (for AWS)
+                token: Bearer token (for JWT).
+        
         Returns:
             ActionResult with signed request details.
         """
-        start_time = time.time()
+        operation = params.get('operation', 'hmac')
         
-        url = params.get("url", "")
-        method = params.get("method", "GET")
-        headers = params.get("headers", {})
-        body = params.get("body")
-        algorithm = SignatureAlgorithm(params.get("algorithm", "hmac_sha256"))
-        credentials = self._get_credentials(params)
-        
-        if not url:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: url",
-                duration=time.time() - start_time
-            )
-        
-        try:
-            if algorithm == SignatureAlgorithm.HMAC_SHA256:
-                result = self._sign_hmac_sha256(url, method, headers, body, credentials)
-            elif algorithm == SignatureAlgorithm.HMAC_SHA1:
-                result = self._sign_hmac_sha1(url, method, headers, body, credentials)
-            elif algorithm == SignatureAlgorithm.AWS_V4:
-                result = self._sign_aws_v4(url, method, headers, body, credentials)
-            elif algorithm == SignatureAlgorithm.OAUTH1:
-                result = self._sign_oauth1(url, method, headers, body, credentials)
-            elif algorithm == SignatureAlgorithm.PLAINTEXT:
-                result = self._sign_plaintext(url, method, headers, body, credentials)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown signature algorithm: {algorithm}",
-                    duration=time.time() - start_time
-                )
-            
-            return ActionResult(
-                success=True,
-                message=f"Request signed with {algorithm.value}",
-                data={
-                    "url": result.url,
-                    "method": result.method,
-                    "headers": dict(result.headers),
-                    "signature": result.signature,
-                    "signature_type": result.signature_type
-                },
-                duration=time.time() - start_time
-            )
-            
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Signing failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+        if operation == 'hmac':
+            return self._sign_hmac(params)
+        elif operation == 'aws4':
+            return self._sign_aws4(params)
+        elif operation == 'oauth1':
+            return self._sign_oauth1(params)
+        elif operation == 'jwt':
+            return self._sign_jwt(params)
+        else:
+            return ActionResult(success=False, message=f"Unknown signing method: {operation}")
     
-    def _get_credentials(self, params: Dict[str, Any]) -> SigningCredentials:
-        """Get signing credentials from params or stored credentials."""
-        cred_name = params.get("credential_name")
-        if cred_name and cred_name in self._credentials:
-            return self._credentials[cred_name]
+    def _sign_hmac(self, params: Dict[str, Any]) -> ActionResult:
+        """Sign request with HMAC."""
+        method = params.get('method', 'GET')
+        url = params.get('url', '')
+        headers = params.get('headers', {})
+        body = params.get('body', '')
+        secret = params.get('secret', '')
+        algorithm = params.get('algorithm', 'sha256')
         
-        cred_dict = params.get("credentials", {})
-        return SigningCredentials(
-            access_key=cred_dict.get("access_key"),
-            secret_key=cred_dict.get("secret_key"),
-            session_token=cred_dict.get("session_token"),
-            region=cred_dict.get("region", "us-east-1"),
-            service=cred_dict.get("service", "execute-api")
+        string_to_sign = f"{method}\n{url}\n{body}"
+        
+        if algorithm == 'sha256':
+            signature = hmac.new(
+                secret.encode('utf-8'),
+                string_to_sign.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+        elif algorithm == 'sha1':
+            signature = hmac.new(
+                secret.encode('utf-8'),
+                string_to_sign.encode('utf-8'),
+                hashlib.sha1
+            ).hexdigest()
+        elif algorithm == 'md5':
+            signature = hmac.new(
+                secret.encode('utf-8'),
+                string_to_sign.encode('utf-8'),
+                hashlib.md5
+            ).hexdigest()
+        
+        signed_headers = dict(headers)
+        signed_headers['X-Signature'] = signature
+        signed_headers['X-Timestamp'] = str(int(time.time()))
+        
+        return ActionResult(
+            success=True,
+            message=f"Signed request with HMAC-{algorithm.upper()}",
+            data={
+                'signature': signature,
+                'headers': signed_headers,
+                'string_to_sign': string_to_sign
+            }
         )
     
-    def store_credentials(self, name: str, credentials: SigningCredentials) -> None:
-        """Store credentials for later use."""
-        self._credentials[name] = credentials
-    
-    def _sign_hmac_sha256(
-        self, url: str, method: str, headers: Dict, body: Any, credentials: SigningCredentials
-    ) -> SignedRequest:
-        """Sign request with HMAC-SHA256."""
-        secret = credentials.secret_key or ""
+    def _sign_aws4(self, params: Dict[str, Any]) -> ActionResult:
+        """Sign request with AWS Signature v4."""
+        method = params.get('method', 'GET')
+        url = params.get('url', '')
+        headers = params.get('headers', {})
+        body = params.get('body', '')
+        access_key = params.get('access_key', '')
+        secret_key = params.get('secret_key', '')
+        region = params.get('region', 'us-east-1')
+        service = params.get('service', 'execute-api')
         
-        body_bytes = self._encode_body(body)
+        if '?' in url:
+            path, querystring = url.split('?', 1)
+        else:
+            path = url
+            querystring = ''
         
-        string_to_sign = f"{method}\n{url}\n{body_bytes.decode('utf-8') if body_bytes else ''}"
-        signature = hmac.new(
-            secret.encode("utf-8"),
-            string_to_sign.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
+        t = datetime.datetime.utcnow()
+        amz_date = t.strftime('%Y%m%dT%H%M%SZ')
+        date_stamp = t.strftime('%Y%m%d')
         
-        new_headers = dict(headers)
-        new_headers["X-Signature"] = signature
-        new_headers["X-Timestamp"] = str(int(time.time()))
+        host = headers.get('Host', '')
         
-        return SignedRequest(
-            url=url, method=method, headers=new_headers,
-            body=body_bytes, signature=signature, signature_type="HMAC-SHA256"
-        )
-    
-    def _sign_hmac_sha1(
-        self, url: str, method: str, headers: Dict, body: Any, credentials: SigningCredentials
-    ) -> SignedRequest:
-        """Sign request with HMAC-SHA1."""
-        secret = credentials.secret_key or ""
+        canonical_uri = quote(path, safe='/')
+        canonical_querystring = quote(urlencode(sorted(querystring.split('&'))), safe='')
         
-        body_bytes = self._encode_body(body)
+        payload_hash = hashlib.sha256(body.encode('utf-8') if body else b'').hexdigest()
         
-        string_to_sign = f"{method}\n{url}\n{body_bytes.decode('utf-8') if body_bytes else ''}"
-        signature = hmac.new(
-            secret.encode("utf-8"),
-            string_to_sign.encode("utf-8"),
-            hashlib.sha1
-        ).hexdigest()
+        canonical_headers = f'host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n'
+        signed_headers = 'host;x-amz-content-sha256;x-amz-date'
         
-        new_headers = dict(headers)
-        new_headers["Authorization"] = f"HMAC-SHA1 {signature}"
+        canonical_request = f"{method}\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
         
-        return SignedRequest(
-            url=url, method=method, headers=new_headers,
-            body=body_bytes, signature=signature, signature_type="HMAC-SHA1"
-        )
-    
-    def _sign_aws_v4(
-        self, url: str, method: str, headers: Dict, body: Any, credentials: SigningCredentials
-    ) -> SignedRequest:
-        """Sign request with AWS Signature Version 4."""
-        access_key = credentials.access_key or ""
-        secret_key = credentials.secret_key or ""
-        region = credentials.region
-        service = credentials.service
-        
-        parsed_url = urllib.parse.urlparse(url)
-        host = parsed_url.netloc
-        path = parsed_url.path or "/"
-        query = parsed_url.query
-        
-        now = datetime.utcnow()
-        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
-        date_stamp = now.strftime("%Y%m%d")
-        
-        new_headers = dict(headers)
-        new_headers["Host"] = host
-        new_headers["X-Amz-Date"] = amz_date
-        
-        if credentials.session_token:
-            new_headers["X-Amz-Security-Token"] = credentials.session_token
-        
-        body_bytes = self._encode_body(body)
-        payload_hash = hashlib.sha256(body_bytes if body_bytes else b"").hexdigest()
-        new_headers["X-Amz-Content-Sha256"] = payload_hash
-        
-        signed_headers = ";".join(["host", "x-amz-date"])
-        
-        canonical_headers = f"host:{host}\nx-amz-date:{amz_date}\n"
-        
-        canonical_request = f"{method}\n{path}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-        hashed_canonical = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
-        
+        algorithm = 'AWS4-HMAC-SHA256'
         credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+        string_to_sign = f"{algorithm}\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
         
-        string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashed_canonical}"
+        k_date = hmac.new(f"AWS4{secret_key}".encode('utf-8'), date_stamp.encode('utf-8'), hashlib.sha256).digest()
+        k_region = hmac.new(k_date, region.encode('utf-8'), hashlib.sha256).digest()
+        k_service = hmac.new(k_region, service.encode('utf-8'), hashlib.sha256).digest()
+        k_signing = hmac.new(k_service, 'aws4_request'.encode('utf-8'), hashlib.sha256).digest()
         
-        k_date = hmac.new(f"AWS4{secret_key}".encode("utf-8"), date_stamp.encode("utf-8"), hashlib.sha256).digest()
-        k_region = hmac.new(k_date, region.encode("utf-8"), hashlib.sha256).digest()
-        k_service = hmac.new(k_region, service.encode("utf-8"), hashlib.sha256).digest()
-        k_signing = hmac.new(k_service, b"aws4_request", hashlib.sha256).digest()
+        signature = hmac.new(k_signing, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
         
-        signature = hmac.new(k_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+        auth_header = f"{algorithm} Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
         
-        authorization = f"AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
-        new_headers["Authorization"] = authorization
+        signed_headers = dict(headers)
+        signed_headers['X-Amz-Date'] = amz_date
+        signed_headers['X-Amz-Content-Sha256'] = payload_hash
+        signed_headers['Authorization'] = auth_header
         
-        return SignedRequest(
-            url=url, method=method, headers=new_headers,
-            body=body_bytes, signature=signature, signature_type="AWSV4"
+        return ActionResult(
+            success=True,
+            message="Signed request with AWS Signature v4",
+            data={
+                'authorization_header': auth_header,
+                'signed_headers': signed_headers,
+                'payload_hash': payload_hash
+            }
         )
     
-    def _sign_oauth1(
-        self, url: str, method: str, headers: Dict, body: Any, credentials: SigningCredentials
-    ) -> SignedRequest:
-        """Sign request with OAuth 1.0a."""
-        import secrets
+    def _sign_oauth1(self, params: Dict[str, Any]) -> ActionResult:
+        """Sign request with OAuth 1.0."""
+        method = params.get('method', 'GET')
+        url = params.get('url', '')
+        headers = params.get('headers', {})
+        body = params.get('body', '')
+        consumer_key = params.get('consumer_key', '')
+        consumer_secret = params.get('consumer_secret', '')
+        token = params.get('token', '')
+        token_secret = params.get('token_secret', '')
+        
         import uuid
+        import secrets
         
-        access_key = credentials.access_key or ""
-        secret_key = credentials.secret_key or ""
+        nonce = secrets.token_hex(16)
+        timestamp = str(int(time.time()))
         
-        oauth_params = OrderedDict([
-            ("oauth_consumer_key", access_key),
-            ("oauth_signature_method", "HMAC-SHA1"),
-            ("oauth_timestamp", str(int(time.time()))),
-            ("oauth_nonce", secrets.token_hex(16)),
-            ("oauth_version", "1.0")
-        ])
+        params_dict = {
+            'oauth_consumer_key': consumer_key,
+            'oauth_nonce': nonce,
+            'oauth_signature_method': 'HMAC-SHA1',
+            'oauth_timestamp': timestamp,
+            'oauth_version': '1.0'
+        }
         
-        body_bytes = self._encode_body(body)
+        if token:
+            params_dict['oauth_token'] = token
         
-        if body_bytes:
-            parsed_url = urllib.parse.urlparse(url)
-            if parsed_url.query:
-                query_params = urllib.parse.parse_qsl(parsed_url.query)
-                for k, v in query_params:
-                    oauth_params[k] = v
+        sorted_params = sorted(params_dict.items())
+        canonical_params = '&'.join(f'{quote(str(k), safe="")}={quote(str(v), safe="")}' for k, v in sorted_params)
         
-        sorted_params = sorted(oauth_params.items())
-        param_string = "&".join(f"{urllib.parse.quote(str(k), '')}={urllib.parse.quote(str(v), '')}" for k, v in sorted_params)
+        base_string = f"{method.upper()}&{quote(url, safe='')}&{quote(canonical_params, safe='')}"
         
-        base_string = "&".join([
-            method.upper(),
-            urllib.parse.quote(url, ""),
-            urllib.parse.quote(param_string, "")
-        ])
+        signing_key = f"{quote(consumer_secret, safe='')}&{quote(token_secret, safe='')}"
         
-        signing_key = f"{urllib.parse.quote(secret_key, '')}&"
         signature = base64.b64encode(
-            hmac.new(signing_key.encode("utf-8"), base_string.encode("utf-8"), hashlib.sha1).digest()
-        ).decode("utf-8")
+            hmac.new(
+                signing_key.encode('utf-8'),
+                base_string.encode('utf-8'),
+                hashlib.sha1
+            ).digest()
+        ).decode('utf-8')
         
-        oauth_params["oauth_signature"] = signature
+        params_dict['oauth_signature'] = signature
         
-        oauth_header = ", ".join(
-            f'{urllib.parse.quote(str(k), "")}="{urllib.parse.quote(str(v), "")}"'
-            for k, v in oauth_params.items()
+        auth_header = 'OAuth ' + ', '.join(
+            f'{quote(str(k), safe="")}="{quote(str(v), safe="")}"' for k, v in sorted_params
         )
+        auth_header += f', oauth_signature="{quote(signature, safe="")}"'
         
-        new_headers = dict(headers)
-        new_headers["Authorization"] = f"OAuth {oauth_header}"
+        signed_headers = dict(headers)
+        signed_headers['Authorization'] = auth_header
         
-        return SignedRequest(
-            url=url, method=method, headers=new_headers,
-            body=body_bytes, signature=signature, signature_type="OAuth1.0a"
-        )
-    
-    def _sign_plaintext(
-        self, url: str, method: str, headers: Dict, body: Any, credentials: SigningCredentials
-    ) -> SignedRequest:
-        """Plaintext signature (no actual signing, for testing)."""
-        secret = credentials.secret_key or ""
-        body_bytes = self._encode_body(body)
-        
-        new_headers = dict(headers)
-        new_headers["X-Api-Key"] = credentials.access_key or ""
-        
-        return SignedRequest(
-            url=url, method=method, headers=new_headers,
-            body=body_bytes, signature=secret, signature_type="Plaintext"
+        return ActionResult(
+            success=True,
+            message="Signed request with OAuth 1.0",
+            data={
+                'authorization_header': auth_header,
+                'signed_headers': signed_headers,
+                'signature': signature
+            }
         )
     
-    def _encode_body(self, body: Any) -> Optional[bytes]:
-        """Encode request body to bytes."""
-        if body is None:
-            return None
-        if isinstance(body, bytes):
-            return body
-        if isinstance(body, dict):
-            return json.dumps(body).encode("utf-8")
-        return str(body).encode("utf-8")
-    
-    def verify_signature(
-        self, url: str, method: str, headers: Dict, body: Any, signature: str, algorithm: str
-    ) -> bool:
-        """Verify a request signature."""
-        try:
-            credentials = SigningCredentials()
-            if algorithm == "hmac_sha256":
-                result = self._sign_hmac_sha256(url, method, headers, body, credentials)
-                return hmac.compare_digest(result.signature, signature)
-            elif algorithm == "hmac_sha1":
-                result = self._sign_hmac_sha1(url, method, headers, body, credentials)
-                return hmac.compare_digest(result.signature, signature)
-            return False
-        except Exception:
-            return False
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate signing parameters."""
-        if "url" not in params:
-            return False, "Missing required parameter: url"
-        return True, ""
-    
-    def get_required_params(self) -> List[str]:
-        """Return required parameters."""
-        return ["url"]
+    def _sign_jwt(self, params: Dict[str, Any]) -> ActionResult:
+        """Sign data with JWT."""
+        payload = params.get('payload', {})
+        secret = params.get('secret', '')
+        algorithm = params.get('algorithm', 'HS256')
+        
+        header = {'alg': algorithm, 'typ': 'JWT'}
+        
+        if 'iat' not in payload:
+            payload['iat'] = int(time.time())
+        if 'exp' not in payload and 'expires_in' in params:
+            payload['exp'] = payload['iat'] + params['expires_in']
+        
+        header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
+        payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
+        
+        message = f"{header_b64}.{payload_b64}"
+        
+        if algorithm == 'HS256':
+            signature = hmac.new(
+                secret.encode('utf-8'),
+                message.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+        elif algorithm == 'HS384':
+            signature = hmac.new(
+                secret.encode('utf-8'),
+                message.encode('utf-8'),
+                hashlib.sha384
+            ).digest()
+        elif algorithm == 'HS512':
+            signature = hmac.new(
+                secret.encode('utf-8'),
+                message.encode('utf-8'),
+                hashlib.sha512
+            ).digest()
+        else:
+            return ActionResult(success=False, message=f"Unsupported JWT algorithm: {algorithm}")
+        
+        signature_b64 = base64.urlsafe_b64encode(signature).decode().rstrip('=')
+        token = f"{message}.{signature_b64}"
+        
+        return ActionResult(
+            success=True,
+            message=f"Signed JWT with {algorithm}",
+            data={
+                'token': token,
+                'header': header,
+                'payload': payload,
+                'signature': signature_b64
+            }
+        )
