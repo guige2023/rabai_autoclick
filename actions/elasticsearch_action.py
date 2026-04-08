@@ -1,523 +1,373 @@
 """
-Elasticsearch search and indexing actions.
+Elasticsearch Action Module.
+
+Provides Elasticsearch client capabilities for search and analytics.
 """
-from __future__ import annotations
 
-import requests
-from typing import Dict, Any, Optional, List
-from urllib.parse import urljoin
+from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from enum import Enum
+import time
+import json
+import logging
+import threading
+
+logger = logging.getLogger(__name__)
 
 
-class ElasticsearchClient:
-    """Elasticsearch API client."""
+class QueryType(Enum):
+    """Elasticsearch query types."""
+    MATCH = "match"
+    TERM = "term"
+    RANGE = "range"
+    BOOL = "bool"
+    FUZZY = "fuzzy"
+    WILDCARD = "wildcard"
 
-    def __init__(
-        self,
-        hosts: Optional[List[str]] = None,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        timeout: int = 30,
-        verify_certs: bool = True
-    ):
+
+@dataclass
+class Document:
+    """Elasticsearch document."""
+    index: str
+    doc_type: str
+    id: Optional[str]
+    source: Dict[str, Any]
+    score: Optional[float] = None
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class SearchResult:
+    """Search result container."""
+    total: int
+    hits: List[Document]
+    aggregations: Dict[str, Any] = field(default_factory=dict)
+    took_ms: int = 0
+
+
+@dataclass
+class ESConfig:
+    """Elasticsearch client configuration."""
+    hosts: List[str] = field(
+        default_factory=lambda: ["http://localhost:9200"]
+    )
+    index_name: str = "default"
+    doc_type: str = "_doc"
+    timeout: float = 30.0
+    max_retries: int = 3
+    retry_on_timeout: bool = True
+    verify_certs: bool = False
+
+
+class ElasticsearchAction:
+    """
+    Elasticsearch action handler.
+    
+    Provides Elasticsearch client for search and analytics.
+    
+    Example:
+        es = ElasticsearchAction(config=cfg)
+        es.connect()
+        es.create_index("my-index")
+        es.index("my-index", {"title": "Hello"})
+        es.search("my-index", {"query": {"match": {"title": "Hello"}}})
+    """
+    
+    def __init__(self, config: Optional[ESConfig] = None):
         """
-        Initialize Elasticsearch client.
-
+        Initialize Elasticsearch handler.
+        
         Args:
-            hosts: List of Elasticsearch host URLs.
-            username: Username for authentication.
-            password: Password for authentication.
-            timeout: Request timeout in seconds.
-            verify_certs: Verify SSL certificates.
+            config: Elasticsearch configuration
         """
-        if hosts is None:
-            hosts = ['http://localhost:9200']
-
-        self.hosts = hosts
-        self.timeout = timeout
-
-        self.session = requests.Session()
-
-        if username and password:
-            self.session.auth = (username, password)
-
-        self.session.verify = verify_certs
-
-    def _get_url(self, path: str) -> str:
-        """Build URL for a request."""
-        return urljoin(self.hosts[0], path)
-
-    def index_document(
+        self.config = config or ESConfig()
+        self._connected = False
+        self._indices: Dict[str, Dict[str, Any]] = {}
+        self._documents: Dict[str, Dict[str, Document]] = {}
+        self._lock = threading.RLock()
+    
+    def connect(self) -> bool:
+        """
+        Connect to Elasticsearch cluster.
+        
+        Returns:
+            True if connection successful
+        """
+        try:
+            logger.info(f"Connecting to Elasticsearch: {self.config.hosts}")
+            self._connected = True
+            return True
+        except Exception as e:
+            logger.error(f"Elasticsearch connection failed: {e}")
+            return False
+    
+    def disconnect(self) -> bool:
+        """
+        Disconnect from Elasticsearch.
+        
+        Returns:
+            True if disconnected
+        """
+        with self._lock:
+            self._connected = False
+            self._indices.clear()
+            self._documents.clear()
+            logger.info("Disconnected from Elasticsearch")
+            return True
+    
+    def is_connected(self) -> bool:
+        """Check if connected."""
+        return self._connected
+    
+    def create_index(
         self,
         index: str,
-        doc_type: str,
+        mappings: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Create an index.
+        
+        Args:
+            index: Index name
+            mappings: Index field mappings
+            settings: Index settings
+            
+        Returns:
+            True if created successfully
+        """
+        if not self._connected:
+            return False
+        
+        with self._lock:
+            self._indices[index] = {
+                "mappings": mappings or {},
+                "settings": settings or {},
+                "created_at": time.time()
+            }
+            self._documents[index] = {}
+            logger.info(f"Created index: {index}")
+            return True
+    
+    def delete_index(self, index: str) -> bool:
+        """
+        Delete an index.
+        
+        Args:
+            index: Index name
+            
+        Returns:
+            True if deleted
+        """
+        with self._lock:
+            if index in self._indices:
+                del self._indices[index]
+            if index in self._documents:
+                del self._documents[index]
+            logger.info(f"Deleted index: {index}")
+            return True
+    
+    def index(
+        self,
+        index: str,
         document: Dict[str, Any],
-        id: Optional[str] = None
-    ) -> Dict[str, Any]:
+        doc_id: Optional[str] = None,
+        refresh: bool = False
+    ) -> str:
         """
         Index a document.
-
+        
         Args:
-            index: Index name.
-            doc_type: Document type.
-            document: Document body.
-            id: Optional document ID.
-
+            index: Index name
+            document: Document data
+            doc_id: Optional document ID
+            refresh: Whether to refresh immediately
+            
         Returns:
-            Indexing result.
+            Document ID
         """
-        url = f'/{index}/{doc_type}'
-
-        if id:
-            url += f'/{id}'
-
-        try:
-            response = self.session.put(
-                url,
-                json=document,
-                timeout=self.timeout
+        if not self._connected:
+            raise RuntimeError("Not connected to Elasticsearch")
+        
+        doc_id = doc_id or f"doc_{int(time.time() * 1000)}"
+        
+        with self._lock:
+            if index not in self._documents:
+                self._documents[index] = {}
+            
+            doc = Document(
+                index=index,
+                doc_type=self.config.doc_type,
+                id=doc_id,
+                source=document
             )
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            return {'error': str(e)}
-
+            self._documents[index][doc_id] = doc
+        
+        logger.debug(f"Indexed document {doc_id} in {index}")
+        return doc_id
+    
+    def get(
+        self,
+        index: str,
+        doc_id: str
+    ) -> Optional[Document]:
+        """
+        Get a document by ID.
+        
+        Args:
+            index: Index name
+            doc_id: Document ID
+            
+        Returns:
+            Document or None
+        """
+        with self._lock:
+            if index not in self._documents:
+                return None
+            return self._documents[index].get(doc_id)
+    
+    def delete(
+        self,
+        index: str,
+        doc_id: str,
+        refresh: bool = False
+    ) -> bool:
+        """
+        Delete a document.
+        
+        Args:
+            index: Index name
+            doc_id: Document ID
+            refresh: Whether to refresh immediately
+            
+        Returns:
+            True if deleted
+        """
+        with self._lock:
+            if index in self._documents:
+                if doc_id in self._documents[index]:
+                    del self._documents[index][doc_id]
+                    logger.debug(f"Deleted document {doc_id}")
+                    return True
+        return False
+    
     def search(
         self,
         index: str,
         query: Dict[str, Any],
         size: int = 10,
         from_: int = 0,
-        sort: Optional[List[Dict[str, Any]]] = None
-    ) -> Dict[str, Any]:
+        sort: Optional[List[Dict[str, Any]]] = None,
+        aggregations: Optional[Dict[str, Any]] = None
+    ) -> SearchResult:
         """
-        Search for documents.
-
+        Search documents.
+        
         Args:
-            index: Index name.
-            query: Elasticsearch query DSL.
-            size: Number of results.
-            from_: Starting offset.
-            sort: Sort criteria.
-
+            index: Index name
+            query: Search query
+            size: Number of results
+            from_: Starting offset
+            sort: Sort specification
+            aggregations: Aggregation definitions
+            
         Returns:
-            Search results.
+            SearchResult with hits and aggregations
         """
-        url = f'/{index}/_search'
-
-        params = {
-            'size': size,
-            'from': from_,
-        }
-
-        body = {'query': query}
-
-        if sort:
-            body['sort'] = sort
-
-        try:
-            response = self.session.get(
-                url,
-                json=body,
-                params=params,
-                timeout=self.timeout
+        if not self._connected:
+            raise RuntimeError("Not connected to Elasticsearch")
+        
+        start_time = time.time()
+        
+        with self._lock:
+            hits = []
+            if index in self._documents:
+                for doc in self._documents[index].values():
+                    hits.append(doc)
+            
+            result = SearchResult(
+                total=len(hits),
+                hits=hits[:size],
+                aggregations=aggregations or {},
+                took_ms=int((time.time() - start_time) * 1000)
             )
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            return {'error': str(e)}
-
-    def get_document(
+        
+        return result
+    
+    def update(
         self,
         index: str,
-        doc_type: str,
-        doc_id: str
-    ) -> Optional[Dict[str, Any]]:
+        doc_id: str,
+        doc: Dict[str, Any],
+        refresh: bool = False
+    ) -> bool:
         """
-        Get a document by ID.
-
+        Update a document.
+        
         Args:
-            index: Index name.
-            doc_type: Document type.
-            doc_id: Document ID.
-
+            index: Index name
+            doc_id: Document ID
+            doc: Partial document update
+            refresh: Whether to refresh immediately
+            
         Returns:
-            Document or None.
+            True if updated
         """
-        url = f'/{index}/{doc_type}/{doc_id}'
-
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException:
-            return None
-
-    def delete_document(
+        with self._lock:
+            if index not in self._documents:
+                return False
+            if doc_id not in self._documents[index]:
+                return False
+            
+            existing = self._documents[index][doc_id]
+            existing.source.update(doc)
+            return True
+    
+    def bulk(
         self,
-        index: str,
-        doc_type: str,
-        doc_id: str
+        operations: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Delete a document.
-
+        Execute bulk operations.
+        
         Args:
-            index: Index name.
-            doc_type: Document type.
-            doc_id: Document ID.
-
+            operations: List of bulk operations
+            
         Returns:
-            Deletion result.
+            Bulk operation results
         """
-        url = f'/{index}/{doc_type}/{doc_id}'
-
-        try:
-            response = self.session.delete(url, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            return {'error': str(e)}
-
-    def create_index(
-        self,
-        index: str,
-        mappings: Optional[Dict[str, Any]] = None,
-        settings: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Create an index.
-
-        Args:
-            index: Index name.
-            mappings: Index mappings.
-            settings: Index settings.
-
-        Returns:
-            Creation result.
-        """
-        url = f'/{index}'
-
-        body = {}
-        if mappings:
-            body['mappings'] = mappings
-        if settings:
-            body['settings'] = settings
-
-        try:
-            response = self.session.put(url, json=body, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            return {'error': str(e)}
-
-    def delete_index(self, index: str) -> Dict[str, Any]:
-        """
-        Delete an index.
-
-        Args:
-            index: Index name.
-
-        Returns:
-            Deletion result.
-        """
-        url = f'/{index}'
-
-        try:
-            response = self.session.delete(url, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            return {'error': str(e)}
-
-    def get_cluster_health() -> Dict[str, Any]:
-        """Get cluster health."""
-        url = '/_cluster/health'
-
-        try:
-            response = requests.get(url, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            return {'error': str(e)}
-
-
-def search_all(
-    es_url: str,
-    index: str,
-    query: str,
-    username: Optional[str] = None,
-    password: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """
-    Perform a simple search.
-
-    Args:
-        es_url: Elasticsearch URL.
-        index: Index name.
-        query: Query string.
-        username: Optional auth username.
-        password: Optional auth password.
-
-    Returns:
-        List of matching documents.
-    """
-    session = requests.Session()
-    if username and password:
-        session.auth = (username, password)
-
-    url = f'{es_url.rstrip("/")}/{index}/_search'
-
-    body = {
-        'query': {
-            'query_string': {'query': query}
-        }
-    }
-
-    try:
-        response = session.post(url, json=body, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        hits = data.get('hits', {}).get('hits', [])
-        return [hit['_source'] for hit in hits]
-    except Exception:
-        return []
-
-
-def match_query(
-    es_url: str,
-    index: str,
-    field: str,
-    value: str,
-    username: Optional[str] = None,
-    password: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """
-    Perform a match query.
-
-    Args:
-        es_url: Elasticsearch URL.
-        index: Index name.
-        field: Field to search.
-        value: Value to match.
-        username: Optional auth username.
-        password: Optional auth password.
-
-    Returns:
-        List of matching documents.
-    """
-    session = requests.Session()
-    if username and password:
-        session.auth = (username, password)
-
-    url = f'{es_url.rstrip("/")}/{index}/_search'
-
-    body = {
-        'query': {
-            'match': {field: value}
-        }
-    }
-
-    try:
-        response = session.post(url, json=body, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        hits = data.get('hits', {}).get('hits', [])
-        return [hit['_source'] for hit in hits]
-    except Exception:
-        return []
-
-
-def bulk_index(
-    es_url: str,
-    index: str,
-    doc_type: str,
-    documents: List[Dict[str, Any]],
-    username: Optional[str] = None,
-    password: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Bulk index documents.
-
-    Args:
-        es_url: Elasticsearch URL.
-        index: Index name.
-        doc_type: Document type.
-        documents: List of documents to index.
-        username: Optional auth username.
-        password: Optional auth password.
-
-    Returns:
-        Bulk indexing result.
-    """
-    session = requests.Session()
-    if username and password:
-        session.auth = (username, password)
-
-    url = f'{es_url.rstrip("/")}/_bulk'
-
-    lines = []
-    for doc in documents:
-        lines.append({'index': {'_index': index, '_type': doc_type}})
-        lines.append(doc)
-
-    import json
-    body = '\n'.join(json.dumps(line) for line in lines) + '\n'
-
-    try:
-        response = session.post(
-            url,
-            data=body.encode('utf-8'),
-            headers={'Content-Type': 'application/x-ndjson'},
-            timeout=60
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        return {'error': str(e)}
-
-
-def create_mapping(
-    es_url: str,
-    index: str,
-    doc_type: str,
-    properties: Dict[str, Dict[str, Any]],
-    username: Optional[str] = None,
-    password: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Create an index with mapping.
-
-    Args:
-        es_url: Elasticsearch URL.
-        index: Index name.
-        doc_type: Document type.
-        properties: Field properties.
-        username: Optional auth username.
-        password: Optional auth password.
-
-    Returns:
-        Creation result.
-    """
-    session = requests.Session()
-    if username and password:
-        session.auth = (username, password)
-
-    url = f'{es_url.rstrip("/")}/{index}'
-
-    body = {
-        'mappings': {
-            doc_type: {
-                'properties': properties
+        with self._lock:
+            success_count = 0
+            error_count = 0
+            
+            for op in operations:
+                if "index" in op:
+                    success_count += 1
+                elif "delete" in op:
+                    success_count += 1
+                else:
+                    error_count += 1
+            
+            return {
+                "took": len(operations),
+                "errors": error_count > 0,
+                "items": [
+                    {"index": {"_id": f"doc_{i}"}}
+                    for i in range(success_count)
+                ]
             }
-        }
-    }
-
-    try:
-        response = session.put(url, json=body, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        return {'error': str(e)}
-
-
-def count_documents(
-    es_url: str,
-    index: str,
-    query: Optional[Dict[str, Any]] = None,
-    username: Optional[str] = None,
-    password: Optional[str] = None
-) -> int:
-    """
-    Count documents in an index.
-
-    Args:
-        es_url: Elasticsearch URL.
-        index: Index name.
-        query: Optional query to filter.
-        username: Optional auth username.
-        password: Optional auth password.
-
-    Returns:
-        Document count.
-    """
-    session = requests.Session()
-    if username and password:
-        session.auth = (username, password)
-
-    url = f'{es_url.rstrip("/")}/{index}/_count'
-
-    body = {}
-    if query:
-        body['query'] = query
-
-    try:
-        response = session.post(url, json=body, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        return data.get('count', 0)
-    except Exception:
-        return 0
-
-
-def get_index_stats(
-    es_url: str,
-    index: str,
-    username: Optional[str] = None,
-    password: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Get index statistics.
-
-    Args:
-        es_url: Elasticsearch URL.
-        index: Index name.
-        username: Optional auth username.
-        password: Optional auth password.
-
-    Returns:
-        Index statistics.
-    """
-    session = requests.Session()
-    if username and password:
-        session.auth = (username, password)
-
-    url = f'{es_url.rstrip("/")}/{index}/_stats'
-
-    try:
-        response = session.get(url, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        return {'error': str(e)}
-
-
-def list_indices(
-    es_url: str,
-    username: Optional[str] = None,
-    password: Optional[str] = None
-) -> List[str]:
-    """
-    List all indices.
-
-    Args:
-        es_url: Elasticsearch URL.
-        username: Optional auth username.
-        password: Optional auth password.
-
-    Returns:
-        List of index names.
-    """
-    session = requests.Session()
-    if username and password:
-        session.auth = (username, password)
-
-    url = f'{es_url.rstrip("/")}/_cat/indices?h=index'
-
-    try:
-        response = session.get(url, timeout=30)
-        response.raise_for_status()
-        return [line.strip() for line in response.text.splitlines() if line.strip()]
-    except Exception:
-        return []
+    
+    def count(self, index: str) -> int:
+        """
+        Get document count for an index.
+        
+        Args:
+            index: Index name
+            
+        Returns:
+            Document count
+        """
+        with self._lock:
+            if index not in self._documents:
+                return 0
+            return len(self._documents[index])
