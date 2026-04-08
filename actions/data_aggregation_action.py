@@ -1,331 +1,258 @@
-"""Data aggregation action module for RabAI AutoClick.
+"""Data Aggregation action module for RabAI AutoClick.
 
 Provides data aggregation operations:
-- GroupAggregationAction: Group and aggregate data
-- PivotTableAction: Create pivot table aggregations
-- TimeSeriesAggregationAction: Time-series aggregation
-- MultiDimensionalAggregationAction: Multi-dimensional data aggregation
+- AggregateSumAction: Sum aggregation
+- AggregateGroupAction: Group by aggregation
+- AggregateWindowAction: Window functions
+- AggregatePivotAction: Pivot table
 """
 
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from __future__ import annotations
 
 import sys
 import os
+from typing import Any, Dict, List, Optional
+from collections import defaultdict
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class GroupAggregationAction(BaseAction):
-    """Group and aggregate data."""
-    action_type = "group_aggregation"
+class AggregateSumAction(BaseAction):
+    """Sum aggregation."""
+    action_type = "aggregate_sum"
+    display_name = "求和聚合"
+    description = "求和聚合"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute sum aggregation."""
+        data = params.get('data', [])
+        field = params.get('field', '')
+        group_by = params.get('group_by', None)
+        output_var = params.get('output_var', 'sum_result')
+
+        if not data or not field:
+            return ActionResult(success=False, message="data and field are required")
+
+        try:
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_group_by = context.resolve_value(group_by) if context else group_by
+
+            if resolved_group_by:
+                groups = defaultdict(list)
+                for record in resolved_data:
+                    key = record.get(resolved_group_by, 'unknown')
+                    value = record.get(field, 0)
+                    if isinstance(value, (int, float)):
+                        groups[key].append(value)
+
+                result = {k: sum(v) for k, v in groups.items()}
+            else:
+                values = [r.get(field, 0) for r in resolved_data if isinstance(r.get(field), (int, float))]
+                result = {'total': sum(values)}
+
+            return ActionResult(
+                success=True,
+                data={output_var: result},
+                message=f"Sum: {result.get('total', sum(result.values())) if isinstance(result, dict) else result}"
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Sum aggregation error: {e}")
+
+
+class AggregateGroupAction(BaseAction):
+    """Group by aggregation."""
+    action_type = "aggregate_group"
     display_name = "分组聚合"
-    description = "对数据进行分组和聚合"
+    description = "分组聚合"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute group aggregation."""
+        data = params.get('data', [])
+        group_by = params.get('group_by', '')
+        aggregations = params.get('aggregations', [])
+        output_var = params.get('output_var', 'group_result')
+
+        if not data or not group_by:
+            return ActionResult(success=False, message="data and group_by are required")
+
         try:
-            data = params.get("data", [])
-            group_by = params.get("group_by", [])
-            aggregations = params.get("aggregations", [])
-            having = params.get("having", None)
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_aggregations = context.resolve_value(aggregations) if context else aggregations
 
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
-
-            if not group_by:
-                return ActionResult(success=False, message="group_by is required")
-
-            if not aggregations:
-                return ActionResult(success=False, message="aggregations is required")
-
-            groups: Dict[Tuple, List[Dict]] = defaultdict(list)
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                key = tuple(item.get(g, None) for g in group_by)
-                groups[key].append(item)
+            groups = defaultdict(list)
+            for record in resolved_data:
+                key = record.get(group_by, 'unknown')
+                groups[key].append(record)
 
             results = []
-            for group_key, group_items in groups.items():
-                row = {g: group_key[i] for i, g in enumerate(group_by)}
+            for group_key, group_records in groups.items():
+                result_row = {group_by: group_key, '_count': len(group_records)}
 
-                for agg in aggregations:
-                    field = agg.get("field")
-                    func = agg.get("func", "sum")
-                    alias = agg.get("alias", f"{func}_{field}")
+                for agg in resolved_aggregations:
+                    field = agg.get('field', '')
+                    func = agg.get('function', 'sum')
 
-                    values = [item.get(field, 0) for item in group_items if field in item]
-                    values = [v for v in values if isinstance(v, (int, float))]
+                    values = [r.get(field, 0) for r in group_records if isinstance(r.get(field), (int, float))]
 
-                    if func == "sum":
-                        row[alias] = sum(values) if values else 0
-                    elif func == "avg":
-                        row[alias] = sum(values) / len(values) if values else 0
-                    elif func == "count":
-                        row[alias] = len(values)
-                    elif func == "min":
-                        row[alias] = min(values) if values else None
-                    elif func == "max":
-                        row[alias] = max(values) if values else None
-                    elif func == "first":
-                        row[alias] = values[0] if values else None
-                    elif func == "last":
-                        row[alias] = values[-1] if values else None
-                    elif func == "count_all":
-                        row[alias] = len(group_items)
-                    elif func == "collect":
-                        row[alias] = values
+                    if func == 'sum':
+                        result_row[f'{field}_sum'] = sum(values)
+                    elif func == 'avg':
+                        result_row[f'{field}_avg'] = sum(values) / len(values) if values else 0
+                    elif func == 'min':
+                        result_row[f'{field}_min'] = min(values) if values else None
+                    elif func == 'max':
+                        result_row[f'{field}_max'] = max(values) if values else None
+                    elif func == 'count':
+                        result_row[f'{field}_count'] = len(values)
 
-                if having:
-                    condition_field = having.get("field")
-                    condition_op = having.get("operator")
-                    condition_value = having.get("value")
-                    row_value = row.get(condition_field)
-                    should_include = False
-                    if condition_op == "gt":
-                        should_include = row_value > condition_value
-                    elif condition_op == "ge":
-                        should_include = row_value >= condition_value
-                    elif condition_op == "lt":
-                        should_include = row_value < condition_value
-                    elif condition_op == "le":
-                        should_include = row_value <= condition_value
-                    elif condition_op == "eq":
-                        should_include = row_value == condition_value
-                    if not should_include:
-                        continue
-
-                results.append(row)
+                results.append(result_row)
 
             return ActionResult(
                 success=True,
-                message=f"Grouped into {len(results)} groups",
-                data={"results": results, "group_count": len(results)},
+                data={output_var: {'groups': results, 'group_count': len(results)}},
+                message=f"Grouped into {len(results)} groups"
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"GroupAggregation error: {e}")
+            return ActionResult(success=False, message=f"Group aggregation error: {e}")
 
 
-class PivotTableAction(BaseAction):
-    """Create pivot table aggregations."""
-    action_type = "pivot_table"
-    display_name = "透视表"
-    description = "创建透视表聚合"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            rows = params.get("rows", [])
-            columns = params.get("columns", [])
-            values = params.get("values", [])
-            aggregation = params.get("aggregation", "sum")
-            fill_value = params.get("fill_value", 0)
-
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
-
-            if not rows or not values:
-                return ActionResult(success=False, message="rows and values are required")
-
-            pivot: Dict[Tuple, Dict[Tuple, float]] = defaultdict(lambda: defaultdict(float))
-
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                row_key = tuple(item.get(r) for r in rows)
-                col_key = tuple(item.get(c) for c in columns) if columns else (None,)
-
-                for val_spec in values:
-                    field = val_spec if isinstance(val_spec, str) else val_spec.get("field")
-                    val = item.get(field, 0)
-                    if isinstance(val, (int, float)):
-                        if aggregation == "sum":
-                            pivot[row_key][col_key] += val
-                        elif aggregation == "count":
-                            pivot[row_key][col_key] += 1
-                        elif aggregation == "avg":
-                            pivot[row_key][("__avg_count",) + col_key] = pivot[row_key].get(("__avg_count",) + col_key, 0) + 1
-                            pivot[row_key][col_key] = (pivot[row_key].get(col_key, 0) * (pivot[row_key].get(("__avg_count",) + col_key, 1) - 1) + val) / pivot[row_key].get(("__avg_count",) + col_key, 1)
-
-            all_col_keys = sorted(set(col for row in pivot.values() for col in row.keys() if col != (None,) and not col[0].startswith("__")))
-
-            results = []
-            for row_key in sorted(pivot.keys()):
-                row_data = {rows[i]: row_key[i] for i in range(len(rows))}
-                for col_key in all_col_keys:
-                    col_label = "_".join(str(k) for k in col_key) if col_key != (None,) else "total"
-                    row_data[col_label] = pivot[row_key].get(col_key, fill_value)
-                results.append(row_data)
-
-            return ActionResult(
-                success=True,
-                message=f"Pivot table: {len(results)} rows",
-                data={"pivot_table": results, "row_count": len(results), "column_count": len(all_col_keys)},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"PivotTable error: {e}")
-
-
-class TimeSeriesAggregationAction(BaseAction):
-    """Time-series aggregation."""
-    action_type = "time_series_aggregation"
-    display_name = "时间序列聚合"
-    description = "时间序列数据聚合"
+class AggregateWindowAction(BaseAction):
+    """Window functions."""
+    action_type = "aggregate_window"
+    display_name = "窗口函数"
+    description = "窗口函数聚合"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute window function."""
+        data = params.get('data', [])
+        field = params.get('field', '')
+        window_type = params.get('window_type', 'rolling')
+        window_size = params.get('window_size', 3)
+        func = params.get('function', 'avg')
+        sort_by = params.get('sort_by', None)
+        output_var = params.get('output_var', 'window_result')
+
+        if not data or not field:
+            return ActionResult(success=False, message="data and field are required")
+
         try:
-            data = params.get("data", [])
-            timestamp_field = params.get("timestamp_field", "timestamp")
-            value_field = params.get("value_field", "value")
-            interval = params.get("interval", "1h")
-            aggregation = params.get("aggregation", "sum")
-            timezone_str = params.get("timezone", "UTC")
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_sort_by = context.resolve_value(sort_by) if context else sort_by
 
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
+            if resolved_sort_by:
+                resolved_data = sorted(resolved_data, key=lambda x: x.get(resolved_sort_by, 0))
 
-            interval_seconds = self._parse_interval(interval)
-            buckets: Dict[int, List[float]] = defaultdict(list)
+            values = [r.get(field, 0) for r in resolved_data if isinstance(r.get(field), (int, float))]
 
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                ts = item.get(timestamp_field)
-                val = item.get(value_field, 0)
-
-                if isinstance(ts, (int, float)):
-                    dt = datetime.fromtimestamp(ts, tz=None)
-                elif isinstance(ts, str):
-                    try:
-                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    except Exception:
-                        continue
+            windowed = []
+            for i, record in enumerate(resolved_data):
+                if window_type == 'rolling':
+                    start = max(0, i - window_size + 1)
+                    window_values = values[start:i + 1]
                 else:
-                    continue
+                    window_values = values[:i + 1]
 
-                if not isinstance(val, (int, float)):
-                    continue
+                if func == 'avg':
+                    record[f'{field}_window_avg'] = sum(window_values) / len(window_values) if window_values else 0
+                elif func == 'sum':
+                    record[f'{field}_window_sum'] = sum(window_values)
+                elif func == 'min':
+                    record[f'{field}_window_min'] = min(window_values) if window_values else None
+                elif func == 'max':
+                    record[f'{field}_window_max'] = max(window_values) if window_values else None
 
-                bucket_key = int(dt.timestamp() // interval_seconds) * interval_seconds
-                buckets[bucket_key].append(val)
+                windowed.append(record)
 
-            sorted_keys = sorted(buckets.keys())
-            results = []
-            for key in sorted_keys:
-                values = buckets[key]
-                ts = datetime.fromtimestamp(key)
-                result = {"timestamp": ts.isoformat(), "bucket_start": key}
-
-                if aggregation == "sum":
-                    result["value"] = sum(values)
-                elif aggregation == "avg":
-                    result["value"] = sum(values) / len(values) if values else 0
-                elif aggregation == "min":
-                    result["value"] = min(values) if values else None
-                elif aggregation == "max":
-                    result["value"] = max(values) if values else None
-                elif aggregation == "count":
-                    result["value"] = len(values)
-                elif aggregation == "first":
-                    result["value"] = values[0] if values else None
-                elif aggregation == "last":
-                    result["value"] = values[-1] if values else None
-
-                results.append(result)
+            result = {
+                'data': windowed,
+                'window_type': window_type,
+                'window_size': window_size,
+                'function': func,
+            }
 
             return ActionResult(
                 success=True,
-                message=f"Time-series: {len(results)} buckets",
-                data={"series": results, "bucket_count": len(results), "interval": interval},
+                data={output_var: result},
+                message=f"Window function '{func}' applied"
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"TimeSeriesAggregation error: {e}")
-
-    def _parse_interval(self, interval: str) -> int:
-        units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-        if interval.endswith(tuple(units.keys())):
-            num = int(interval[:-1])
-            unit = interval[-1]
-            return num * units.get(unit, 1)
-        return 3600
+            return ActionResult(success=False, message=f"Window aggregation error: {e}")
 
 
-class MultiDimensionalAggregationAction(BaseAction):
-    """Multi-dimensional data aggregation (OLAP-style)."""
-    action_type = "multidimensional_aggregation"
-    display_name = "多维聚合"
-    description = "多维数据聚合(OLAP风格)"
+class AggregatePivotAction(BaseAction):
+    """Pivot table."""
+    action_type = "aggregate_pivot"
+    display_name = "数据透视"
+    description = "数据透视表"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute pivot table."""
+        data = params.get('data', [])
+        index = params.get('index', '')
+        columns = params.get('columns', '')
+        values = params.get('values', '')
+        aggfunc = params.get('aggfunc', 'sum')
+        output_var = params.get('output_var', 'pivot_result')
+
+        if not data or not index or not columns or not values:
+            return ActionResult(success=False, message="data, index, columns, and values are required")
+
         try:
-            data = params.get("data", [])
-            dimensions = params.get("dimensions", [])
-            measures = params.get("measures", [])
-            rollup = params.get("rollup", False)
+            resolved_data = context.resolve_value(data) if context else data
 
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
+            pivot = defaultdict(lambda: defaultdict(list))
 
-            if not dimensions or not measures:
-                return ActionResult(success=False, message="dimensions and measures are required")
+            for record in resolved_data:
+                idx_val = record.get(index, 'unknown')
+                col_val = record.get(columns, 'unknown')
+                val = record.get(values, 0)
+                if isinstance(val, (int, float)):
+                    pivot[idx_val][col_val].append(val)
 
-            def aggregate(group_key: Tuple, items: List[Dict]) -> Dict:
-                result = {dim: group_key[i] for i, dim in enumerate(dimensions)}
-                for measure in measures:
-                    field = measure.get("field")
-                    func = measure.get("func", "sum")
-                    alias = measure.get("alias", f"{func}_{field}")
+            result_data = []
+            all_columns = set()
+            for idx_val in pivot:
+                all_columns.update(pivot[idx_val].keys())
 
-                    values = [item.get(field, 0) for item in items if field in item and isinstance(item.get(field), (int, float))]
+            for idx_val in sorted(pivot.keys()):
+                row = {index: idx_val}
+                for col_val in sorted(all_columns):
+                    col_values = pivot[idx_val].get(col_val, [])
+                    if col_values:
+                        if aggfunc == 'sum':
+                            row[f'{col_val}'] = sum(col_values)
+                        elif aggfunc == 'avg':
+                            row[f'{col_val}'] = sum(col_values) / len(col_values)
+                        elif aggfunc == 'count':
+                            row[f'{col_val}'] = len(col_values)
+                        elif aggfunc == 'min':
+                            row[f'{col_val}'] = min(col_values)
+                        elif aggfunc == 'max':
+                            row[f'{col_val}'] = max(col_values)
+                    else:
+                        row[f'{col_val}'] = None
+                result_data.append(row)
 
-                    if func == "sum":
-                        result[alias] = round(sum(values), 4) if values else 0
-                    elif func == "avg":
-                        result[alias] = round(sum(values) / len(values), 4) if values else 0
-                    elif func == "count":
-                        result[alias] = len(values)
-                    elif func == "min":
-                        result[alias] = min(values) if values else None
-                    elif func == "max":
-                        result[alias] = max(values) if values else None
-
-                return result
-
-            cells: Dict[Tuple, List[Dict]] = defaultdict(list)
-            for item in data:
-                if isinstance(item, dict):
-                    key = tuple(item.get(d) for d in dimensions)
-                    cells[key].append(item)
-
-            results = [aggregate(k, v) for k, v in cells.items()]
-
-            if rollup:
-                for i, dim in enumerate(dimensions):
-                    subtotal_key = [None] * len(dimensions)
-                    subtotal_key[i] = slice(None)
-                    subtotal_values = []
-                    for key, items in cells.items():
-                        if key[i] is not None:
-                            subtotal_values.extend(items)
-                    if subtotal_values:
-                        sub_key = [None] * len(dimensions)
-                        sub_key[i] = "__TOTAL__"
-                        results.append(aggregate(tuple(sub_key), subtotal_values))
-
-                total_values = []
-                for items in cells.values():
-                    total_values.extend(items)
-                if total_values:
-                    total_key = tuple("__TOTAL__" for _ in dimensions)
-                    results.append(aggregate(total_key, total_values))
+            result = {
+                'data': result_data,
+                'row_count': len(result_data),
+                'column_count': len(all_columns),
+                'index': index,
+                'columns': columns,
+                'values': values,
+            }
 
             return ActionResult(
                 success=True,
-                message=f"Multi-dimensional: {len(results)} cells",
-                data={"results": results, "cell_count": len(results), "dimensions": dimensions, "measures": measures},
+                data={output_var: result},
+                message=f"Pivot: {len(result_data)} rows x {len(all_columns)} columns"
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"MultiDimensionalAggregation error: {e}")
+            return ActionResult(success=False, message=f"Pivot aggregation error: {e}")
