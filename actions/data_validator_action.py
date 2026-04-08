@@ -1,19 +1,16 @@
 """Data validator action module for RabAI AutoClick.
 
-Provides data validation operations:
-- DataValidator: General data validator
-- SchemaValidator: Validate against schemas
-- TypeValidator: Type checking validator
-- RangeValidator: Range validation
-- PatternValidator: Pattern/regex validation
-- CustomValidator: Custom validation rules
+Provides comprehensive data validation:
+- SchemaValidatorAction: Validate data against schemas
+- DataTypeValidatorAction: Validate data types
+- RangeValidatorAction: Validate numeric ranges
+- FormatValidatorAction: Validate string formats
+- CrossFieldValidatorAction: Cross-field validation
 """
 
 import re
-import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
-from dataclasses import dataclass
-from enum import Enum
+from typing import Any, Dict, List, Optional, Union, Callable
+from datetime import datetime
 
 import sys
 import os
@@ -23,505 +20,380 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class ValidationType(Enum):
-    """Validation types."""
-    REQUIRED = "required"
-    TYPE = "type"
-    RANGE = "range"
-    PATTERN = "pattern"
-    LENGTH = "length"
-    ENUM = "enum"
-    CUSTOM = "custom"
-    SCHEMA = "schema"
-
-
-@dataclass
-class ValidationRule:
-    """Validation rule definition."""
-    field: str
-    validation_type: ValidationType
-    constraint: Any = None
-    message: str = ""
-    required: bool = True
-
-
-@dataclass
-class ValidationError:
-    """Validation error."""
-    field: str
-    message: str
-    value: Any = None
-    rule: Optional[ValidationRule] = None
-
-
-@dataclass
-class ValidationResult:
-    """Result of validation."""
-    valid: bool
-    errors: List[ValidationError]
-    warnings: List[str]
-    validated_at: float
-
-
-class SchemaValidator:
-    """Validate data against schema."""
-
-    def __init__(self, schema: Dict[str, ValidationRule]):
-        self.schema = schema
-
-    def validate(self, data: Dict) -> Tuple[bool, List[ValidationError]]:
-        """Validate data against schema."""
-        errors = []
-
-        for field, rule in self.schema.items():
-            value = data.get(field)
-
-            if rule.required and value is None:
-                errors.append(ValidationError(
-                    field=field,
-                    message=rule.message or f"Field '{field}' is required",
-                    value=value,
-                    rule=rule,
-                ))
-                continue
-
-            if value is None:
-                continue
-
-            if rule.validation_type == ValidationType.TYPE:
-                if not self._validate_type(value, rule.constraint):
-                    errors.append(ValidationError(
-                        field=field,
-                        message=rule.message or f"Field '{field}' must be of type {rule.constraint}",
-                        value=value,
-                        rule=rule,
-                    ))
-
-            elif rule.validation_type == ValidationType.RANGE:
-                if not self._validate_range(value, rule.constraint):
-                    errors.append(ValidationError(
-                        field=field,
-                        message=rule.message or f"Field '{field}' out of range",
-                        value=value,
-                        rule=rule,
-                    ))
-
-            elif rule.validation_type == ValidationType.PATTERN:
-                if not self._validate_pattern(value, rule.constraint):
-                    errors.append(ValidationError(
-                        field=field,
-                        message=rule.message or f"Field '{field}' does not match pattern",
-                        value=value,
-                        rule=rule,
-                    ))
-
-            elif rule.validation_type == ValidationType.LENGTH:
-                if not self._validate_length(value, rule.constraint):
-                    errors.append(ValidationError(
-                        field=field,
-                        message=rule.message or f"Field '{field}' length invalid",
-                        value=value,
-                        rule=rule,
-                    ))
-
-            elif rule.validation_type == ValidationType.ENUM:
-                if not self._validate_enum(value, rule.constraint):
-                    errors.append(ValidationError(
-                        field=field,
-                        message=rule.message or f"Field '{field}' not in allowed values",
-                        value=value,
-                        rule=rule,
-                    ))
-
-        return len(errors) == 0, errors
-
-    def _validate_type(self, value: Any, expected_type: type) -> bool:
-        """Validate type."""
-        return isinstance(value, expected_type)
-
-    def _validate_range(self, value: Union[int, float], constraint: Dict) -> bool:
-        """Validate numeric range."""
-        if not isinstance(value, (int, float)):
-            return False
-        min_val = constraint.get("min")
-        max_val = constraint.get("max")
-        if min_val is not None and value < min_val:
-            return False
-        if max_val is not None and value > max_val:
-            return False
-        return True
-
-    def _validate_pattern(self, value: str, pattern: str) -> bool:
-        """Validate pattern."""
-        if not isinstance(value, str):
-            return False
-        return bool(re.match(pattern, value))
-
-    def _validate_length(self, value: Any, constraint: Dict) -> bool:
-        """Validate length."""
-        length = len(value)
-        min_len = constraint.get("min")
-        max_len = constraint.get("max")
-        if min_len is not None and length < min_len:
-            return False
-        if max_len is not None and length > max_len:
-            return False
-        return True
-
-    def _validate_enum(self, value: Any, allowed: List) -> bool:
-        """Validate enum."""
-        return value in allowed
-
-
-class TypeValidator:
-    """Type-based validator."""
-
-    @staticmethod
-    def is_string(value: Any) -> bool:
-        return isinstance(value, str)
-
-    @staticmethod
-    def is_int(value: Any) -> bool:
-        return isinstance(value, int) and not isinstance(value, bool)
-
-    @staticmethod
-    def is_float(value: Any) -> bool:
-        return isinstance(value, float)
-
-    @staticmethod
-    def is_number(value: Any) -> bool:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-    @staticmethod
-    def is_bool(value: Any) -> bool:
-        return isinstance(value, bool)
-
-    @staticmethod
-    def is_list(value: Any) -> bool:
-        return isinstance(value, list)
-
-    @staticmethod
-    def is_dict(value: Any) -> bool:
-        return isinstance(value, dict)
-
-    @staticmethod
-    def is_email(value: str) -> bool:
-        if not isinstance(value, str):
-            return False
-        pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        return bool(re.match(pattern, value))
-
-    @staticmethod
-    def is_url(value: str) -> bool:
-        if not isinstance(value, str):
-            return False
-        pattern = r"^https?://[^\s/$.?#].[^\s]*$"
-        return bool(re.match(pattern, value))
-
-    @staticmethod
-    def is_uuid(value: str) -> bool:
-        if not isinstance(value, str):
-            return False
-        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-        return bool(re.match(pattern, value.lower()))
-
-
-class RangeValidator:
-    """Range validator."""
-
-    @staticmethod
-    def validate_min(value: Union[int, float], min_val: float) -> bool:
-        """Validate minimum."""
-        return value >= min_val
-
-    @staticmethod
-    def validate_max(value: Union[int, float], max_val: float) -> bool:
-        """Validate maximum."""
-        return value <= max_val
-
-    @staticmethod
-    def validate_range(value: Union[int, float], min_val: float, max_val: float) -> bool:
-        """Validate range."""
-        return min_val <= value <= max_val
-
-    @staticmethod
-    def validate_positive(value: Union[int, float]) -> bool:
-        """Validate positive."""
-        return value > 0
-
-    @staticmethod
-    def validate_non_negative(value: Union[int, float]) -> bool:
-        """Validate non-negative."""
-        return value >= 0
-
-
-class PatternValidator:
-    """Pattern-based validator."""
-
-    def __init__(self):
-        self._patterns: Dict[str, str] = {
-            "email": r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
-            "url": r"^https?://[^\s/$.?#].[^\s]*$",
-            "uuid": r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-            "phone": r"^\+?[1-9]\d{1,14}$",
-            "ipv4": r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$",
-            "date": r"^\d{4}-\d{2}-\d{2}$",
-            "datetime": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$",
-        }
-
-    def register_pattern(self, name: str, pattern: str):
-        """Register a custom pattern."""
-        self._patterns[name] = pattern
-
-    def validate(self, value: str, pattern: Union[str, re.Pattern]) -> bool:
-        """Validate against pattern."""
-        if isinstance(pattern, str):
-            if pattern in self._patterns:
-                pattern = self._patterns[pattern]
-            pattern = re.compile(pattern)
-        return bool(pattern.match(str(value)))
-
-
-class CustomValidator:
-    """Custom validation rules."""
-
-    def __init__(self):
-        self._validators: Dict[str, Callable[[Any], Tuple[bool, str]]] = {}
-
-    def register(self, name: str, validator: Callable[[Any], Tuple[bool, str]]):
-        """Register a custom validator.
-
-        Args:
-            name: Validator name
-            validator: Function that takes value and returns (valid, message)
-        """
-        self._validators[name] = validator
-
-    def validate(self, name: str, value: Any) -> Tuple[bool, str]:
-        """Validate using custom validator."""
-        if name not in self._validators:
-            return False, f"Validator '{name}' not found"
-        return self._validators[name](value)
-
-
-class DataValidator:
-    """Main data validator combining all validators."""
-
-    def __init__(self):
-        self.schema_validator = SchemaValidator({})
-        self.type_validator = TypeValidator()
-        self.range_validator = RangeValidator()
-        self.pattern_validator = PatternValidator()
-        self.custom_validator = CustomValidator()
-
-    def validate(
-        self,
-        data: Dict,
-        rules: List[ValidationRule],
-    ) -> ValidationResult:
-        """Validate data against rules."""
-        errors = []
-        warnings = []
-
-        for rule in rules:
-            value = data.get(rule.field)
-
-            if rule.required and value is None:
-                errors.append(ValidationError(
-                    field=rule.field,
-                    message=rule.message or f"Field '{rule.field}' is required",
-                    value=value,
-                    rule=rule,
-                ))
-                continue
-
-            if value is None:
-                continue
-
-            valid, error_msg = self._validate_rule(rule, value)
-            if not valid:
-                errors.append(ValidationError(
-                    field=rule.field,
-                    message=error_msg or f"Validation failed for '{rule.field}'",
-                    value=value,
-                    rule=rule,
-                ))
-
-        return ValidationResult(
-            valid=len(errors) == 0,
-            errors=errors,
-            warnings=warnings,
-            validated_at=time.time(),
-        )
-
-    def _validate_rule(self, rule: ValidationRule, value: Any) -> Tuple[bool, str]:
-        """Validate single rule."""
-        if rule.validation_type == ValidationType.TYPE:
-            if not self.type_validator.is_string(value) if rule.constraint == str else \
-               not self.type_validator.is_int(value) if rule.constraint == int else \
-               not self.type_validator.is_float(value) if rule.constraint == float else \
-               not self.type_validator.is_dict(value) if rule.constraint == dict else \
-               not self.type_validator.is_list(value) if rule.constraint == list else True:
-                return False, f"Expected type {rule.constraint.__name__}"
-            return True, ""
-
-        elif rule.validation_type == ValidationType.RANGE:
-            if not self.range_validator.validate_range(value, rule.constraint.get("min", 0), rule.constraint.get("max", float("inf"))):
-                return False, f"Value out of range"
-            return True, ""
-
-        elif rule.validation_type == ValidationType.PATTERN:
-            if not self.pattern_validator.validate(value, rule.constraint):
-                return False, f"Pattern mismatch"
-            return True, ""
-
-        elif rule.validation_type == ValidationType.LENGTH:
-            min_len = rule.constraint.get("min", 0)
-            max_len = rule.constraint.get("max", float("inf"))
-            length = len(value)
-            if length < min_len or length > max_len:
-                return False, f"Length must be between {min_len} and {max_len}"
-            return True, ""
-
-        elif rule.validation_type == ValidationType.ENUM:
-            if value not in rule.constraint:
-                return False, f"Value not in allowed values"
-            return True, ""
-
-        elif rule.validation_type == ValidationType.CUSTOM:
-            valid, msg = self.custom_validator.validate(rule.constraint, value)
-            return valid, msg
-
-        return True, ""
-
-
-class DataValidatorAction(BaseAction):
-    """Data validator action."""
-    action_type = "data_validator"
-    display_name = "数据验证器"
-    description = "数据验证和模式检查"
+class SchemaValidatorAction(BaseAction):
+    """Validate data against schemas."""
+    action_type = "data_schema_validator"
+    display_name = "Schema验证器"
+    description = "根据Schema验证数据"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            operation = params.get("operation", "validate")
             data = params.get("data", {})
+            schema = params.get("schema", {})
+            strict = params.get("strict", False)
 
-            if operation == "validate":
-                return self._validate_data(data, params)
-            elif operation == "validate_type":
-                return self._validate_type(data, params)
-            elif operation == "validate_pattern":
-                return self._validate_pattern(data, params)
-            elif operation == "register_pattern":
-                return self._register_pattern(params)
-            elif operation == "register_custom":
-                return self._register_custom(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+            errors = []
+            warnings = []
 
+            required_fields = schema.get("required", [])
+            field_schemas = schema.get("fields", {})
+
+            for field in required_fields:
+                if field not in data:
+                    errors.append(f"Required field missing: {field}")
+
+            for field, field_schema in field_schemas.items():
+                if field not in data:
+                    continue
+
+                value = data[field]
+                expected_type = field_schema.get("type")
+                if expected_type:
+                    type_valid = self._validate_type(value, expected_type)
+                    if not type_valid:
+                        errors.append(f"Field '{field}': expected {expected_type}, got {type(value).__name__}")
+
+                constraints = field_schema.get("constraints", {})
+                constraint_errors = self._validate_constraints(value, constraints)
+                errors.extend([f"Field '{field}': {e}" for e in constraint_errors])
+
+            is_valid = len(errors) == 0
+
+            return ActionResult(
+                success=is_valid,
+                data={
+                    "is_valid": is_valid,
+                    "errors": errors,
+                    "warnings": warnings,
+                    "fields_validated": len(field_schemas),
+                    "required_fields": len(required_fields),
+                    "missing_required": [f for f in required_fields if f not in data]
+                },
+                message=f"Schema validation: {'passed' if is_valid else f'failed ({len(errors)} errors)'}"
+            )
         except Exception as e:
-            return ActionResult(success=False, message=f"Validation error: {str(e)}")
+            return ActionResult(success=False, message=f"Schema validator error: {str(e)}")
 
-    def _validate_data(self, data: Dict, params: Dict) -> ActionResult:
-        """Validate data with rules."""
-        rules_data = params.get("rules", [])
-
-        rules = []
-        for r in rules_data:
-            try:
-                vtype = ValidationType[r.get("type", "REQUIRED").upper()]
-                rule = ValidationRule(
-                    field=r.get("field", ""),
-                    validation_type=vtype,
-                    constraint=r.get("constraint"),
-                    message=r.get("message", ""),
-                    required=r.get("required", True),
-                )
-                rules.append(rule)
-            except KeyError:
-                continue
-
-        validator = DataValidator()
-        result = validator.validate(data, rules)
-
-        return ActionResult(
-            success=result.valid,
-            message="Valid" if result.valid else f"{len(result.errors)} validation errors",
-            data={
-                "valid": result.valid,
-                "errors": [
-                    {"field": e.field, "message": e.message, "value": str(e.value)[:50]}
-                    for e in result.errors
-                ],
-                "validated_at": result.validated_at,
-            },
-        )
-
-    def _validate_type(self, data: Any, params: Dict) -> ActionResult:
-        """Validate data type."""
-        type_name = params.get("type", "string").lower()
-        validator = TypeValidator()
-
-        checks = {
-            "string": validator.is_string,
-            "int": validator.is_int,
-            "float": validator.is_float,
-            "number": validator.is_number,
-            "bool": validator.is_bool,
-            "list": validator.is_list,
-            "dict": validator.is_dict,
-            "email": validator.is_email,
-            "url": validator.is_url,
-            "uuid": validator.is_uuid,
+    def _validate_type(self, value: Any, expected_type: str) -> bool:
+        type_map = {
+            "string": str,
+            "integer": int,
+            "number": (int, float),
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+            "null": type(None)
         }
+        expected = type_map.get(expected_type)
+        if expected is None:
+            return True
+        return isinstance(value, expected)
 
-        check_fn = checks.get(type_name)
-        if not check_fn:
-            return ActionResult(success=False, message=f"Unknown type: {type_name}")
+    def _validate_constraints(self, value: Any, constraints: Dict) -> List[str]:
+        errors = []
+        if "min_length" in constraints and isinstance(value, (str, list)) and len(value) < constraints["min_length"]:
+            errors.append(f"min_length: {len(value)} < {constraints['min_length']}")
+        if "max_length" in constraints and isinstance(value, (str, list)) and len(value) > constraints["max_length"]:
+            errors.append(f"max_length: {len(value)} > {constraints['max_length']}")
+        if "min" in constraints and isinstance(value, (int, float)) and value < constraints["min"]:
+            errors.append(f"min: {value} < {constraints['min']}")
+        if "max" in constraints and isinstance(value, (int, float)) and value > constraints["max"]:
+            errors.append(f"max: {value} > {constraints['max']}")
+        if "pattern" in constraints and isinstance(value, str):
+            if not re.match(constraints["pattern"], value):
+                errors.append(f"pattern mismatch")
+        if "enum" in constraints and value not in constraints["enum"]:
+            errors.append(f"not in enum: {constraints['enum']}")
+        return errors
 
-        valid = check_fn(data)
-        return ActionResult(
-            success=valid,
-            message=f"Type check: {'passed' if valid else 'failed'}",
-            data={"type": type_name, "valid": valid, "value": str(data)[:50]},
-        )
+    def get_required_params(self) -> List[str]:
+        return ["data", "schema"]
 
-    def _validate_pattern(self, data: str, params: Dict) -> ActionResult:
-        """Validate pattern."""
-        pattern = params.get("pattern", "")
-        validator = PatternValidator()
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {"strict": False}
 
-        valid = validator.validate(data, pattern)
-        return ActionResult(
-            success=valid,
-            message=f"Pattern check: {'passed' if valid else 'failed'}",
-            data={"pattern": pattern, "valid": valid},
-        )
 
-    def _register_pattern(self, params: Dict) -> ActionResult:
-        """Register a pattern."""
-        name = params.get("name")
-        pattern = params.get("pattern")
+class DataTypeValidatorAction(BaseAction):
+    """Validate data types."""
+    action_type = "data_type_validator"
+    display_name = "类型验证器"
+    description = "验证数据类型"
 
-        if not name or not pattern:
-            return ActionResult(success=False, message="name and pattern are required")
-
-        validator = PatternValidator()
-        validator.register_pattern(name, pattern)
-
-        return ActionResult(success=True, message=f"Pattern '{name}' registered")
-
-    def _register_custom(self, params: Dict) -> ActionResult:
-        """Register a custom validator."""
-        name = params.get("name")
-        func_code = params.get("func")
-
-        if not name or not func_code:
-            return ActionResult(success=False, message="name and func are required")
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            custom_validator = CustomValidator()
-            custom_validator.register(name, eval(f"lambda x: {func_code}"))
-            return ActionResult(success=True, message=f"Custom validator '{name}' registered")
+            data = params.get("data", {})
+            expected_types = params.get("expected_types", {})
+            coerce_types = params.get("coerce_types", False)
+
+            errors = []
+            validated = {}
+            coerced = {}
+
+            for field, expected_type in expected_types.items():
+                value = data.get(field)
+                if value is None:
+                    if params.get("allow_null", False):
+                        validated[field] = {"type": "null", "valid": True, "value": None}
+                    else:
+                        errors.append(f"Field '{field}': null value not allowed")
+                        validated[field] = {"type": "null", "valid": False, "value": None}
+                    continue
+
+                actual_type = type(value).__name__
+                type_valid = actual_type == expected_type
+
+                if not type_valid and coerce_types:
+                    try:
+                        if expected_type == "string":
+                            coerced_value = str(value)
+                            coerced[field] = {"from": actual_type, "to": "string", "value": coerced_value}
+                            value = coerced_value
+                            type_valid = True
+                        elif expected_type == "integer":
+                            coerced_value = int(value)
+                            coerced[field] = {"from": actual_type, "to": "integer", "value": coerced_value}
+                            value = coerced_value
+                            type_valid = True
+                        elif expected_type == "float":
+                            coerced_value = float(value)
+                            coerced[field] = {"from": actual_type, "to": "float", "value": coerced_value}
+                            value = coerced_value
+                            type_valid = True
+                    except (ValueError, TypeError):
+                        type_valid = False
+
+                validated[field] = {"type": actual_type, "valid": type_valid, "value": value}
+                if not type_valid:
+                    errors.append(f"Field '{field}': expected {expected_type}, got {actual_type}")
+
+            is_valid = len(errors) == 0
+
+            return ActionResult(
+                success=is_valid,
+                data={
+                    "is_valid": is_valid,
+                    "errors": errors,
+                    "validated": validated,
+                    "coerced": coerced,
+                    "fields_validated": len(expected_types)
+                },
+                message=f"Type validation: {'passed' if is_valid else f'failed ({len(errors)} errors)'}"
+            )
         except Exception as e:
-            return ActionResult(success=False, message=f"Failed to register: {str(e)}")
+            return ActionResult(success=False, message=f"Type validator error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ["data"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {"expected_types": {}, "coerce_types": False, "allow_null": False}
+
+
+class RangeValidatorAction(BaseAction):
+    """Validate numeric ranges."""
+    action_type = "data_range_validator"
+    display_name = "范围验证器"
+    description = "验证数值范围"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", {})
+            ranges = params.get("ranges", {})
+            inclusive = params.get("inclusive", True)
+
+            errors = []
+            validated = {}
+
+            for field, range_spec in ranges.items():
+                value = data.get(field)
+                if value is None:
+                    continue
+
+                if not isinstance(value, (int, float)):
+                    errors.append(f"Field '{field}': non-numeric value {type(value).__name__}")
+                    validated[field] = {"valid": False, "reason": "non-numeric"}
+                    continue
+
+                min_val = range_spec.get("min")
+                max_val = range_spec.get("max")
+                min_exclusive = range_spec.get("min_exclusive", False)
+                max_exclusive = range_spec.get("max_exclusive", False)
+
+                if min_val is not None:
+                    if inclusive and not min_exclusive:
+                        min_ok = value >= min_val
+                    else:
+                        min_ok = value > min_val
+                    if not min_ok:
+                        errors.append(f"Field '{field}': {value} < min {min_val}")
+                        validated[field] = {"valid": False, "reason": "below_min", "value": value, "min": min_val}
+                        continue
+
+                if max_val is not None:
+                    if inclusive and not max_exclusive:
+                        max_ok = value <= max_val
+                    else:
+                        max_ok = value < max_val
+                    if not max_ok:
+                        errors.append(f"Field '{field}': {value} > max {max_val}")
+                        validated[field] = {"valid": False, "reason": "above_max", "value": value, "max": max_val}
+                        continue
+
+                validated[field] = {"valid": True, "value": value, "min": min_val, "max": max_val}
+
+            is_valid = len(errors) == 0
+
+            return ActionResult(
+                success=is_valid,
+                data={
+                    "is_valid": is_valid,
+                    "errors": errors,
+                    "validated": validated,
+                    "ranges_checked": len(ranges)
+                },
+                message=f"Range validation: {'passed' if is_valid else f'failed ({len(errors)} errors)'}"
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Range validator error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ["data"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {"ranges": {}, "inclusive": True}
+
+
+class FormatValidatorAction(BaseAction):
+    """Validate string formats."""
+    action_type = "data_format_validator"
+    display_name = "格式验证器"
+    description = "验证字符串格式"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", {})
+            formats = params.get("formats", {})
+
+            errors = []
+            validated = {}
+
+            format_patterns = {
+                "email": r"^[\w\.-]+@[\w\.-]+\.\w+$",
+                "url": r"^https?://[\w\.-]+\.\w+",
+                "phone": r"^\+?[\d\s\-\(\)]{10,}$",
+                "ipv4": r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$",
+                "date_iso": r"^\d{4}-\d{2}-\d{2}$",
+                "datetime_iso": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",
+                "uuid": r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "hex_color": r"^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$",
+                "postal_code_us": r"^\d{5}(-\d{4})?$",
+                "credit_card": r"^\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}$",
+            }
+
+            for field, format_spec in formats.items():
+                value = data.get(field)
+                if value is None:
+                    continue
+
+                value_str = str(value)
+
+                if format_spec in format_patterns:
+                    pattern = format_patterns[format_spec]
+                else:
+                    pattern = format_spec
+
+                is_match = bool(re.match(pattern, value_str))
+
+                validated[field] = {"valid": is_match, "format": format_spec, "value": value_str}
+                if not is_match:
+                    errors.append(f"Field '{field}': format '{format_spec}' not matched")
+
+            is_valid = len(errors) == 0
+
+            return ActionResult(
+                success=is_valid,
+                data={
+                    "is_valid": is_valid,
+                    "errors": errors,
+                    "validated": validated,
+                    "formats_checked": len(formats)
+                },
+                message=f"Format validation: {'passed' if is_valid else f'failed ({len(errors)} errors)'}"
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Format validator error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ["data"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {"formats": {}}
+
+
+class CrossFieldValidatorAction(BaseAction):
+    """Cross-field validation."""
+    action_type = "data_crossfield_validator"
+    display_name = "跨字段验证器"
+    description = "跨字段交叉验证"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", {})
+            rules = params.get("rules", [])
+
+            errors = []
+            validated = {}
+
+            for rule in rules:
+                rule_name = rule.get("name", "unnamed")
+                fields = rule.get("fields", [])
+                condition = rule.get("condition", "eq")
+                value = rule.get("value")
+                error_msg = rule.get("error_msg", f"Cross-field rule '{rule_name}' failed")
+
+                field_values = [data.get(f) for f in fields]
+
+                if condition == "eq":
+                    is_valid = all(fv == field_values[0] for fv in field_values)
+                elif condition == "ne":
+                    is_valid = len(set(str(fv) for fv in field_values)) == len(field_values)
+                elif condition == "gt":
+                    is_valid = all(field_values[i] > field_values[i-1] for i in range(1, len(field_values)))
+                elif condition == "lt":
+                    is_valid = all(field_values[i] < field_values[i-1] for i in range(1, len(field_values)))
+                elif condition == "sum_eq":
+                    is_valid = sum(field_values) == value
+                elif condition == "sum_lt":
+                    is_valid = sum(field_values) < value
+                elif condition == "sum_gt":
+                    is_valid = sum(field_values) > value
+                elif condition == "matches":
+                    pattern = rule.get("pattern", "")
+                    is_valid = all(re.match(pattern, str(fv)) for fv in field_values)
+                else:
+                    is_valid = True
+
+                validated[rule_name] = {"valid": is_valid, "fields": fields, "condition": condition}
+                if not is_valid:
+                    errors.append(error_msg)
+
+            is_valid = len(errors) == 0
+
+            return ActionResult(
+                success=is_valid,
+                data={
+                    "is_valid": is_valid,
+                    "errors": errors,
+                    "validated": validated,
+                    "rules_checked": len(rules)
+                },
+                message=f"Cross-field validation: {'passed' if is_valid else f'failed ({len(errors)} errors)'}"
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cross-field validator error: {str(e)}")
+
+    def get_required_params(self) -> List[str]:
+        return ["data"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {"rules": []}
