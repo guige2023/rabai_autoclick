@@ -1,345 +1,386 @@
 """API monitor action module for RabAI AutoClick.
 
 Provides API monitoring with health checks, latency tracking,
-error rate monitoring, and alerting capabilities.
+error rate monitoring, and alerting.
 """
 
-import time
 import sys
 import os
-from typing import Any, Dict, List, Optional
+import time
+import json
+from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-from collections import deque
-import threading
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from statistics import mean, median
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
 @dataclass
-class MetricSample:
-    """A single metric sample."""
+class RequestMetric:
+    """A single request metric."""
     timestamp: float
-    latency_ms: float
+    endpoint: str
+    method: str
     status_code: int
+    latency_ms: float
     success: bool
-    error: Optional[str] = None
+    error_type: Optional[str] = None
 
 
 @dataclass
-class ApiEndpoint:
-    """API endpoint definition."""
-    name: str
-    url: str
-    method: str
-    expected_status: int = 200
-    timeout: float = 5.0
-    headers: Dict[str, str] = field(default_factory=dict)
+class HealthStatus:
+    """Health status of an API."""
+    healthy: bool
+    latency_ms: float
+    uptime_percent: float
+    error_rate_percent: float
+    last_check: str
 
 
-class ApiMonitorAction(BaseAction):
-    """API monitor action with health checks and alerting.
+class APIMonitorAction(BaseAction):
+    """Monitor API health, latency, and error rates.
     
-    Monitors API endpoints with configurable health checks,
-    latency thresholds, error rate tracking, and alerting.
+    Tracks request metrics, calculates health indicators,
+    and provides alerting on degradation.
     """
     action_type = "api_monitor"
     display_name = "API监控"
-    description = "API健康检查与监控"
+    description = "API健康检查和性能监控"
     
     def __init__(self):
         super().__init__()
-        self._endpoints: Dict[str, ApiEndpoint] = {}
-        self._metrics: Dict[str, deque] = {}
-        self._max_history = 1000
-        self._lock = threading.RLock()
-        self._alerts: List[Dict[str, Any]] = []
-    
-    def add_endpoint(self, endpoint: ApiEndpoint) -> None:
-        """Add an endpoint to monitor."""
-        with self._lock:
-            self._endpoints[endpoint.name] = endpoint
-            if endpoint.name not in self._metrics:
-                self._metrics[endpoint.name] = deque(maxlen=self._max_history)
+        self._metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self._health_checks: Dict[str, Callable] = {}
+        self._alert_thresholds = {
+            'latency_ms': 1000,
+            'error_rate_percent': 5.0,
+            'min_requests': 10
+        }
     
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute API monitoring operations.
+        """Execute monitoring operation.
         
         Args:
             context: Execution context.
             params: Dict with keys:
-                operation: check|add|remove|status|metrics|alert
-                endpoint: Endpoint name (for check/status)
-                latency_threshold: Alert threshold in ms
-                error_rate_threshold: Alert threshold for error rate.
+                - operation: 'record', 'health', 'stats', 'alert', 'clear'
+                - endpoint: API endpoint name
+                - metric: Metric data dict
+                - thresholds: Alert threshold overrides
         
         Returns:
             ActionResult with monitoring result.
         """
-        operation = params.get('operation', 'status')
+        operation = params.get('operation', 'record').lower()
         
-        if operation == 'check':
-            return self._check_endpoint(params)
-        elif operation == 'add':
-            return self._add_endpoint(params)
-        elif operation == 'remove':
-            return self._remove_endpoint(params)
-        elif operation == 'status':
-            return self._status(params)
-        elif operation == 'metrics':
-            return self._metrics(params)
+        if operation == 'record':
+            return self._record(params)
+        elif operation == 'health':
+            return self._health(params)
+        elif operation == 'stats':
+            return self._stats(params)
         elif operation == 'alert':
-            return self._check_alerts(params)
+            return self._alert(params)
+        elif operation == 'clear':
+            return self._clear(params)
         else:
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
+            return ActionResult(
+                success=False,
+                message=f"Unknown operation: {operation}"
+            )
     
-    def _add_endpoint(self, params: Dict[str, Any]) -> ActionResult:
-        """Add an endpoint to monitor."""
-        endpoint = ApiEndpoint(
-            name=params['name'],
-            url=params['url'],
-            method=params.get('method', 'GET'),
-            expected_status=params.get('expected_status', 200),
-            timeout=params.get('timeout', 5.0),
-            headers=params.get('headers', {})
+    def _record(self, params: Dict[str, Any]) -> ActionResult:
+        """Record a request metric."""
+        endpoint = params.get('endpoint', 'default')
+        metric_data = params.get('metric', {})
+        
+        metric = RequestMetric(
+            timestamp=time.time(),
+            endpoint=endpoint,
+            method=metric_data.get('method', 'GET'),
+            status_code=metric_data.get('status_code', 0),
+            latency_ms=metric_data.get('latency_ms', 0),
+            success=200 <= metric_data.get('status_code', 0) < 300,
+            error_type=metric_data.get('error_type')
         )
         
-        self.add_endpoint(endpoint)
+        self._metrics[endpoint].append(metric)
         
         return ActionResult(
             success=True,
-            message=f"Added endpoint {endpoint.name}",
-            data={'name': endpoint.name, 'url': endpoint.url}
+            message=f"Recorded metric for {endpoint}",
+            data={'endpoint': endpoint, 'latency_ms': metric.latency_ms}
         )
     
-    def _remove_endpoint(self, params: Dict[str, Any]) -> ActionResult:
-        """Remove an endpoint from monitoring."""
-        name = params.get('endpoint')
+    def _health(self, params: Dict[str, Any]) -> ActionResult:
+        """Get health status of an endpoint."""
+        endpoint = params.get('endpoint', 'default')
+        window_seconds = params.get('window_seconds', 300)
         
-        with self._lock:
-            if name in self._endpoints:
-                del self._endpoints[name]
-                if name in self._metrics:
-                    del self._metrics[name]
-                return ActionResult(success=True, message=f"Removed endpoint {name}")
-            
-            return ActionResult(success=False, message=f"Endpoint {name} not found")
-    
-    def _check_endpoint(self, params: Dict[str, Any]) -> ActionResult:
-        """Check health of an endpoint."""
-        name = params.get('endpoint')
+        cutoff = time.time() - window_seconds
+        metrics = [m for m in self._metrics[endpoint] if m.timestamp >= cutoff]
         
-        if not name:
-            return ActionResult(success=False, message="Endpoint name required")
+        if len(metrics) < self._alert_thresholds['min_requests']:
+            return ActionResult(
+                success=True,
+                message="Insufficient data for health check",
+                data={
+                    'healthy': None,
+                    'sample_size': len(metrics)
+                }
+            )
         
-        with self._lock:
-            endpoint = self._endpoints.get(name)
+        # Calculate health indicators
+        total = len(metrics)
+        successes = sum(1 for m in metrics if m.success)
+        errors = total - successes
         
-        if not endpoint:
-            return ActionResult(success=False, message=f"Endpoint {name} not found")
+        latencies = [m.latency_ms for m in metrics]
         
-        start = time.time()
-        sample = self._make_request(endpoint)
-        latency_ms = (time.time() - start) * 1000
+        uptime = (successes / total) * 100
+        error_rate = (errors / total) * 100
+        avg_latency = mean(latencies)
+        p95_latency = sorted(latencies)[int(len(latencies) * 0.95)] if latencies else 0
         
-        sample.latency_ms = latency_ms
+        healthy = (
+            avg_latency < self._alert_thresholds['latency_ms'] and
+            error_rate < self._alert_thresholds['error_rate_percent']
+        )
         
-        with self._lock:
-            if name in self._metrics:
-                self._metrics[name].append(sample)
-        
-        status = "healthy" if sample.success else "unhealthy"
+        status = HealthStatus(
+            healthy=healthy,
+            latency_ms=avg_latency,
+            uptime_percent=uptime,
+            error_rate_percent=error_rate,
+            last_check=datetime.utcnow().isoformat() + 'Z'
+        )
         
         return ActionResult(
-            success=sample.success,
-            message=f"Endpoint {name}: {status} ({latency_ms:.1f}ms)",
+            success=True,
+            message=f"{'Healthy' if healthy else 'Unhealthy'}",
             data={
-                'endpoint': name,
-                'healthy': sample.success,
-                'latency_ms': round(latency_ms, 2),
-                'status_code': sample.status_code,
-                'error': sample.error
+                'healthy': status.healthy,
+                'latency_ms': round(status.latency_ms, 2),
+                'p95_latency_ms': round(p95_latency, 2),
+                'uptime_percent': round(status.uptime_percent, 2),
+                'error_rate_percent': round(status.error_rate_percent, 2),
+                'sample_size': total
             }
         )
     
-    def _make_request(self, endpoint: ApiEndpoint) -> MetricSample:
-        """Make request to endpoint and return metric sample."""
-        sample = MetricSample(
-            timestamp=time.time(),
-            latency_ms=0,
-            status_code=0,
-            success=False
+    def _stats(self, params: Dict[str, Any]) -> ActionResult:
+        """Get detailed statistics."""
+        endpoint = params.get('endpoint', 'default')
+        window_seconds = params.get('window_seconds', 3600)
+        
+        cutoff = time.time() - window_seconds
+        metrics = [m for m in self._metrics[endpoint] if m.timestamp >= cutoff]
+        
+        if not metrics:
+            return ActionResult(
+                success=True,
+                message="No metrics available",
+                data={'count': 0}
+            )
+        
+        latencies = [m.latency_ms for m in metrics]
+        status_codes = defaultdict(int)
+        error_types = defaultdict(int)
+        
+        for m in metrics:
+            status_codes[m.status_code] += 1
+            if m.error_type:
+                error_types[m.error_type] += 1
+        
+        return ActionResult(
+            success=True,
+            message=f"Statistics for {endpoint}",
+            data={
+                'count': len(metrics),
+                'latency': {
+                    'min': round(min(latencies), 2),
+                    'max': round(max(latencies), 2),
+                    'mean': round(mean(latencies), 2),
+                    'median': round(median(latencies), 2),
+                    'p95': round(sorted(latencies)[int(len(latencies) * 0.95)], 2),
+                    'p99': round(sorted(latencies)[int(len(latencies) * 0.99)], 2)
+                },
+                'status_codes': dict(status_codes),
+                'error_types': dict(error_types)
+            }
         )
-        
-        try:
-            req = Request(endpoint.url, method=endpoint.method, headers=endpoint.headers)
-            with urlopen(req, timeout=endpoint.timeout) as response:
-                sample.status_code = response.status
-                sample.success = response.status == endpoint.expected_status
-        except HTTPError as e:
-            sample.status_code = e.code
-            sample.success = False
-            sample.error = f"HTTP {e.code}: {e.reason}"
-        except URLError as e:
-            sample.status_code = 0
-            sample.success = False
-            sample.error = str(e.reason)
-        except Exception as e:
-            sample.status_code = 0
-            sample.success = False
-            sample.error = str(e)
-        
-        return sample
     
-    def _status(self, params: Dict[str, Any]) -> ActionResult:
-        """Get status of all or specific endpoint."""
-        name = params.get('endpoint')
+    def _alert(self, params: Dict[str, Any]) -> ActionResult:
+        """Check if any endpoints need alerting."""
+        alerts = []
         
-        with self._lock:
-            if name:
-                if name not in self._endpoints:
-                    return ActionResult(success=False, message=f"Endpoint {name} not found")
-                
-                endpoints = {name: self._endpoints[name]}
-            else:
-                endpoints = dict(self._endpoints)
-        
-        statuses = []
-        
-        for endpoint_name, endpoint in endpoints.items():
-            with self._lock:
-                metrics = self._metrics.get(endpoint_name, deque())
-            
-            if not metrics:
-                statuses.append({
-                    'name': endpoint_name,
-                    'url': endpoint.url,
-                    'status': 'unknown',
-                    'last_check': None
+        for endpoint in self._metrics:
+            health_result = self._health({'endpoint': endpoint})
+            if health_result.data and not health_result.data.get('healthy'):
+                alerts.append({
+                    'endpoint': endpoint,
+                    'reason': 'Health check failed',
+                    'details': health_result.data
                 })
-                continue
-            
-            latest = metrics[-1]
-            
-            if len(metrics) >= 5:
-                recent_success = sum(1 for m in list(metrics)[-5:] if m.success)
-                if recent_success == 0:
-                    status = 'down'
-                elif recent_success < 3:
-                    status = 'degraded'
-                else:
-                    status = 'healthy'
-            else:
-                status = 'healthy' if latest.success else 'down'
-            
-            avg_latency = sum(m.latency_ms for m in list(metrics)[-10:]) / min(len(metrics), 10)
-            
-            statuses.append({
-                'name': endpoint_name,
-                'url': endpoint.url,
-                'status': status,
-                'last_check': latest.timestamp,
-                'last_latency_ms': round(latest.latency_ms, 2),
-                'avg_latency_ms': round(avg_latency, 2),
-                'error_rate': round((len(metrics) - sum(1 for m in metrics if m.success)) / len(metrics) * 100, 1)
+        
+        return ActionResult(
+            success=len(alerts) == 0,
+            message=f"{len(alerts)} alerts" if alerts else "No alerts",
+            data={'alerts': alerts, 'count': len(alerts)}
+        )
+    
+    def _clear(self, params: Dict[str, Any]) -> ActionResult:
+        """Clear metrics for an endpoint."""
+        endpoint = params.get('endpoint', 'default')
+        if endpoint in self._metrics:
+            self._metrics[endpoint].clear()
+        
+        return ActionResult(
+            success=True,
+            message=f"Cleared metrics for {endpoint}"
+        )
+
+
+class LatencyTrackerAction(BaseAction):
+    """Track and analyze API latency patterns."""
+    action_type = "latency_tracker"
+    display_name = "延迟跟踪"
+    description = "API响应延迟跟踪分析"
+    
+    def __init__(self):
+        super().__init__()
+        self._requests: deque = deque(maxlen=10000)
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute latency tracking operation.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - operation: 'track', 'percentiles', 'trends'
+                - endpoint: Endpoint name
+                - latency_ms: Latency in milliseconds
+                - window: Analysis window in seconds
+        
+        Returns:
+            ActionResult with latency analysis.
+        """
+        operation = params.get('operation', 'track').lower()
+        
+        if operation == 'track':
+            return self._track(params)
+        elif operation == 'percentiles':
+            return self._percentiles(params)
+        elif operation == 'trends':
+            return self._trends(params)
+        else:
+            return ActionResult(
+                success=False,
+                message=f"Unknown operation: {operation}"
+            )
+    
+    def _track(self, params: Dict[str, Any]) -> ActionResult:
+        """Track a single request latency."""
+        endpoint = params.get('endpoint', 'default')
+        latency_ms = params.get('latency_ms', 0)
+        
+        self._requests.append({
+            'timestamp': time.time(),
+            'endpoint': endpoint,
+            'latency_ms': latency_ms
+        })
+        
+        return ActionResult(
+            success=True,
+            message=f"Tracked latency {latency_ms}ms"
+        )
+    
+    def _percentiles(self, params: Dict[str, Any]) -> ActionResult:
+        """Calculate latency percentiles."""
+        endpoint = params.get('endpoint')
+        window = params.get('window', 300)
+        
+        cutoff = time.time() - window
+        requests = self._requests
+        
+        if endpoint:
+            requests = [r for r in requests if r['endpoint'] == endpoint]
+        
+        latencies = sorted([r['latency_ms'] for r in requests if r['timestamp'] >= cutoff])
+        
+        if not latencies:
+            return ActionResult(
+                success=True,
+                message="No latency data",
+                data={}
+            )
+        
+        def percentile(data, p):
+            idx = int(len(data) * p)
+            return data[min(idx, len(data) - 1)]
+        
+        return ActionResult(
+            success=True,
+            message="Latency percentiles calculated",
+            data={
+                'p50': round(percentile(latencies, 0.50), 2),
+                'p75': round(percentile(latencies, 0.75), 2),
+                'p90': round(percentile(latencies, 0.90), 2),
+                'p95': round(percentile(latencies, 0.95), 2),
+                'p99': round(percentile(latencies, 0.99), 2),
+                'count': len(latencies)
+            }
+        )
+    
+    def _trends(self, params: Dict[str, Any]) -> ActionResult:
+        """Analyze latency trends over time."""
+        endpoint = params.get('endpoint', 'default')
+        bucket_size = params.get('bucket_size', 60)  # 1 minute buckets
+        window = params.get('window', 3600)
+        
+        cutoff = time.time() - window
+        requests = [
+            r for r in self._requests
+            if r['endpoint'] == endpoint and r['timestamp'] >= cutoff
+        ]
+        
+        if not requests:
+            return ActionResult(
+                success=True,
+                message="No trend data",
+                data={'buckets': []}
+            )
+        
+        # Group into time buckets
+        buckets = defaultdict(list)
+        for r in requests:
+            bucket_key = int(r['timestamp'] / bucket_size) * bucket_size
+            buckets[bucket_key].append(r['latency_ms'])
+        
+        # Calculate stats per bucket
+        result = []
+        for ts in sorted(buckets.keys()):
+            latencies = buckets[ts]
+            result.append({
+                'timestamp': datetime.fromtimestamp(ts).isoformat(),
+                'latency_mean': round(mean(latencies), 2),
+                'latency_max': round(max(latencies), 2),
+                'count': len(latencies)
             })
         
         return ActionResult(
             success=True,
-            message=f"Status for {len(statuses)} endpoints",
-            data={'endpoints': statuses}
-        )
-    
-    def _metrics(self, params: Dict[str, Any]) -> ActionResult:
-        """Get detailed metrics for endpoint."""
-        name = params.get('endpoint')
-        window = params.get('window', 100)
-        
-        if not name:
-            return ActionResult(success=False, message="Endpoint name required")
-        
-        with self._lock:
-            metrics = list(self._metrics.get(name, []))[-window:]
-        
-        if not metrics:
-            return ActionResult(success=True, message=f"No metrics for {name}", data={'metrics': []})
-        
-        total = len(metrics)
-        successful = sum(1 for m in metrics if m.success)
-        failed = total - successful
-        
-        latencies = [m.latency_ms for m in metrics]
-        
-        return ActionResult(
-            success=True,
-            message=f"Metrics for {name}",
-            data={
-                'endpoint': name,
-                'total_requests': total,
-                'successful': successful,
-                'failed': failed,
-                'error_rate': round(failed / total * 100, 2) if total > 0 else 0,
-                'min_latency_ms': round(min(latencies), 2) if latencies else 0,
-                'max_latency_ms': round(max(latencies), 2) if latencies else 0,
-                'avg_latency_ms': round(sum(latencies) / len(latencies), 2) if latencies else 0,
-                'metrics': [
-                    {
-                        'timestamp': m.timestamp,
-                        'latency_ms': round(m.latency_ms, 2),
-                        'status_code': m.status_code,
-                        'success': m.success,
-                        'error': m.error
-                    }
-                    for m in metrics
-                ]
-            }
-        )
-    
-    def _check_alerts(self, params: Dict[str, Any]) -> ActionResult:
-        """Check for alert conditions."""
-        latency_threshold = params.get('latency_threshold', 1000)
-        error_rate_threshold = params.get('error_rate_threshold', 10)
-        window = params.get('window', 50)
-        
-        alerts = []
-        
-        with self._lock:
-            for name, metrics_deque in self._metrics.items():
-                metrics = list(metrics_deque)[-window:]
-                
-                if len(metrics) < 5:
-                    continue
-                
-                avg_latency = sum(m.latency_ms for m in metrics) / len(metrics)
-                error_count = sum(1 for m in metrics if not m.success)
-                error_rate = error_count / len(metrics) * 100
-                
-                if avg_latency > latency_threshold:
-                    alerts.append({
-                        'endpoint': name,
-                        'type': 'latency',
-                        'message': f"Avg latency {avg_latency:.1f}ms exceeds threshold {latency_threshold}ms",
-                        'severity': 'warning' if avg_latency < latency_threshold * 2 else 'critical'
-                    })
-                
-                if error_rate > error_rate_threshold:
-                    alerts.append({
-                        'endpoint': name,
-                        'type': 'error_rate',
-                        'message': f"Error rate {error_rate:.1f}% exceeds threshold {error_rate_threshold}%",
-                        'severity': 'warning' if error_rate < error_rate_threshold * 2 else 'critical'
-                    })
-        
-        self._alerts.extend(alerts)
-        
-        return ActionResult(
-            success=True,
-            message=f"{len(alerts)} alerts triggered",
-            data={'alerts': alerts, 'total_alerts': len(self._alerts)}
+            message=f"Trend analysis with {len(result)} buckets",
+            data={'buckets': result}
         )
