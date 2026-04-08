@@ -1,282 +1,410 @@
-"""Data quality action module for RabAI AutoClick.
+"""
+Data Quality Action - Data validation and quality checks.
 
-Provides data quality checks including completeness,
-uniqueness, consistency, validity, and custom rule evaluation.
+This module provides data quality validation including schema
+checking, constraint validation, and anomaly detection.
 """
 
-import sys
-import os
+from __future__ import annotations
+
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+import math
 from dataclasses import dataclass, field
-from collections import Counter
+from typing import Any, Callable, TypeVar
+from enum import Enum
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+
+class ValidationType(Enum):
+    """Type of validation to perform."""
+    SCHEMA = "schema"
+    CONSTRAINT = "constraint"
+    RANGE = "range"
+    FORMAT = "format"
+    CUSTOM = "custom"
+
+
+class QualityLevel(Enum):
+    """Data quality level."""
+    EXCELLENT = "excellent"
+    GOOD = "good"
+    FAIR = "fair"
+    POOR = "poor"
+    FAILING = "failing"
 
 
 @dataclass
-class QualityRule:
-    """A data quality rule definition."""
+class ValidationRule:
+    """A single validation rule."""
+    rule_id: str
     name: str
-    rule_type: str  # completeness, uniqueness, validity, consistency, custom
-    field: Optional[str] = None
-    params: Dict[str, Any] = field(default_factory=dict)
+    validation_type: ValidationType
+    field_path: str
+    params: dict[str, Any] = field(default_factory=dict)
+    error_message: str | None = None
 
 
-class DataQualityAction(BaseAction):
-    """Evaluate data quality across multiple dimensions.
+@dataclass
+class ValidationError:
+    """A validation error."""
+    rule_id: str
+    rule_name: str
+    field_path: str
+    value: Any
+    expected: str
+    actual: str
+
+
+@dataclass
+class QualityReport:
+    """Data quality report."""
+    level: QualityLevel
+    score: float
+    total_records: int
+    valid_records: int
+    invalid_records: int
+    errors: list[ValidationError]
+    warnings: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class SchemaValidator:
+    """Validates data against a schema."""
     
-    Checks completeness, uniqueness, validity,
-    consistency, and custom rules with detailed reports.
-    """
-    action_type = "data_quality"
-    display_name = "数据质量检查"
-    description = "数据质量评估：完整性/唯一性/有效性/一致性"
+    def __init__(self) -> None:
+        self._schemas: dict[str, dict[str, Any]] = {}
+    
+    def define_schema(
+        self,
+        schema_name: str,
+        fields: dict[str, dict[str, Any]],
+    ) -> None:
+        """
+        Define a schema for validation.
+        
+        Fields can have: type, required, min, max, pattern, enum
+        """
+        self._schemas[schema_name] = fields
+    
+    def validate(
+        self,
+        data: dict[str, Any],
+        schema_name: str,
+    ) -> tuple[bool, list[ValidationError]]:
+        """Validate data against a named schema."""
+        if schema_name not in self._schemas:
+            return False, [ValidationError(
+                rule_id="schema_not_found",
+                rule_name="Schema Not Found",
+                field_path="",
+                value=None,
+                expected=schema_name,
+                actual="",
+            )]
+        
+        schema = self._schemas[schema_name]
+        errors = []
+        
+        for field_name, rules in schema.items():
+            value = data.get(field_name)
+            
+            if rules.get("required", False) and value is None:
+                errors.append(ValidationError(
+                    rule_id=f"{field_name}_required",
+                    rule_name=f"{field_name} Required",
+                    field_path=field_name,
+                    value=value,
+                    expected="non-null value",
+                    actual="null",
+                ))
+                continue
+            
+            if value is None:
+                continue
+            
+            expected_type = rules.get("type")
+            if expected_type and not isinstance(value, expected_type):
+                errors.append(ValidationError(
+                    rule_id=f"{field_name}_type",
+                    rule_name=f"{field_name} Type",
+                    field_path=field_name,
+                    value=value,
+                    expected=str(expected_type),
+                    actual=type(value).__name__,
+                ))
+            
+            if "min" in rules and isinstance(value, (int, float)):
+                if value < rules["min"]:
+                    errors.append(ValidationError(
+                        rule_id=f"{field_name}_min",
+                        rule_name=f"{field_name} Minimum",
+                        field_path=field_name,
+                        value=value,
+                        expected=f">= {rules['min']}",
+                        actual=str(value),
+                    ))
+            
+            if "max" in rules and isinstance(value, (int, float)):
+                if value > rules["max"]:
+                    errors.append(ValidationError(
+                        rule_id=f"{field_name}_max",
+                        rule_name=f"{field_name} Maximum",
+                        field_path=field_name,
+                        value=value,
+                        expected=f"<= {rules['max']}",
+                        actual=str(value),
+                    ))
+            
+            if "pattern" in rules:
+                pattern = rules["pattern"]
+                if not isinstance(value, str) or not re.match(pattern, value):
+                    errors.append(ValidationError(
+                        rule_id=f"{field_name}_pattern",
+                        rule_name=f"{field_name} Format",
+                        field_path=field_name,
+                        value=value,
+                        expected=f"matching pattern {pattern}",
+                        actual=str(value)[:50],
+                    ))
+            
+            if "enum" in rules:
+                if value not in rules["enum"]:
+                    errors.append(ValidationError(
+                        rule_id=f"{field_name}_enum",
+                        rule_name=f"{field_name} Enum",
+                        field_path=field_name,
+                        value=value,
+                        expected=f"one of {rules['enum']}",
+                        actual=str(value),
+                    ))
+        
+        return len(errors) == 0, errors
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Evaluate data quality.
+
+class ConstraintValidator:
+    """Validates data against custom constraints."""
+    
+    def __init__(self) -> None:
+        self._constraints: list[ValidationRule] = []
+    
+    def add_constraint(
+        self,
+        rule_id: str,
+        name: str,
+        predicate: Callable[[Any], bool],
+        error_message: str,
+        field_path: str = "",
+    ) -> None:
+        """Add a custom constraint."""
+        rule = ValidationRule(
+            rule_id=rule_id,
+            name=name,
+            validation_type=ValidationType.CUSTOM,
+            field_path=field_path,
+            error_message=error_message,
+        )
+        rule._predicate = predicate
+        self._constraints.append(rule)
+    
+    def validate_record(
+        self,
+        record: dict[str, Any],
+    ) -> list[ValidationError]:
+        """Validate a record against all constraints."""
+        errors = []
+        
+        for rule in self._constraints:
+            try:
+                if rule.validation_type == ValidationType.CUSTOM:
+                    value = self._get_nested(record, rule.field_path) if rule.field_path else record
+                    if not rule._predicate(value):
+                        errors.append(ValidationError(
+                            rule_id=rule.rule_id,
+                            rule_name=rule.name,
+                            field_path=rule.field_path,
+                            value=value,
+                            expected=rule.error_message,
+                            actual="constraint failed",
+                        ))
+            except Exception:
+                pass
+        
+        return errors
+    
+    def _get_nested(self, data: dict[str, Any], path: str) -> Any:
+        """Get nested value."""
+        keys = path.split(".")
+        current = data
+        for key in keys:
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                return None
+        return current
+
+
+class DataQualityScorer:
+    """Computes data quality scores."""
+    
+    def __init__(
+        self,
+        excellent_threshold: float = 0.95,
+        good_threshold: float = 0.85,
+        fair_threshold: float = 0.70,
+    ) -> None:
+        self.excellent_threshold = excellent_threshold
+        self.good_threshold = good_threshold
+        self.fair_threshold = fair_threshold
+    
+    def compute_score(
+        self,
+        total_records: int,
+        valid_records: int,
+        error_count: int,
+    ) -> tuple[QualityLevel, float]:
+        """Compute overall quality score."""
+        if total_records == 0:
+            return QualityLevel.FAILING, 0.0
+        
+        completeness = valid_records / total_records
+        correctness = max(0, 1 - (error_count / total_records))
+        
+        score = (completeness + correctness) / 2
+        
+        if score >= self.excellent_threshold:
+            level = QualityLevel.EXCELLENT
+        elif score >= self.good_threshold:
+            level = QualityLevel.GOOD
+        elif score >= self.fair_threshold:
+            level = QualityLevel.FAIR
+        elif score > 0:
+            level = QualityLevel.POOR
+        else:
+            level = QualityLevel.FAILING
+        
+        return level, score
+
+
+class DataQualityAction:
+    """
+    Data quality validation action.
+    
+    Example:
+        action = DataQualityAction()
+        action.define_schema("user", {
+            "email": {"type": str, "required": True, "pattern": r"^[^@]+@[^@]+$"},
+            "age": {"type": int, "min": 0, "max": 150},
+        })
+        report = await action.validate_records(records, "user")
+    """
+    
+    def __init__(self) -> None:
+        self.schema_validator = SchemaValidator()
+        self.constraint_validator = ConstraintValidator()
+        self.quality_scorer = DataQualityScorer()
+    
+    def define_schema(
+        self,
+        schema_name: str,
+        fields: dict[str, dict[str, Any]],
+    ) -> None:
+        """Define a validation schema."""
+        self.schema_validator.define_schema(schema_name, fields)
+    
+    def add_rule(
+        self,
+        rule_id: str,
+        name: str,
+        predicate: Callable[[Any], bool],
+        error_message: str,
+        field_path: str = "",
+    ) -> None:
+        """Add a custom validation rule."""
+        self.constraint_validator.add_constraint(
+            rule_id, name, predicate, error_message, field_path
+        )
+    
+    async def validate_records(
+        self,
+        records: list[dict[str, Any]],
+        schema_name: str | None = None,
+        apply_constraints: bool = True,
+    ) -> QualityReport:
+        """
+        Validate a batch of records.
         
         Args:
-            context: Execution context.
-            params: Dict with keys:
-                - data: list of dicts, data to check
-                - rules: list of rule specs or auto-detect
-                - check_types: list of checks to run
-                    (completeness/uniqueness/validity/consistency)
-                - null_threshold: float, max null rate (0-1)
-                - unique_threshold: float, min unique rate (0-1)
-                - save_to_var: str
-        
+            records: List of records to validate
+            schema_name: Optional schema name for schema validation
+            apply_constraints: Whether to apply custom constraints
+            
         Returns:
-            ActionResult with quality report.
+            QualityReport with validation results
         """
-        data = params.get('data', [])
-        rules = params.get('rules', [])
-        check_types = params.get('check_types', [
-            'completeness', 'uniqueness', 'validity', 'consistency'
-        ])
-        null_threshold = params.get('null_threshold', 0.0)
-        unique_threshold = params.get('unique_threshold', 0.0)
-        save_to_var = params.get('save_to_var', None)
-
-        if not data:
-            return ActionResult(success=False, message="No data provided")
-
-        report = {
-            'total_records': len(data),
-            'total_fields': 0,
-            'checks': {},
-            'passed': True,
-            'failed_rules': []
-        }
-
-        # Auto-detect fields if data is list of dicts
-        fields = set()
-        if data and isinstance(data[0], dict):
-            for record in data:
-                fields.update(record.keys())
-        report['total_fields'] = len(fields)
-
-        results = {}
-
-        if 'completeness' in check_types:
-            results['completeness'] = self._check_completeness(data, fields, null_threshold)
-
-        if 'uniqueness' in check_types:
-            results['uniqueness'] = self._check_uniqueness(data, fields, unique_threshold)
-
-        if 'validity' in check_types:
-            results['validity'] = self._check_validity(data, fields)
-
-        if 'consistency' in check_types:
-            results['consistency'] = self._check_consistency(data, fields)
-
-        # Evaluate against thresholds
-        for check_name, check_result in results.items():
-            if check_result.get('failed_fields'):
-                report['failed_rules'].extend([
-                    f"{check_name}.{f}" for f in check_result['failed_fields']
-                ])
-                report['passed'] = False
-            report['checks'][check_name] = check_result
-
-        if save_to_var and hasattr(context, 'vars'):
-            context.vars[save_to_var] = report
-
-        return ActionResult(
-            success=report['passed'],
-            message=f"Quality check: {'PASSED' if report['passed'] else 'FAILED'} ({len(report['failed_rules'])} issues)",
-            data=report
-        )
-
-    def _check_completeness(
-        self, data: List, fields: Set[str], threshold: float
-    ) -> Dict[str, Any]:
-        """Check data completeness (null rates)."""
-        field_stats = {}
-        failed_fields = []
-
-        for field_name in fields:
-            non_null = sum(1 for record in data if isinstance(record, dict) and record.get(field_name) is not None)
-            null_count = len(data) - non_null
-            null_rate = null_count / len(data) if data else 0
-            complete_rate = 1.0 - null_rate
-
-            field_stats[field_name] = {
-                'null_count': null_count,
-                'null_rate': round(null_rate, 4),
-                'complete_count': non_null,
-                'complete_rate': round(complete_rate, 4)
-            }
-
-            if threshold > 0 and null_rate > threshold:
-                failed_fields.append(field_name)
-
-        return {
-            'field_stats': field_stats,
-            'failed_fields': failed_fields,
-            'overall_null_rate': round(
-                sum(1 for r in data for v in (r.values() if isinstance(r, dict) else [r]) if v is None) / max(1, len(data) * max(1, len(fields))),
-                4
-            )
-        }
-
-    def _check_uniqueness(
-        self, data: List, fields: Set[str], threshold: float
-    ) -> Dict[str, Any]:
-        """Check uniqueness of fields."""
-        field_stats = {}
-        failed_fields = []
-
-        for field_name in fields:
-            values = [record.get(field_name) if isinstance(record, dict) else None for record in data]
-            unique_count = len(set(v for v in values if v is not None))
-            total_non_null = sum(1 for v in values if v is not None)
-            unique_rate = unique_count / total_non_null if total_non_null > 0 else 0
-
-            field_stats[field_name] = {
-                'unique_count': unique_count,
-                'unique_rate': round(unique_rate, 4),
-                'duplicate_count': total_non_null - unique_count
-            }
-
-            if threshold > 0 and unique_rate < threshold:
-                failed_fields.append(field_name)
-
-        # Check record-level uniqueness
-        record_strings = [str(r) for r in data]
-        dup_records = len(record_strings) - len(set(record_strings))
-        field_stats['_record_level'] = {
-            'unique_count': len(set(record_strings)),
-            'duplicate_count': dup_records
-        }
-
-        return {
-            'field_stats': field_stats,
-            'failed_fields': failed_fields
-        }
-
-    def _check_validity(self, data: List, fields: Set[str]) -> Dict[str, Any]:
-        """Check data validity (type, format, range)."""
-        field_stats = {}
-        failed_fields = []
-
-        type_patterns = {
-            'email': r'^[\w\.-]+@[\w\.-]+\.\w+$',
-            'phone': r'^[\d\-\+\(\)\s]+$',
-            'url': r'^https?://[\w\-\.]+[\w/\-\.%?=&]+$',
-            'ip': r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
-            'date': r'^\d{4}[-/]\d{2}[-/]\d{2}$',
-        }
-
-        for field_name in fields:
-            values = [record.get(field_name) if isinstance(record, dict) else None for record in data]
-            non_null_values = [v for v in values if v is not None]
-
-            if not non_null_values:
-                continue
-
-            # Detect type
-            detected_type = 'unknown'
-            for type_name, pattern in type_patterns.items():
-                if all(re.match(pattern, str(v)) for v in non_null_values[:10]):
-                    detected_type = type_name
-                    break
-            if detected_type == 'unknown':
-                if all(isinstance(v, bool) for v in non_null_values):
-                    detected_type = 'boolean'
-                elif all(isinstance(v, (int, float)) for v in non_null_values):
-                    detected_type = 'numeric'
-
-            # Check format validity
-            invalid_count = 0
-            if detected_type in type_patterns:
-                pattern = type_patterns[detected_type]
-                invalid_count = sum(1 for v in non_null_values if not re.match(pattern, str(v)))
-
-            field_stats[field_name] = {
-                'detected_type': detected_type,
-                'valid_count': len(non_null_values) - invalid_count,
-                'invalid_count': invalid_count,
-                'valid_rate': round((len(non_null_values) - invalid_count) / len(non_null_values), 4) if non_null_values else 1.0
-            }
-
-            if invalid_count > 0:
-                failed_fields.append(field_name)
-
-        return {
-            'field_stats': field_stats,
-            'failed_fields': failed_fields
-        }
-
-    def _check_consistency(self, data: List, fields: Set[str]) -> Dict[str, Any]:
-        """Check data consistency (cross-field relationships)."""
-        field_stats = {}
-        failed_fields = []
-
-        for field_name in fields:
-            values = [record.get(field_name) if isinstance(record, dict) else None for record in data]
-            non_null_values = [v for v in values if v is not None]
-
-            if not non_null_values:
-                continue
-
-            # Check for format consistency
-            formats = Counter(str(type(v).__name__) for v in non_null_values)
-            most_common_type = formats.most_common(1)[0][0]
-            type_consistency = formats[most_common_type] / len(non_null_values)
-
-            # Check length consistency
-            if all(isinstance(v, str) for v in non_null_values):
-                lengths = [len(v) for v in non_null_values]
-                avg_length = sum(lengths) / len(lengths)
-                length_variance = sum((l - avg_length) ** 2 for l in lengths) / len(lengths)
+        all_errors: list[ValidationError] = []
+        warnings: list[str] = []
+        
+        valid_count = 0
+        
+        for i, record in enumerate(records):
+            record_errors = []
+            
+            if schema_name:
+                _, schema_errors = self.schema_validator.validate(record, schema_name)
+                record_errors.extend(schema_errors)
+            
+            if apply_constraints:
+                constraint_errors = self.constraint_validator.validate_record(record)
+                record_errors.extend(constraint_errors)
+            
+            if record_errors:
+                all_errors.extend(record_errors)
             else:
-                length_variance = 0
+                valid_count += 1
+        
+        level, score = self.quality_scorer.compute_score(
+            len(records),
+            valid_count,
+            len(all_errors),
+        )
+        
+        return QualityReport(
+            level=level,
+            score=score,
+            total_records=len(records),
+            valid_records=valid_count,
+            invalid_records=len(records) - valid_count,
+            errors=all_errors,
+            warnings=warnings,
+        )
+    
+    def validate_single(
+        self,
+        record: dict[str, Any],
+        schema_name: str | None = None,
+    ) -> tuple[bool, list[ValidationError]]:
+        """Validate a single record."""
+        errors = []
+        
+        if schema_name:
+            _, schema_errors = self.schema_validator.validate(record, schema_name)
+            errors.extend(schema_errors)
+        
+        constraint_errors = self.constraint_validator.validate_record(record)
+        errors.extend(constraint_errors)
+        
+        return len(errors) == 0, errors
 
-            field_stats[field_name] = {
-                'type_consistency': round(type_consistency, 4),
-                'length_variance': round(length_variance, 2)
-            }
 
-            if type_consistency < 0.8:
-                failed_fields.append(field_name)
-
-        return {
-            'field_stats': field_stats,
-            'failed_fields': failed_fields
-        }
-
-    def get_required_params(self) -> List[str]:
-        return ['data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'rules': [],
-            'check_types': ['completeness', 'uniqueness', 'validity', 'consistency'],
-            'null_threshold': 0.0,
-            'unique_threshold': 0.0,
-            'save_to_var': None,
-        }
+# Export public API
+__all__ = [
+    "ValidationType",
+    "QualityLevel",
+    "ValidationRule",
+    "ValidationError",
+    "QualityReport",
+    "SchemaValidator",
+    "ConstraintValidator",
+    "DataQualityScorer",
+    "DataQualityAction",
+]
