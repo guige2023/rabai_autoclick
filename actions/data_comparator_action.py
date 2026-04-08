@@ -1,353 +1,351 @@
 """Data comparator action module for RabAI AutoClick.
 
-Provides data comparison with field-level diff,
-similarity scoring, change detection, and merge strategies.
+Provides data comparison capabilities for finding differences
+between datasets, records, and structured data.
 """
 
 import sys
 import os
-import json
-from typing import Any, Dict, List, Optional, Union, Callable
-from deepdiff import DeepDiff
-import threading
+from typing import Any, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
+@dataclass
+class DiffResult:
+    """Result of a diff operation."""
+    added: List[Any]
+    removed: List[Any]
+    modified: List[Tuple[Any, Any]]
+    unchanged: List[Any]
+
+
 class DataComparatorAction(BaseAction):
-    """Compare data records and detect differences.
+    """Data comparator action for comparing data sources.
     
-    Supports field-level diff, similarity scoring,
-    change detection, and automatic merge strategies.
+    Supports comparing lists, dicts, and structured data with
+    configurable key fields and similarity thresholds.
     """
     action_type = "data_comparator"
     display_name = "数据比较"
-    description = "数据比较和差异检测"
+    description = "数据集差异比较"
     
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute comparison operations.
+        """Execute data comparison.
         
         Args:
             context: Execution context.
-            params: Dict with keys: action (compare, find_changes,
-                   similarity, merge), records/config.
+            params: Dict with keys:
+                operation: compare|diff|match|similarity
+                left: Left data source
+                right: Right data source
+                key_field: Field to use as key for matching
+                ignore_fields: Fields to ignore in comparison
+                threshold: Similarity threshold (0-1).
         
         Returns:
             ActionResult with comparison results.
         """
-        action = params.get('action', 'compare')
+        operation = params.get('operation', 'compare')
         
-        if action == 'compare':
-            return self._compare_records(params)
-        elif action == 'find_changes':
-            return self._find_changes(params)
-        elif action == 'similarity':
-            return self._calculate_similarity(params)
-        elif action == 'merge':
-            return self._merge_records(params)
-        elif action == 'compare_batch':
-            return self._compare_batch(params)
+        if operation == 'compare':
+            return self._compare(params)
+        elif operation == 'diff':
+            return self._diff_lists(params)
+        elif operation == 'match':
+            return self._match(params)
+        elif operation == 'similarity':
+            return self._similarity(params)
         else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown action: {action}"
-            )
+            return ActionResult(success=False, message=f"Unknown operation: {operation}")
     
-    def _compare_records(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Compare two records and return differences."""
-        record1 = params.get('record1', {})
-        record2 = params.get('record2', {})
-        
-        if not isinstance(record1, dict) or not isinstance(record2, dict):
-            return ActionResult(
-                success=False,
-                message="Both record1 and record2 must be dictionaries"
-            )
-        
+    def _compare(self, params: Dict[str, Any]) -> ActionResult:
+        """Compare two data sources."""
+        left = params.get('left', [])
+        right = params.get('right', [])
+        key_field = params.get('key_field')
         ignore_fields = params.get('ignore_fields', [])
-        ignore_order = params.get('ignore_order', False)
         
-        try:
-            diff = DeepDiff(
-                record1, record2,
-                ignore_order=ignore_order,
-                exclude_paths=[f"root['{f}']" for f in ignore_fields]
-            )
-            
-            added = diff.get('dictionary_item_added', [])
-            removed = diff.get('dictionary_item_removed', [])
-            changed = diff.get('values_changed', {})
-            type_changes = diff.get('type_changes', {})
-            
+        if isinstance(left, list) and isinstance(right, list):
+            if key_field:
+                return self._compare_list_of_dicts(left, right, key_field, ignore_fields)
+            else:
+                return self._diff_lists({
+                    **params,
+                    'left': left,
+                    'right': right
+                })
+        
+        if isinstance(left, dict) and isinstance(right, dict):
+            return self._compare_dicts(left, right, ignore_fields)
+        
+        if left == right:
             return ActionResult(
                 success=True,
-                message=f"Found {len(changed)} changes",
-                data={
-                    'identical': len(diff) == 0,
-                    'added': [str(a) for a in added],
-                    'removed': [str(r) for r in removed],
-                    'changed': {k: {'old': v.get('old_value'), 'new': v.get('new_value')} 
-                               for k, v in changed.items()},
-                    'type_changes': {k: {'old_type': v.get('old_type'), 'new_type': v.get('new_type')}
-                                    for k, v in type_changes.items()},
-                    'diff': diff.to_dict()
-                }
+                message="Data sources are equal",
+                data={'equal': True}
             )
-            
-        except Exception as e:
+        else:
             return ActionResult(
-                success=False,
-                message=f"Comparison failed: {e}"
+                success=True,
+                message="Data sources differ",
+                data={'equal': False, 'left': left, 'right': right}
             )
     
-    def _find_changes(
+    def _compare_list_of_dicts(
         self,
-        params: Dict[str, Any]
+        left: List[Dict],
+        right: List[Dict],
+        key_field: str,
+        ignore_fields: List[str]
     ) -> ActionResult:
-        """Find changes between old and new record versions."""
-        old_record = params.get('old_record', {})
-        new_record = params.get('new_record', {})
+        """Compare two lists of dictionaries by key field."""
+        left_keys = {item.get(key_field) for item in left if item.get(key_field) is not None}
+        right_keys = {item.get(key_field) for item in right if item.get(key_field) is not None}
         
-        if not isinstance(old_record, dict) or not isinstance(new_record, dict):
-            return ActionResult(
-                success=False,
-                message="Both old_record and new_record must be dictionaries"
-            )
+        added_keys = right_keys - left_keys
+        removed_keys = left_keys - right_keys
+        common_keys = left_keys & right_keys
         
-        changes = []
+        left_by_key = {item.get(key_field): item for item in left}
+        right_by_key = {item.get(key_field): item for item in right}
         
-        all_keys = set(old_record.keys()) | set(new_record.keys())
+        added = [right_by_key[k] for k in added_keys]
+        removed = [left_by_key[k] for k in removed_keys]
+        modified = []
+        unchanged = []
+        
+        for key in common_keys:
+            left_item = left_by_key[key]
+            right_item = right_by_key[key]
+            
+            if self._items_differ(left_item, right_item, ignore_fields):
+                modified.append((left_item, right_item))
+            else:
+                unchanged.append(left_item)
+        
+        return ActionResult(
+            success=True,
+            message=f"Comparison: {len(added)} added, {len(removed)} removed, {len(modified)} modified, {len(unchanged)} unchanged",
+            data={
+                'added': added,
+                'added_count': len(added),
+                'removed': removed,
+                'removed_count': len(removed),
+                'modified': [{'before': m[0], 'after': m[1]} for m in modified],
+                'modified_count': len(modified),
+                'unchanged': unchanged,
+                'unchanged_count': len(unchanged)
+            }
+        )
+    
+    def _items_differ(
+        self,
+        left: Dict,
+        right: Dict,
+        ignore_fields: List[str]
+    ) -> bool:
+        """Check if two items differ."""
+        all_keys = set(left.keys()) | set(right.keys())
         
         for key in all_keys:
-            old_val = old_record.get(key)
-            new_val = new_record.get(key)
+            if key in ignore_fields:
+                continue
             
-            if old_val != new_val:
-                changes.append({
-                    'field': key,
-                    'old_value': old_val,
-                    'new_value': new_val,
-                    'change_type': 'modified'
-                })
-            elif key in new_record and key not in old_record:
-                changes.append({
-                    'field': key,
-                    'old_value': None,
-                    'new_value': new_val,
-                    'change_type': 'added'
-                })
-            elif key in old_record and key not in new_record:
-                changes.append({
-                    'field': key,
-                    'old_value': old_val,
-                    'new_value': None,
-                    'change_type': 'removed'
-                })
+            if left.get(key) != right.get(key):
+                return True
         
-        return ActionResult(
-            success=True,
-            message=f"Found {len(changes)} changes",
-            data={
-                'changes': changes,
-                'change_count': len(changes)
-            }
-        )
+        return False
     
-    def _calculate_similarity(
+    def _compare_dicts(
         self,
-        params: Dict[str, Any]
+        left: Dict,
+        right: Dict,
+        ignore_fields: List[str]
     ) -> ActionResult:
-        """Calculate similarity between two records."""
-        record1 = params.get('record1', {})
-        record2 = params.get('record2', {})
+        """Compare two dictionaries."""
+        all_keys = set(left.keys()) | set(right.keys())
         
-        if not isinstance(record1, dict) or not isinstance(record2, dict):
-            return ActionResult(
-                success=False,
-                message="Both record1 and record2 must be dictionaries"
-            )
+        added = []
+        removed = []
+        modified = []
+        unchanged = []
         
-        algorithm = params.get('algorithm', 'jaccard')
-        fields = params.get('fields')
-        
-        if fields:
-            r1 = {k: record1.get(k) for k in fields if k in record1}
-            r2 = {k: record2.get(k) for k in fields if k in record2}
-        else:
-            r1 = record1
-            r2 = record2
-        
-        if algorithm == 'jaccard':
-            similarity = self._jaccard_similarity(r1, r2)
-        elif algorithm == 'cosine':
-            similarity = self._cosine_similarity(r1, r2)
-        elif algorithm == 'exact':
-            similarity = 1.0 if r1 == r2 else 0.0
-        else:
-            similarity = self._jaccard_similarity(r1, r2)
-        
-        return ActionResult(
-            success=True,
-            message=f"Similarity: {similarity:.2%}",
-            data={
-                'similarity': similarity,
-                'algorithm': algorithm
-            }
-        )
-    
-    def _jaccard_similarity(
-        self,
-        dict1: Dict[str, Any],
-        dict2: Dict[str, Any]
-    ) -> float:
-        """Calculate Jaccard similarity between two dictionaries."""
-        keys1 = set(dict1.keys())
-        keys2 = set(dict2.keys())
-        
-        if len(keys1 | keys2) == 0:
-            return 1.0
-        
-        intersection = len(keys1 & keys2)
-        union = len(keys1 | keys2)
-        
-        if union == 0:
-            return 1.0
-        
-        key_similarity = intersection / union
-        
-        matching_values = sum(
-            1 for k in keys1 & keys2 if dict1[k] == dict2[k]
-        )
-        value_similarity = matching_values / len(keys1 & keys2) if keys1 & keys2 else 0
-        
-        return (key_similarity + value_similarity) / 2
-    
-    def _cosine_similarity(
-        self,
-        dict1: Dict[str, Any],
-        dict2: Dict[str, Any]
-    ) -> float:
-        """Calculate cosine similarity between two dictionaries."""
-        all_keys = set(dict1.keys()) | set(dict2.keys())
-        
-        if not all_keys:
-            return 1.0
-        
-        vec1 = [self._normalize_value(dict1.get(k)) for k in all_keys]
-        vec2 = [self._normalize_value(dict2.get(k)) for k in all_keys]
-        
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        magnitude1 = sum(a * a for a in vec1) ** 0.5
-        magnitude2 = sum(b * b for b in vec2) ** 0.5
-        
-        if magnitude1 == 0 or magnitude2 == 0:
-            return 0.0
-        
-        return dot_product / (magnitude1 * magnitude2)
-    
-    def _normalize_value(self, value: Any) -> float:
-        """Normalize a value to float for similarity calculation."""
-        if value is None:
-            return 0.0
-        if isinstance(value, bool):
-            return 1.0 if value else 0.0
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            return 1.0 if value else 0.0
-        return 0.0
-    
-    def _merge_records(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Merge multiple records with conflict resolution."""
-        records = params.get('records', [])
-        if not records:
-            return ActionResult(success=False, message="No records provided")
-        
-        strategy = params.get('strategy', 'last_wins')
-        conflict_field = params.get('conflict_field', 'updated_at')
-        
-        if len(records) == 1:
-            return ActionResult(
-                success=True,
-                message="Single record, returned as-is",
-                data={'merged': records[0]}
-            )
-        
-        merged = records[0].copy()
-        
-        for record in records[1:]:
-            for key, value in record.items():
-                if key not in merged:
-                    merged[key] = value
-                else:
-                    if strategy == 'last_wins':
-                        merged[key] = value
-                    elif strategy == 'first_wins':
-                        pass
-                    elif strategy == 'conflict':
-                        if merged[key] != value:
-                            merged[key] = {'conflict': [merged[key], value]}
-                    elif strategy == 'keep_max':
-                        if isinstance(value, (int, float)) and isinstance(merged[key], (int, float)):
-                            merged[key] = max(merged[key], value)
-        
-        return ActionResult(
-            success=True,
-            message=f"Merged {len(records)} records",
-            data={
-                'merged': merged,
-                'strategy': strategy
-            }
-        )
-    
-    def _compare_batch(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Compare records in batch mode."""
-        baseline = params.get('baseline', {})
-        records = params.get('records', [])
-        
-        if not records:
-            return ActionResult(success=False, message="No records provided")
-        
-        results = []
-        identical_count = 0
-        changed_count = 0
-        
-        for record in records:
-            diff = DeepDiff(baseline, record, ignore_order=False)
+        for key in sorted(all_keys):
+            if key in ignore_fields:
+                continue
             
-            is_identical = len(diff) == 0
+            left_val = left.get(key)
+            right_val = right.get(key)
             
-            if is_identical:
-                identical_count += 1
+            if key not in left:
+                added.append({'field': key, 'value': right_val})
+            elif key not in right:
+                removed.append({'field': key, 'value': left_val})
+            elif left_val != right_val:
+                modified.append({'field': key, 'before': left_val, 'after': right_val})
             else:
-                changed_count += 1
-            
-            results.append({
-                'identical': is_identical,
-                'changes': diff.to_dict() if diff else {}
-            })
+                unchanged.append({'field': key, 'value': left_val})
         
         return ActionResult(
             success=True,
-            message=f"Compared {len(records)} records",
+            message=f"Dict comparison: {len(added)} added, {len(removed)} removed, {len(modified)} modified",
             data={
-                'total': len(records),
-                'identical': identical_count,
-                'changed': changed_count,
-                'results': results
+                'added': added,
+                'removed': removed,
+                'modified': modified,
+                'unchanged': unchanged
             }
         )
+    
+    def _diff_lists(self, params: Dict[str, Any]) -> ActionResult:
+        """Diff two lists."""
+        left = params.get('left', [])
+        right = params.get('right', [])
+        
+        left_set = set(left)
+        right_set = set(right)
+        
+        added = list(right_set - left_set)
+        removed = list(left_set - right_set)
+        common = list(left_set & right_set)
+        
+        return ActionResult(
+            success=True,
+            message=f"List diff: {len(added)} added, {len(removed)} removed, {len(common)} common",
+            data={
+                'added': added,
+                'added_count': len(added),
+                'removed': removed,
+                'removed_count': len(removed),
+                'common': common,
+                'common_count': len(common)
+            }
+        )
+    
+    def _match(self, params: Dict[str, Any]) -> ActionResult:
+        """Match items between two sources using similarity."""
+        left = params.get('left', [])
+        right = params.get('right', [])
+        threshold = params.get('threshold', 0.8)
+        key_field = params.get('key_field')
+        
+        if not left or not right:
+            return ActionResult(success=False, message="Both sources must be non-empty")
+        
+        matches = []
+        unmatched_left = []
+        unmatched_right = []
+        
+        if key_field:
+            left_items = {item.get(key_field): item for item in left}
+            right_items = {item.get(key_field): item for item in right}
+            
+            left_keys = set(left_items.keys())
+            right_keys = set(right_items.keys())
+            
+            for key in left_keys & right_keys:
+                matches.append({
+                    'left': left_items[key],
+                    'right': right_items[key],
+                    'similarity': 1.0,
+                    'key': key
+                })
+            
+            unmatched_left = [left_items[k] for k in left_keys - right_keys]
+            unmatched_right = [right_items[k] for k in right_keys - left_keys]
+        else:
+            right_remaining = list(right)
+            
+            for left_item in left:
+                best_match = None
+                best_score = 0
+                
+                for i, right_item in enumerate(right_remaining):
+                    score = self._calculate_similarity(left_item, right_item)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_match = (i, right_item)
+                
+                if best_match and best_score >= threshold:
+                    matches.append({
+                        'left': left_item,
+                        'right': best_match[1],
+                        'similarity': best_score
+                    })
+                    del right_remaining[best_match[0]]
+                else:
+                    unmatched_left.append(left_item)
+            
+            unmatched_right = right_remaining
+        
+        return ActionResult(
+            success=True,
+            message=f"Matched {len(matches)} pairs, {len(unmatched_left)} unmatched left, {len(unmatched_right)} unmatched right",
+            data={
+                'matches': matches,
+                'match_count': len(matches),
+                'unmatched_left': unmatched_left,
+                'unmatched_left_count': len(unmatched_left),
+                'unmatched_right': unmatched_right,
+                'unmatched_right_count': len(unmatched_right)
+            }
+        )
+    
+    def _similarity(self, params: Dict[str, Any]) -> ActionResult:
+        """Calculate similarity between two values."""
+        left = params.get('left')
+        right = params.get('right')
+        
+        if left is None or right is None:
+            return ActionResult(success=False, message="Both values required")
+        
+        score = self._calculate_similarity(left, right)
+        
+        return ActionResult(
+            success=True,
+            message=f"Similarity: {score:.2%}",
+            data={
+                'left': left,
+                'right': right,
+                'similarity': round(score, 4)
+            }
+        )
+    
+    def _calculate_similarity(self, left: Any, right: Any) -> float:
+        """Calculate similarity score between two values."""
+        if left == right:
+            return 1.0
+        
+        if isinstance(left, str) and isinstance(right, str):
+            return SequenceMatcher(None, left, right).ratio()
+        
+        if isinstance(left, dict) and isinstance(right, dict):
+            all_keys = set(left.keys()) | set(right.keys())
+            if not all_keys:
+                return 1.0
+            
+            matches = 0
+            for key in all_keys:
+                if left.get(key) == right.get(key):
+                    matches += 1
+            
+            return matches / len(all_keys)
+        
+        if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+            max_len = max(len(left), len(right))
+            if max_len == 0:
+                return 1.0
+            
+            matches = sum(1 for i in range(min(len(left), len(right))) if left[i] == right[i])
+            return matches / max_len
+        
+        return 0.0
