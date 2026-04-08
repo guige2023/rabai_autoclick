@@ -1,327 +1,255 @@
 """
-Data Enrichment Action Module
+Data Enrichment Action Module.
 
-Provides data enrichment, augmentation, and transformation capabilities.
+Provides data enrichment capabilities with lookup tables,
+external data joining, and computed field generation.
 """
-from typing import Any, Optional, Callable, Awaitable
+
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
-from collections import defaultdict
+from enum import Enum
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class EnrichmentSource:
-    """An enrichment data source."""
+class LookupTable:
+    """Lookup table for data enrichment."""
+    table_id: str
     name: str
-    lookup: Callable[[Any], Awaitable[dict[str, Any]]]
     key_field: str
-    priority: int = 0
-    cache_ttl_seconds: int = 3600
-    timeout_seconds: float = 10.0
+    data: Dict[Any, Dict[str, Any]] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class EnrichmentConfig:
-    """Configuration for enrichment."""
-    sources: list[EnrichmentSource] = field(default_factory=list)
-    merge_strategy: str = "override"  # override, preserve, merge
-    error_strategy: str = "skip"  # skip, fail, placeholder
-    parallel: bool = True
-    max_enrichments_per_record: int = 10
+class EnrichmentRule:
+    """Enrichment rule definition."""
+    rule_id: str
+    name: str
+    source_field: str
+    target_field: str
+    enrichment_type: str
+    lookup_table_id: Optional[str] = None
+    transform_func: Optional[Callable] = None
+    default_value: Any = None
+    required: bool = False
 
 
 @dataclass
 class EnrichmentResult:
     """Result of enrichment operation."""
-    original: dict[str, Any]
-    enriched: dict[str, Any]
-    sources_applied: list[str]
-    errors: list[str]
-    duration_ms: float
+    success: bool
+    enriched_count: int
+    failed_count: int
+    errors: List[str] = field(default_factory=list)
 
 
-class DataEnrichmentAction:
-    """Main data enrichment action handler."""
-    
-    def __init__(self, config: Optional[EnrichmentConfig] = None):
-        self.config = config or EnrichmentConfig()
-        self._cache: dict[str, tuple[Any, datetime]] = {}
-        self._enrichment_stats: dict[str, dict] = defaultdict(lambda: {
-            "hits": 0, "misses": 0, "errors": 0
-        })
-    
-    def add_source(self, source: EnrichmentSource) -> "DataEnrichmentAction":
-        """Add an enrichment source."""
-        self.config.sources.append(source)
-        self.config.sources.sort(key=lambda s: s.priority)
-        return self
-    
-    async def enrich_record(
+class LookupManager:
+    """Manages lookup tables."""
+
+    def __init__(self):
+        self.tables: Dict[str, LookupTable] = {}
+
+    def add_table(self, table: LookupTable):
+        """Add a lookup table."""
+        self.tables[table.table_id] = table
+
+    def remove_table(self, table_id: str) -> bool:
+        """Remove a lookup table."""
+        if table_id in self.tables:
+            del self.tables[table_id]
+            return True
+        return False
+
+    def get_table(self, table_id: str) -> Optional[LookupTable]:
+        """Get lookup table by ID."""
+        return self.tables.get(table_id)
+
+    def lookup(
         self,
-        record: dict[str, Any],
-        source_names: Optional[list[str]] = None
-    ) -> EnrichmentResult:
-        """
-        Enrich a single record with data from sources.
-        
-        Args:
-            record: Original record to enrich
-            source_names: Optional list of source names to use (None = all)
-            
-        Returns:
-            EnrichmentResult with enriched data
-        """
-        start_time = datetime.now()
+        table_id: str,
+        key: Any,
+        fields: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Look up value in table."""
+        table = self.tables.get(table_id)
+        if not table:
+            return None
+
+        result = table.data.get(key)
+        if result and fields:
+            return {k: result.get(k) for k in fields if k in result}
+
+        return result
+
+    def reverse_lookup(
+        self,
+        table_id: str,
+        value: Any,
+        key_field: str
+    ) -> Optional[Any]:
+        """Reverse lookup by value."""
+        table = self.tables.get(table_id)
+        if not table:
+            return None
+
+        for key, row in table.data.items():
+            if row.get(key_field) == value:
+                return key
+
+        return None
+
+
+class DataEnricher:
+    """Enriches data with additional fields."""
+
+    def __init__(self, lookup_manager: LookupManager):
+        self.lookup_manager = lookup_manager
+        self.rules: List[EnrichmentRule] = []
+
+    def add_rule(self, rule: EnrichmentRule):
+        """Add enrichment rule."""
+        self.rules.append(rule)
+
+    def remove_rule(self, rule_id: str) -> bool:
+        """Remove enrichment rule."""
+        for i, rule in enumerate(self.rules):
+            if rule.rule_id == rule_id:
+                self.rules.pop(i)
+                return True
+        return False
+
+    def enrich_record(self, record: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+        """Enrich a single record."""
         errors = []
-        sources_applied = []
-        enriched = dict(record)
-        
-        sources = [
-            s for s in self.config.sources
-            if source_names is None or s.name in source_names
-        ]
-        
-        if self.config.parallel:
-            tasks = [self._enrich_with_source(enriched, source) for source in sources]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for source, result in zip(sources, results):
-                if isinstance(result, Exception):
-                    errors.append(f"{source.name}: {str(result)}")
-                    self._enrichment_stats[source.name]["errors"] += 1
-                elif result:
-                    self._merge_enrichment(enriched, result, source.name)
-                    sources_applied.append(source.name)
-        else:
-            for source in sources:
-                try:
-                    result = await self._enrich_with_source(enriched, source)
-                    if result:
-                        self._merge_enrichment(enriched, result, source.name)
-                        sources_applied.append(source.name)
-                except Exception as e:
-                    errors.append(f"{source.name}: {str(e)}")
-                    self._enrichment_stats[source.name]["errors"] += 1
-        
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return EnrichmentResult(
-            original=record,
-            enriched=enriched,
-            sources_applied=sources_applied,
-            errors=errors,
-            duration_ms=duration_ms
-        )
-    
-    async def enrich_batch(
-        self,
-        records: list[dict[str, Any]],
-        source_names: Optional[list[str]] = None,
-        max_concurrent: int = 10
-    ) -> list[EnrichmentResult]:
-        """
-        Enrich multiple records.
-        
-        Args:
-            records: List of records to enrich
-            source_names: Optional source filter
-            max_concurrent: Maximum concurrent enrichment operations
-            
-        Returns:
-            List of EnrichmentResult
-        """
-        semaphore = asyncio.Semaphore(max_concurrent)
-        
-        async def enrich_with_semaphore(record: dict):
-            async with semaphore:
-                return await self.enrich_record(record, source_names)
-        
-        tasks = [enrich_with_semaphore(r) for r in records]
-        return await asyncio.gather(*tasks, return_exceptions=True)
-    
-    async def _enrich_with_source(
-        self,
-        record: dict[str, Any],
-        source: EnrichmentSource
-    ) -> Optional[dict[str, Any]]:
-        """Enrich record with a specific source."""
-        # Get lookup key from record
-        key = record.get(source.key_field)
-        if not key:
-            self._enrichment_stats[source.name]["misses"] += 1
-            return None
-        
-        # Check cache
-        cache_key = f"{source.name}:{key}"
-        if cache_key in self._cache:
-            cached_data, cached_at = self._cache[cache_key]
-            age = (datetime.now() - cached_at).total_seconds()
-            if age < source.cache_ttl_seconds:
-                self._enrichment_stats[source.name]["hits"] += 1
-                return cached_data
-        
-        # Perform lookup with timeout
-        try:
-            result = await asyncio.wait_for(
-                source.lookup(key),
-                timeout=source.timeout_seconds
-            )
-            
-            # Cache result
-            self._cache[cache_key] = (result, datetime.now())
-            self._enrichment_stats[source.name]["hits"] += 1
-            
-            return result
-            
-        except asyncio.TimeoutError:
-            self._enrichment_stats[source.name]["errors"] += 1
-            raise Exception(f"Source {source.name} timed out after {source.timeout_seconds}s")
-    
-    def _merge_enrichment(
-        self,
-        record: dict[str, Any],
-        enrichment: dict[str, Any],
-        source_name: str
-    ):
-        """Merge enrichment data into record."""
-        prefix = f"{source_name}_"
-        
-        for key, value in enrichment.items():
-            # Prefix keys to avoid conflicts
-            prefixed_key = f"{prefix}{key}"
-            
-            if self.config.merge_strategy == "override":
-                record[prefixed_key] = value
-            elif self.config.merge_strategy == "preserve":
-                if key not in record:
-                    record[key] = value
-                record[prefixed_key] = value
-            elif self.config.merge_strategy == "merge":
-                # Merge at top level, prefix only if conflict
-                if key not in record:
-                    record[key] = value
+        enriched = record.copy()
+
+        for rule in self.rules:
+            source_value = record.get(rule.source_field)
+
+            if source_value is None and rule.required:
+                errors.append(f"Missing required field: {rule.source_field}")
+                continue
+
+            try:
+                if rule.enrichment_type == "lookup":
+                    lookup_result = self.lookup_manager.lookup(
+                        rule.lookup_table_id,
+                        source_value
+                    )
+                    if lookup_result:
+                        enriched[rule.target_field] = lookup_result
+                    else:
+                        enriched[rule.target_field] = rule.default_value
+
+                elif rule.enrichment_type == "direct":
+                    enriched[rule.target_field] = source_value
+
+                elif rule.enrichment_type == "computed":
+                    if rule.transform_func:
+                        enriched[rule.target_field] = rule.transform_func(source_value, record)
+                    else:
+                        enriched[rule.target_field] = source_value
+
+                elif rule.enrichment_type == "constant":
+                    enriched[rule.target_field] = rule.default_value
+
+            except Exception as e:
+                errors.append(f"Rule {rule.rule_id} failed: {str(e)}")
+                if rule.required:
+                    enriched[rule.target_field] = None
                 else:
-                    record[prefixed_key] = value
-    
-    async def lookup_value(
+                    enriched[rule.target_field] = rule.default_value
+
+        return enriched, errors
+
+    def enrich_batch(
         self,
-        source_name: str,
-        key: Any
-    ) -> Optional[dict[str, Any]]:
-        """Direct lookup from a specific source."""
-        source = next((s for s in self.config.sources if s.name == source_name), None)
-        if not source:
-            return None
-        
-        cache_key = f"{source_name}:{key}"
-        if cache_key in self._cache:
-            cached_data, cached_at = self._cache[cache_key]
-            age = (datetime.now() - cached_at).total_seconds()
-            if age < source.cache_ttl_seconds:
-                return cached_data
-        
-        try:
-            result = await asyncio.wait_for(
-                source.lookup(key),
-                timeout=source.timeout_seconds
-            )
-            self._cache[cache_key] = (result, datetime.now())
-            return result
-        except Exception:
-            return None
-    
-    async def clear_cache(self, source_name: Optional[str] = None):
-        """Clear enrichment cache."""
-        if source_name:
-            keys_to_remove = [
-                k for k in self._cache if k.startswith(f"{source_name}:")
-            ]
-            for key in keys_to_remove:
-                del self._cache[key]
-        else:
-            self._cache.clear()
-    
-    def get_stats(self) -> dict[str, Any]:
-        """Get enrichment statistics."""
-        total_hits = sum(s["hits"] for s in self._enrichment_stats.values())
-        total_misses = sum(s["misses"] for s in self._enrichment_stats.values())
-        total_errors = sum(s["errors"] for s in self._enrichment_stats.values())
-        
-        return {
-            "cache_size": len(self._cache),
-            "total_hits": total_hits,
-            "total_misses": total_misses,
-            "total_errors": total_errors,
-            "hit_rate": total_hits / max(1, total_hits + total_misses),
-            "source_stats": dict(self._enrichment_stats)
-        }
+        records: List[Dict[str, Any]]
+    ) -> EnrichmentResult:
+        """Enrich batch of records."""
+        enriched_records = []
+        failed_count = 0
+        errors = []
+
+        for record in records:
+            enriched, record_errors = self.enrich_record(record)
+            enriched_records.append(enriched)
+            if record_errors:
+                failed_count += 1
+                errors.extend(record_errors)
+
+        return EnrichmentResult(
+            success=failed_count == 0,
+            enriched_count=len(enriched_records),
+            failed_count=failed_count,
+            errors=errors
+        )
 
 
-class DataAugmenter:
-    """Provides data augmentation transformations."""
-    
-    @staticmethod
-    async def add_timestamps(data: dict[str, Any]) -> dict[str, Any]:
-        """Add created/updated timestamps."""
-        now = datetime.now()
-        result = dict(data)
-        if "created_at" not in result:
-            result["created_at"] = now
-        result["updated_at"] = now
-        return result
-    
-    @staticmethod
-    async def add_computed_fields(
-        data: dict[str, Any],
-        field_definitions: dict[str, Callable]
-    ) -> dict[str, Any]:
-        """Add computed fields based on existing data."""
-        result = dict(data)
-        for field_name, compute_fn in field_definitions.items():
+class ComputedFieldGenerator:
+    """Generates computed fields from existing data."""
+
+    def __init__(self):
+        self.generators: Dict[str, Callable] = {}
+
+    def register(self, field_name: str, generator: Callable[[Dict[str, Any]], Any]):
+        """Register a computed field generator."""
+        self.generators[field_name] = generator
+
+    def compute(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute all registered fields."""
+        result = record.copy()
+
+        for field_name, generator in self.generators.items():
             try:
-                result[field_name] = compute_fn(data)
-            except Exception:
+                result[field_name] = generator(record)
+            except Exception as e:
+                logger.error(f"Computed field {field_name} failed: {e}")
                 result[field_name] = None
+
         return result
-    
-    @staticmethod
-    async def normalize_fields(
-        data: dict[str, Any],
-        field_mappings: dict[str, str]
-    ) -> dict[str, Any]:
-        """Normalize/rename fields."""
-        result = {}
-        for key, value in data.items():
-            new_key = field_mappings.get(key, key)
-            result[new_key] = value
-        return result
-    
-    @staticmethod
-    async def add_derived_metrics(
-        data: dict[str, Any],
-        metrics: list[dict[str, str]]
-    ) -> dict[str, Any]:
-        """Add derived metrics (e.g., totals, ratios)."""
-        result = dict(data)
-        for metric in metrics:
-            source_fields = metric["sources"]
-            operation = metric.get("operation", "sum")
-            target_field = metric["target"]
-            
-            try:
-                values = [data.get(f, 0) for f in source_fields]
-                if operation == "sum":
-                    result[target_field] = sum(values)
-                elif operation == "avg":
-                    result[target_field] = sum(values) / len(values) if values else 0
-                elif operation == "min":
-                    result[target_field] = min(values)
-                elif operation == "max":
-                    result[target_field] = max(values)
-                elif operation == "count":
-                    result[target_field] = len([v for v in values if v])
-            except Exception:
-                result[target_field] = None
-        
-        return result
+
+    def compute_batch(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Compute fields for batch."""
+        return [self.compute(record) for record in records]
+
+
+def main():
+    """Demonstrate data enrichment."""
+    lookup_manager = LookupManager()
+
+    lookup_manager.add_table(LookupTable(
+        table_id="status_codes",
+        name="Status Code Lookup",
+        key_field="code",
+        data={
+            200: {"label": "Success", "category": "OK"},
+            400: {"label": "Bad Request", "category": "Client Error"},
+            500: {"label": "Server Error", "category": "Server Error"}
+        }
+    ))
+
+    enricher = DataEnricher(lookup_manager)
+    enricher.add_rule(EnrichmentRule(
+        rule_id="rule1",
+        name="Status Label",
+        source_field="status_code",
+        target_field="status_label",
+        enrichment_type="lookup",
+        lookup_table_id="status_codes"
+    ))
+
+    record = {"id": 1, "status_code": 200, "value": 100}
+    enriched, errors = enricher.enrich_record(record)
+
+    print(f"Enriched: {enriched}")
+    print(f"Errors: {errors}")
+
+
+if __name__ == "__main__":
+    main()
