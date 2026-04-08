@@ -1,146 +1,202 @@
+"""Retry action module for RabAI AutoClick.
+
+Provides retry utilities:
+- RetryPolicy: Configurable retry policies
+- RetryExecutor: Execute with retry
+- BackoffStrategy: Backoff strategies
 """
-Retry and backoff utilities - retry with backoff, circuit breaker, timeout handling.
-"""
-from typing import Any, Dict, Optional, Callable
+
+from typing import Any, Callable, Dict, List, Optional, Type
 import time
-import logging
+import random
 import threading
+import uuid
 
-logger = logging.getLogger(__name__)
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class BaseAction:
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+class BackoffStrategy:
+    """Base backoff strategy."""
+
+    def next(self) -> float:
+        """Get next delay."""
+        raise NotImplementedError
+
+    def reset(self) -> None:
+        """Reset strategy."""
         raise NotImplementedError
 
 
-class CircuitBreaker:
-    """Circuit breaker pattern implementation."""
+class FixedBackoff(BackoffStrategy):
+    """Fixed backoff."""
 
-    STATES = {"closed": 0, "open": 1, "half_open": 2}
+    def __init__(self, delay: float = 1.0):
+        self.delay = delay
 
-    def __init__(self, failure_threshold: int = 5, timeout: float = 60.0) -> None:
-        self._failure_threshold = failure_threshold
-        self._timeout = timeout
-        self._state = self.STATES["closed"]
-        self._failure_count = 0
-        self._last_failure_time: Optional[float] = None
-        self._lock = threading.Lock()
+    def next(self) -> float:
+        return self.delay
 
-    def call(self, fn: Callable, *args, **kwargs) -> Any:
-        with self._lock:
-            if self._state == self.STATES["open"]:
-                if time.time() - self._last_failure_time >= self._timeout:
-                    self._state = self.STATES["half_open"]
-                else:
-                    raise Exception("Circuit breaker is OPEN")
-        result = fn(*args, **kwargs)
-        with self._lock:
-            self._failure_count = 0
-            self._state = self.STATES["closed"]
-        return result
+    def reset(self) -> None:
+        pass
 
-    def record_failure(self) -> None:
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-            if self._failure_count >= self._failure_threshold:
-                self._state = self.STATES["open"]
 
-    def state(self) -> str:
-        with self._lock:
-            return {v: k for k, v in self.STATES.items()}[self._state]
+class LinearBackoff(BackoffStrategy):
+    """Linear backoff."""
+
+    def __init__(self, start: float = 1.0, increment: float = 1.0):
+        self.start = start
+        self.increment = increment
+        self._attempt = 0
+
+    def next(self) -> float:
+        delay = self.start + (self._attempt * self.increment)
+        self._attempt += 1
+        return delay
+
+    def reset(self) -> None:
+        self._attempt = 0
+
+
+class ExponentialBackoff(BackoffStrategy):
+    """Exponential backoff."""
+
+    def __init__(self, base: float = 2.0, max_delay: float = 60.0, jitter: bool = True):
+        self.base = base
+        self.max_delay = max_delay
+        self.jitter = jitter
+        self._attempt = 0
+
+    def next(self) -> float:
+        delay = min(self.base ** self._attempt, self.max_delay)
+        self._attempt += 1
+        if self.jitter:
+            delay *= (0.5 + random.random())
+        return delay
+
+    def reset(self) -> None:
+        self._attempt = 0
+
+
+class RetryPolicy:
+    """Retry policy configuration."""
+
+    def __init__(
+        self,
+        max_attempts: int = 3,
+        backoff: Optional[BackoffStrategy] = None,
+        retryable_exceptions: Optional[List[Type[Exception]]] = None,
+    ):
+        self.max_attempts = max_attempts
+        self.backoff = backoff or ExponentialBackoff()
+        self.retryable_exceptions = retryable_exceptions or [Exception]
+
+    def should_retry(self, attempt: int, exception: Exception) -> bool:
+        """Check if should retry."""
+        if attempt >= self.max_attempts:
+            return False
+        return any(isinstance(exception, exc_type) for exc_type in self.retryable_exceptions)
+
+
+class RetryExecutor:
+    """Execute operations with retry."""
+
+    def __init__(self, policy: Optional[RetryPolicy] = None):
+        self.policy = policy or RetryPolicy()
+
+    def execute(self, func: Callable, *args, **kwargs) -> Any:
+        """Execute with retry."""
+        attempt = 0
+        last_exception = None
+
+        while attempt < self.policy.max_attempts:
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_exception = e
+                if not self.policy.should_retry(attempt, e):
+                    raise
+                attempt += 1
+                delay = self.policy.backoff.next()
+                time.sleep(delay)
+
+        if last_exception:
+            raise last_exception
 
 
 class RetryAction(BaseAction):
-    """Retry and backoff operations.
+    """Retry management action."""
+    action_type = "retry"
+    display_name = "重试管理"
+    description = "重试策略"
 
-    Provides retry with exponential backoff, circuit breaker, timeout simulation.
-    """
+    def __init__(self):
+        super().__init__()
+        self._policies: Dict[str, RetryPolicy] = {}
 
-    def __init__(self) -> None:
-        self._breakers: Dict[str, CircuitBreaker] = {}
-
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        operation = params.get("operation", "backoff")
-        name = params.get("name", "default")
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            if operation == "backoff":
-                attempt = int(params.get("attempt", 0))
-                base_delay = float(params.get("base_delay", 1.0))
-                max_delay = float(params.get("max_delay", 60.0))
-                exponential = params.get("exponential", True)
-                jitter = params.get("jitter", True)
-                if exponential:
-                    delay = min(base_delay * (2 ** attempt), max_delay)
-                else:
-                    delay = min(base_delay * (attempt + 1), max_delay)
-                if jitter:
-                    import random
-                    delay = delay * (0.5 + random.random())
-                return {"success": True, "delay_seconds": round(delay, 3), "attempt": attempt}
+            operation = params.get("operation", "create")
 
-            elif operation == "retry_config":
-                max_attempts = int(params.get("max_attempts", 3))
-                base_delay = float(params.get("base_delay", 1.0))
-                return {"success": True, "max_attempts": max_attempts, "base_delay": base_delay}
-
-            elif operation == "circuit_breaker_create":
-                failure_threshold = int(params.get("failure_threshold", 5))
-                timeout = float(params.get("timeout", 60.0))
-                self._breakers[name] = CircuitBreaker(failure_threshold, timeout)
-                return {"success": True, "name": name, "state": "closed"}
-
-            elif operation == "circuit_breaker_state":
-                if name not in self._breakers:
-                    return {"success": False, "error": f"Circuit breaker {name} not found"}
-                state = self._breakers[name].state()
-                return {"success": True, "name": name, "state": state}
-
-            elif operation == "circuit_breaker_record":
-                if name not in self._breakers:
-                    return {"success": False, "error": f"Circuit breaker {name} not found"}
-                self._breakers[name].record_failure()
-                return {"success": True, "name": name, "state": self._breakers[name].state()}
-
-            elif operation == "should_retry":
-                attempt = int(params.get("attempt", 0))
-                max_attempts = int(params.get("max_attempts", 3))
-                error_type = params.get("error_type", "transient")
-                retryable = error_type in ("transient", "timeout", "network")
-                should_retry = attempt < max_attempts - 1 and retryable
-                return {"success": True, "should_retry": should_retry, "attempt": attempt, "max_attempts": max_attempts}
-
-            elif operation == "timeout":
-                timeout_seconds = float(params.get("timeout_seconds", 5))
-                start_time = time.time()
-                return {"success": True, "timeout_seconds": timeout_seconds, "started_at": start_time}
-
-            elif operation == "check_timeout":
-                started_at = float(params.get("started_at", time.time()))
-                timeout_seconds = float(params.get("timeout_seconds", 5))
-                elapsed = time.time() - started_at
-                exceeded = elapsed > timeout_seconds
-                remaining = max(0, timeout_seconds - elapsed)
-                return {"success": True, "elapsed": round(elapsed, 3), "remaining": round(remaining, 3), "exceeded": exceeded}
-
-            elif operation == "delayed_retry":
-                attempt = int(params.get("attempt", 0))
-                base_delay = float(params.get("base_delay", 1.0))
-                max_delay = float(params.get("max_delay", 30.0))
-                delay = min(base_delay * (2 ** attempt), max_delay)
-                import random
-                delay = delay * (0.5 + random.random())
-                return {"success": True, "delay_seconds": round(delay, 3), "attempt": attempt, "can_retry": True}
-
+            if operation == "create":
+                return self._create(params)
+            elif operation == "execute":
+                return self._execute(params)
+            elif operation == "list":
+                return self._list()
             else:
-                return {"success": False, "error": f"Unknown operation: {operation}"}
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
         except Exception as e:
-            logger.error(f"RetryAction error: {e}")
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"Retry error: {str(e)}")
 
+    def _create(self, params: Dict[str, Any]) -> ActionResult:
+        """Create retry policy."""
+        name = params.get("name", str(uuid.uuid4()))
+        max_attempts = params.get("max_attempts", 3)
+        backoff_type = params.get("backoff", "exponential")
+        base = params.get("base", 2.0)
+        max_delay = params.get("max_delay", 60.0)
 
-def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-    return RetryAction().execute(context, params)
+        if backoff_type == "fixed":
+            backoff = FixedBackoff(delay=params.get("delay", 1.0))
+        elif backoff_type == "linear":
+            backoff = LinearBackoff(start=params.get("start", 1.0), increment=params.get("increment", 1.0))
+        elif backoff_type == "exponential":
+            backoff = ExponentialBackoff(base=base, max_delay=max_delay)
+        else:
+            backoff = ExponentialBackoff()
+
+        policy = RetryPolicy(max_attempts=max_attempts, backoff=backoff)
+        self._policies[name] = policy
+
+        return ActionResult(success=True, message=f"Retry policy created: {name}", data={"name": name})
+
+    def _execute(self, params: Dict[str, Any]) -> ActionResult:
+        """Execute with retry (simulated)."""
+        name = params.get("name", "default")
+
+        policy = self._policies.get(name)
+        if not policy:
+            return ActionResult(success=False, message=f"Policy not found: {name}")
+
+        executor = RetryExecutor(policy)
+        attempt = 0
+
+        def mock_func():
+            return {"executed": True, "attempt": attempt + 1}
+
+        try:
+            result = executor.execute(mock_func)
+            return ActionResult(success=True, message="Executed with retry", data={"result": result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Failed after retries: {str(e)}")
+
+    def _list(self) -> ActionResult:
+        """List all policies."""
+        names = list(self._policies.keys())
+        return ActionResult(success=True, message=f"{len(names)} policies", data={"policies": names})
