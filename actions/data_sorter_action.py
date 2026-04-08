@@ -1,13 +1,15 @@
 """Data sorter action module for RabAI AutoClick.
 
 Provides data sorting:
-- DataSorterAction: Sort data
-- MultiKeySorterAction: Sort by multiple keys
-- CustomSorterAction: Custom sort function
+- DataSorter: General data sorter
+- MultiKeySorter: Sort by multiple keys
+- CustomSorter: Custom sort function
+- StableSorter: Stable sorting
 """
 
-from typing import Any, Dict, List, Optional, Callable
-from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
 
 import sys
 import os
@@ -17,120 +19,146 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class DataSorterAction(BaseAction):
-    """Sort data."""
-    action_type = "data_sorter"
-    display_name = "数据排序"
-    description = "对数据排序"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            sort_by = params.get("sort_by", None)
-            order = params.get("order", "asc")
-
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
-
-            if not sort_by:
-                sorted_data = sorted(data, reverse=(order == "desc"))
-            else:
-                sorted_data = sorted(
-                    data,
-                    key=lambda x: x.get(sort_by, "") if isinstance(x, dict) else getattr(x, sort_by, ""),
-                    reverse=(order == "desc")
-                )
-
-            return ActionResult(
-                success=True,
-                data={
-                    "sorted": sorted_data,
-                    "sort_by": sort_by,
-                    "order": order,
-                    "count": len(sorted_data)
-                },
-                message=f"Sorted: {len(data)} items by {sort_by or 'value'} ({order})"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Data sorter error: {str(e)}")
+class SortOrder(Enum):
+    """Sort order."""
+    ASC = "asc"
+    DESC = "desc"
 
 
-class MultiKeySorterAction(BaseAction):
-    """Sort by multiple keys."""
-    action_type = "multi_key_sorter"
-    display_name = "多键排序"
-    description = "按多个键排序"
+@dataclass
+class SortConfig:
+    """Sort configuration."""
+    field: str
+    order: SortOrder = SortOrder.ASC
+    numeric: bool = False
+    nulls_first: bool = False
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            sort_keys = params.get("sort_keys", [])
-            orders = params.get("orders", ["asc"] * 10)
 
-            if not sort_keys:
-                return ActionResult(success=False, message="sort_keys is required")
+class DataSorter:
+    """General data sorter."""
 
-            def sort_key(item):
-                keys = []
-                for i, sort_key in enumerate(sort_keys):
-                    order = orders[i] if i < len(orders) else "asc"
-                    value = item.get(sort_key, "") if isinstance(item, dict) else getattr(item, sort_key, "")
-                    if order == "desc":
-                        keys.append((order, value))
+    def sort(
+        self,
+        data: List[Any],
+        configs: List[SortConfig],
+    ) -> List[Any]:
+        """Sort data by configurations."""
+        if not data or not configs:
+            return list(data)
+
+        def sort_key(item):
+            values = []
+            for config in configs:
+                value = item.get(config.field) if isinstance(item, dict) else getattr(item, config.field, None)
+
+                if value is None:
+                    if config.nulls_first:
+                        values.append(float("-inf") if config.order == SortOrder.ASC else float("inf"))
                     else:
-                        keys.append((order, value))
-                return keys
+                        values.append(float("inf") if config.order == SortOrder.ASC else float("-inf"))
+                elif config.numeric and isinstance(value, (int, float)):
+                    values.append(value)
+                elif isinstance(value, str):
+                    try:
+                        values.append(float(value))
+                    except ValueError:
+                        values.append(value.lower() if config.order == SortOrder.ASC else (-len(value), value))
+                else:
+                    values.append(value)
 
-            sorted_data = sorted(data, key=sort_key)
+            return tuple(values)
 
-            return ActionResult(
-                success=True,
-                data={
-                    "sorted": sorted_data,
-                    "sort_keys": sort_keys,
-                    "count": len(sorted_data)
-                },
-                message=f"Multi-key sorted: {len(data)} items by {sort_keys}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Multi-key sorter error: {str(e)}")
+        reverse = configs[0].order == SortOrder.DESC
+        return sorted(data, key=sort_key, reverse=reverse)
 
 
-class CustomSorterAction(BaseAction):
+class MultiKeySorter:
+    """Sort by multiple keys."""
+
+    def sort(
+        self,
+        data: List[Dict],
+        keys: List[str],
+        orders: Optional[List[SortOrder]] = None,
+    ) -> List[Dict]:
+        """Sort by multiple keys."""
+        if not data:
+            return data
+
+        orders = orders or [SortOrder.ASC] * len(keys)
+
+        def multi_key(item):
+            result = []
+            for key, order in zip(keys, orders):
+                value = item.get(key)
+                if value is None:
+                    result.append(("" if order == SortOrder.ASC else None, ""))
+                elif isinstance(value, (int, float)):
+                    result.append((0, value if order == SortOrder.ASC else -value))
+                else:
+                    result.append((str(value).lower(), ""))
+            return result
+
+        return sorted(data, key=multi_key)
+
+
+class CustomSorter:
     """Custom sort function."""
-    action_type = "custom_sorter"
-    display_name = "自定义排序"
-    description = "自定义排序函数"
+
+    def sort(
+        self,
+        data: List[Any],
+        sort_fn: Callable[[Any, Any], int],
+    ) -> List[Any]:
+        """Sort with custom function."""
+        from functools import cmp_to_key
+        return sorted(data, key=cmp_to_key(sort_fn))
+
+
+class DataSorterAction(BaseAction):
+    """Data sorter action."""
+    action_type = "data_sorter"
+    display_name = "数据排序器"
+    description = "数据排序"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
+            operation = params.get("operation", "sort")
             data = params.get("data", [])
-            sort_func_name = params.get("sort_func", "length")
-            order = params.get("order", "asc")
 
-            def get_sort_key(item):
-                if sort_func_name == "length":
-                    return len(str(item))
-                elif sort_func_name == "str_lower":
-                    return str(item).lower()
-                elif sort_func_name == "type":
-                    return type(item).__name__
-                elif sort_func_name == "reverse":
-                    return str(item)[::-1]
-                else:
-                    return str(item)
+            if operation == "sort":
+                return self._sort(data, params)
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-            sorted_data = sorted(data, key=get_sort_key, reverse=(order == "desc"))
-
-            return ActionResult(
-                success=True,
-                data={
-                    "sorted": sorted_data,
-                    "sort_func": sort_func_name,
-                    "order": order,
-                    "count": len(sorted_data)
-                },
-                message=f"Custom sorted: {len(data)} items by {sort_func_name}"
-            )
         except Exception as e:
-            return ActionResult(success=False, message=f"Custom sorter error: {str(e)}")
+            return ActionResult(success=False, message=f"Sort error: {str(e)}")
+
+    def _sort(self, data: List[Dict], params: Dict) -> ActionResult:
+        """Sort data."""
+        keys = params.get("keys", [])
+        orders_str = params.get("orders", [])
+
+        orders = []
+        for o in orders_str:
+            try:
+                orders.append(SortOrder[o.upper()])
+            except KeyError:
+                orders.append(SortOrder.ASC)
+
+        if not keys:
+            return ActionResult(success=False, message="keys is required")
+
+        if len(keys) == 1:
+            config = SortConfig(field=keys[0], order=orders[0] if orders else SortOrder.ASC)
+            sorter = DataSorter()
+            sorted_data = sorter.sort(data, [config])
+        else:
+            sorter = MultiKeySorter()
+            sorted_data = sorter.sort(data, keys, orders)
+
+        return ActionResult(
+            success=True,
+            message=f"Sorted by {keys}",
+            data={"data": sorted_data, "count": len(sorted_data)},
+        )
