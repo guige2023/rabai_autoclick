@@ -1,347 +1,288 @@
-"""ratelimit_action module for rabai_autoclick.
+"""Rate limit action module for RabAI AutoClick.
 
-Provides rate limiting primitives: sliding window, token bucket,
-leaky bucket, fixed window, and adaptive rate limiting.
+Provides rate limiting operations:
+- RateLimitTokenBucketAction: Token bucket rate limiter
+- RateLimitSlidingWindowAction: Sliding window rate limiter
+- RateLimitFixedWindowAction: Fixed window rate limiter
+- RateLimitAdaptiveAction: Adaptive rate limiter
 """
 
-from __future__ import annotations
-
-import threading
 import time
-from collections import deque
+import threading
+from typing import Any, Dict, Optional
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
-
-__all__ = [
-    "RateLimiter",
-    "SlidingWindowLimiter",
-    "TokenBucketLimiter",
-    "LeakyBucketLimiter",
-    "FixedWindowLimiter",
-    "AdaptiveRateLimiter",
-    "MultiLimiter",
-    "RateLimitExceeded",
-    "is_rate_limited",
-    "check_rate_limit",
-]
 
 
-class RateLimitExceeded(Exception):
-    """Raised when rate limit is exceeded."""
-    pass
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class RateLimitConfig:
-    """Configuration for a rate limiter."""
-    max_calls: int
-    period_seconds: float
-    burst: int = 1
-
-
-class SlidingWindowLimiter:
-    """Sliding window rate limiter."""
-
-    def __init__(self, max_calls: int, window_seconds: float) -> None:
-        self.max_calls = max_calls
-        self.window_seconds = window_seconds
-        self._calls: deque = deque()
-        self._lock = threading.Lock()
-
-    def _cleanup(self) -> None:
-        """Remove expired calls from window."""
-        cutoff = time.monotonic() - self.window_seconds
-        while self._calls and self._calls[0] < cutoff:
-            self._calls.popleft()
-
-    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """Acquire permission to proceed.
-
-        Args:
-            blocking: Wait if rate limited.
-            timeout: Max wait time.
-
-        Returns:
-            True if acquired.
-        """
-        deadline = None if timeout is None else time.monotonic() + timeout
-
-        with self._lock:
-            while True:
-                self._cleanup()
-                if len(self._calls) < self.max_calls:
-                    self._calls.append(time.monotonic())
-                    return True
-                if not blocking:
-                    return False
-                oldest = self._calls[0]
-                wait_time = oldest + self.window_seconds - time.monotonic()
-                if timeout is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return False
-                    wait_time = min(wait_time, remaining)
-                ev = threading.Event()
-                ev.wait(max(0, wait_time))
-
-    def try_acquire(self) -> bool:
-        """Try to acquire without blocking."""
-        return self.acquire(blocking=False)
-
-    def reset(self) -> None:
-        """Reset all calls."""
-        with self._lock:
-            self._calls.clear()
-
-    def get_remaining(self) -> int:
-        """Get remaining calls in current window."""
-        with self._lock:
-            self._cleanup()
-            return max(0, self.max_calls - len(self._calls))
-
-
-class TokenBucketLimiter:
-    """Token bucket rate limiter with burst support."""
-
-    def __init__(self, rate: float, capacity: int) -> None:
-        self.rate = rate
+class TokenBucket:
+    """Token bucket rate limiter."""
+    def __init__(self, capacity: float, refill_rate: float):
         self.capacity = capacity
-        self._tokens = float(capacity)
-        self._last_refill = time.monotonic()
+        self.refill_rate = refill_rate
+        self._tokens = capacity
+        self._last_refill = time.time()
         self._lock = threading.Lock()
 
-    def _refill(self) -> None:
-        """Refill tokens based on elapsed time."""
-        now = time.monotonic()
-        elapsed = now - self._last_refill
-        self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
-        self._last_refill = now
-
-    def acquire(self, tokens: int = 1, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """Acquire tokens.
-
-        Args:
-            tokens: Number of tokens needed.
-            blocking: Wait if not enough tokens.
-            timeout: Max wait time.
-
-        Returns:
-            True if acquired.
-        """
-        deadline = None if timeout is None else time.monotonic() + timeout
-
-        with self._lock:
-            while True:
-                self._refill()
-                if self._tokens >= tokens:
-                    self._tokens -= tokens
-                    return True
-                if not blocking:
-                    return False
-                wait_time = (tokens - self._tokens) / self.rate
-                if timeout is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return False
-                    wait_time = min(wait_time, remaining)
-                ev = threading.Event()
-                ev.wait(wait_time)
-
-    def try_acquire(self, tokens: int = 1) -> bool:
-        """Try to acquire without blocking."""
-        return self.acquire(tokens=tokens, blocking=False)
-
-    def reset(self) -> None:
-        """Reset tokens to full capacity."""
-        with self._lock:
-            self._tokens = float(self.capacity)
-            self._last_refill = time.monotonic()
-
-    def get_available(self) -> float:
-        """Get available tokens."""
+    def consume(self, tokens: float = 1.0) -> bool:
         with self._lock:
             self._refill()
-            return self._tokens
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                return True
+            return False
+
+    def _refill(self):
+        now = time.time()
+        elapsed = now - self._last_refill
+        self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_rate)
+        self._last_refill = now
+
+    def get_wait_time(self, tokens: float = 1.0) -> float:
+        with self._lock:
+            self._refill()
+            if self._tokens >= tokens:
+                return 0.0
+            return (tokens - self._tokens) / self.refill_rate
 
 
-class LeakyBucketLimiter:
-    """Leaky bucket rate limiter."""
-
-    def __init__(self, capacity: int, leak_rate: float) -> None:
-        self.capacity = capacity
-        self.leak_rate = leak_rate
-        self._level = 0.0
-        self._last_leak = time.monotonic()
-        self._lock = threading.Lock()
-
-    def _leak(self) -> None:
-        """Leak from bucket."""
-        now = time.monotonic()
-        elapsed = now - self._last_leak
-        self._level = max(0.0, self._level - elapsed * self.leak_rate)
-        self._last_leak = now
-
-    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """Try to add one drop to bucket.
-
-        Args:
-            blocking: Wait if bucket full.
-            timeout: Max wait time.
-
-        Returns:
-            True if acquired.
-        """
-        deadline = None if timeout is None else time.monotonic() + timeout
-
-        while True:
-            with self._lock:
-                self._leak()
-                if self._level < self.capacity:
-                    self._level += 1
-                    return True
-            if not blocking:
-                return False
-            wait_time = 1.0 / self.leak_rate if self.leak_rate > 0 else 1.0
-            if timeout is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                wait_time = min(wait_time, remaining)
-            ev = threading.Event()
-            ev.wait(wait_time)
-
-    def try_acquire(self) -> bool:
-        """Try without blocking."""
-        return self.acquire(blocking=False)
-
-
-class FixedWindowLimiter:
-    """Fixed window rate limiter."""
-
-    def __init__(self, max_calls: int, window_seconds: float) -> None:
-        self.max_calls = max_calls
+class SlidingWindow:
+    """Sliding window rate limiter."""
+    def __init__(self, max_requests: int, window_seconds: float):
+        self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self._window_start = time.monotonic()
-        self._count = 0
+        self._requests: list = []
         self._lock = threading.Lock()
 
-    def _check_window(self) -> None:
-        """Check if window needs reset."""
-        now = time.monotonic()
-        if now - self._window_start >= self.window_seconds:
-            self._window_start = now
-            self._count = 0
-
-    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """Acquire permission to proceed."""
-        deadline = None if timeout is None else time.monotonic() + timeout
-
+    def is_allowed(self) -> bool:
         with self._lock:
-            while True:
-                self._check_window()
-                if self._count < self.max_calls:
-                    self._count += 1
-                    return True
-                if not blocking:
-                    return False
-                wait_time = self.window_seconds - (time.monotonic() - self._window_start)
-                if timeout is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return False
-                    wait_time = min(wait_time, remaining)
-                ev = threading.Event()
-                ev.wait(max(0, wait_time))
+            now = time.time()
+            cutoff = now - self.window_seconds
+            self._requests = [t for t in self._requests if t > cutoff]
+            if len(self._requests) < self.max_requests:
+                self._requests.append(now)
+                return True
+            return False
 
-    def try_acquire(self) -> bool:
-        """Try without blocking."""
-        return self.acquire(blocking=False)
-
-    def reset(self) -> None:
-        """Reset window."""
+    def get_wait_time(self) -> float:
         with self._lock:
-            self._window_start = time.monotonic()
-            self._count = 0
+            if len(self._requests) < self.max_requests:
+                return 0.0
+            oldest = min(self._requests)
+            return max(0.0, self.window_seconds - (time.time() - oldest))
+
+
+class FixedWindow:
+    """Fixed window rate limiter."""
+    def __init__(self, max_requests: int, window_seconds: float):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._requests = 0
+        self._window_start = time.time()
+        self._lock = threading.Lock()
+
+    def is_allowed(self) -> bool:
+        with self._lock:
+            now = time.time()
+            if now - self._window_start >= self.window_seconds:
+                self._requests = 0
+                self._window_start = now
+            if self._requests < self.max_requests:
+                self._requests += 1
+                return True
+            return False
+
+    def get_wait_time(self) -> float:
+        with self._lock:
+            elapsed = time.time() - self._window_start
+            if elapsed >= self.window_seconds:
+                return 0.0
+            return self.window_seconds - elapsed
 
 
 class AdaptiveRateLimiter:
-    """Adaptive rate limiter that adjusts based on success."""
-
-    def __init__(
-        self,
-        initial_rate: float = 10.0,
-        min_rate: float = 0.1,
-        max_rate: float = 1000.0,
-        increase_factor: float = 1.2,
-        decrease_factor: float = 0.5,
-    ) -> None:
+    """Adaptive rate limiter that adjusts based on success/failure."""
+    def __init__(self, initial_rate: float, min_rate: float, max_rate: float):
         self.current_rate = initial_rate
         self.min_rate = min_rate
         self.max_rate = max_rate
-        self.increase_factor = increase_factor
-        self.decrease_factor = decrease_factor
+        self._success_count = 0
+        self._failure_count = 0
         self._lock = threading.Lock()
-        self._limiter = TokenBucketLimiter(initial_rate, int(initial_rate))
+        self._last_adjust = time.time()
+        self._adjust_interval = 10.0
 
-    def record_success(self) -> None:
-        """Record successful call, increase rate."""
+    def record_success(self):
         with self._lock:
-            new_rate = min(self.max_rate, self.current_rate * self.increase_factor)
-            if new_rate != self.current_rate:
-                self.current_rate = new_rate
-                self._limiter = TokenBucketLimiter(new_rate, int(new_rate))
+            self._success_count += 1
+            self._maybe_adjust(increase=True)
 
-    def record_failure(self) -> None:
-        """Record failed call, decrease rate."""
+    def record_failure(self):
         with self._lock:
-            new_rate = max(self.min_rate, self.current_rate * self.decrease_factor)
-            if new_rate != self.current_rate:
-                self.current_rate = new_rate
-                self._limiter = TokenBucketLimiter(new_rate, int(new_rate))
+            self._failure_count += 1
+            self._maybe_adjust(increase=False)
 
-    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """Acquire permission to proceed."""
-        return self._limiter.acquire(blocking=blocking, timeout=timeout)
+    def _maybe_adjust(self, increase: bool):
+        now = time.time()
+        if now - self._last_adjust < self._adjust_interval:
+            return
+        self._last_adjust = now
+        if increase:
+            self.current_rate = min(self.max_rate, self.current_rate * 1.1)
+        else:
+            self.current_rate = max(self.min_rate, self.current_rate * 0.9)
+        self._success_count = 0
+        self._failure_count = 0
 
-    def try_acquire(self) -> bool:
-        """Try without blocking."""
-        return self.acquire(blocking=False)
-
-
-class MultiLimiter:
-    """Combine multiple rate limiters (AND logic)."""
-
-    def __init__(self, limiters: list) -> None:
-        self.limiters = limiters
-
-    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """Acquire from all limiters."""
-        deadline = None if timeout is None else time.monotonic() + timeout
-        for limiter in self.limiters:
-            remaining = None if timeout is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                return False
-            if not limiter.acquire(blocking=blocking, timeout=remaining):
-                return False
+    def is_allowed(self) -> bool:
         return True
 
-    def try_acquire(self) -> bool:
-        """Try all limiters without blocking."""
-        return all(limiter.try_acquire() for limiter in self.limiters)
+    def get_current_rate(self) -> float:
+        return self.current_rate
 
 
-def is_rate_limited(limiter: SlidingWindowLimiter) -> bool:
-    """Check if rate limited without consuming."""
-    return not limiter.try_acquire()
+_limiters: Dict[str, Any] = {}
+_lock = threading.Lock()
 
 
-def check_rate_limit(
-    limiter: SlidingWindowLimiter,
-    raise_on_limit: bool = False,
-) -> bool:
-    """Check rate limit and optionally raise exception."""
-    if limiter.try_acquire():
-        return True
-    if raise_on_limit:
-        raise RateLimitExceeded("Rate limit exceeded")
-    return False
+class RateLimitTokenBucketAction(BaseAction):
+    """Token bucket rate limiting."""
+    action_type = "ratelimit_token_bucket"
+    display_name = "令牌桶限流"
+    description = "令牌桶算法限流"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "default")
+            capacity = params.get("capacity", 10)
+            refill_rate = params.get("refill_rate", 1.0)
+            tokens = params.get("tokens", 1)
+            wait = params.get("wait", False)
+
+            with _lock:
+                if key not in _limiters:
+                    _limiters[key] = TokenBucket(capacity, refill_rate)
+                limiter = _limiters[key]
+
+            if wait:
+                wait_time = limiter.get_wait_time(tokens)
+                return ActionResult(
+                    success=True,
+                    message=f"Wait time: {wait_time:.2f}s",
+                    data={"wait_time": wait_time, "key": key}
+                )
+
+            allowed = limiter.consume(tokens)
+            wait_time = limiter.get_wait_time(tokens) if not allowed else 0
+
+            return ActionResult(
+                success=allowed,
+                message="Request allowed" if allowed else f"Rate limited, wait {wait_time:.2f}s",
+                data={"allowed": allowed, "wait_time": wait_time, "key": key}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Rate limit token bucket failed: {str(e)}")
+
+
+class RateLimitSlidingWindowAction(BaseAction):
+    """Sliding window rate limiting."""
+    action_type = "ratelimit_sliding_window"
+    display_name = "滑动窗口限流"
+    description = "滑动窗口算法限流"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "default")
+            max_requests = params.get("max_requests", 100)
+            window_seconds = params.get("window_seconds", 60.0)
+
+            with _lock:
+                if key not in _limiters:
+                    _limiters[key] = SlidingWindow(max_requests, window_seconds)
+                limiter = _limiters[key]
+
+            allowed = limiter.is_allowed()
+            wait_time = limiter.get_wait_time()
+
+            return ActionResult(
+                success=allowed,
+                message="Request allowed" if allowed else f"Rate limited, wait {wait_time:.2f}s",
+                data={"allowed": allowed, "wait_time": wait_time, "key": key}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Rate limit sliding window failed: {str(e)}")
+
+
+class RateLimitFixedWindowAction(BaseAction):
+    """Fixed window rate limiting."""
+    action_type = "ratelimit_fixed_window"
+    display_name = "固定窗口限流"
+    description = "固定窗口算法限流"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "default")
+            max_requests = params.get("max_requests", 100)
+            window_seconds = params.get("window_seconds", 60.0)
+
+            with _lock:
+                if key not in _limiters:
+                    _limiters[key] = FixedWindow(max_requests, window_seconds)
+                limiter = _limiters[key]
+
+            allowed = limiter.is_allowed()
+            wait_time = limiter.get_wait_time()
+
+            return ActionResult(
+                success=allowed,
+                message="Request allowed" if allowed else f"Rate limited, wait {wait_time:.2f}s",
+                data={"allowed": allowed, "wait_time": wait_time, "key": key}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Rate limit fixed window failed: {str(e)}")
+
+
+class RateLimitAdaptiveAction(BaseAction):
+    """Adaptive rate limiting."""
+    action_type = "ratelimit_adaptive"
+    display_name = "自适应限流"
+    description = "自适应限流调节"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "default")
+            initial_rate = params.get("initial_rate", 10.0)
+            min_rate = params.get("min_rate", 1.0)
+            max_rate = params.get("max_rate", 100.0)
+            record_success = params.get("record_success", False)
+            record_failure = params.get("record_failure", False)
+
+            with _lock:
+                if key not in _limiters:
+                    _limiters[key] = AdaptiveRateLimiter(initial_rate, min_rate, max_rate)
+                limiter = _limiters[key]
+
+            if record_success:
+                limiter.record_success()
+            if record_failure:
+                limiter.record_failure()
+
+            current_rate = limiter.get_current_rate()
+
+            return ActionResult(
+                success=True,
+                message=f"Current rate: {current_rate:.2f} req/s",
+                data={"current_rate": current_rate, "key": key}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Rate limit adaptive failed: {str(e)}")

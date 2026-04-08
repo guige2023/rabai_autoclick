@@ -1,16 +1,16 @@
-"""Data transformation action module for RabAI AutoClick.
+"""DataFrame action module for RabAI AutoClick.
 
-Provides data transformation operations:
-- NormalizeAction: Normalize numeric data
-- EncodeCategoricalAction: Encode categorical variables
-- ImputeMissingAction: Impute missing values
-- ReshapeAction: Reshape data structures
-- GroupAggregateAction: Group and aggregate data
-- DeduplicateAction: Remove duplicate records
+Provides DataFrame operations using pandas:
+- DataFrameLoadAction: Load data into DataFrame
+- DataFrameTransformAction: Transform DataFrame
+- DataFrameAggregateAction: Aggregate DataFrame data
+- DataFrameMergeAction: Merge multiple DataFrames
 """
 
-import statistics
+import json
+import io
 from typing import Any, Dict, List, Optional, Union
+
 
 import sys
 import os
@@ -19,471 +19,267 @@ _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
+try:
+    import pandas as pd
+    import numpy as np
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
 
-class NormalizeAction(BaseAction):
-    """Normalize numeric data."""
-    action_type = "normalize"
-    display_name = "数据归一化"
-    description = "归一化数值数据"
+
+class DataFrameLoadAction(BaseAction):
+    """Load data into a pandas DataFrame."""
+    action_type = "dataframe_load"
+    display_name = "DataFrame加载"
+    description = "将数据加载到pandas DataFrame"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            values = params.get("values", [])
-            method = params.get("method", "minmax")
+            if not PANDAS_AVAILABLE:
+                return ActionResult(success=False, message="pandas is not installed")
 
-            if not values:
-                return ActionResult(success=False, message="values list is required")
+            source_type = params.get("source_type", "json")
+            data = params.get("data", None)
+            filepath = params.get("filepath", None)
+            columns = params.get("columns", None)
+            index_col = params.get("index_col", None)
 
-            numeric_values = []
-            for v in values:
-                try:
-                    numeric_values.append(float(v))
-                except (TypeError, ValueError):
-                    pass
+            df = None
 
-            if not numeric_values:
-                return ActionResult(success=False, message="No numeric values found")
+            if source_type == "json":
+                if isinstance(data, list):
+                    df = pd.DataFrame(data)
+                elif isinstance(data, str):
+                    df = pd.read_json(io.StringIO(data))
+                elif filepath:
+                    df = pd.read_json(filepath)
+            elif source_type == "csv":
+                if filepath:
+                    df = pd.read_csv(filepath, index_col=index_col)
+                elif isinstance(data, str):
+                    df = pd.read_csv(io.StringIO(data))
+            elif source_type == "dict":
+                if isinstance(data, dict):
+                    df = pd.DataFrame(data)
+            elif source_type == "list":
+                if isinstance(data, list):
+                    df = pd.DataFrame(data)
+                    if columns:
+                        df.columns = columns
 
-            if method == "minmax":
-                min_val = min(numeric_values)
-                max_val = max(numeric_values)
-                if max_val == min_val:
-                    normalized = [0.5] * len(numeric_values)
-                else:
-                    normalized = [(v - min_val) / (max_val - min_val) for v in numeric_values]
-
-            elif method == "zscore":
-                mean = statistics.mean(numeric_values)
-                stdev = statistics.stdev(numeric_values) if len(numeric_values) > 1 else 1
-                if stdev == 0:
-                    normalized = [0.0] * len(numeric_values)
-                else:
-                    normalized = [(v - mean) / stdev for v in numeric_values]
-
-            elif method == "robust":
-                sorted_vals = sorted(numeric_values)
-                median = statistics.median(numeric_values)
-                q1 = sorted_vals[len(sorted_vals) // 4]
-                q3 = sorted_vals[3 * len(sorted_vals) // 4]
-                iqr = q3 - q1
-                if iqr == 0:
-                    normalized = [0.0] * len(numeric_values)
-                else:
-                    normalized = [(v - median) / iqr for v in numeric_values]
-
-            elif method == "log":
-                import math
-                normalized = [math.log(v + 1) for v in numeric_values]
-
-            else:
-                return ActionResult(success=False, message=f"Unknown method: {method}")
+            if df is None:
+                return ActionResult(success=False, message="Could not load data")
 
             return ActionResult(
                 success=True,
-                message=f"Normalized {len(normalized)} values using {method}",
-                data={"normalized": normalized, "method": method, "count": len(normalized)}
+                message=f"Loaded DataFrame with {len(df)} rows, {len(df.columns)} columns",
+                data={
+                    "shape": df.shape,
+                    "columns": list(df.columns),
+                    "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                    "head": df.head(5).to_dict(orient="records")
+                }
             )
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Normalize error: {str(e)}")
+            return ActionResult(success=False, message=f"DataFrame load failed: {str(e)}")
 
 
-class EncodeCategoricalAction(BaseAction):
-    """Encode categorical variables."""
-    action_type = "encode_categorical"
-    display_name = "类别编码"
-    description = "编码分类变量"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            values = params.get("values", [])
-            encoding_type = params.get("encoding_type", "label")
-            categories = params.get("categories", None)
-
-            if not values:
-                return ActionResult(success=False, message="values list is required")
-
-            if encoding_type == "label":
-                if categories is None:
-                    unique_values = list(dict.fromkeys(values))
-                else:
-                    unique_values = categories
-
-                label_map = {v: i for i, v in enumerate(unique_values)}
-                encoded = [label_map.get(v, -1) for v in values]
-
-                return ActionResult(
-                    success=True,
-                    message=f"Label encoded {len(encoded)} values",
-                    data={"encoded": encoded, "label_map": label_map}
-                )
-
-            elif encoding_type == "onehot":
-                if categories is None:
-                    unique_values = list(dict.fromkeys(values))
-                else:
-                    unique_values = categories
-
-                onehot_map = {v: i for i, v in enumerate(unique_values)}
-                encoded = []
-                for v in values:
-                    row = [0] * len(unique_values)
-                    idx = onehot_map.get(v, -1)
-                    if idx >= 0:
-                        row[idx] = 1
-                    encoded.append(row)
-
-                return ActionResult(
-                    success=True,
-                    message=f"One-hot encoded {len(encoded)} values",
-                    data={"encoded": encoded, "categories": unique_values}
-                )
-
-            elif encoding_type == "ordinal":
-                if categories is None:
-                    return ActionResult(success=False, message="categories required for ordinal encoding")
-
-                ordinal_map = {v: i for i, v in enumerate(categories)}
-                encoded = [ordinal_map.get(v, -1) for v in values]
-
-                return ActionResult(
-                    success=True,
-                    message=f"Ordinal encoded {len(encoded)} values",
-                    data={"encoded": encoded, "ordinal_map": ordinal_map}
-                )
-
-            elif encoding_type == "count":
-                from collections import Counter
-                counts = Counter(values)
-                encoded = [counts[v] for v in values]
-
-                return ActionResult(
-                    success=True,
-                    message=f"Count encoded {len(encoded)} values",
-                    data={"encoded": encoded, "count_map": dict(counts)}
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown encoding type: {encoding_type}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Encode error: {str(e)}")
-
-
-class ImputeMissingAction(BaseAction):
-    """Impute missing values."""
-    action_type = "impute_missing"
-    display_name = "缺失值填充"
-    description = "填充数据中的缺失值"
+class DataFrameTransformAction(BaseAction):
+    """Transform a pandas DataFrame."""
+    action_type = "dataframe_transform"
+    display_name = "DataFrame转换"
+    description = "转换pandas DataFrame"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            records = params.get("records", [])
-            column = params.get("column", "")
-            method = params.get("method", "mean")
-            constant_value = params.get("constant_value", 0)
+            if not PANDAS_AVAILABLE:
+                return ActionResult(success=False, message="pandas is not installed")
 
-            if not records:
-                return ActionResult(success=False, message="records list is required")
-
-            if not column and isinstance(records[0], dict):
-                return ActionResult(success=False, message="column name required for dict records")
-
-            values = []
-            indices = []
-
-            for i, record in enumerate(records):
-                if isinstance(record, dict):
-                    val = record.get(column)
-                elif isinstance(record, (list, tuple)):
-                    val = record
-                else:
-                    val = record
-
-                if val is None or val == "" or (isinstance(val, float) and val != val):
-                    indices.append(i)
-                else:
-                    try:
-                        values.append(float(val))
-                    except (TypeError, ValueError):
-                        indices.append(i)
-
-            fill_value = constant_value
-
-            if method == "mean" and values:
-                fill_value = sum(values) / len(values)
-            elif method == "median" and values:
-                fill_value = statistics.median(values)
-            elif method == "mode" and values:
-                from collections import Counter
-                fill_value = Counter(values).most_common(1)[0][0]
-            elif method == "forward":
-                last_val = None
-                for i, record in enumerate(records):
-                    if isinstance(record, dict):
-                        val = record.get(column)
-                    else:
-                        val = record
-                    if val is not None and val != "":
-                        last_val = val
-                    elif i in indices and last_val is not None:
-                        indices.remove(i)
-                        if isinstance(record, dict):
-                            record[column] = last_val
-                return ActionResult(
-                    success=True,
-                    message=f"Forward filled {len(indices)} missing values",
-                    data={"records": records, "filled_count": len(indices)}
-                )
-            elif method == "backward":
-                next_val = None
-                for i in reversed(range(len(records))):
-                    record = records[i]
-                    if isinstance(record, dict):
-                        val = record.get(column)
-                    else:
-                        val = record
-                    if val is not None and val != "":
-                        next_val = val
-                    elif i in indices and next_val is not None:
-                        indices.remove(i)
-                        if isinstance(record, dict):
-                            record[column] = next_val
-                return ActionResult(
-                    success=True,
-                    message=f"Backward filled {len(indices)} missing values",
-                    data={"records": records, "filled_count": len(indices)}
-                )
-
-            for i in indices:
-                record = records[i]
-                if isinstance(record, dict):
-                    record[column] = fill_value
-
-            return ActionResult(
-                success=True,
-                message=f"Imputed {len(indices)} missing values with {method}",
-                data={"records": records, "filled_count": len(indices), "fill_value": fill_value}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Impute error: {str(e)}")
-
-
-class ReshapeAction(BaseAction):
-    """Reshape data structures."""
-    action_type = "reshape"
-    display_name = "数据重塑"
-    description = "重塑数据结构"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
             data = params.get("data", [])
-            from_shape = params.get("from_shape", "flat")
-            to_shape = params.get("to_shape", "nested")
+            operations = params.get("operations", [])
+            columns_rename = params.get("columns_rename", {})
+            drop_columns = params.get("drop_columns", [])
+            fill_na = params.get("fill_na", None)
 
             if not data:
-                return ActionResult(success=False, message="data list is required")
+                return ActionResult(success=False, message="data is required")
 
-            if from_shape == "flat" and to_shape == "nested":
-                group_by = params.get("group_by", "")
-                if not group_by:
-                    return ActionResult(success=False, message="group_by required")
+            df = pd.DataFrame(data)
 
-                grouped = {}
-                for record in data:
-                    if isinstance(record, dict):
-                        key = record.get(group_by, "unknown")
-                        if key not in grouped:
-                            grouped[key] = []
-                        grouped[key].append(record)
+            for op in operations:
+                op_type = op.get("type", "")
 
-                return ActionResult(
-                    success=True,
-                    message=f"Reshaped to {len(grouped)} groups",
-                    data={"reshaped": grouped, "group_count": len(grouped)}
-                )
+                if op_type == "filter":
+                    column = op.get("column", "")
+                    operator = op.get("operator", "==")
+                    value = op.get("value", None)
+                    if column in df.columns:
+                        if operator == "==":
+                            df = df[df[column] == value]
+                        elif operator == "!=":
+                            df = df[df[column] != value]
+                        elif operator == ">":
+                            df = df[df[column] > value]
+                        elif operator == "<":
+                            df = df[df[column] < value]
+                        elif operator == ">=":
+                            df = df[df[column] >= value]
+                        elif operator == "<=":
+                            df = df[df[column] <= value]
+                        elif operator == "contains":
+                            df = df[df[column].astype(str).str.contains(str(value), na=False)]
 
-            elif from_shape == "nested" and to_shape == "flat":
-                result = []
-                for key, values in data.items() if isinstance(data, dict) else enumerate(data):
-                    for item in values:
-                        if isinstance(item, dict):
-                            item_copy = dict(item)
-                            item_copy[params.get("key_field", "group")] = key
-                            result.append(item_copy)
-                        else:
-                            result.append({"value": item, "group": key})
+                elif op_type == "sort":
+                    by = op.get("by", "")
+                    ascending = op.get("ascending", True)
+                    if by in df.columns:
+                        df = df.sort_values(by=by, ascending=ascending)
 
-                return ActionResult(
-                    success=True,
-                    message=f"Reshaped to {len(result)} flat records",
-                    data={"reshaped": result, "row_count": len(result)}
-                )
+                elif op_type == "groupby":
+                    by = op.get("by", [])
+                    agg_func = op.get("agg_func", "sum")
+                    result_col = op.get("result_column", "result")
+                    if all(c in df.columns for c in by):
+                        df = df.groupby(by)[by[0]].agg(agg_func).reset_index()
 
-            elif from_shape == "wide" and to_shape == "long":
-                id_cols = params.get("id_cols", [])
-                value_cols = params.get("value_cols", [])
-                var_name = params.get("var_name", "variable")
-                val_name = params.get("val_name", "value")
+            if columns_rename:
+                df = df.rename(columns=columns_rename)
 
-                if not id_cols or not value_cols:
-                    return ActionResult(success=False, message="id_cols and value_cols required")
+            if drop_columns:
+                existing_drops = [c for c in drop_columns if c in df.columns]
+                if existing_drops:
+                    df = df.drop(columns=existing_drops)
 
-                result = []
-                for record in data:
-                    if not isinstance(record, dict):
-                        continue
-                    base = {col: record.get(col) for col in id_cols}
-                    for vcol in value_cols:
-                        row = dict(base)
-                        row[var_name] = vcol
-                        row[val_name] = record.get(vcol)
-                        result.append(row)
-
-                return ActionResult(
-                    success=True,
-                    message=f"Reshaped from wide to long: {len(result)} rows",
-                    data={"reshaped": result, "row_count": len(result)}
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unsupported reshape: {from_shape} -> {to_shape}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Reshape error: {str(e)}")
-
-
-class GroupAggregateAction(BaseAction):
-    """Group and aggregate data."""
-    action_type = "group_aggregate"
-    display_name = "分组聚合"
-    description = "分组并聚合数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            records = params.get("records", [])
-            group_by = params.get("group_by", [])
-            aggregations = params.get("aggregations", {})
-
-            if not records:
-                return ActionResult(success=False, message="records list is required")
-
-            if isinstance(group_by, str):
-                group_by = [group_by]
-
-            if not group_by or not aggregations:
-                return ActionResult(success=False, message="group_by and aggregations required")
-
-            groups = {}
-            for record in records:
-                if not isinstance(record, dict):
-                    continue
-                key = tuple(record.get(col, None) for col in group_by)
-                if key not in groups:
-                    groups[key] = []
-                groups[key].append(record)
-
-            results = []
-            for key, group_records in groups.items():
-                result = dict(zip(group_by, key))
-                for field, agg_func in aggregations.items():
-                    values = []
-                    for record in group_records:
-                        val = record.get(field)
-                        if val is not None:
-                            try:
-                                values.append(float(val))
-                            except (TypeError, ValueError):
-                                pass
-
-                    if agg_func == "sum":
-                        result[f"{field}_sum"] = sum(values) if values else 0
-                    elif agg_func == "avg" or agg_func == "mean":
-                        result[f"{field}_mean"] = sum(values) / len(values) if values else 0
-                    elif agg_func == "count":
-                        result[f"{field}_count"] = len(values)
-                    elif agg_func == "min":
-                        result[f"{field}_min"] = min(values) if values else None
-                    elif agg_func == "max":
-                        result[f"{field}_max"] = max(values) if values else None
-                    elif agg_func == "first":
-                        result[f"{field}_first"] = values[0] if values else None
-                    elif agg_func == "last":
-                        result[f"{field}_last"] = values[-1] if values else None
-
-                results.append(result)
+            if fill_na is not None:
+                df = df.fillna(fill_na)
 
             return ActionResult(
                 success=True,
-                message=f"Aggregated into {len(results)} groups",
-                data={"results": results, "group_count": len(results)}
+                message=f"Transformed DataFrame: {len(df)} rows, {len(df.columns)} columns",
+                data={
+                    "shape": df.shape,
+                    "columns": list(df.columns),
+                    "transformed_data": df.to_dict(orient="records")
+                }
             )
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Group aggregate error: {str(e)}")
+            return ActionResult(success=False, message=f"DataFrame transform failed: {str(e)}")
 
 
-class DeduplicateAction(BaseAction):
-    """Remove duplicate records."""
-    action_type = "deduplicate"
-    display_name = "去重"
-    description = "删除重复记录"
+class DataFrameAggregateAction(BaseAction):
+    """Aggregate DataFrame data."""
+    action_type = "dataframe_aggregate"
+    display_name = "DataFrame聚合"
+    description = "聚合DataFrame数据"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            records = params.get("records", [])
-            key_fields = params.get("key_fields", None)
-            keep = params.get("keep", "first")
+            if not PANDAS_AVAILABLE:
+                return ActionResult(success=False, message="pandas is not installed")
 
-            if not records:
-                return ActionResult(success=False, message="records list is required")
+            data = params.get("data", [])
+            group_by = params.get("group_by", [])
+            aggregations = params.get("aggregations", [])
+            having = params.get("having", None)
 
-            if key_fields:
-                if isinstance(key_fields, str):
-                    key_fields = [key_fields]
+            if not data:
+                return ActionResult(success=False, message="data is required")
+            if not group_by:
+                return ActionResult(success=False, message="group_by is required")
+            if not aggregations:
+                return ActionResult(success=False, message="aggregations is required")
 
-                seen = {}
-                result = []
-                duplicates_removed = 0
+            df = pd.DataFrame(data)
 
-                for record in records:
-                    if not isinstance(record, dict):
-                        continue
-                    key = tuple(record.get(f) for f in key_fields)
+            if not all(c in df.columns for c in group_by):
+                return ActionResult(success=False, message="Some group_by columns not found in data")
 
-                    if key not in seen:
-                        seen[key] = len(result)
-                        result.append(record)
-                    elif keep == "last":
-                        result[seen[key]] = record
-                    else:
-                        duplicates_removed += 1
+            agg_dict = {}
+            for agg in aggregations:
+                column = agg.get("column", "")
+                func = agg.get("func", "sum")
+                alias = agg.get("alias", f"{column}_{func}")
+                if column in df.columns:
+                    agg_dict[column] = func
 
-                return ActionResult(
-                    success=True,
-                    message=f"Removed {duplicates_removed} duplicates",
-                    data={"records": result, "duplicates_removed": duplicates_removed, "original_count": len(records)}
-                )
+            if not agg_dict:
+                return ActionResult(success=False, message="No valid aggregations found")
 
-            else:
-                seen = set()
-                result = []
-                duplicates_removed = 0
+            result = df.groupby(group_by).agg(agg_dict).reset_index()
+            result.columns = group_by + [agg.get("alias", f"{agg['column']}_{agg['func']}") for agg in aggregations if agg["column"] in df.columns]
 
-                for record in records:
-                    key = str(record)
-                    if key not in seen:
-                        seen.add(key)
-                        result.append(record)
-                    else:
-                        duplicates_removed += 1
+            if having:
+                op = having.get("operator", " > ")
+                value = having.get("value", 0)
+                col = having.get("column", result.columns[-1])
+                if col in result.columns:
+                    if op == ">":
+                        result = result[result[col] > value]
+                    elif op == ">=":
+                        result = result[result[col] >= value]
+                    elif op == "<":
+                        result = result[result[col] < value]
+                    elif op == "<=":
+                        result = result[result[col] <= value]
 
-                return ActionResult(
-                    success=True,
-                    message=f"Removed {duplicates_removed} duplicates",
-                    data={"records": result, "duplicates_removed": duplicates_removed, "original_count": len(records)}
-                )
+            return ActionResult(
+                success=True,
+                message=f"Aggregated into {len(result)} groups",
+                data={
+                    "shape": result.shape,
+                    "columns": list(result.columns),
+                    "aggregated_data": result.to_dict(orient="records")
+                }
+            )
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Deduplicate error: {str(e)}")
+            return ActionResult(success=False, message=f"DataFrame aggregate failed: {str(e)}")
+
+
+class DataFrameMergeAction(BaseAction):
+    """Merge multiple DataFrames."""
+    action_type = "dataframe_merge"
+    display_name = "DataFrame合并"
+    description = "合并多个DataFrame"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            if not PANDAS_AVAILABLE:
+                return ActionResult(success=False, message="pandas is not installed")
+
+            left_data = params.get("left_data", [])
+            right_data = params.get("right_data", [])
+            left_on = params.get("left_on", "")
+            right_on = params.get("right_on", "")
+            how = params.get("how", "inner")
+            suffixes = params.get("suffixes", ["_left", "_right"])
+
+            if not left_data or not right_data:
+                return ActionResult(success=False, message="left_data and right_data are required")
+            if not left_on or not right_on:
+                return ActionResult(success=False, message="left_on and right_on are required")
+
+            left_df = pd.DataFrame(left_data)
+            right_df = pd.DataFrame(right_data)
+
+            if left_on not in left_df.columns:
+                return ActionResult(success=False, message=f"Column '{left_on}' not in left data")
+            if right_on not in right_df.columns:
+                return ActionResult(success=False, message=f"Column '{right_on}' not in right data")
+
+            merged = pd.merge(left_df, right_df, left_on=left_on, right_on=right_on, how=how, suffixes=suffixes)
+
+            return ActionResult(
+                success=True,
+                message=f"Merged DataFrame: {len(merged)} rows",
+                data={
+                    "shape": merged.shape,
+                    "columns": list(merged.columns),
+                    "merged_data": merged.to_dict(orient="records")
+                }
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"DataFrame merge failed: {str(e)}")
