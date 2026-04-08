@@ -1,263 +1,321 @@
-"""Distributed lock action module for RabAI AutoClick.
+"""Distributed Lock Action Module.
 
-Provides distributed locking operations:
-- LockAcquireAction: Acquire a lock
-- LockReleaseAction: Release a lock
-- LockStatsAction: Get lock statistics
-- LockContextAction: Lock context manager
+Provides distributed locking mechanism for coordinating access
+to shared resources across processes or machines.
 """
+from __future__ import annotations
 
-import threading
 import time
 import uuid
-from typing import Any, Callable, Dict, Optional
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 import sys
 import os
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+
+
+class LockStatus(Enum):
+    """Lock status."""
+    ACQUIRED = "acquired"
+    RELEASED = "released"
+    EXPIRED = "expired"
+    CONFLICT = "conflict"
 
 
 @dataclass
 class Lock:
-    """Represents a lock."""
-    name: str
-    lock_id: str
-    holder_id: str
-    acquired_at: datetime = field(default_factory=datetime.utcnow)
-    expires_at: Optional[datetime] = None
-    recursive: bool = False
-    hold_count: int = 1
+    """Distributed lock."""
+    key: str
+    owner_id: str
+    acquired_at: float
+    expires_at: float
+    ttl_seconds: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class DistributedLockManager:
-    """Manages distributed locks (in-memory implementation)."""
+class DistributedLockStore:
+    """In-memory distributed lock store."""
+
     def __init__(self):
         self._locks: Dict[str, Lock] = {}
-        self._lock = threading.RLock()
-        self._holders: Dict[str, str] = {}
 
-    def acquire(
-        self,
-        name: str,
-        holder_id: str,
-        timeout: Optional[float] = None,
-        ttl_seconds: Optional[float] = None,
-        recursive: bool = False
-    ) -> Optional[str]:
-        lock_id = str(uuid.uuid4())
-        start = time.time()
+    def acquire(self, key: str, owner_id: str,
+               ttl_seconds: float = 60.0,
+               metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Acquire lock."""
+        now = time.time()
 
-        while True:
-            with self._lock:
-                if name not in self._locks:
-                    expires = None
-                    if ttl_seconds:
-                        expires = datetime.utcnow() + timedelta(seconds=ttl_seconds)
-                    self._locks[name] = Lock(
-                        name=name,
-                        lock_id=lock_id,
-                        holder_id=holder_id,
-                        expires_at=expires,
-                        recursive=recursive
-                    )
-                    self._holders[holder_id] = name
-                    return lock_id
+        if key in self._locks:
+            existing = self._locks[key]
+            if existing.expires_at > now:
+                if existing.owner_id != owner_id:
+                    return False
 
-                existing_lock = self._locks[name]
-                if existing_lock.expires_at and datetime.utcnow() > existing_lock.expires_at:
-                    del self._locks[name]
-                    if existing_lock.holder_id in self._holders:
-                        del self._holders[existing_lock.holder_id]
-                    continue
+        lock = Lock(
+            key=key,
+            owner_id=owner_id,
+            acquired_at=now,
+            expires_at=now + ttl_seconds,
+            ttl_seconds=ttl_seconds,
+            metadata=metadata or {}
+        )
+        self._locks[key] = lock
+        return True
 
-                if existing_lock.holder_id == holder_id and recursive:
-                    existing_lock.hold_count += 1
-                    return lock_id
+    def release(self, key: str, owner_id: str) -> bool:
+        """Release lock."""
+        if key not in self._locks:
+            return False
 
-            if timeout and (time.time() - start) >= timeout:
+        lock = self._locks[key]
+        if lock.owner_id != owner_id:
+            return False
+
+        del self._locks[key]
+        return True
+
+    def extend(self, key: str, owner_id: str,
+              additional_seconds: float) -> bool:
+        """Extend lock TTL."""
+        if key not in self._locks:
+            return False
+
+        lock = self._locks[key]
+        if lock.owner_id != owner_id:
+            return False
+
+        lock.expires_at += additional_seconds
+        lock.ttl_seconds += additional_seconds
+        return True
+
+    def is_locked(self, key: str) -> bool:
+        """Check if key is locked."""
+        if key not in self._locks:
+            return False
+
+        lock = self._locks[key]
+        if time.time() > lock.expires_at:
+            del self._locks[key]
+            return False
+
+        return True
+
+    def get_lock(self, key: str) -> Optional[Lock]:
+        """Get lock info."""
+        if key in self._locks:
+            lock = self._locks[key]
+            if time.time() > lock.expires_at:
+                del self._locks[key]
                 return None
-            time.sleep(0.01)
+            return lock
+        return None
 
-    def release(self, name: str, holder_id: str) -> bool:
-        with self._lock:
-            if name not in self._locks:
-                return True
-            lock = self._locks[name]
-            if lock.holder_id != holder_id:
-                return False
-            lock.hold_count -= 1
-            if lock.hold_count <= 0:
-                del self._locks[name]
-                if holder_id in self._holders:
-                    del self._holders[holder_id]
-            return True
+    def cleanup_expired(self) -> int:
+        """Remove expired locks."""
+        now = time.time()
+        expired = [k for k, v in self._locks.items() if v.expires_at <= now]
+        for k in expired:
+            del self._locks[k]
+        return len(expired)
 
-    def is_locked(self, name: str) -> bool:
-        with self._lock:
-            if name not in self._locks:
-                return False
-            lock = self._locks[name]
-            if lock.expires_at and datetime.utcnow() > lock.expires_at:
-                del self._locks[name]
-                if lock.holder_id in self._holders:
-                    del self._holders[lock.holder_id]
-                return False
-            return True
 
-    def get_stats(self) -> Dict[str, Any]:
-        with self._lock:
-            now = datetime.utcnow()
-            active = []
-            for lock in self._locks.values():
-                if not lock.expires_at or lock.expires_at > now:
-                    active.append({
-                        "name": lock.name,
-                        "holder_id": lock.holder_id,
-                        "acquired_at": lock.acquired_at.isoformat(),
-                        "recursive": lock.recursive,
-                        "hold_count": lock.hold_count
-                    })
+_global_store = DistributedLockStore()
+
+
+class DistributedLockAction:
+    """Distributed lock action.
+
+    Example:
+        action = DistributedLockAction()
+
+        if action.acquire("resource-1", ttl=30):
+            try:
+                process_resource()
+            finally:
+                action.release("resource-1")
+    """
+
+    def __init__(self, store: Optional[DistributedLockStore] = None):
+        self._store = store or _global_store
+        self._local_owner = uuid.uuid4().hex
+
+    def acquire(self, key: str, owner_id: Optional[str] = None,
+               ttl_seconds: float = 60.0,
+               metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Acquire lock."""
+        owner = owner_id or self._local_owner
+        acquired = self._store.acquire(key, owner, ttl_seconds, metadata)
+
+        if acquired:
             return {
-                "total_locks": len(active),
-                "locks": active
+                "success": True,
+                "key": key,
+                "owner_id": owner,
+                "ttl_seconds": ttl_seconds,
+                "message": f"Acquired lock: {key}"
             }
 
+        lock = self._store.get_lock(key)
+        return {
+            "success": False,
+            "key": key,
+            "owner_id": lock.owner_id if lock else None,
+            "message": "Lock already held"
+        }
 
-_lock_manager = DistributedLockManager()
+    def release(self, key: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
+        """Release lock."""
+        owner = owner_id or self._local_owner
+        released = self._store.release(key, owner)
+
+        if released:
+            return {
+                "success": True,
+                "key": key,
+                "message": f"Released lock: {key}"
+            }
+
+        return {
+            "success": False,
+            "key": key,
+            "message": "Not lock owner or lock not found"
+        }
+
+    def extend(self, key: str, additional_seconds: float,
+              owner_id: Optional[str] = None) -> Dict[str, Any]:
+        """Extend lock TTL."""
+        owner = owner_id or self._local_owner
+        extended = self._store.extend(key, owner, additional_seconds)
+
+        if extended:
+            return {
+                "success": True,
+                "key": key,
+                "additional_seconds": additional_seconds,
+                "message": f"Extended lock: {key}"
+            }
+
+        return {
+            "success": False,
+            "key": key,
+            "message": "Not lock owner or lock not found"
+        }
+
+    def is_locked(self, key: str) -> Dict[str, Any]:
+        """Check if key is locked."""
+        locked = self._store.is_locked(key)
+        lock = self._store.get_lock(key) if locked else None
+
+        return {
+            "success": True,
+            "key": key,
+            "locked": locked,
+            "owner_id": lock.owner_id if lock else None,
+            "ttl_remaining": (lock.expires_at - time.time()) if lock else 0
+        }
+
+    def get_lock_info(self, key: str) -> Dict[str, Any]:
+        """Get detailed lock info."""
+        lock = self._store.get_lock(key)
+        if lock:
+            return {
+                "success": True,
+                "key": key,
+                "owner_id": lock.owner_id,
+                "acquired_at": lock.acquired_at,
+                "expires_at": lock.expires_at,
+                "ttl_seconds": lock.ttl_seconds,
+                "metadata": lock.metadata
+            }
+
+        return {
+            "success": False,
+            "key": key,
+            "message": "Lock not found or expired"
+        }
+
+    def list_locks(self) -> Dict[str, Any]:
+        """List all active locks."""
+        locks = list(self._store._locks.values())
+        return {
+            "success": True,
+            "locks": [
+                {
+                    "key": l.key,
+                    "owner_id": l.owner_id,
+                    "acquired_at": l.acquired_at,
+                    "expires_at": l.expires_at,
+                    "ttl_remaining": l.expires_at - time.time()
+                }
+                for l in locks
+            ],
+            "count": len(locks)
+        }
+
+    def cleanup(self) -> Dict[str, Any]:
+        """Cleanup expired locks."""
+        count = self._store.cleanup_expired()
+        return {
+            "success": True,
+            "cleaned": count,
+            "message": f"Cleaned {count} expired locks"
+        }
 
 
-class LockAcquireAction(BaseAction):
-    """Acquire a lock."""
-    action_type = "lock_acquire"
-    display_name = "获取锁"
-    description = "获取分布式锁"
+def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute distributed lock action."""
+    operation = params.get("operation", "")
+    action = DistributedLockAction()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            holder_id = params.get("holder_id", str(uuid.uuid4()))
-            timeout = params.get("timeout", 10.0)
-            ttl = params.get("ttl_seconds", None)
-            recursive = params.get("recursive", False)
-
-            if not name:
-                return ActionResult(success=False, message="name is required")
-
-            lock_id = _lock_manager.acquire(
-                name=name,
-                holder_id=holder_id,
-                timeout=timeout,
-                ttl_seconds=ttl,
-                recursive=recursive
+    try:
+        if operation == "acquire":
+            key = params.get("key", "")
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.acquire(
+                key=key,
+                owner_id=params.get("owner_id"),
+                ttl_seconds=params.get("ttl_seconds", 60.0),
+                metadata=params.get("metadata")
             )
 
-            if lock_id:
-                return ActionResult(
-                    success=True,
-                    message=f"Lock '{name}' acquired",
-                    data={"lock_id": lock_id, "name": name, "holder_id": holder_id}
-                )
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Failed to acquire lock '{name}' (timeout)",
-                    data={"name": name, "timeout": timeout}
-                )
+        elif operation == "release":
+            key = params.get("key", "")
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.release(key, params.get("owner_id"))
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Lock acquire failed: {str(e)}")
+        elif operation == "extend":
+            key = params.get("key", "")
+            additional_seconds = params.get("additional_seconds", 60.0)
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.extend(key, additional_seconds, params.get("owner_id"))
 
+        elif operation == "is_locked":
+            key = params.get("key", "")
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.is_locked(key)
 
-class LockReleaseAction(BaseAction):
-    """Release a lock."""
-    action_type = "lock_release"
-    display_name = "释放锁"
-    description = "释放分布式锁"
+        elif operation == "get_info":
+            key = params.get("key", "")
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.get_lock_info(key)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            holder_id = params.get("holder_id", "")
+        elif operation == "list":
+            return action.list_locks()
 
-            if not name:
-                return ActionResult(success=False, message="name is required")
-            if not holder_id:
-                return ActionResult(success=False, message="holder_id is required")
+        elif operation == "cleanup":
+            return action.cleanup()
 
-            released = _lock_manager.release(name, holder_id)
+        else:
+            return {"success": False, "message": f"Unknown operation: {operation}"}
 
-            return ActionResult(
-                success=released,
-                message=f"Lock '{name}' released: {released}",
-                data={"name": name, "holder_id": holder_id, "released": released}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Lock release failed: {str(e)}")
-
-
-class LockStatsAction(BaseAction):
-    """Get lock statistics."""
-    action_type = "lock_stats"
-    display_name = "锁统计"
-    description = "获取锁统计"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            stats = _lock_manager.get_stats()
-            return ActionResult(
-                success=True,
-                message=f"{stats['total_locks']} active locks",
-                data=stats
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Lock stats failed: {str(e)}")
-
-
-class LockContextAction(BaseAction):
-    """Lock context manager."""
-    action_type = "lock_context"
-    display_name = "锁上下文"
-    description = "锁上下文管理"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            operation = params.get("operation", "check")
-
-            if not name:
-                return ActionResult(success=False, message="name is required")
-
-            if operation == "check":
-                is_locked = _lock_manager.is_locked(name)
-                return ActionResult(
-                    success=True,
-                    message=f"Lock '{name}' is {'locked' if is_locked else 'available'}",
-                    data={"name": name, "is_locked": is_locked}
-                )
-            elif operation == "wait":
-                holder_id = params.get("holder_id", str(uuid.uuid4()))
-                timeout = params.get("timeout", 10.0)
-                ttl = params.get("ttl_seconds", 60.0)
-
-                lock_id = _lock_manager.acquire(name, holder_id, timeout=timeout, ttl_seconds=ttl)
-                if lock_id:
-                    return ActionResult(
-                        success=True,
-                        message=f"Lock '{name}' acquired after wait",
-                        data={"lock_id": lock_id, "name": name, "holder_id": holder_id}
-                    )
-                else:
-                    return ActionResult(success=False, message=f"Timeout waiting for lock '{name}'")
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Lock context failed: {str(e)}")
+    except Exception as e:
+        return {"success": False, "message": f"Distributed lock error: {str(e)}"}
