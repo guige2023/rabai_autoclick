@@ -1,237 +1,221 @@
-"""API Monitor action module for RabAI AutoClick.
+"""API monitor action module for RabAI AutoClick.
 
 Provides API monitoring operations:
-- APIHealthCheckAction: Check API health
-- APIMetricsAction: Collect API metrics
-- APIAlertAction: Trigger API alerts
-- APIDashboardAction: Generate API dashboard
+- APIMonitorTrackAction: Track API calls
+- APIMonitorAlertAction: Set up monitoring alerts
+- APIMonitorStatusAction: Get API status
+- APIMonitorMetricsAction: Get API metrics
 """
 
-from __future__ import annotations
+import threading
+import time
+import urllib.request
+import urllib.parse
+import urllib.error
+from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+import json
+
 
 import sys
 import os
-import time
-from typing import Any, Dict, List, Optional
-from collections import defaultdict, deque
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class APIHealthCheckAction(BaseAction):
-    """Check API health."""
-    action_type = "api_health_check"
-    display_name = "API健康检查"
-    description = "API健康状态检查"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute health check."""
-        url = params.get('url', '')
-        timeout = params.get('timeout', 10)
-        expected_codes = params.get('expected_codes', [200])
-        output_var = params.get('output_var', 'health_result')
-
-        if not url:
-            return ActionResult(success=False, message="url is required")
-
-        try:
-            import requests
-
-            resolved_url = context.resolve_value(url) if context else url
-
-            start_time = time.time()
-            response = requests.get(resolved_url, timeout=timeout)
-            latency = (time.time() - start_time) * 1000
-
-            is_healthy = response.status_code in expected_codes
-
-            result = {
-                'healthy': is_healthy,
-                'url': resolved_url,
-                'status_code': response.status_code,
-                'latency_ms': round(latency, 2),
-                'timestamp': time.time(),
-            }
-
-            return ActionResult(
-                success=is_healthy,
-                data={output_var: result},
-                message=f"Health {'OK' if is_healthy else 'FAIL'}: {response.status_code} ({latency:.0f}ms)"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                data={output_var: {'healthy': False, 'error': str(e)}},
-                message=f"Health check failed: {e}"
-            )
+@dataclass
+class APICallRecord:
+    """Represents an API call record."""
+    url: str
+    method: str
+    status_code: Optional[int] = None
+    response_time_ms: float = 0.0
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    error: Optional[str] = None
+    success: bool = False
 
 
-class APIMetricsAction(BaseAction):
-    """Collect API metrics."""
-    action_type = "api_metrics"
-    display_name = "API指标"
-    description = "收集API指标"
-    version = "1.0"
-
+class APIMonitor:
+    """API monitoring service."""
     def __init__(self):
-        super().__init__()
-        self._metrics = defaultdict(lambda: {'count': 0, 'total_latency': 0, 'errors': 0, 'latencies': deque(maxlen=100)})
+        self._records: List[APICallRecord] = []
+        self._lock = threading.RLock()
+        self._alerts: Dict[str, Callable] = {}
+        self._max_records = 10000
+
+    def track(self, record: APICallRecord) -> None:
+        with self._lock:
+            self._records.append(record)
+            if len(self._records) > self._max_records:
+                self._records = self._records[-self._max_records:]
+
+    def get_records(self, limit: int = 100, since: Optional[datetime] = None) -> List[APICallRecord]:
+        with self._lock:
+            records = self._records
+            if since:
+                records = [r for r in records if r.timestamp >= since]
+            return records[-limit:]
+
+    def get_stats(self, window_seconds: int = 300) -> Dict[str, Any]:
+        with self._lock:
+            cutoff = datetime.utcnow() - timedelta(seconds=window_seconds)
+            recent = [r for r in self._records if r.timestamp >= cutoff]
+
+            if not recent:
+                return {
+                    "total_calls": 0,
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "avg_response_time_ms": 0,
+                    "success_rate": 1.0,
+                    "window_seconds": window_seconds
+                }
+
+            successes = [r for r in recent if r.success]
+            failures = [r for r in recent if not r.success]
+            response_times = [r.response_time_ms for r in recent if r.success]
+
+            return {
+                "total_calls": len(recent),
+                "success_count": len(successes),
+                "failure_count": len(failures),
+                "avg_response_time_ms": sum(response_times) / len(response_times) if response_times else 0,
+                "min_response_time_ms": min(response_times) if response_times else 0,
+                "max_response_time_ms": max(response_times) if response_times else 0,
+                "success_rate": len(successes) / len(recent) if recent else 0,
+                "window_seconds": window_seconds
+            }
+
+    def get_status(self) -> str:
+        stats = self.get_stats(window_seconds=60)
+        if stats["total_calls"] == 0:
+            return "no_data"
+        if stats["success_rate"] >= 0.99:
+            return "healthy"
+        elif stats["success_rate"] >= 0.95:
+            return "degraded"
+        else:
+            return "unhealthy"
+
+
+_monitor = APIMonitor()
+
+
+class APIMonitorTrackAction(BaseAction):
+    """Track API calls."""
+    action_type = "api_monitor_track"
+    display_name = "API监控"
+    description = "跟踪API调用"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute metrics collection."""
-        endpoint = params.get('endpoint', 'default')
-        latency = params.get('latency', 0)
-        status_code = params.get('status_code', 200)
-        increment = params.get('increment', True)
-        output_var = params.get('output_var', 'metrics_result')
-
         try:
-            resolved_endpoint = context.resolve_value(endpoint) if context else endpoint
-            resolved_latency = context.resolve_value(latency) if context else latency
-            resolved_status = context.resolve_value(status_code) if context else status_code
+            url = params.get("url", "")
+            method = params.get("method", "GET")
+            headers = params.get("headers", {})
+            body = params.get("body", None)
+            timeout = params.get("timeout", 30)
 
-            metrics = self._metrics[resolved_endpoint]
+            if not url:
+                return ActionResult(success=False, message="url is required")
 
-            if increment:
-                metrics['count'] += 1
-                metrics['total_latency'] += resolved_latency
-                metrics['latencies'].append(resolved_latency)
-                if resolved_status >= 400:
-                    metrics['errors'] += 1
+            start = time.time()
+            record = APICallRecord(url=url, method=method)
 
-            avg_latency = metrics['total_latency'] / metrics['count'] if metrics['count'] > 0 else 0
-            recent_latencies = list(metrics['latencies'])
-            p50 = sorted(recent_latencies)[len(recent_latencies) // 2] if recent_latencies else 0
-            p95 = sorted(recent_latencies)[int(len(recent_latencies) * 0.95)] if recent_latencies else 0
-            p99 = sorted(recent_latencies)[int(len(recent_latencies) * 0.99)] if recent_latencies else 0
+            try:
+                data = body.encode("utf-8") if body else None
+                req = urllib.request.Request(url, data=data, headers=headers, method=method)
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    record.status_code = response.getcode()
+                    record.success = 200 <= response.getcode() < 300
+            except urllib.error.HTTPError as e:
+                record.status_code = e.code
+                record.success = False
+                record.error = str(e.reason)
+            except urllib.error.URLError as e:
+                record.error = str(e.reason)
+                record.success = False
+            except Exception as e:
+                record.error = str(e)
+                record.success = False
 
-            result = {
-                'endpoint': resolved_endpoint,
-                'request_count': metrics['count'],
-                'error_count': metrics['errors'],
-                'error_rate': metrics['errors'] / metrics['count'] if metrics['count'] > 0 else 0,
-                'avg_latency_ms': round(avg_latency, 2),
-                'p50_latency_ms': round(p50, 2),
-                'p95_latency_ms': round(p95, 2),
-                'p99_latency_ms': round(p99, 2),
-            }
+            record.response_time_ms = (time.time() - start) * 1000
+            _monitor.track(record)
+
+            return ActionResult(
+                success=record.success,
+                message=f"API call: {record.status_code} in {record.response_time_ms:.2f}ms",
+                data={
+                    "success": record.success,
+                    "status_code": record.status_code,
+                    "response_time_ms": record.response_time_ms,
+                    "error": record.error
+                }
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"API monitor track failed: {str(e)}")
+
+
+class APIMonitorAlertAction(BaseAction):
+    """Set up monitoring alerts."""
+    action_type = "api_monitor_alert"
+    display_name = "API监控告警"
+    description = "设置API监控告警"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            alert_type = params.get("alert_type", "failure_rate")
+            threshold = params.get("threshold", 0.1)
+            window = params.get("window", 300)
 
             return ActionResult(
                 success=True,
-                data={output_var: result},
-                message=f"Metrics for {resolved_endpoint}: {metrics['count']} requests, {result['error_rate']:.1%} errors"
+                message=f"Alert set: {alert_type} > {threshold} in {window}s",
+                data={"alert_type": alert_type, "threshold": threshold, "window": window}
             )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"API metrics error: {e}")
+            return ActionResult(success=False, message=f"API monitor alert failed: {str(e)}")
 
 
-class APIAlertAction(BaseAction):
-    """Trigger API alerts."""
-    action_type = "api_alert"
-    display_name = "API告警"
-    description = "触发API告警"
-    version = "1.0"
+class APIMonitorStatusAction(BaseAction):
+    """Get API status."""
+    action_type = "api_monitor_status"
+    display_name = "API状态"
+    description = "获取API状态"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute alert trigger."""
-        metric = params.get('metric', '')
-        threshold = params.get('threshold', 0)
-        current_value = params.get('current_value', 0)
-        operator = params.get('operator', 'gt')
-        message = params.get('message', '')
-        severity = params.get('severity', 'warning')
-        output_var = params.get('output_var', 'alert_result')
-
         try:
-            resolved_metric = context.resolve_value(metric) if context else metric
-            resolved_threshold = context.resolve_value(threshold) if context else threshold
-            resolved_value = context.resolve_value(current_value) if context else current_value
-            resolved_message = context.resolve_value(message) if context else message
-
-            triggered = False
-            if operator == 'gt':
-                triggered = resolved_value > resolved_threshold
-            elif operator == 'lt':
-                triggered = resolved_value < resolved_threshold
-            elif operator == 'eq':
-                triggered = resolved_value == resolved_threshold
-            elif operator == 'gte':
-                triggered = resolved_value >= resolved_threshold
-            elif operator == 'lte':
-                triggered = resolved_value <= resolved_threshold
-
-            result = {
-                'triggered': triggered,
-                'metric': resolved_metric,
-                'threshold': resolved_threshold,
-                'current_value': resolved_value,
-                'operator': operator,
-                'severity': severity,
-                'message': resolved_message,
-                'timestamp': time.time(),
-            }
-
+            status = _monitor.get_status()
             return ActionResult(
-                success=not triggered,
-                data={output_var: result},
-                message=f"Alert {'TRIGGERED' if triggered else 'OK'}: {resolved_metric} {resolved_value} {operator} {resolved_threshold}"
+                success=True,
+                message=f"API status: {status}",
+                data={"status": status}
             )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"API alert error: {e}")
+            return ActionResult(success=False, message=f"API monitor status failed: {str(e)}")
 
 
-class APIDashboardAction(BaseAction):
-    """Generate API dashboard."""
-    action_type = "api_dashboard"
-    display_name = "API仪表盘"
-    description = "生成API仪表盘"
-    version = "1.0"
+class APIMonitorMetricsAction(BaseAction):
+    """Get API metrics."""
+    action_type = "api_monitor_metrics"
+    display_name = "API指标"
+    description = "获取API指标"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute dashboard generation."""
-        metrics_data = params.get('metrics', {})
-        time_range = params.get('time_range', '1h')
-        output_var = params.get('output_var', 'dashboard')
-
         try:
-            resolved_metrics = context.resolve_value(metrics_data) if context else metrics_data
-
-            dashboard = {
-                'title': 'API Dashboard',
-                'time_range': time_range,
-                'generated_at': time.time(),
-                'summary': {
-                    'total_requests': 0,
-                    'total_errors': 0,
-                    'avg_latency': 0,
-                },
-                'endpoints': [],
-            }
-
-            if isinstance(resolved_metrics, dict):
-                for endpoint, metrics in resolved_metrics.items():
-                    dashboard['endpoints'].append({
-                        'endpoint': endpoint,
-                        'requests': metrics.get('count', 0),
-                        'errors': metrics.get('errors', 0),
-                        'latency': metrics.get('avg_latency', 0),
-                    })
-                    dashboard['summary']['total_requests'] += metrics.get('count', 0)
-                    dashboard['summary']['total_errors'] += metrics.get('errors', 0)
-
-            if dashboard['summary']['total_requests'] > 0:
-                dashboard['summary']['error_rate'] = dashboard['summary']['total_errors'] / dashboard['summary']['total_requests']
-            else:
-                dashboard['summary']['error_rate'] = 0
+            window = params.get("window", 300)
+            stats = _monitor.get_stats(window)
 
             return ActionResult(
                 success=True,
-                data={output_var: dashboard},
-                message=f"Dashboard generated: {dashboard['summary']['total_requests']} total requests"
+                message=f"API metrics (window: {window}s)",
+                data=stats
             )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"API dashboard error: {e}")
+            return ActionResult(success=False, message=f"API monitor metrics failed: {str(e)}")
