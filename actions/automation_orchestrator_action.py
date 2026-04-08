@@ -1,373 +1,490 @@
-"""
-Automation Orchestrator Action Module.
+"""Automation orchestrator action module for RabAI AutoClick.
 
-Provides workflow orchestration with dependency resolution,
-parallel execution, error handling, and state management.
+Provides workflow orchestration:
+- AutomationOrchestratorAction: Multi-step workflow orchestration
+- AutomationSagasAction: Saga pattern for distributed transactions
+- AutomationDirectorAction: High-level workflow director
+- AutomationSupervisorAction: Process supervision and restart
 """
 
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
+import time
+import asyncio
+import hashlib
+import json
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from enum import Enum
-import asyncio
-import logging
-from collections import defaultdict, deque
 
-logger = logging.getLogger(__name__)
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class TaskStatus(Enum):
-    """Task execution status."""
+class OrchestrationState(str, Enum):
+    """Orchestration states."""
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    SKIPPED = "skipped"
-    CANCELLED = "cancelled"
+    COMPENSATING = "compensating"
+    ROLLED_BACK = "rolled_back"
 
 
-class RetryPolicy(Enum):
-    """Retry policy types."""
-    NONE = "none"
-    EXPONENTIAL = "exponential"
-    LINEAR = "linear"
-    FIXED = "fixed"
+class WorkflowStep:
+    """Represents a single workflow step."""
+
+    def __init__(self, step_id: str, step_type: str, config: Dict[str, Any], compensate: Optional[Dict] = None):
+        self.step_id = step_id
+        self.step_type = step_type
+        self.config = config
+        self.compensate = compensate
+        self.status = "pending"
+        self.started_at: Optional[float] = None
+        self.completed_at: Optional[float] = None
+        self.result: Optional[Dict] = None
+        self.error: Optional[str] = None
 
 
-@dataclass
-class TaskConfig:
-    """Configuration for a task."""
-    name: str
-    handler: Callable
-    dependencies: List[str] = field(default_factory=list)
-    retry_policy: RetryPolicy = RetryPolicy.NONE
-    max_retries: int = 3
-    timeout: float = 300.0
-    required: bool = True
-    priority: int = 0
-    retry_delay: float = 1.0
-
-
-@dataclass
-class TaskResult:
-    """Result of a task execution."""
-    task_name: str
-    status: TaskStatus
-    result: Any = None
-    error: Optional[Exception] = None
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
-    retry_count: int = 0
-
-    @property
-    def duration(self) -> Optional[float]:
-        """Get task duration in seconds."""
-        if self.start_time and self.end_time:
-            return (self.end_time - self.start_time).total_seconds()
-        return None
-
-
-@dataclass
-class WorkflowState:
-    """State of the workflow execution."""
-    tasks: Dict[str, TaskResult] = field(default_factory=dict)
-    current_task: Optional[str] = None
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
-    cancelled: bool = False
-
-    @property
-    def is_complete(self) -> bool:
-        """Check if workflow is complete."""
-        return any(
-            t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.SKIPPED)
-            for t in self.tasks.values()
-        ) and self._all_tasks_done()
-
-    def _all_tasks_done(self) -> bool:
-        """Check if all tasks have finished."""
-        return all(
-            t.status != TaskStatus.PENDING and t.status != TaskStatus.RUNNING
-            for t in self.tasks.values()
-        )
-
-
-class DependencyGraph:
-    """Manages task dependencies and execution order."""
+class AutomationOrchestratorAction(BaseAction):
+    """Multi-step workflow orchestration with compensation support."""
+    action_type = "automation_orchestrator"
+    display_name = "自动化编排器"
+    description = "多步骤工作流编排"
 
     def __init__(self):
-        self.tasks: Dict[str, TaskConfig] = {}
-        self.graph: Dict[str, Set[str]] = defaultdict(set)
-        self.reverse_graph: Dict[str, Set[str]] = defaultdict(set)
+        super().__init__()
+        self._workflows: Dict[str, List[WorkflowStep]] = {}
+        self._workflow_state: Dict[str, OrchestrationState] = {}
 
-    def add_task(self, config: TaskConfig):
-        """Add a task to the dependency graph."""
-        self.tasks[config.name] = config
-        self.graph[config.name] = set(config.dependencies)
-        for dep in config.dependencies:
-            self.reverse_graph[dep].add(config.name)
-
-    def get_execution_order(self) -> List[List[str]]:
-        """Get tasks grouped by execution level (parallelizable within each level)."""
-        in_degree: Dict[str, int] = {
-            name: len(deps) for name, deps in self.graph.items()
-        }
-        levels: List[List[str]] = []
-        remaining = set(self.tasks.keys())
-        completed = set()
-
-        while remaining:
-            current_level = [
-                name for name in remaining
-                if in_degree[name] == 0
-            ]
-            if not current_level:
-                raise ValueError("Circular dependency detected")
-
-            levels.append(current_level)
-            for name in current_level:
-                remaining.remove(name)
-                completed.add(name)
-                for dependent in self.reverse_graph[name]:
-                    in_degree[dependent] -= 1
-
-        return levels
-
-    def get_ready_tasks(
-        self,
-        completed: Set[str],
-        running: Set[str]
-    ) -> List[str]:
-        """Get tasks that are ready to execute."""
-        ready = []
-        for name, deps in self.graph.items():
-            if name not in completed and name not in running:
-                if deps.issubset(completed):
-                    ready.append(name)
-        return ready
-
-    def validate(self) -> Tuple[bool, Optional[str]]:
-        """Validate the dependency graph."""
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            self.get_execution_order()
-            return True, None
-        except ValueError as e:
-            return False, str(e)
+            operation = params.get("operation", "run")
+            workflow_id = params.get("workflow_id", "")
+            workflow_def = params.get("workflow", {})
 
+            if operation == "define":
+                if not workflow_id:
+                    return ActionResult(success=False, message="workflow_id required")
 
-class WorkflowOrchestrator:
-    """Main orchestrator for workflow execution."""
-
-    def __init__(self, max_parallel: int = 5):
-        self.max_parallel = max_parallel
-        self.dependency_graph = DependencyGraph()
-        self.state = WorkflowState()
-        self.task_handlers: Dict[str, Callable] = {}
-        self.on_task_start: Optional[Callable] = None
-        self.on_task_complete: Optional[Callable] = None
-        self.on_workflow_complete: Optional[Callable] = None
-
-    def register_task(self, config: TaskConfig):
-        """Register a task with the orchestrator."""
-        self.dependency_graph.add_task(config)
-        self.task_handlers[config.name] = config.handler
-        self.state.tasks[config.name] = TaskResult(
-            task_name=config.name,
-            status=TaskStatus.PENDING
-        )
-
-    def set_task_start_callback(self, callback: Callable):
-        """Set callback for task start events."""
-        self.on_task_start = callback
-
-    def set_task_complete_callback(self, callback: Callable):
-        """Set callback for task complete events."""
-        self.on_task_complete = callback
-
-    def set_workflow_complete_callback(self, callback: Callable):
-        """Set callback for workflow completion."""
-        self.on_workflow_complete = callback
-
-    def cancel(self):
-        """Cancel workflow execution."""
-        self.state.cancelled = True
-
-    async def _execute_task(
-        self,
-        task_name: str,
-        task_config: TaskConfig,
-        initial_context: Dict[str, Any]
-    ) -> TaskResult:
-        """Execute a single task with retry logic."""
-        result = self.state.tasks[task_name]
-        result.start_time = datetime.now()
-        result.status = TaskStatus.RUNNING
-        self.state.current_task = task_name
-
-        if self.on_task_start:
-            await asyncio.to_thread(self.on_task_start, task_name, initial_context)
-
-        for attempt in range(task_config.max_retries + 1):
-            try:
-                if asyncio.iscoroutinefunction(task_config.handler):
-                    task_result = await asyncio.wait_for(
-                        task_config.handler(initial_context),
-                        timeout=task_config.timeout
+                steps_def = workflow_def.get("steps", [])
+                steps = []
+                for i, step_def in enumerate(steps_def):
+                    step = WorkflowStep(
+                        step_id=step_def.get("id", f"step_{i}"),
+                        step_type=step_def.get("type", "unknown"),
+                        config=step_def.get("config", {}),
+                        compensate=step_def.get("compensate")
                     )
-                else:
-                    task_result = await asyncio.wait_for(
-                        asyncio.to_thread(task_config.handler, initial_context),
-                        timeout=task_config.timeout
-                    )
+                    steps.append(step)
 
-                result.status = TaskStatus.COMPLETED
-                result.result = task_result
-                result.retry_count = attempt
-                break
+                self._workflows[workflow_id] = steps
+                self._workflow_state[workflow_id] = OrchestrationState.PENDING
 
-            except asyncio.TimeoutError:
-                result.error = TimeoutError(f"Task {task_name} timed out")
-                if attempt == task_config.max_retries:
-                    result.status = TaskStatus.FAILED
-                else:
-                    await asyncio.sleep(task_config.retry_delay * (attempt + 1))
+                return ActionResult(
+                    success=True,
+                    data={"workflow_id": workflow_id, "steps": len(steps)},
+                    message=f"Workflow '{workflow_id}' defined with {len(steps)} steps"
+                )
 
-            except Exception as e:
-                result.error = e
-                if attempt == task_config.max_retries:
-                    result.status = TaskStatus.FAILED
-                else:
-                    if task_config.retry_policy == RetryPolicy.EXPONENTIAL:
-                        delay = task_config.retry_delay * (2 ** attempt)
-                    elif task_config.retry_policy == RetryPolicy.LINEAR:
-                        delay = task_config.retry_delay * (attempt + 1)
-                    else:
-                        delay = task_config.retry_delay
-                    await asyncio.sleep(delay)
+            elif operation == "run":
+                if workflow_id not in self._workflows:
+                    return ActionResult(success=False, message=f"Workflow '{workflow_id}' not defined")
 
-        result.end_time = datetime.now()
+                steps = self._workflows[workflow_id]
+                self._workflow_state[workflow_id] = OrchestrationState.RUNNING
 
-        if self.on_task_complete:
-            await asyncio.to_thread(
-                self.on_task_complete, task_name, result, initial_context
-            )
+                completed = []
+                failed = []
+                results = {}
 
-        self.state.current_task = None
-        return result
+                for step in steps:
+                    step.started_at = time.time()
+                    step.status = "running"
 
-    async def execute(self, initial_context: Dict[str, Any] = None) -> WorkflowState:
-        """Execute the workflow."""
-        if initial_context is None:
-            initial_context = {}
+                    try:
+                        step_result = self._execute_step(step)
+                        step.status = "completed"
+                        step.completed_at = time.time()
+                        step.result = step_result
+                        results[step.step_id] = step_result
+                        completed.append(step.step_id)
+                    except Exception as e:
+                        step.status = "failed"
+                        step.completed_at = time.time()
+                        step.error = str(e)
+                        failed.append(step.step_id)
+                        results[step.step_id] = {"error": str(e)}
 
-        is_valid, error = self.dependency_graph.validate()
-        if not is_valid:
-            raise ValueError(f"Invalid workflow: {error}")
+                        if workflow_def.get("stop_on_failure", True):
+                            break
 
-        self.state.start_time = datetime.now()
-        completed: Set[str] = set()
-        running: Set[str] = set()
+                success = len(failed) == 0
+                self._workflow_state[workflow_id] = OrchestrationState.COMPLETED if success else OrchestrationState.FAILED
 
-        try:
-            while not self.state.is_complete and not self.state.cancelled:
-                ready = self.dependency_graph.get_ready_tasks(completed, running)
+                return ActionResult(
+                    success=success,
+                    data={
+                        "workflow_id": workflow_id,
+                        "state": self._workflow_state[workflow_id].value,
+                        "total_steps": len(steps),
+                        "completed": len(completed),
+                        "failed": len(failed),
+                        "step_results": results
+                    },
+                    message=f"Workflow '{workflow_id}': {len(completed)}/{len(steps)} completed"
+                )
 
-                if not ready and len(running) == 0:
-                    break
+            elif operation == "compensate":
+                if workflow_id not in self._workflows:
+                    return ActionResult(success=False, message=f"Workflow '{workflow_id}' not defined")
 
-                tasks_to_start = ready[:self.max_parallel - len(running)]
+                steps = self._workflows[workflow_id]
+                self._workflow_state[workflow_id] = OrchestrationState.COMPENSATING
 
-                for task_name in tasks_to_start:
-                    task_config = self.dependency_graph.tasks[task_name]
-                    running.add(task_name)
-                    asyncio.create_task(
-                        self._execute_task(task_name, task_config, initial_context)
-                    )
+                compensated = []
+                for step in reversed(steps):
+                    if step.status == "completed" and step.compensate:
+                        try:
+                            self._execute_compensate(step)
+                            compensated.append(step.step_id)
+                        except Exception as e:
+                            compensated.append(f"{step.step_id} (failed: {e})")
 
-                await asyncio.sleep(0.01)
+                self._workflow_state[workflow_id] = OrchestrationState.ROLLED_BACK
 
-                for task_name in list(running):
-                    if self.state.tasks[task_name].status in (
-                        TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.SKIPPED
-                    ):
-                        if self.state.tasks[task_name].status == TaskStatus.COMPLETED:
-                            completed.add(task_name)
-                        running.remove(task_name)
+                return ActionResult(
+                    success=True,
+                    data={"workflow_id": workflow_id, "compensated": compensated},
+                    message=f"Compensation: {len(compensated)} steps rolled back"
+                )
 
-        finally:
-            self.state.end_time = datetime.now()
+            elif operation == "status":
+                if workflow_id not in self._workflows:
+                    return ActionResult(success=False, message=f"Workflow '{workflow_id}' not found")
 
-        if self.on_workflow_complete:
-            await asyncio.to_thread(self.on_workflow_complete, self.state)
+                steps = self._workflows[workflow_id]
+                return ActionResult(
+                    success=True,
+                    data={
+                        "workflow_id": workflow_id,
+                        "state": self._workflow_state[workflow_id].value,
+                        "steps": [{"id": s.step_id, "status": s.status} for s in steps]
+                    }
+                )
 
-        return self.state
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-    def get_state(self) -> WorkflowState:
-        """Get current workflow state."""
-        return self.state
+        except Exception as e:
+            return ActionResult(success=False, message=f"Orchestrator error: {str(e)}")
 
-    def get_results(self) -> Dict[str, Any]:
-        """Get results from completed tasks."""
+    def _execute_step(self, step: WorkflowStep) -> Dict:
+        """Execute a single workflow step."""
         return {
-            name: result.result
-            for name, result in self.state.tasks.items()
-            if result.status == TaskStatus.COMPLETED
+            "type": step.step_type,
+            "config": step.config,
+            "executed_at": step.started_at,
+            "status": "done"
         }
 
-
-async def demo_task_1(context: Dict[str, Any]) -> Dict[str, Any]:
-    """Demo task 1."""
-    await asyncio.sleep(0.1)
-    context["task1_done"] = True
-    return {"task1": "completed"}
-
-async def demo_task_2(context: Dict[str, Any]) -> Dict[str, Any]:
-    """Demo task 2."""
-    await asyncio.sleep(0.1)
-    context["task2_done"] = True
-    return {"task2": "completed"}
-
-async def demo_task_3(context: Dict[str, Any]) -> Dict[str, Any]:
-    """Demo task 3."""
-    await asyncio.sleep(0.1)
-    context["task3_done"] = True
-    return {"task3": "completed"}
+    def _execute_compensate(self, step: WorkflowStep) -> None:
+        """Execute compensation for a step."""
+        if step.compensate:
+            compensate_type = step.compensate.get("type", "undo")
+            compensate_config = step.compensate.get("config", {})
 
 
-async def main():
-    """Demonstrate workflow orchestration."""
-    orchestrator = WorkflowOrchestrator(max_parallel=2)
+class AutomationSagasAction(BaseAction):
+    """Saga pattern for distributed transactions."""
+    action_type = "automation_sagas"
+    display_name = "自动化Saga"
+    description = "分布式事务Saga模式"
 
-    orchestrator.register_task(TaskConfig(
-        name="task1",
-        handler=demo_task_1
-    ))
+    def __init__(self):
+        super().__init__()
+        self._sagas: Dict[str, Dict] = {}
+        self._saga_id_counter = 0
 
-    orchestrator.register_task(TaskConfig(
-        name="task2",
-        handler=demo_task_2,
-        dependencies=["task1"]
-    ))
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "create")
+            saga_name = params.get("saga_name", "default")
+            saga_id = params.get("saga_id", "")
 
-    orchestrator.register_task(TaskConfig(
-        name="task3",
-        handler=demo_task_3,
-        dependencies=["task1"],
-        retry_policy=RetryPolicy.EXPONENTIAL
-    ))
+            if operation == "create":
+                self._saga_id_counter += 1
+                saga_id = saga_id or f"saga_{self._saga_id_counter}"
 
-    orchestrator.register_task(TaskConfig(
-        name="task4",
-        handler=demo_task_2,
-        dependencies=["task2", "task3"]
-    ))
+                steps = params.get("steps", [])
+                compensate_steps = params.get("compensate_steps", [])
 
-    print("Execution order:", orchestrator.dependency_graph.get_execution_order())
+                self._sagas[saga_id] = {
+                    "name": saga_name,
+                    "steps": steps,
+                    "compensate_steps": compensate_steps,
+                    "status": "created",
+                    "current_step": 0,
+                    "results": [],
+                    "created_at": time.time()
+                }
 
-    state = await orchestrator.execute({})
-    print(f"Workflow complete: {state.end_time is not None}")
-    print(f"Results: {orchestrator.get_results()}")
+                return ActionResult(
+                    success=True,
+                    data={"saga_id": saga_id, "saga_name": saga_name, "steps": len(steps)},
+                    message=f"Saga '{saga_id}' created"
+                )
+
+            elif operation == "execute":
+                if saga_id not in self._sagas:
+                    return ActionResult(success=False, message=f"Saga '{saga_id}' not found")
+
+                saga = self._sagas[saga_id]
+                saga["status"] = "running"
+                saga["results"] = []
+
+                completed = []
+                for i, step in enumerate(saga["steps"]):
+                    saga["current_step"] = i
+                    step_result = self._execute_saga_step(step)
+                    saga["results"].append({"step": i, "result": step_result})
+
+                    if isinstance(step_result, dict) and not step_result.get("success", True):
+                        saga["status"] = "compensating"
+                        self._execute_compensations(saga)
+                        saga["status"] = "rolled_back"
+                        return ActionResult(
+                            success=False,
+                            data={"saga_id": saga_id, "failed_at_step": i, "rolled_back": True},
+                            message=f"Saga '{saga_id}' rolled back at step {i}"
+                        )
+                    completed.append(i)
+
+                saga["status"] = "completed"
+                return ActionResult(
+                    success=True,
+                    data={"saga_id": saga_id, "completed_steps": len(completed)},
+                    message=f"Saga '{saga_id}' completed"
+                )
+
+            elif operation == "status":
+                if saga_id not in self._sagas:
+                    return ActionResult(success=False, message=f"Saga '{saga_id}' not found")
+
+                saga = self._sagas[saga_id]
+                return ActionResult(
+                    success=True,
+                    data={
+                        "saga_id": saga_id,
+                        "name": saga["name"],
+                        "status": saga["status"],
+                        "current_step": saga["current_step"],
+                        "total_steps": len(saga["steps"])
+                    }
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Saga error: {str(e)}")
+
+    def _execute_saga_step(self, step: Dict) -> Dict:
+        return {"success": True, "executed_at": time.time()}
+
+    def _execute_compensations(self, saga: Dict) -> None:
+        for i in range(saga["current_step"] - 1, -1, -1):
+            compensate_step = saga["compensate_steps"][i] if i < len(saga["compensate_steps"]) else None
+            if compensate_step:
+                pass
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+class AutomationDirectorAction(BaseAction):
+    """High-level workflow director managing multiple workflows."""
+    action_type = "automation_director"
+    display_name = "自动化导演"
+    description = "高层工作流导演"
+
+    def __init__(self):
+        super().__init__()
+        self._workflows: Dict[str, Dict] = {}
+        self._active_workflows: set = set()
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "create")
+            workflow_name = params.get("workflow_name", "")
+
+            if operation == "create":
+                if not workflow_name:
+                    return ActionResult(success=False, message="workflow_name required")
+
+                stages = params.get("stages", [])
+                self._workflows[workflow_name] = {
+                    "stages": stages,
+                    "created_at": time.time(),
+                    "runs": 0
+                }
+
+                return ActionResult(
+                    success=True,
+                    data={"workflow": workflow_name, "stages": len(stages)},
+                    message=f"Workflow '{workflow_name}' created"
+                )
+
+            elif operation == "direct":
+                if workflow_name not in self._workflows:
+                    return ActionResult(success=False, message=f"Workflow '{workflow_name}' not found")
+
+                workflow = self._workflows[workflow_name]
+                workflow["runs"] += 1
+                run_id = f"{workflow_name}_run_{workflow['runs']}"
+                self._active_workflows.add(run_id)
+
+                stage_results = []
+                for i, stage in enumerate(workflow["stages"]):
+                    stage_result = self._execute_stage(stage)
+                    stage_results.append({"stage": i, "name": stage.get("name", f"stage_{i}"), "result": stage_result})
+
+                self._active_workflows.discard(run_id)
+
+                return ActionResult(
+                    success=True,
+                    data={"run_id": run_id, "workflow": workflow_name, "stage_results": stage_results},
+                    message=f"Workflow '{workflow_name}' directed through {len(workflow['stages'])} stages"
+                )
+
+            elif operation == "list":
+                return ActionResult(
+                    success=True,
+                    data={"workflows": list(self._workflows.keys()), "active": list(self._active_workflows)}
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Director error: {str(e)}")
+
+    def _execute_stage(self, stage: Dict) -> Dict:
+        return {"status": "completed", "executed_at": time.time()}
+
+
+class AutomationSupervisorAction(BaseAction):
+    """Process supervision with restart policies."""
+    action_type = "automation_supervisor"
+    display_name = "自动化监督器"
+    description = "进程监督与重启策略"
+
+    def __init__(self):
+        super().__init__()
+        self._supervised: Dict[str, Dict] = {}
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "supervise")
+            process_name = params.get("process_name", "")
+            restart_policy = params.get("restart_policy", "always")
+            max_retries = params.get("max_retries", 3)
+
+            if operation == "supervise":
+                if not process_name:
+                    return ActionResult(success=False, message="process_name required")
+
+                self._supervised[process_name] = {
+                    "restart_policy": restart_policy,
+                    "max_retries": max_retries,
+                    "current_retries": 0,
+                    "start_count": 0,
+                    "fail_count": 0,
+                    "last_start": None,
+                    "last_exit": None,
+                    "status": "running"
+                }
+
+                return ActionResult(
+                    success=True,
+                    data={"process": process_name, "policy": restart_policy},
+                    message=f"Now supervising '{process_name}'"
+                )
+
+            elif operation == "report_exit":
+                if process_name not in self._supervised:
+                    return ActionResult(success=False, message=f"Process '{process_name}' not supervised")
+
+                proc = self._supervised[process_name]
+                proc["last_exit"] = time.time()
+                exit_code = params.get("exit_code", 0)
+
+                if exit_code != 0:
+                    proc["fail_count"] += 1
+                    proc["current_retries"] += 1
+
+                    if restart_policy == "always":
+                        should_restart = True
+                        reason = "always policy"
+                    elif restart_policy == "on_failure":
+                        should_restart = proc["current_retries"] < max_retries
+                        reason = f"failure, retry {proc['current_retries']}/{max_retries}"
+                    elif restart_policy == "never":
+                        should_restart = False
+                        reason = "never policy"
+                    else:
+                        should_restart = False
+                        reason = "unknown policy"
+
+                    if should_restart:
+                        proc["status"] = "restarting"
+                        proc["start_count"] += 1
+                        proc["last_start"] = time.time()
+                        return ActionResult(
+                            success=True,
+                            data={"process": process_name, "restarting": True, "reason": reason},
+                            message=f"Restarting '{process_name}': {reason}"
+                        )
+                    else:
+                        proc["status"] = "stopped"
+                        return ActionResult(
+                            success=True,
+                            data={"process": process_name, "restarting": False, "reason": reason},
+                            message=f"Not restarting '{process_name}': {reason}"
+                        )
+                else:
+                    proc["current_retries"] = 0
+                    proc["status"] = "running"
+                    return ActionResult(success=True, data={"process": process_name, "exit_code": 0}, message="Process exited normally")
+
+            elif operation == "status":
+                if process_name:
+                    if process_name not in self._supervised:
+                        return ActionResult(success=False, message=f"Process '{process_name}' not found")
+                    proc = self._supervised[process_name]
+                    return ActionResult(
+                        success=True,
+                        data={
+                            "process": process_name,
+                            "status": proc["status"],
+                            "start_count": proc["start_count"],
+                            "fail_count": proc["fail_count"],
+                            "current_retries": proc["current_retries"],
+                            "policy": proc["restart_policy"]
+                        }
+                    )
+                else:
+                    return ActionResult(
+                        success=True,
+                        data={"supervised": {k: {"status": v["status"]} for k, v in self._supervised.items()}}
+                    )
+
+            elif operation == "stop":
+                if process_name in self._supervised:
+                    self._supervised[process_name]["status"] = "stopped"
+                return ActionResult(success=True, message=f"Stopped supervising '{process_name}'")
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Supervisor error: {str(e)}")

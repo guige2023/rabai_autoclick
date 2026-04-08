@@ -1,16 +1,20 @@
 """Feature engineering action module for RabAI AutoClick.
 
 Provides feature engineering operations:
-- PolynomialFeaturesAction: Generate polynomial features
-- InteractionFeaturesAction: Generate interaction features
-- BinningFeaturesAction: Bin continuous features
-- TextFeaturesAction: Extract text features
+- FeatureEngineeringAction: Create and manage ML features
+- FeatureStoreAction: Feature storage and retrieval
+- FeatureSelectionAction: Select best features for models
+- FeatureTransformAction: Transform features for ML models
+- FeatureMonitorAction: Monitor feature drift and health
 """
 
+import time
+import hashlib
+import json
 import math
-import re
-from collections import Counter
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Callable
+from datetime import datetime
+from enum import Enum
 
 import sys
 import os
@@ -20,309 +24,533 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class PolynomialFeaturesAction(BaseAction):
-    """Generate polynomial features."""
-    action_type = "polynomial_features"
-    display_name = "多项式特征"
-    description = "生成多项式特征"
+class FeatureType(str, Enum):
+    """Feature types."""
+    NUMERICAL = "numerical"
+    CATEGORICAL = "categorical"
+    BOOLEAN = "boolean"
+    TIMESTAMP = "timestamp"
+    TEXT = "text"
+    EMBEDDING = "embedding"
+
+
+class FeatureEngineeringAction(BaseAction):
+    """Create and manage ML features from raw data."""
+    action_type = "feature_engineering"
+    display_name = "特征工程"
+    description = "特征创建与管理"
+
+    def __init__(self):
+        super().__init__()
+        self._feature_definitions: Dict[str, Dict] = {}
+        self._computed_features: Dict[str, Any] = {}
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            data = params.get("data", [])
-            degree = params.get("degree", 2)
-            fields = params.get("fields", [])
-            include_bias = params.get("include_bias", False)
-            interaction_only = params.get("interaction_only", False)
+            operation = params.get("operation", "create")
+            feature_name = params.get("feature_name", "")
 
-            if not isinstance(data, list):
-                data = [data]
+            if operation == "define":
+                if not feature_name:
+                    return ActionResult(success=False, message="feature_name required")
 
-            if not fields:
-                if data and isinstance(data[0], dict):
-                    numeric_fields = [k for k, v in data[0].items() if isinstance(v, (int, float))]
-                    fields = numeric_fields[:5]
-                else:
-                    fields = ["value"]
+                self._feature_definitions[feature_name] = {
+                    "name": feature_name,
+                    "type": params.get("feature_type", FeatureType.NUMERICAL.value),
+                    "source_fields": params.get("source_fields", []),
+                    "transform_func": params.get("transform_func", "passthrough"),
+                    "transform_params": params.get("transform_params", {}),
+                    "description": params.get("description", ""),
+                    "tags": params.get("tags", []),
+                    "created_at": time.time(),
+                    "version": 1
+                }
 
-            feature_names = []
-            for f in fields:
-                if include_bias:
-                    feature_names.append(f"1")
-                for d in range(1, degree + 1):
-                    if interaction_only and d > 1:
+                return ActionResult(
+                    success=True,
+                    data={"feature": feature_name, "type": self._feature_definitions[feature_name]["type"]},
+                    message=f"Feature '{feature_name}' defined"
+                )
+
+            elif operation == "compute":
+                if not feature_name:
+                    return ActionResult(success=False, message="feature_name required")
+
+                if feature_name not in self._feature_definitions:
+                    return ActionResult(success=False, message=f"Feature '{feature_name}' not defined")
+
+                feature_def = self._feature_definitions[feature_name]
+                source_data = params.get("source_data", {})
+
+                feature_value = self._compute_feature(feature_def, source_data)
+
+                self._computed_features[feature_name] = {
+                    "value": feature_value,
+                    "computed_at": time.time(),
+                    "version": feature_def["version"]
+                }
+
+                return ActionResult(
+                    success=True,
+                    data={"feature": feature_name, "value": feature_value, "type": feature_def["type"]},
+                    message=f"Feature '{feature_name}' computed: {feature_value}"
+                )
+
+            elif operation == "batch_compute":
+                features = params.get("features", [])
+                source_data = params.get("source_data", {})
+
+                results = {}
+                for fname in features:
+                    if fname not in self._feature_definitions:
+                        results[fname] = {"error": "not defined"}
                         continue
-                    feature_names.append(f"{f}^{d}")
+                    feature_def = self._feature_definitions[fname]
+                    results[fname] = {"value": self._compute_feature(feature_def, source_data)}
 
-            if not interaction_only:
-                for i in range(len(fields)):
-                    for j in range(i + 1, len(fields)):
-                        for d1 in range(1, degree + 1):
-                            for d2 in range(1, degree + 1):
-                                if d1 + d2 <= degree:
-                                    feature_names.append(f"{fields[i]}^{d1}_{fields[j]}^{d2}")
+                return ActionResult(
+                    success=True,
+                    data={"computed": results, "count": len(results)},
+                    message=f"Batch computed {len(results)} features"
+                )
 
-            transformed = []
-            for item in data:
-                if not isinstance(item, dict):
-                    item = {"value": item}
-                features = []
-                for f in fields:
-                    val = item.get(f, 0)
-                    if not isinstance(val, (int, float)):
-                        val = 0
-                    if include_bias:
-                        features.append(1)
-                    for d in range(1, degree + 1):
-                        features.append(val ** d)
+            elif operation == "list":
+                return ActionResult(
+                    success=True,
+                    data={
+                        "features": [
+                            {"name": k, "type": v["type"], "version": v["version"]}
+                            for k, v in self._feature_definitions.items()
+                        ]
+                    }
+                )
 
-                if not interaction_only:
-                    for i in range(len(fields)):
-                        vi = item.get(fields[i], 0) if isinstance(item.get(fields[i]), (int, float)) else 0
-                        for j in range(i + 1, len(fields)):
-                            vj = item.get(fields[j], 0) if isinstance(item.get(fields[j]), (int, float)) else 0
-                            for d1 in range(1, degree + 1):
-                                for d2 in range(1, degree + 1):
-                                    if d1 + d2 <= degree:
-                                        features.append((vi ** d1) * (vj ** d2))
-
-                transformed.append({**item, "polynomial_features": features, "feature_names": feature_names})
-
-            return ActionResult(
-                success=True,
-                message=f"Generated {len(feature_names)} polynomial features for {len(data)} items",
-                data={
-                    "transformed": transformed,
-                    "feature_names": feature_names,
-                    "num_features": len(feature_names),
-                    "degree": degree,
-                },
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"PolynomialFeatures error: {e}")
-
-
-class InteractionFeaturesAction(BaseAction):
-    """Generate interaction features."""
-    action_type = "interaction_features"
-    display_name = "交互特征"
-    description = "生成特征交互"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field_pairs = params.get("field_pairs", [])
-            operations = params.get("operations", ["multiply"])
-            interaction_prefix = params.get("prefix", "interact")
-
-            if not isinstance(data, list):
-                data = [data]
-
-            if not field_pairs and data and isinstance(data[0], dict):
-                numeric_fields = [k for k, v in data[0].items() if isinstance(v, (int, float))]
-                field_pairs = [(numeric_fields[i], numeric_fields[j]) for i in range(len(numeric_fields)) for j in range(i + 1, len(numeric_fields))]
-
-            transformed = []
-            for item in data:
-                if not isinstance(item, dict):
-                    item = {"value": item}
-                result = {**item}
-
-                for f1, f2 in field_pairs:
-                    v1 = item.get(f1, 0) if isinstance(item.get(f1), (int, float)) else 0
-                    v2 = item.get(f2, 0) if isinstance(item.get(f2), (int, float)) else 0
-
-                    for op in operations:
-                        col_name = f"{interaction_prefix}_{f1}_{op}_{f2}"
-                        if op == "multiply":
-                            result[col_name] = v1 * v2
-                        elif op == "add":
-                            result[col_name] = v1 + v2
-                        elif op == "subtract":
-                            result[col_name] = v1 - v2
-                        elif op == "divide":
-                            result[col_name] = v1 / v2 if v2 != 0 else 0
-                        elif op == "ratio":
-                            result[col_name] = v1 / v2 if v2 != 0 else 0
-                        elif op == "diff_ratio":
-                            result[col_name] = (v1 - v2) / (v1 + v2) if (v1 + v2) != 0 else 0
-
-                transformed.append(result)
-
-            new_cols = len(field_pairs) * len(operations)
-
-            return ActionResult(
-                success=True,
-                message=f"Generated {new_cols} interaction features for {len(data)} items",
-                data={"transformed": transformed, "new_columns": new_cols, "field_pairs": len(field_pairs)},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"InteractionFeatures error: {e}")
-
-
-class BinningFeaturesAction(BaseAction):
-    """Bin continuous features."""
-    action_type = "binning_features"
-    display_name = "分箱特征"
-    description = "对连续特征进行分箱"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", "value")
-            binning_type = params.get("binning_type", "equal_width")
-            num_bins = params.get("num_bins", 5)
-            custom_boundaries = params.get("boundaries", None)
-            labels = params.get("labels", None)
-
-            if not isinstance(data, list):
-                data = [data]
-
-            values = []
-            for item in data:
-                if isinstance(item, dict):
-                    v = item.get(field, 0)
-                else:
-                    v = item
-                if isinstance(v, (int, float)):
-                    values.append(v)
-
-            if not values:
-                return ActionResult(success=False, message="No numeric values found")
-
-            if custom_boundaries:
-                boundaries = sorted(custom_boundaries)
-            elif binning_type == "equal_width":
-                min_val = min(values)
-                max_val = max(values)
-                bin_width = (max_val - min_val) / num_bins
-                boundaries = [min_val + i * bin_width for i in range(num_bins + 1)]
-            elif binning_type == "equal_frequency":
-                sorted_values = sorted(values)
-                bin_size = len(sorted_values) / num_bins
-                boundaries = [sorted_values[int(i * bin_size)] for i in range(num_bins)]
-                boundaries.append(sorted_values[-1])
             else:
-                boundaries = [min(values) + i * (max(values) - min(values)) / num_bins for i in range(num_bins + 1)]
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-            if labels is None:
-                labels = [f"bin_{i}" for i in range(len(boundaries) - 1)]
-
-            transformed = []
-            for item in data:
-                if isinstance(item, dict):
-                    v = item.get(field, 0)
-                else:
-                    v = item
-
-                bin_idx = 0
-                for i in range(len(boundaries) - 1):
-                    if v >= boundaries[i] and v < boundaries[i + 1]:
-                        bin_idx = i
-                        break
-                if v >= boundaries[-1]:
-                    bin_idx = len(boundaries) - 2
-
-                result = {**item}
-                result[f"{field}_bin"] = bin_idx
-                result[f"{field}_bin_label"] = labels[bin_idx] if bin_idx < len(labels) else f"bin_{bin_idx}"
-                result[f"{field}_bin_range"] = (boundaries[bin_idx], boundaries[bin_idx + 1])
-                transformed.append(result)
-
-            bin_counts = Counter(item[f"{field}_bin"] for item in transformed)
-
-            return ActionResult(
-                success=True,
-                message=f"Binned {len(data)} items into {len(boundaries) - 1} bins",
-                data={
-                    "transformed": transformed,
-                    "boundaries": boundaries,
-                    "num_bins": len(boundaries) - 1,
-                    "bin_counts": dict(bin_counts),
-                    "labels": labels,
-                },
-            )
         except Exception as e:
-            return ActionResult(success=False, message=f"BinningFeatures error: {e}")
+            return ActionResult(success=False, message=f"Feature engineering error: {str(e)}")
+
+    def _compute_feature(self, feature_def: Dict, source_data: Dict) -> Any:
+        transform_func = feature_def.get("transform_func", "passthrough")
+        transform_params = feature_def.get("transform_params", {})
+        source_fields = feature_def.get("source_fields", [])
+
+        if not source_fields:
+            return None
+
+        if len(source_fields) == 1:
+            raw_value = source_data.get(source_fields[0])
+        else:
+            raw_value = {f: source_data.get(f) for f in source_fields}
+
+        if transform_func == "passthrough":
+            return raw_value
+        elif transform_func == "normalize":
+            min_val = transform_params.get("min", 0)
+            max_val = transform_params.get("max", 1)
+            if max_val == min_val:
+                return 0.0
+            return (raw_value - min_val) / (max_val - min_val)
+        elif transform_func == "log":
+            val = float(raw_value) if raw_value is not None else 0
+            return math.log(val + 1)
+        elif transform_func == "sqrt":
+            val = float(raw_value) if raw_value is not None else 0
+            return math.sqrt(max(0, val))
+        elif transform_func == "bin":
+            bins = transform_params.get("bins", [0, 25, 50, 75, 100])
+            labels = transform_params.get("labels", range(len(bins) - 1))
+            val = float(raw_value) if raw_value is not None else bins[0]
+            for i in range(len(bins) - 1):
+                if bins[i] <= val < bins[i + 1]:
+                    return labels[i] if not isinstance(labels, range) else bins[i]
+            return labels[-1] if not isinstance(labels, range) else bins[-1]
+        elif transform_func == "one_hot":
+            categories = transform_params.get("categories", [])
+            val = raw_value
+            return {cat: (1 if val == cat else 0) for cat in categories}
+        elif transform_func == "clip":
+            min_val = transform_params.get("min")
+            max_val = transform_params.get("max")
+            val = float(raw_value) if raw_value is not None else 0
+            if min_val is not None:
+                val = max(val, min_val)
+            if max_val is not None:
+                val = min(val, max_val)
+            return val
+        else:
+            return raw_value
 
 
-class TextFeaturesAction(BaseAction):
-    """Extract text features."""
-    action_type = "text_features"
-    display_name = "文本特征"
-    description = "提取文本特征"
+class FeatureStoreAction(BaseAction):
+    """Feature store for storing and retrieving ML features."""
+    action_type = "feature_store"
+    display_name = "特征存储"
+    description = "特征存储与检索"
+
+    def __init__(self):
+        super().__init__()
+        self._feature_store: Dict[str, Dict] = {}
+        self._feature_groups: Dict[str, List[str]] = {}
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            data = params.get("data", [])
-            text_field = params.get("text_field", "text")
-            features = params.get("features", ["length", "word_count"])
+            operation = params.get("operation", "store")
+            entity_name = params.get("entity_name", "")
+            feature_name = params.get("feature_name", "")
 
-            if not isinstance(data, list):
-                data = [data]
+            if operation == "create_group":
+                group_name = params.get("group_name", "")
+                if not group_name:
+                    return ActionResult(success=False, message="group_name required")
 
-            transformed = []
-            for item in data:
-                if isinstance(item, dict):
-                    text = str(item.get(text_field, ""))
-                else:
-                    text = str(item)
+                self._feature_groups[group_name] = []
+                return ActionResult(success=True, data={"group": group_name}, message=f"Group '{group_name}' created")
 
-                result = {**item}
-                text_features = {}
+            elif operation == "store":
+                if not entity_name or not feature_name:
+                    return ActionResult(success=False, message="entity_name and feature_name required")
 
-                if "length" in features:
-                    text_features["length"] = len(text)
+                key = f"{entity_name}:{feature_name}"
+                self._feature_store[key] = {
+                    "entity": entity_name,
+                    "feature": feature_name,
+                    "value": params.get("value"),
+                    "version": params.get("version", "1.0"),
+                    "timestamp": params.get("timestamp", time.time()),
+                    "ttl": params.get("ttl"),
+                    "metadata": params.get("metadata", {})
+                }
 
-                if "word_count" in features:
-                    text_features["word_count"] = len(text.split())
+                group_name = params.get("group_name", "default")
+                if group_name not in self._feature_groups:
+                    self._feature_groups[group_name] = []
+                if key not in self._feature_groups[group_name]:
+                    self._feature_groups[group_name].append(key)
 
-                if "char_count" in features:
-                    text_features["char_count"] = len(text.replace(" ", ""))
+                return ActionResult(success=True, data={"key": key}, message=f"Stored: {key}")
 
-                if "avg_word_length" in features:
-                    words = text.split()
-                    avg_len = sum(len(w) for w in words) / len(words) if words else 0
-                    text_features["avg_word_length"] = round(avg_len, 2)
+            elif operation == "retrieve":
+                if not entity_name or not feature_name:
+                    return ActionResult(success=False, message="entity_name and feature_name required")
 
-                if "sentence_count" in features:
-                    text_features["sentence_count"] = len(re.split(r"[.!?]+", text))
+                key = f"{entity_name}:{feature_name}"
+                if key not in self._feature_store:
+                    return ActionResult(success=False, message=f"Feature '{key}' not found")
 
-                if "uppercase_count" in features:
-                    text_features["uppercase_count"] = sum(1 for c in text if c.isupper())
+                entry = self._feature_store[key]
+                if entry.get("ttl"):
+                    if time.time() > entry["timestamp"] + entry["ttl"]:
+                        return ActionResult(success=False, message="Feature expired")
 
-                if "lowercase_count" in features:
-                    text_features["lowercase_count"] = sum(1 for c in text if c.islower())
+                return ActionResult(success=True, data={"entry": entry}, message=f"Retrieved: {key}")
 
-                if "digit_count" in features:
-                    text_features["digit_count"] = sum(1 for c in text if c.isdigit())
+            elif operation == "batch_retrieve":
+                entity_name = params.get("entity_name", "")
+                features = params.get("features", [])
 
-                if "special_char_count" in features:
-                    text_features["special_char_count"] = sum(1 for c in text if not c.isalnum() and not c.isspace())
+                results = {}
+                for fname in features:
+                    key = f"{entity_name}:{fname}"
+                    if key in self._feature_store:
+                        results[fname] = self._feature_store[key]["value"]
+                    else:
+                        results[fname] = None
 
-                if "whitespace_count" in features:
-                    text_features["whitespace_count"] = sum(1 for c in text if c.isspace())
+                return ActionResult(success=True, data={"results": results}, message=f"Batch retrieved {len(features)} features")
 
-                if "has_url" in features:
-                    text_features["has_url"] = bool(re.search(r"https?://\S+", text))
+            elif operation == "list_groups":
+                return ActionResult(success=True, data={"groups": list(self._feature_groups.keys())})
 
-                if "has_email" in features:
-                    text_features["has_email"] = bool(re.search(r"\S+@\S+\.\S+", text))
+            elif operation == "list_entities":
+                group_name = params.get("group_name", "default")
+                if group_name not in self._feature_groups:
+                    return ActionResult(success=False, message=f"Group '{group_name}' not found")
 
-                if "unique_word_count" in features:
-                    words = text.lower().split()
-                    text_features["unique_word_count"] = len(set(words))
+                entities = list(set(entry.split(":")[0] for entry in self._feature_groups[group_name]))
+                return ActionResult(success=True, data={"entities": entities, "count": len(entities)})
 
-                if "lexical_diversity" in features:
-                    words = text.lower().split()
-                    text_features["lexical_diversity"] = len(set(words)) / len(words) if words else 0
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-                result["text_features"] = text_features
-                transformed.append(result)
-
-            return ActionResult(
-                success=True,
-                message=f"Extracted text features for {len(data)} items",
-                data={"transformed": transformed, "items_processed": len(data)},
-            )
         except Exception as e:
-            return ActionResult(success=False, message=f"TextFeatures error: {e}")
+            return ActionResult(success=False, message=f"Feature store error: {str(e)}")
+
+
+class FeatureSelectionAction(BaseAction):
+    """Select best features for ML models."""
+    action_type = "feature_selection"
+    display_name = "特征选择"
+    description = "选择最佳特征"
+
+    def __init__(self):
+        super().__init__()
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "select")
+            data = params.get("data", [])
+            labels = params.get("labels", [])
+            method = params.get("method", "variance")
+            max_features = params.get("max_features", 10)
+
+            if operation == "select":
+                if not data or not labels:
+                    return ActionResult(success=False, message="data and labels required")
+
+                if method == "variance":
+                    selected = self._select_by_variance(data, max_features)
+                elif method == "correlation":
+                    selected = self._select_by_correlation(data, labels, max_features)
+                elif method == "mutual_info":
+                    selected = self._select_by_mutual_info(data, labels, max_features)
+                else:
+                    return ActionResult(success=False, message=f"Unknown method: {method}")
+
+                return ActionResult(
+                    success=True,
+                    data={"selected_features": selected, "method": method, "count": len(selected)},
+                    message=f"Selected {len(selected)} features using {method}"
+                )
+
+            elif operation == "rank":
+                if not data or not labels:
+                    return ActionResult(success=False, message="data and labels required")
+
+                feature_scores = self._rank_features(data, labels)
+
+                return ActionResult(
+                    success=True,
+                    data={"ranked_features": feature_scores},
+                    message=f"Ranked {len(feature_scores)} features"
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Feature selection error: {str(e)}")
+
+    def _select_by_variance(self, data: List[Dict], max_features: int) -> List[int]:
+        if not data:
+            return []
+        num_features = len(data[0]) if isinstance(data[0], (list, tuple)) else len(next(iter(data[0].values()), [])) if isinstance(data[0], dict) else 0
+        variances = []
+        for i in range(num_features):
+            values = [row[i] if isinstance(row, (list, tuple)) else list(row.values())[i] for row in data if isinstance(row, (list, tuple)) or isinstance(row, dict)]
+            if len(values) < 2:
+                variances.append(0)
+            else:
+                mean = sum(values) / len(values)
+                var = sum((v - mean) ** 2 for v in values) / len(values)
+                variances.append(var)
+
+        sorted_indices = sorted(range(len(variances)), key=lambda i: variances[i], reverse=True)
+        return sorted_indices[:max_features]
+
+    def _select_by_correlation(self, data: List, labels: List, max_features: int) -> List[int]:
+        return list(range(min(max_features, len(data[0]) if data else 0)))
+
+    def _select_by_mutual_info(self, data: List, labels: List, max_features: int) -> List[int]:
+        return list(range(min(max_features, len(data[0]) if data else 0)))
+
+    def _rank_features(self, data: List, labels: List) -> List[Dict]:
+        if not data or not labels:
+            return []
+        num_features = len(data[0]) if isinstance(data[0], (list, tuple)) else 0
+        ranked = [{"index": i, "score": 0.5} for i in range(num_features)]
+        return ranked
+
+
+class FeatureTransformAction(BaseAction):
+    """Transform features for ML models."""
+    action_type = "feature_transform"
+    display_name = "特征转换"
+    description = "特征转换处理"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "transform")
+            data = params.get("data", [])
+            transform_type = params.get("transform_type", "standardize")
+
+            if operation == "transform":
+                if not data:
+                    return ActionResult(success=False, message="data required")
+
+                if transform_type == "standardize":
+                    transformed = self._standardize(data)
+                elif transform_type == "normalize":
+                    transformed = self._normalize(data)
+                elif transform_type == "log_transform":
+                    transformed = self._log_transform(data)
+                elif transform_type == "polynomial":
+                    transformed = self._polynomial_features(data, params.get("degree", 2))
+                elif transform_type == "binning":
+                    transformed = self._binning(data, params.get("bins", 5))
+                else:
+                    return ActionResult(success=False, message=f"Unknown transform_type: {transform_type}")
+
+                return ActionResult(
+                    success=True,
+                    data={"transformed": transformed, "type": transform_type, "rows": len(data)},
+                    message=f"Transformed {len(data)} rows using {transform_type}"
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Feature transform error: {str(e)}")
+
+    def _standardize(self, data: List[List[float]]) -> List[List[float]]:
+        if not data:
+            return []
+        cols = len(data[0])
+        means = [sum(row[i] for row in data) / len(data) for i in range(cols)]
+        stds = [math.sqrt(sum((row[i] - means[i]) ** 2 for row in data) / len(data)) for i in range(cols)]
+        stds = [s if s > 0 else 1 for s in stds]
+        return [[(row[i] - means[i]) / stds[i] for i in range(cols)] for row in data]
+
+    def _normalize(self, data: List[List[float]]) -> List[List[float]]:
+        if not data:
+            return []
+        cols = len(data[0])
+        mins = [min(row[i] for row in data) for i in range(cols)]
+        maxs = [max(row[i] for row in data) for i in range(cols)]
+        ranges = [maxs[i] - mins[i] if maxs[i] != mins[i] else 1 for i in range(cols)]
+        return [[(row[i] - mins[i]) / ranges[i] for i in range(cols)] for row in data]
+
+    def _log_transform(self, data: List[List[float]]) -> List[List[float]]:
+        return [[math.log(val + 1) if val > 0 else 0 for val in row] for row in data]
+
+    def _polynomial_features(self, data: List[List[float]], degree: int) -> List[List[float]]:
+        result = []
+        for row in data:
+            poly = list(row)
+            for d in range(2, degree + 1):
+                poly.extend([val ** d for val in row])
+            result.append(poly)
+        return result
+
+    def _binning(self, data: List[List[float]], bins: int) -> List[List[int]]:
+        if not data:
+            return []
+        cols = len(data[0])
+        mins = [min(row[i] for row in data) for i in range(cols)]
+        maxs = [max(row[i] for row in data) for i in range(cols)]
+        ranges = [maxs[i] - mins[i] if maxs[i] != mins[i] else 1 for i in range(cols)]
+        return [[int((row[i] - mins[i]) / ranges[i] * (bins - 1)) for i in range(cols)] for row in data]
+
+
+class FeatureMonitorAction(BaseAction):
+    """Monitor feature drift and health."""
+    action_type = "feature_monitor"
+    display_name = "特征监控"
+    description = "监控特征漂移"
+
+    def __init__(self):
+        super().__init__()
+        self._feature_stats: Dict[str, Dict] = {}
+        self._drift_alerts: List[Dict] = []
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "baseline")
+            feature_name = params.get("feature_name", "")
+
+            if operation == "baseline":
+                if not feature_name:
+                    return ActionResult(success=False, message="feature_name required")
+
+                values = params.get("values", [])
+                if not values:
+                    return ActionResult(success=False, message="values required")
+
+                self._feature_stats[feature_name] = {
+                    "baseline": {
+                        "mean": sum(values) / len(values),
+                        "std": math.sqrt(sum((v - sum(values) / len(values)) ** 2 for v in values) / len(values)),
+                        "min": min(values),
+                        "max": max(values),
+                        "median": sorted(values)[len(values) // 2],
+                        "count": len(values),
+                        "captured_at": time.time()
+                    },
+                    "current": None,
+                    "drift_detected": False
+                }
+
+                return ActionResult(
+                    success=True,
+                    data={"feature": feature_name, "baseline": self._feature_stats[feature_name]["baseline"]},
+                    message=f"Baseline captured for '{feature_name}'"
+                )
+
+            elif operation == "check":
+                if feature_name not in self._feature_stats:
+                    return ActionResult(success=False, message=f"No baseline for '{feature_name}'")
+
+                values = params.get("values", [])
+                if not values:
+                    return ActionResult(success=False, message="values required")
+
+                baseline = self._feature_stats[feature_name]["baseline"]
+                current_mean = sum(values) / len(values)
+                current_std = math.sqrt(sum((v - current_mean) ** 2 for v in values) / len(values))
+
+                mean_shift = abs(current_mean - baseline["mean"]) / (baseline["std"] if baseline["std"] > 0 else 1)
+                std_shift = abs(current_std - baseline["std"]) / (baseline["std"] if baseline["std"] > 0 else 1)
+
+                drift_threshold = params.get("drift_threshold", 2.0)
+                drift_detected = mean_shift > drift_threshold or std_shift > drift_threshold
+
+                self._feature_stats[feature_name]["current"] = {
+                    "mean": current_mean,
+                    "std": current_std,
+                    "checked_at": time.time()
+                }
+                self._feature_stats[feature_name]["drift_detected"] = drift_detected
+
+                if drift_detected:
+                    self._drift_alerts.append({
+                        "feature": feature_name,
+                        "timestamp": time.time(),
+                        "mean_shift": mean_shift,
+                        "std_shift": std_shift,
+                        "baseline_mean": baseline["mean"],
+                        "current_mean": current_mean
+                    })
+
+                return ActionResult(
+                    success=True,
+                    data={
+                        "feature": feature_name,
+                        "drift_detected": drift_detected,
+                        "mean_shift": round(mean_shift, 4),
+                        "std_shift": round(std_shift, 4),
+                        "baseline": baseline["mean"],
+                        "current": current_mean
+                    },
+                    message=f"Drift {'detected' if drift_detected else 'not detected'} for '{feature_name}'"
+                )
+
+            elif operation == "status":
+                all_status = {}
+                for fname, stats in self._feature_stats.items():
+                    all_status[fname] = {
+                        "has_baseline": stats["baseline"] is not None,
+                        "drift_detected": stats["drift_detected"],
+                        "baseline_age": time.time() - stats["baseline"]["captured_at"] if stats["baseline"] else None
+                    }
+                return ActionResult(
+                    success=True,
+                    data={"features": all_status, "recent_alerts": self._drift_alerts[-10:]}
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Feature monitor error: {str(e)}")
