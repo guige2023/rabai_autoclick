@@ -1,197 +1,275 @@
-"""OCR (Optical Character Recognition) utilities for text extraction from screen regions.
+"""
+OCR Utilities
 
-Provides text extraction from screenshots and UI elements
-using Tesseract OCR or system-native text recognition,
-useful for reading dynamic text in automation flows.
+Optical character recognition for extracting text from screenshots.
+Supports multiple OCR engines and language configuration.
 
 Example:
-    >>> from utils.ocr_utils import extract_text, extract_text_from_region
-    >>> text = extract_text_from_region((100, 100, 400, 300))
-    >>> print(f"Found: {text}")
+    >>> ocr = OCREngine()
+    >>> text = ocr.extract_text(screenshot_path)
+    >>> regions = ocr.extract_regions(screenshot_path)
+    >>> for region in regions:
+    ...     print(region.text, region.bounds)
 """
 
 from __future__ import annotations
 
 import subprocess
+import tempfile
+from dataclasses import dataclass
 from typing import Optional
 
-__all__ = [
-    "extract_text",
-    "extract_text_from_region",
-    "extract_text_from_image",
-    "get_text_at_point",
-    "find_text_position",
-    "OCRError",
-]
+
+@dataclass
+class TextRegion:
+    """A text region detected by OCR."""
+    text: str
+    confidence: float
+    bounds: tuple[int, int, int, int]  # x, y, width, height
+    language: str = "en"
 
 
-class OCRError(Exception):
-    """Raised when OCR extraction fails."""
-    pass
-
-
-def extract_text(image_path: str, lang: str = "eng") -> str:
-    """Extract text from an image file using Tesseract OCR.
-
-    Args:
-        image_path: Path to the image file.
-        lang: Tesseract language code (default: 'eng').
-
-    Returns:
-        Extracted text as a string.
-
-    Raises:
-        OCRError: If Tesseract is not available or extraction fails.
+class OCREngine:
     """
-    try:
-        result = subprocess.run(
-            ["tesseract", image_path, "stdout", "-l", lang],
-            capture_output=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            return result.stdout.decode().strip()
-        else:
-            raise OCRError(f"Tesseract failed: {result.stderr.decode()}")
-    except FileNotFoundError:
-        raise OCRError("Tesseract is not installed. Install with: brew install tesseract")
-    except Exception as e:
-        raise OCRError(f"OCR extraction failed: {e}")
+    OCR engine wrapper for text extraction from images.
 
-
-def extract_text_from_region(
-    region: tuple[float, float, float, float],
-    lang: str = "eng",
-    scale: float = 2.0,
-) -> str:
-    """Extract text from a specific screen region.
-
-    Args:
-        region: Screen region as (x, y, width, height).
-        lang: Language code for OCR.
-        scale: Resolution scale factor for better accuracy.
-
-    Returns:
-        Extracted text string.
+    Supports:
+        - Tesseract (system installation)
+        - Native macOS OCR via Vision framework
     """
-    import tempfile
-    import os
 
-    try:
-        from utils.screenshot_utils import capture_region
-    except ImportError:
+    def __init__(
+        self,
+        engine: str = "vision",  # "vision" or "tesseract"
+        language: str = "eng",
+    ) -> None:
+        self.engine = engine
+        self.language = language
+
+    def extract_text(
+        self,
+        image_path: str,
+        language: Optional[str] = None,
+    ) -> str:
+        """
+        Extract all text from an image.
+
+        Args:
+            image_path: Path to image file.
+            language: Override language code.
+
+        Returns:
+            Extracted text, empty string on failure.
+        """
+        lang = language or self.language
+
+        if self.engine == "vision":
+            return self._extract_vision(image_path)
+        elif self.engine == "tesseract":
+            return self._extract_tesseract(image_path, lang)
+
         return ""
 
-    data = capture_region(region)
-    if data is None:
-        return ""
+    def extract_regions(
+        self,
+        image_path: str,
+        language: Optional[str] = None,
+    ) -> list[TextRegion]:
+        """
+        Extract text regions with bounding boxes.
 
-    # Write to temp file for tesseract
-    fd, tmp_path = tempfile.mkstemp(suffix=".png")
-    try:
-        os.write(fd, data)
-        os.close(fd)
-        text = extract_text(tmp_path, lang=lang)
-        return text
-    except Exception:
-        return ""
-    finally:
+        Args:
+            image_path: Path to image file.
+            language: Override language code.
+
+        Returns:
+            List of TextRegion objects.
+        """
+        lang = language or self.language
+
+        if self.engine == "vision":
+            return self._extract_regions_vision(image_path)
+        elif self.engine == "tesseract":
+            return self._extract_regions_tesseract(image_path, lang)
+
+        return []
+
+    def _extract_vision(self, image_path: str) -> str:
+        """Use macOS Vision framework for OCR."""
         try:
-            os.unlink(tmp_path)
+            script = f'''
+            use framework "Vision"
+            use framework "AppKit"
+
+            set img to current application's NSImage's alloc()'s initWithContentsOfFile:"{image_path}"
+            if img is missing value then return ""
+
+            set handler to current application's VNRecognizeTextRequest's new()
+            handler's setRecognitionLevel:(current application's VNRecognizeTextRecognitionLevelAccurate)
+            handler's setRecognitionLanguages:{{"{self.language}"}}
+
+            set request to current application's VNImageRequestRequest's alloc()'s initWithImage:img
+            set requests to current application's NSArray's arrayWithObject:request
+
+            current application's VNImageRequestHandler's alloc()'s initWithCVPixelBuffer:null options:(current application's NSDictionary's dictionary())'s performSelectorOnMainThread:"featuresInRequest:error:" withObject:requests waitUntilDone:true
+
+            set observations to request's results()
+            if observations is missing value then return ""
+
+            set resultText to current application's NSMutableString's string()
+            repeat with observation in observations
+                set topCandidate to observation's topCandidates(1)'s firstObject()
+                if topCandidate is not missing value then
+                    (resultText's appendString:(topCandidate's string()))
+                    (resultText's appendString:(character id 10))
+                end if
+            end repeat
+
+            return resultText as text
+            '''
+
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+            )
+
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return ""
+
+    def _extract_tesseract(self, image_path: str, language: str) -> str:
+        """Use Tesseract for OCR."""
+        try:
+            result = subprocess.run(
+                ["tesseract", image_path, "stdout", "-l", language],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return ""
+
+    def _extract_regions_vision(self, image_path: str) -> list[TextRegion]:
+        """Extract text regions using Vision framework."""
+        regions: list[TextRegion] = []
+
+        try:
+            script = f'''
+            use framework "Vision"
+            use framework "AppKit"
+
+            set img to current application's NSImage's alloc()'s initWithContentsOfFile:"{image_path}"
+            if img is missing value then return ""
+
+            set request to current application's VNRecognizeTextRequest's new()
+            request's setRecognitionLevel:(current application's VNRecognizeTextRecognitionLevelAccurate)
+            request's setRecognitionLanguages:{{"{self.language}"}}
+
+            set handler to current application's VNImageRequestHandler's alloc()'s initWithURL:(current application's NSURL's fileURLWithPath:"{image_path}") options:(current application's NSDictionary's dictionary())
+            handler's performRequests:{{request}} error:(missing value)
+
+            set observations to request's results()
+            if observations is missing value then return ""
+
+            set output to current application's NSMutableString's string()
+            repeat with observation in observations
+                set box to observation's boundingBox()
+                set text to (observation's topCandidates(1)'s firstObject()'s string()) as text
+                set conf to (observation's topCandidates(1)'s firstObject()'s confidence()) as number
+                set imgW to (img's size)'s width
+                set imgH to (img's size)'s height
+
+                set x to (box's origin)'s x * imgW
+                set y to (1.0 - (box's origin)'s y - (box's size)'s height) * imgH
+                set w to (box's size)'s width * imgW
+                set h to (box's size)'s height * imgH
+
+                (output's appendString:(text & "|" & (x as text) & "|" & (y as text) & "|" & (w as text) & "|" & (h as text) & "|" & (conf as text) & "\\n"))
+            end repeat
+
+            return output as text
+            '''
+
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+            )
+
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    parts = line.split("|")
+                    if len(parts) >= 6:
+                        try:
+                            regions.append(TextRegion(
+                                text=parts[0],
+                                confidence=float(parts[5]),
+                                bounds=(
+                                    int(float(parts[1])),
+                                    int(float(parts[2])),
+                                    int(float(parts[3])),
+                                    int(float(parts[4])),
+                                ),
+                            ))
+                        except (ValueError, IndexError):
+                            pass
         except Exception:
             pass
 
+        return regions
 
-def extract_text_from_image(
-    image_data: bytes,
-    lang: str = "eng",
-) -> str:
-    """Extract text from raw image bytes.
-
-    Args:
-        image_data: PNG/JPEG image bytes.
-        lang: Tesseract language code.
-
-    Returns:
-        Extracted text string.
-    """
-    import tempfile
-    import os
-
-    fd, tmp_path = tempfile.mkstemp(suffix=".png")
-    try:
-        os.write(fd, image_data)
-        os.close(fd)
-        return extract_text(tmp_path, lang=lang)
-    except Exception:
-        return ""
-    finally:
+    def _extract_regions_tesseract(
+        self,
+        image_path: str,
+        language: str,
+    ) -> list[TextRegion]:
+        """Extract text regions using Tesseract."""
+        regions: list[TextRegion] = []
         try:
-            os.unlink(tmp_path)
+            with tempfile.NamedTemporaryFile(suffix=".tsv", delete=False) as f:
+                tsv_path = f.name
+
+            result = subprocess.run(
+                ["tesseract", image_path, "stdout", "-l", language, "tsv"],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+            )
+
+            if result.returncode == 0:
+                # Parse TSV output
+                import csv
+                import io
+
+                reader = csv.reader(io.StringIO(result.stdout), delimiter="\t")
+                next(reader, None)  # Skip header
+                for row in reader:
+                    if len(row) >= 7:
+                        try:
+                            regions.append(TextRegion(
+                                text=row[11],  # text column
+                                confidence=float(row[10]) / 100.0,
+                                bounds=(
+                                    int(float(row[6])),
+                                    int(float(row[7])),
+                                    int(float(row[8])),
+                                    int(float(row[9])),
+                                ),
+                            ))
+                        except (ValueError, IndexError):
+                            pass
+
+            import os
+            os.remove(tsv_path)
         except Exception:
             pass
 
-
-def get_text_at_point(
-    x: float,
-    y: float,
-    radius: float = 50.0,
-    lang: str = "eng",
-) -> str:
-    """Extract text near a specific screen point.
-
-    Args:
-        x: Center X coordinate.
-        y: Center Y coordinate.
-        radius: Capture radius around the point.
-        lang: Language code.
-
-    Returns:
-        Extracted text string.
-    """
-    region = (x - radius, y - radius, radius * 2, radius * 2)
-    return extract_text_from_region(region, lang=lang)
-
-
-def find_text_position(
-    text: str,
-    region: Optional[tuple[float, float, float, float]] = None,
-    exact: bool = False,
-) -> list[tuple[int, int, int, int]]:
-    """Find the screen positions of text within a region.
-
-    Uses OCR to find text and returns bounding boxes.
-
-    Args:
-        text: Text to search for.
-        region: Optional screen region to search within.
-        exact: If True, require exact match.
-
-    Returns:
-        List of (x, y, width, height) bounding boxes for each match.
-    """
-    import re
-
-    if region is not None:
-        captured_text = extract_text_from_region(region)
-    else:
-        try:
-            from utils.screenshot_utils import capture_screen
-            data = capture_screen()
-            if data:
-                captured_text = extract_text_from_image(data)
-            else:
-                captured_text = ""
-        except Exception:
-            captured_text = ""
-
-    positions: list[tuple[int, int, int, int]] = []
-    pattern = re.escape(text) if exact else re.compile(re.escape(text), re.IGNORECASE)
-
-    for match in re.finditer(pattern, captured_text):
-        # Approximate position based on character offset
-        # This is a rough approximation - real implementation would need
-        # Tesseract's bounding box data
-        pass
-
-    return positions
+        return regions
