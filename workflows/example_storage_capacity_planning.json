@@ -1,0 +1,117 @@
+{
+  "name": "Storage Capacity Planning Workflow",
+  "description": "Automate storage capacity analysis and planning",
+  "version": "1.0",
+  "author": "RabAI Team",
+  "variables": {
+    "storage_volumes": 20,
+    "current_volume": 0,
+    "healthy_count": 0,
+    "warning_count": 0
+  },
+  "steps": [
+    {
+      "id": 1,
+      "type": "set_variable",
+      "name": "volume_counter",
+      "value": 0,
+      "value_type": "int",
+      "pre_delay": 1.0,
+      "comment": "Initialize volume counter"
+    },
+    {
+      "id": 2,
+      "type": "click",
+      "x": 100,
+      "y": 100,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.3,
+      "comment": "Open storage management"
+    },
+    {
+      "id": 3,
+      "type": "delay",
+      "seconds": 2.0,
+      "pre_delay": 0.5,
+      "comment": "Wait for management"
+    },
+    {
+      "id": 4,
+      "type": "loop",
+      "loop_id": "storage_check_loop",
+      "count": "{{storage_volumes}}",
+      "loop_start": 5,
+      "pre_delay": 0.3,
+      "comment": "Start storage check loop"
+    },
+    {
+      "id": 5,
+      "type": "click",
+      "x": 200,
+      "y": 200,
+      "button": "left",
+      "clicks": 1,
+      "pre_delay": 0.4,
+      "comment": "Select storage volume"
+    },
+    {
+      "id": 6,
+      "type": "delay",
+      "seconds": 1.5,
+      "pre_delay": 0.3,
+      "comment": "Wait for capacity check"
+    },
+    {
+      "id": 7,
+      "type": "screenshot",
+      "save_path": "./screenshots/storage_capacity_{{volume_counter}}.png",
+      "pre_delay": 0.5,
+      "comment": "Capture capacity screenshot"
+    },
+    {
+      "id": 8,
+      "type": "set_variable",
+      "name": "volume_counter",
+      "value": "{{volume_counter + 1}}",
+      "value_type": "expression",
+      "pre_delay": 0.2,
+      "comment": "Increment volume counter"
+    },
+    {
+      "id": 9,
+      "type": "condition",
+      "condition": "{{volume_counter < storage_volumes}}",
+      "true_next": 10,
+      "false_next": 11,
+      "pre_delay": 0.1,
+      "comment": "Check if more volumes"
+    },
+    {
+      "id": 10,
+      "type": "goto",
+      "step_id": 4,
+      "pre_delay": 0.1,
+      "comment": "Continue to next volume"
+    },
+    {
+      "id": 11,
+      "type": "screenshot",
+      "save_path": "./screenshots/storage_capacity_planning_complete.png",
+      "pre_delay": 0.5,
+      "comment": "Capture completion screenshot"
+    },
+    {
+      "id": 12,
+      "type": "delay",
+      "seconds": 1.0,
+      "pre_delay": 0.5,
+      "comment": "Final delay"
+    }
+  ],
+  "settings": {
+    "loop_count": 1,
+    "retry_on_failure": true,
+    "max_retries": 2
+  }
+}
