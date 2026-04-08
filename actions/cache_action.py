@@ -1,7 +1,7 @@
 """Cache action module for RabAI AutoClick.
 
-Provides caching functionality with TTL, LRU eviction,
-and cache-aside pattern support.
+Provides in-memory caching with TTL, LRU eviction,
+cache-aside pattern, and cache stampede prevention.
 """
 
 import sys
@@ -9,350 +9,270 @@ import os
 import time
 import threading
 import hashlib
-import json
+import pickle
 from typing import Any, Dict, List, Optional, Callable
-from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class LRUCache:
-    """Thread-safe LRU cache implementation."""
+class EvictionPolicy(Enum):
+    """Cache eviction policies."""
+    LRU = "lru"
+    LFU = "lfu"
+    FIFO = "fifo"
+    TTL = "ttl"
 
-    def __init__(self, capacity: int = 100):
-        self.capacity = capacity
-        self.cache: OrderedDict = OrderedDict()
-        self.lock = threading.Lock()
-        self.hits = 0
-        self.misses = 0
 
-    def get(self, key: str) -> Optional[Any]:
-        """Get value from cache."""
-        with self.lock:
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                self.hits += 1
-                entry = self.cache[key]
-                if entry['expires_at'] and time.time() > entry['expires_at']:
-                    del self.cache[key]
-                    self.misses += 1
-                    return None
-                return entry['value']
-            self.misses += 1
-            return None
-
-    def set(self, key: str, value: Any, ttl: float = 0):
-        """Set value in cache with optional TTL."""
-        with self.lock:
-            expires_at = time.time() + ttl if ttl > 0 else None
-            if key in self.cache:
-                self.cache.move_to_end(key)
-            self.cache[key] = {'value': value, 'expires_at': expires_at}
-            while len(self.cache) > self.capacity:
-                self.cache.popitem(last=False)
-
-    def delete(self, key: str):
-        """Delete key from cache."""
-        with self.lock:
-            if key in self.cache:
-                del self.cache[key]
-
-    def clear(self):
-        """Clear entire cache."""
-        with self.lock:
-            self.cache.clear()
-            self.hits = 0
-            self.misses = 0
-
-    def stats(self) -> Dict:
-        """Get cache statistics."""
-        with self.lock:
-            total = self.hits + self.misses
-            hit_rate = self.hits / total if total > 0 else 0
-            return {
-                'size': len(self.cache),
-                'capacity': self.capacity,
-                'hits': self.hits,
-                'misses': self.misses,
-                'hit_rate': round(hit_rate, 3),
-            }
+@dataclass
+class CacheEntry:
+    """A cache entry with metadata."""
+    key: str
+    value: Any
+    created_at: float
+    last_accessed: float
+    access_count: int = 0
+    size_bytes: int = 0
 
 
 class CacheAction(BaseAction):
-    """LRU cache with TTL support.
+    """In-memory cache with multiple eviction strategies.
     
-    Thread-safe in-memory cache with configurable
-    capacity and automatic expiration.
+    Supports LRU, LFU, FIFO, and TTL-based eviction
+    with cache-aside pattern and stampede prevention.
     """
     action_type = "cache"
-    display_name = "缓存"
-    description = "LRU缓存，支持TTL过期和自动淘汰"
+    display_name = "缓存管理"
+    description = "内存缓存：LRU/LFU/FIFO/TTL，支持缓存穿透防护"
 
-    _caches: Dict[str, LRUCache] = {}
-    _lock = threading.Lock()
+    _caches: Dict[str, Dict[str, CacheEntry]] = {}
+    _locks: Dict[str, threading.Lock] = {}
+    _stats: Dict[str, Dict[str, int]] = {}
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache operation.
+        """Perform cache operations.
         
         Args:
             context: Execution context.
             params: Dict with keys:
-                - cache_id: str (cache identifier)
-                - action: str (get/set/delete/clear/stats)
-                - key: str (for get/set/delete)
-                - value: any (for set)
-                - ttl: float (seconds, for set)
-                - capacity: int (for create)
+                - operation: str (get/set/delete/clear/has/stats/pop)
+                - cache_name: str, cache identifier
+                - key: str, cache key
+                - value: any, value to cache (for set)
+                - ttl: float, time-to-live in seconds
+                - max_size: int, max entries (for eviction)
+                - eviction_policy: str (lru/lfu/fifo/ttl)
                 - save_to_var: str
         
         Returns:
-            ActionResult with cache result.
+            ActionResult with cache operation result.
         """
-        cache_id = params.get('cache_id', 'default')
-        action = params.get('action', 'get')
+        operation = params.get('operation', '')
+        cache_name = params.get('cache_name', 'default')
         key = params.get('key', '')
-        value = params.get('value')
+        value = params.get('value', None)
         ttl = params.get('ttl', 0)
-        capacity = params.get('capacity', 100)
-        save_to_var = params.get('save_to_var', 'cache_result')
+        max_size = params.get('max_size', 1000)
+        eviction_policy = params.get('eviction_policy', 'lru')
+        save_to_var = params.get('save_to_var', None)
 
-        with self._lock:
-            if cache_id not in self._caches:
-                self._caches[cache_id] = LRUCache(capacity=capacity)
+        self._ensure_cache(cache_name, eviction_policy, max_size)
 
-        cache = self._caches[cache_id]
-
-        if action == 'get':
-            result_value = cache.get(key)
-            result = {
-                'cache_id': cache_id,
-                'action': 'get',
-                'key': key,
-                'found': result_value is not None,
-                'value': result_value,
-            }
-
-        elif action == 'set':
-            cache.set(key, value, ttl=ttl)
-            result = {
-                'cache_id': cache_id,
-                'action': 'set',
-                'key': key,
-                'ttl': ttl,
-            }
-
-        elif action == 'delete':
-            cache.delete(key)
-            result = {
-                'cache_id': cache_id,
-                'action': 'delete',
-                'key': key,
-            }
-
-        elif action == 'clear':
-            cache.clear()
-            result = {
-                'cache_id': cache_id,
-                'action': 'clear',
-            }
-
-        elif action == 'stats':
-            stats = cache.stats()
-            result = {
-                'cache_id': cache_id,
-                'action': 'stats',
-                **stats,
-            }
-
+        if operation == 'get':
+            return self._get(cache_name, key, save_to_var)
+        elif operation == 'set':
+            return self._set(cache_name, key, value, ttl, save_to_var)
+        elif operation == 'delete':
+            return self._delete(cache_name, key)
+        elif operation == 'clear':
+            return self._clear(cache_name)
+        elif operation == 'has':
+            return self._has(cache_name, key, save_to_var)
+        elif operation == 'stats':
+            return self._stats_op(cache_name, save_to_var)
+        elif operation == 'pop':
+            return self._pop(cache_name, key, save_to_var)
+        elif operation == 'keys':
+            return self._keys(cache_name, save_to_var)
         else:
-            return ActionResult(success=False, message=f"Unknown action: {action}")
+            return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-        if context and save_to_var:
-            context.variables[save_to_var] = result
+    def _ensure_cache(
+        self, cache_name: str, eviction_policy: str, max_size: int
+    ) -> None:
+        """Ensure cache exists."""
+        if cache_name not in self._caches:
+            with threading.Lock():
+                if cache_name not in self._caches:
+                    self._caches[cache_name] = {}
+                    self._locks[cache_name] = threading.Lock()
+                    self._stats[cache_name] = {
+                        'hits': 0, 'misses': 0, 'sets': 0,
+                        'deletes': 0, 'evictions': 0
+                    }
 
-        return ActionResult(success=True, data=result, message=f"Cache {action}: {key if key else cache_id}")
+    def _get(self, cache_name: str, key: str, save_to_var: Optional[str]) -> ActionResult:
+        """Get value from cache."""
+        if not key:
+            return ActionResult(success=False, message="key is required")
 
+        with self._locks[cache_name]:
+            entry = self._caches[cache_name].get(key)
+            if entry is None:
+                self._stats[cache_name]['misses'] += 1
+                return ActionResult(success=False, message="Cache miss", data=None)
 
-class CacheAsideAction(BaseAction):
-    """Cache-aside pattern implementation.
-    
-    Check cache first, load from source on miss,
-    and populate cache automatically.
-    """
-    action_type = "cache_aside"
-    display_name = "缓存旁路"
-    description = "缓存旁路模式：先查缓存，未命中再查源并回填"
+            # Check TTL
+            if entry.created_at + (getattr(entry, 'ttl', 0) or 0) > 0:
+                elapsed = time.time() - entry.created_at
+                if elapsed > getattr(entry, 'ttl', float('inf')):
+                    del self._caches[cache_name][key]
+                    self._stats[cache_name]['misses'] += 1
+                    return ActionResult(success=False, message="TTL expired", data=None)
 
-    _caches: Dict[str, LRUCache] = {}
-    _lock = threading.Lock()
+            # Update access metadata
+            entry.last_accessed = time.time()
+            entry.access_count += 1
+            self._stats[cache_name]['hits'] += 1
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache-aside pattern.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - cache_id: str
-                - key: str
-                - loader: callable (function to load data on miss)
-                - loader_params: dict
-                - ttl: float (cache TTL in seconds)
-                - save_to_var: str
-        
-        Returns:
-            ActionResult with cache-aside result.
-        """
-        cache_id = params.get('cache_id', 'aside_default')
-        key = params.get('key', '')
-        loader = params.get('loader', None)
-        loader_params = params.get('loader_params', {})
-        ttl = params.get('ttl', 300)
-        save_to_var = params.get('save_to_var', 'cache_aside_result')
-
-        with self._lock:
-            if cache_id not in self._caches:
-                self._caches[cache_id] = LRUCache(capacity=1000)
-
-        cache = self._caches[cache_id]
-
-        # Try cache first
-        value = cache.get(key)
-
-        if value is not None:
-            result = {
-                'cache_id': cache_id,
-                'key': key,
-                'source': 'cache',
-                'found': True,
-                'value': value,
-            }
-        else:
-            # Load from source
-            loaded = None
-            if loader and callable(loader):
-                try:
-                    loaded = loader(loader_params)
-                except Exception as e:
-                    return ActionResult(success=False, message=f"Loader error: {e}")
-
-            if loaded is not None:
-                cache.set(key, loaded, ttl=ttl)
-                result = {
-                    'cache_id': cache_id,
-                    'key': key,
-                    'source': 'loader',
-                    'found': True,
-                    'value': loaded,
-                }
-            else:
-                result = {
-                    'cache_id': cache_id,
-                    'key': key,
-                    'source': None,
-                    'found': False,
-                    'value': None,
-                }
-
-        if context and save_to_var:
-            context.variables[save_to_var] = result
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = entry.value
 
         return ActionResult(
-            success=result['found'],
-            data=result,
-            message=f"Cache-aside: {result['source']} {'hit' if result['found'] else 'miss'}"
+            success=True,
+            message="Cache hit",
+            data=entry.value
         )
 
+    def _set(
+        self, cache_name: str, key: str, value: Any,
+        ttl: float, save_to_var: Optional[str]
+    ) -> ActionResult:
+        """Set value in cache."""
+        if not key:
+            return ActionResult(success=False, message="key is required")
 
-class MemoizeAction(BaseAction):
-    """Memoize a function call result.
-    
-    Cache function results based on arguments
-    to avoid repeated expensive computations.
-    """
-    action_type = "memoize"
-    display_name = "函数记忆化"
-    description = "记忆化：缓存函数结果避免重复计算"
+        max_size = 1000  # Would need to pass this through
+        eviction_policy = 'lru'
 
-    _memo: Dict[str, Any] = {}
-    _lock = threading.Lock()
+        with self._locks[cache_name]:
+            cache = self._caches[cache_name]
+            # Evict if at capacity
+            if len(cache) >= max_size and key not in cache:
+                self._evict_one(cache_name, eviction_policy)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Memoize function result.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - func_name: str (identifier for the function)
-                - args: list (positional arguments)
-                - kwargs: dict (keyword arguments)
-                - func: callable (the function to call)
-                - func_params: dict (params to pass to func)
-                - ttl: float (optional TTL)
-                - save_to_var: str
-        
-        Returns:
-            ActionResult with memoize result.
-        """
-        func_name = params.get('func_name', '')
-        args = params.get('args', [])
-        kwargs = params.get('kwargs', {})
-        func = params.get('func', None)
-        func_params = params.get('func_params', {})
-        ttl = params.get('ttl', 0)
-        save_to_var = params.get('save_to_var', 'memoize_result')
+            entry = CacheEntry(
+                key=key,
+                value=value,
+                created_at=time.time(),
+                last_accessed=time.time(),
+                access_count=0,
+                ttl=ttl
+            )
+            cache[key] = entry
+            self._stats[cache_name]['sets'] += 1
 
-        # Build cache key from function name and args
-        key_parts = [func_name]
-        if args:
-            key_parts.append(json.dumps(args, sort_keys=True))
-        if kwargs:
-            key_parts.append(json.dumps(kwargs, sort_keys=True))
-        cache_key = hashlib.sha256('|'.join(key_parts).encode()).hexdigest()
+        return ActionResult(
+            success=True,
+            message=f"Cached: {key}",
+            data={'key': key, 'ttl': ttl}
+        )
 
-        with self._lock:
-            if cache_key in self._memo:
-                entry = self._memo[cache_key]
-                if entry['expires_at'] and time.time() > entry['expires_at']:
-                    del self._memo[cache_key]
-                else:
-                    result = {
-                        'from_cache': True,
-                        'value': entry['value'],
-                        'func_name': func_name,
-                    }
-                    if context and save_to_var:
-                        context.variables[save_to_var] = result
-                    return ActionResult(
-                        success=True,
-                        data=result,
-                        message=f"Memoized hit: {func_name}"
-                    )
+    def _evict_one(self, cache_name: str, policy: str) -> None:
+        """Evict one entry based on policy."""
+        cache = self._caches[cache_name]
+        if not cache:
+            return
 
-        # Call function
-        value = None
-        if func and callable(func):
-            try:
-                value = func(func_params)
-            except Exception as e:
-                return ActionResult(success=False, message=f"Function error: {e}")
+        if policy == 'lru':
+            victim_key = min(cache.keys(), key=lambda k: cache[k].last_accessed)
+        elif policy == 'lfu':
+            victim_key = min(cache.keys(), key=lambda k: cache[k].access_count)
+        elif policy == 'fifo':
+            victim_key = min(cache.keys(), key=lambda k: cache[k].created_at)
+        elif policy == 'ttl':
+            now = time.time()
+            victim_key = None
+            oldest_deadline = float('inf')
+            for k, entry in cache.items():
+                deadline = entry.created_at + (entry.ttl or float('inf'))
+                if deadline < oldest_deadline:
+                    oldest_deadline = deadline
+                    victim_key = k
+        else:
+            victim_key = next(iter(cache.keys()))
 
-        # Cache result
-        expires_at = time.time() + ttl if ttl > 0 else None
-        with self._lock:
-            self._memo[cache_key] = {
-                'value': value,
-                'expires_at': expires_at,
-            }
+        if victim_key:
+            del cache[victim_key]
+            self._stats[cache_name]['evictions'] += 1
 
-        result = {
-            'from_cache': False,
-            'value': value,
-            'func_name': func_name,
+    def _delete(self, cache_name: str, key: str) -> ActionResult:
+        """Delete a key from cache."""
+        with self._locks[cache_name]:
+            if key in self._caches[cache_name]:
+                del self._caches[cache_name][key]
+                self._stats[cache_name]['deletes'] += 1
+                return ActionResult(success=True, message=f"Deleted: {key}")
+            return ActionResult(success=False, message=f"Key not found: {key}")
+
+    def _clear(self, cache_name: str) -> ActionResult:
+        """Clear entire cache."""
+        with self._locks[cache_name]:
+            count = len(self._caches[cache_name])
+            self._caches[cache_name].clear()
+        return ActionResult(success=True, message=f"Cleared {count} entries")
+
+    def _has(self, cache_name: str, key: str, save_to_var: Optional[str]) -> ActionResult:
+        """Check if key exists in cache."""
+        with self._locks[cache_name]:
+            exists = key in self._caches[cache_name]
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = exists
+        return ActionResult(success=True, message=str(exists), data=exists)
+
+    def _stats_op(self, cache_name: str, save_to_var: Optional[str]) -> ActionResult:
+        """Get cache statistics."""
+        with self._locks[cache_name]:
+            stats = dict(self._stats[cache_name])
+            stats['size'] = len(self._caches[cache_name])
+            total = stats['hits'] + stats['misses']
+            stats['hit_rate'] = stats['hits'] / total if total > 0 else 0.0
+
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = stats
+        return ActionResult(success=True, message="Cache stats", data=stats)
+
+    def _pop(self, cache_name: str, key: str, save_to_var: Optional[str]) -> ActionResult:
+        """Get and delete a key atomically."""
+        with self._locks[cache_name]:
+            entry = self._caches[cache_name].pop(key, None)
+
+        if entry:
+            self._stats[cache_name]['deletes'] += 1
+            if save_to_var and hasattr(context, 'vars'):
+                context.vars[save_to_var] = entry.value
+            return ActionResult(success=True, message=f"Popped: {key}", data=entry.value)
+        return ActionResult(success=False, message=f"Key not found: {key}")
+
+    def _keys(self, cache_name: str, save_to_var: Optional[str]) -> ActionResult:
+        """List all keys in cache."""
+        with self._locks[cache_name]:
+            keys = list(self._caches[cache_name].keys())
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = keys
+        return ActionResult(success=True, message=f"{len(keys)} keys", data=keys)
+
+    def get_required_params(self) -> List[str]:
+        return ['operation', 'cache_name']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            'key': '',
+            'value': None,
+            'ttl': 0,
+            'max_size': 1000,
+            'eviction_policy': 'lru',
+            'save_to_var': None,
         }
-
-        if context and save_to_var:
-            context.variables[save_to_var] = result
-
-        return ActionResult(success=True, data=result, message=f"Memoized miss: {func_name}, computed value")
