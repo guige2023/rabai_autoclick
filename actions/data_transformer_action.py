@@ -1,490 +1,397 @@
-"""Data Transformer Action Module.
+"""Data transformer action module for RabAI AutoClick.
 
-Provides data transformation, conversion, and
-manipulation capabilities for various data formats.
+Provides data transformation operations including mapping, filtering,
+aggregation, and format conversion for ETL pipelines.
 """
 
+import sys
+import os
+import json
 from typing import Any, Dict, List, Optional, Callable, Union, TypeVar
 from dataclasses import dataclass, field
-from enum import Enum
-import json
-import re
-from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
-T = TypeVar("T")
-
-
-class TransformType(Enum):
-    """Types of data transformations."""
-    MAP = "map"
-    FILTER = "filter"
-    REDUCE = "reduce"
-    SORT = "sort"
-    GROUP = "group"
-    FLATTEN = "flatten"
-    PIVOT = "pivot"
-    MERGE = "merge"
-    SPLIT = "split"
-    EXTRACT = "extract"
+T = TypeVar('T')
 
 
 @dataclass
-class TransformConfig:
-    """Configuration for a transformation."""
-    transform_type: TransformType
-    source_field: Optional[str] = None
-    target_field: Optional[str] = None
-    transform_fn: Optional[Callable] = None
-    parameters: Dict[str, Any] = field(default_factory=dict)
+class TransformRule:
+    """A data transformation rule."""
+    source_path: str
+    target_path: str
+    transform_func: Optional[Callable[[Any], Any]] = None
+    default: Any = None
 
 
-class ArrayTransformer:
-    """Transforms array/list data."""
-
-    def map(
+class DataTransformerAction(BaseAction):
+    """Transform data using mapping rules and functions.
+    
+    Supports field mapping, nested path access, value transformation,
+    and format conversion.
+    """
+    action_type = "data_transformer"
+    display_name = "数据转换"
+    description = "数据映射、转换和格式化"
+    
+    def execute(
         self,
-        items: List[Any],
-        fn: Callable[[Any], Any],
-    ) -> List[Any]:
-        """Apply function to each item."""
-        return [fn(item) for item in items]
-
-    def filter(
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data transformation.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: Input data (dict or list)
+                - rules: List of TransformRule dicts
+                - mapping: Dict of target_key -> source_key or transform function
+                - format: Output format ('dict', 'list', 'json')
+        
+        Returns:
+            ActionResult with transformed data.
+        """
+        data = params.get('data')
+        rules = params.get('rules', [])
+        mapping = params.get('mapping', {})
+        output_format = params.get('format', 'dict')
+        
+        if data is None:
+            return ActionResult(success=False, message="data is required")
+        
+        # Convert rules to TransformRule objects
+        transform_rules = []
+        for rule in rules:
+            if isinstance(rule, dict):
+                transform_rules.append(TransformRule(
+                    source_path=rule.get('source', ''),
+                    target_path=rule.get('target', ''),
+                    transform_func=rule.get('func'),
+                    default=rule.get('default')
+                ))
+        
+        # Apply mapping
+        if mapping:
+            result = self._apply_mapping(data, mapping)
+        elif transform_rules:
+            result = self._apply_rules(data, transform_rules)
+        else:
+            result = data
+        
+        # Format output
+        if output_format == 'json':
+            result = json.dumps(result, ensure_ascii=False)
+        
+        return ActionResult(
+            success=True,
+            message="Data transformed",
+            data={'result': result}
+        )
+    
+    def _apply_mapping(
         self,
-        items: List[Any],
-        predicate: Callable[[Any], bool],
-    ) -> List[Any]:
-        """Filter items by predicate."""
-        return [item for item in items if predicate(item)]
-
-    def reduce(
+        data: Union[Dict, List],
+        mapping: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Apply field mapping to data."""
+        if isinstance(data, dict):
+            result = {}
+            for target_key, source_spec in mapping.items():
+                if callable(source_spec):
+                    result[target_key] = source_spec(data)
+                elif isinstance(source_spec, str):
+                    if '.' in source_spec:
+                        result[target_key] = self._get_nested(data, source_spec)
+                    else:
+                        result[target_key] = data.get(source_spec)
+                else:
+                    result[target_key] = source_spec
+            return result
+        elif isinstance(data, list):
+            return [self._apply_mapping(item, mapping) for item in data]
+        else:
+            return data
+    
+    def _apply_rules(
         self,
-        items: List[Any],
-        fn: Callable[[Any, Any], Any],
-        initial: Any = None,
-    ) -> Any:
-        """Reduce items to single value."""
-        if not items:
-            return initial
+        data: Union[Dict, List],
+        rules: List[TransformRule]
+    ) -> Dict[str, Any]:
+        """Apply transformation rules to data."""
+        if isinstance(data, dict):
+            result = {}
+            for rule in rules:
+                value = self._get_nested(data, rule.source_path, rule.default)
+                if rule.transform_func:
+                    value = rule.transform_func(value)
+                self._set_nested(result, rule.target_path, value)
+            return result
+        elif isinstance(data, list):
+            return [self._apply_rules(item, rules) for item in data]
+        else:
+            return data
+    
+    def _get_nested(self, data: Dict, path: str, default: Any = None) -> Any:
+        """Get value from nested dict using dot notation."""
+        if not path:
+            return data
+        parts = path.split('.')
+        value = data
+        for part in parts:
+            if isinstance(value, dict):
+                value = value.get(part)
+            elif isinstance(value, list) and part.isdigit():
+                idx = int(part)
+                value = value[idx] if idx < len(value) else None
+            else:
+                return default
+            if value is None:
+                return default
+        return value
+    
+    def _set_nested(self, data: Dict, path: str, value: Any) -> None:
+        """Set value in nested dict using dot notation."""
+        parts = path.split('.')
+        current = data
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
 
-        result = initial if initial is not None else items[0]
-        start_idx = 0 if initial is None else -1
 
-        for i in range(start_idx, len(items)):
-            result = fn(result, items[i])
-
-        return result
-
-    def sort(
+class DataFilterAction(BaseAction):
+    """Filter data based on conditions."""
+    action_type = "data_filter"
+    display_name = "数据过滤"
+    description = "根据条件过滤数据"
+    
+    def execute(
         self,
-        items: List[Any],
-        key: Optional[Callable[[Any], Any]] = None,
-        reverse: bool = False,
-    ) -> List[Any]:
-        """Sort items."""
-        return sorted(items, key=key, reverse=reverse)
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data filtering.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: Input data (list of dicts)
+                - conditions: Dict of field -> expected value or filter function
+                - exclude: If True, exclude matching items (default False)
+        
+        Returns:
+            ActionResult with filtered data.
+        """
+        data = params.get('data')
+        conditions = params.get('conditions', {})
+        exclude = params.get('exclude', False)
+        
+        if data is None:
+            return ActionResult(success=False, message="data is required")
+        
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data must be a list")
+        
+        filtered = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            
+            matches = self._check_conditions(item, conditions)
+            
+            if exclude:
+                if not matches:
+                    filtered.append(item)
+            else:
+                if matches:
+                    filtered.append(item)
+        
+        return ActionResult(
+            success=True,
+            message=f"Filtered to {len(filtered)} items",
+            data={'items': filtered, 'count': len(filtered)}
+        )
+    
+    def _check_conditions(self, item: Dict, conditions: Dict) -> bool:
+        """Check if item matches all conditions."""
+        for field_path, condition in conditions.items():
+            value = self._get_nested_value(item, field_path)
+            
+            if callable(condition):
+                if not condition(value):
+                    return False
+            elif isinstance(condition, (list, tuple)):
+                if value not in condition:
+                    return False
+            elif value != condition:
+                return False
+        
+        return True
+    
+    def _get_nested_value(self, data: Dict, path: str) -> Any:
+        """Get value using dot notation."""
+        parts = path.split('.')
+        value = data
+        for part in parts:
+            if isinstance(value, dict):
+                value = value.get(part)
+            else:
+                return None
+        return value
 
-    def group_by(
+
+class DataAggregatorAction(BaseAction):
+    """Aggregate data using group-by and aggregation functions."""
+    action_type = "data_aggregator"
+    display_name = "数据聚合"
+    description = "分组聚合计算"
+    
+    def execute(
         self,
-        items: List[Dict[str, Any]],
-        key_field: str,
-    ) -> Dict[Any, List[Dict[str, Any]]]:
-        """Group items by field."""
-        groups: Dict[Any, List[Dict[str, Any]]] = {}
-        for item in items:
-            key = item.get(key_field)
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data aggregation.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: Input data (list of dicts)
+                - group_by: Field to group by
+                - aggregations: Dict of result_field -> (agg_func, source_field)
+                  Example: {'total': ('sum', 'amount'), 'count': ('count', None)}
+        
+        Returns:
+            ActionResult with aggregated results.
+        """
+        data = params.get('data')
+        group_by = params.get('group_by')
+        aggregations = params.get('aggregations', {})
+        
+        if data is None:
+            return ActionResult(success=False, message="data is required")
+        
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data must be a list")
+        
+        if not group_by:
+            return ActionResult(success=False, message="group_by is required")
+        
+        # Group data
+        groups: Dict[str, List[Dict]] = {}
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get(group_by, 'null'))
             if key not in groups:
                 groups[key] = []
             groups[key].append(item)
-        return groups
-
-    def flatten(
+        
+        # Aggregate each group
+        results = []
+        for group_key, items in groups.items():
+            result = {group_by: group_key}
+            
+            for agg_name, (agg_func, source_field) in aggregations.items():
+                result[agg_name] = self._aggregate(items, agg_func, source_field)
+            
+            results.append(result)
+        
+        return ActionResult(
+            success=True,
+            message=f"Aggregated into {len(results)} groups",
+            data={'groups': results, 'group_count': len(results)}
+        )
+    
+    def _aggregate(
         self,
-        nested_list: List[List[Any]],
-    ) -> List[Any]:
-        """Flatten nested list."""
-        result = []
-        for item in nested_list:
-            if isinstance(item, list):
-                result.extend(self.flatten([item]))
-            else:
-                result.append(item)
-        return result
-
-    def chunk(
-        self,
-        items: List[Any],
-        chunk_size: int,
-    ) -> List[List[Any]]:
-        """Split items into chunks."""
-        return [
-            items[i:i + chunk_size]
-            for i in range(0, len(items), chunk_size)
-        ]
-
-    def unique(
-        self,
-        items: List[Any],
-        key: Optional[Callable[[Any], Any]] = None,
-    ) -> List[Any]:
-        """Get unique items."""
-        if key is None:
-            seen = set()
-            result = []
-            for item in items:
-                if item not in seen:
-                    seen.add(item)
-                    result.append(item)
-            return result
-        else:
-            seen_keys = set()
-            result = []
-            for item in items:
-                k = key(item)
-                if k not in seen_keys:
-                    seen_keys.add(k)
-                    result.append(item)
-            return result
-
-
-class DictTransformer:
-    """Transforms dictionary data."""
-
-    def rename_keys(
-        self,
-        data: Dict[str, Any],
-        rename_map: Dict[str, str],
-    ) -> Dict[str, Any]:
-        """Rename dictionary keys."""
-        result = {}
-        for key, value in data.items():
-            new_key = rename_map.get(key, key)
-            result[new_key] = value
-        return result
-
-    def pick(
-        self,
-        data: Dict[str, Any],
-        fields: List[str],
-    ) -> Dict[str, Any]:
-        """Pick specific fields."""
-        return {k: data.get(k) for k in fields if k in data}
-
-    def omit(
-        self,
-        data: Dict[str, Any],
-        fields: List[str],
-    ) -> Dict[str, Any]:
-        """Omit specific fields."""
-        return {k: v for k, v in data.items() if k not in fields}
-
-    def deep_merge(
-        self,
-        left: Dict[str, Any],
-        right: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Deep merge two dictionaries."""
-        result = left.copy()
-
-        for key, value in right.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = self.deep_merge(result[key], value)
-            else:
-                result[key] = value
-
-        return result
-
-    def flatten_dict(
-        self,
-        data: Dict[str, Any],
-        separator: str = ".",
-        parent_key: str = "",
-    ) -> Dict[str, Any]:
-        """Flatten nested dictionary."""
-        result = {}
-        for key, value in data.items():
-            new_key = f"{parent_key}{separator}{key}" if parent_key else key
-
-            if isinstance(value, dict):
-                result.update(self.flatten_dict(value, separator, new_key))
-            else:
-                result[new_key] = value
-
-        return result
-
-    def unflatten_dict(
-        self,
-        data: Dict[str, Any],
-        separator: str = ".",
-    ) -> Dict[str, Any]:
-        """Unflatten dictionary to nested structure."""
-        result: Dict[str, Any] = {}
-
-        for flat_key, value in data.items():
-            parts = flat_key.split(separator)
-            current = result
-
-            for part in parts[:-1]:
-                if part not in current:
-                    current[part] = {}
-                current = current[part]
-
-            current[parts[-1]] = value
-
-        return result
-
-    def transform_values(
-        self,
-        data: Dict[str, Any],
-        fn: Callable[[Any], Any],
-    ) -> Dict[str, Any]:
-        """Transform all values."""
-        return {k: fn(v) for k, v in data.items()}
-
-    def transform_keys(
-        self,
-        data: Dict[str, Any],
-        fn: Callable[[str], str],
-    ) -> Dict[str, Any]:
-        """Transform all keys."""
-        return {fn(k): v for k, v in data.items()}
-
-
-class StringTransformer:
-    """Transforms string data."""
-
-    def capitalize(
-        self,
-        text: str,
-        first_only: bool = True,
-    ) -> str:
-        """Capitalize text."""
-        if first_only:
-            return text.capitalize()
-        return text.title()
-
-    def camel_to_snake(self, text: str) -> str:
-        """Convert camelCase to snake_case."""
-        result = re.sub(r'([A-Z])', r'_\1', text)
-        return result.lower().lstrip('_')
-
-    def snake_to_camel(self, text: str) -> str:
-        """Convert snake_case to camelCase."""
-        parts = text.split('_')
-        return parts[0] + ''.join(p.title() for p in parts[1:])
-
-    def kebab_to_snake(self, text: str) -> str:
-        """Convert kebab-case to snake_case."""
-        return text.replace('-', '_')
-
-    def truncate(
-        self,
-        text: str,
-        length: int,
-        suffix: str = "...",
-    ) -> str:
-        """Truncate text to length."""
-        if len(text) <= length:
-            return text
-        return text[:length - len(suffix)] + suffix
-
-    def slugify(self, text: str) -> str:
-        """Convert text to URL-friendly slug."""
-        text = text.lower()
-        text = re.sub(r'[^\w\s-]', '', text)
-        text = re.sub(r'[-\s]+', '-', text)
-        return text.strip('-')
-
-
-class DataTransformer:
-    """Main data transformation orchestrator."""
-
-    def __init__(self):
-        self.array_transformer = ArrayTransformer()
-        self.dict_transformer = DictTransformer()
-        self.string_transformer = StringTransformer()
-
-    def transform(
-        self,
-        data: Any,
-        config: TransformConfig,
+        items: List[Dict],
+        func: str,
+        field: Optional[str]
     ) -> Any:
-        """Apply transformation based on config."""
-        transform_type = config.transform_type
+        """Apply aggregation function."""
+        if func == 'count':
+            return len(items)
+        
+        if func == 'sum':
+            return sum(item.get(field, 0) for item in items if item.get(field) is not None)
+        
+        if func == 'avg':
+            values = [item.get(field, 0) for item in items if item.get(field) is not None]
+            return sum(values) / len(values) if values else 0
+        
+        if func == 'min':
+            values = [item.get(field) for item in items if item.get(field) is not None]
+            return min(values) if values else None
+        
+        if func == 'max':
+            values = [item.get(field) for item in items if item.get(field) is not None]
+            return max(values) if values else None
+        
+        if func == 'first':
+            return items[0].get(field) if items else None
+        
+        if func == 'last':
+            return items[-1].get(field) if items else None
+        
+        return None
 
-        if transform_type == TransformType.MAP:
-            return self.array_transformer.map(data, config.transform_fn)
 
-        elif transform_type == TransformType.FILTER:
-            return self.array_transformer.filter(data, config.transform_fn)
-
-        elif transform_type == TransformType.REDUCE:
-            return self.array_transformer.reduce(
-                data,
-                config.transform_fn,
-                config.parameters.get("initial"),
-            )
-
-        elif transform_type == TransformType.SORT:
-            return self.array_transformer.sort(
-                data,
-                key=config.transform_fn,
-                reverse=config.parameters.get("reverse", False),
-            )
-
-        elif transform_type == TransformType.GROUP:
-            return self.array_transformer.group_by(
-                data,
-                config.parameters["key_field"],
-            )
-
-        elif transform_type == TransformType.FLATTEN:
-            return self.array_transformer.flatten(data)
-
-        elif transform_type == TransformType.MERGE:
-            return self.dict_transformer.deep_merge(
-                config.parameters["left"],
-                config.parameters["right"],
-            )
-
-        return data
-
-    def transform_batch(
+class DataSorterAction(BaseAction):
+    """Sort data by one or more fields."""
+    action_type = "data_sorter"
+    display_name = "数据排序"
+    description = "多字段排序"
+    
+    def execute(
         self,
-        items: List[Dict[str, Any]],
-        field: str,
-        fn: Callable[[Any], Any],
-    ) -> List[Dict[str, Any]]:
-        """Transform a specific field in each item."""
-        return [
-            {**item, field: fn(item.get(field))}
-            for item in items
-        ]
-
-
-class DataConverter:
-    """Converts data between formats."""
-
-    def to_json(self, data: Any, indent: Optional[int] = None) -> str:
-        """Convert to JSON string."""
-        return json.dumps(data, indent=indent, default=str)
-
-    def from_json(self, json_str: str) -> Any:
-        """Parse JSON string."""
-        return json.loads(json_str)
-
-    def to_csv_row(
-        self,
-        data: Dict[str, Any],
-        fields: List[str],
-    ) -> str:
-        """Convert dict to CSV row."""
-        values = [str(data.get(f, "")) for f in fields]
-        return ",".join(f'"{v}"' if ',' in v else v for v in values)
-
-    def from_csv_row(
-        self,
-        row: str,
-        fields: List[str],
-    ) -> Dict[str, Any]:
-        """Parse CSV row to dict."""
-        values = row.split(",")
-        return {f: v.strip('"') for f, v in zip(fields, values)}
-
-
-class DataTransformerAction:
-    """High-level data transformer action."""
-
-    def __init__(
-        self,
-        transformer: Optional[DataTransformer] = None,
-        converter: Optional[DataConverter] = None,
-    ):
-        self.transformer = transformer or DataTransformer()
-        self.converter = converter or DataConverter()
-
-    def map(
-        self,
-        items: List[Any],
-        fn: Callable[[Any], Any],
-    ) -> List[Any]:
-        """Map function over items."""
-        return self.transformer.array_transformer.map(items, fn)
-
-    def filter(
-        self,
-        items: List[Any],
-        predicate: Callable[[Any], bool],
-    ) -> List[Any]:
-        """Filter items."""
-        return self.transformer.array_transformer.filter(items, predicate)
-
-    def group_by(
-        self,
-        items: List[Dict[str, Any]],
-        key_field: str,
-    ) -> Dict[Any, List[Dict[str, Any]]]:
-        """Group items by field."""
-        return self.transformer.array_transformer.group_by(items, key_field)
-
-    def sort_by(
-        self,
-        items: List[Any],
-        key: Callable[[Any], Any],
-        reverse: bool = False,
-    ) -> List[Any]:
-        """Sort items by key."""
-        return self.transformer.array_transformer.sort(items, key, reverse)
-
-    def pick(
-        self,
-        data: Dict[str, Any],
-        fields: List[str],
-    ) -> Dict[str, Any]:
-        """Pick fields from dict."""
-        return self.transformer.dict_transformer.pick(data, fields)
-
-    def omit(
-        self,
-        data: Dict[str, Any],
-        fields: List[str],
-    ) -> Dict[str, Any]:
-        """Omit fields from dict."""
-        return self.transformer.dict_transformer.omit(data, fields)
-
-    def merge(
-        self,
-        left: Dict[str, Any],
-        right: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Merge two dictionaries."""
-        return self.transformer.dict_transformer.deep_merge(left, right)
-
-    def flatten(
-        self,
-        data: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Flatten nested dict."""
-        return self.transformer.dict_transformer.flatten_dict(data)
-
-    def camel_to_snake(self, text: str) -> str:
-        """Convert camelCase to snake_case."""
-        return self.transformer.string_transformer.camel_to_snake(text)
-
-    def snake_to_camel(self, text: str) -> str:
-        """Convert snake_case to camelCase."""
-        return self.transformer.string_transformer.snake_to_camel(text)
-
-
-# Module exports
-__all__ = [
-    "DataTransformerAction",
-    "DataTransformer",
-    "DataConverter",
-    "ArrayTransformer",
-    "DictTransformer",
-    "StringTransformer",
-    "TransformConfig",
-    "TransformType",
-]
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data sorting.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: Input data (list)
+                - sort_by: Field to sort by (or list of fields)
+                - reverse: Sort descending (default False)
+        
+        Returns:
+            ActionResult with sorted data.
+        """
+        data = params.get('data')
+        sort_by = params.get('sort_by')
+        reverse = params.get('reverse', False)
+        
+        if data is None:
+            return ActionResult(success=False, message="data is required")
+        
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data must be a list")
+        
+        if not sort_by:
+            return ActionResult(success=False, message="sort_by is required")
+        
+        sort_fields = [sort_by] if isinstance(sort_by, str) else sort_by
+        
+        def sort_key(item):
+            values = []
+            for field in sort_fields:
+                if isinstance(item, dict):
+                    value = item.get(field)
+                else:
+                    value = getattr(item, field, None)
+                values.append(value)
+            return tuple(values)
+        
+        sorted_data = sorted(data, key=sort_key, reverse=reverse)
+        
+        return ActionResult(
+            success=True,
+            message=f"Sorted {len(sorted_data)} items",
+            data={'items': sorted_data, 'count': len(sorted_data)}
+        )
