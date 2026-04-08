@@ -1,190 +1,127 @@
-"""Data paginator action module for RabAI AutoClick.
+# Copyright (c) 2024. coded by claude
+"""Data Paginator Action Module.
 
-Provides pagination:
-- DataPaginator: Paginate data collections
-- CursorPaginator: Cursor-based pagination
-- OffsetPaginator: Offset-based pagination
-- PagePaginator: Page-based pagination
+Provides pagination utilities for API responses with support for
+offset, cursor-based, and keyset pagination strategies.
 """
+from typing import Optional, Dict, Any, List, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+import logging
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
-from dataclasses import dataclass
+logger = logging.getLogger(__name__)
 
-import sys
-import os
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+class PaginationStrategy(Enum):
+    OFFSET = "offset"
+    CURSOR = "cursor"
+    KEYSET = "keyset"
 
 
 @dataclass
-class PaginationResult:
-    """Pagination result."""
-    data: List[Any]
-    page: int
+class Page:
+    items: List[Dict[str, Any]]
+    page_number: int
     page_size: int
-    total: int
+    total_items: int
     total_pages: int
     has_next: bool
-    has_prev: bool
+    has_previous: bool
+    next_cursor: Optional[str] = None
+    previous_cursor: Optional[str] = None
+
+
+@dataclass
+class PaginationConfig:
+    strategy: PaginationStrategy = PaginationStrategy.OFFSET
+    default_page_size: int = 20
+    max_page_size: int = 100
+    cursor_field: Optional[str] = None
 
 
 class DataPaginator:
-    """General data paginator."""
+    def __init__(self, config: Optional[PaginationConfig] = None):
+        self.config = config or PaginationConfig()
 
-    def paginate(
-        self,
-        data: List[Any],
-        page: int = 1,
-        page_size: int = 10,
-    ) -> PaginationResult:
-        """Paginate data."""
-        total = len(data)
-        total_pages = (total + page_size - 1) // page_size if page_size > 0 else 0
-
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-
-        paginated_data = data[start_idx:end_idx]
-
-        return PaginationResult(
-            data=paginated_data,
-            page=page,
+    def paginate_offset(self, items: List[Dict[str, Any]], page: int = 1, page_size: Optional[int] = None) -> Page:
+        page_size = self._normalize_page_size(page_size)
+        total_items = len(items)
+        total_pages = (total_items + page_size - 1) // page_size if total_items > 0 else 1
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_items = items[start:end]
+        return Page(
+            items=page_items,
+            page_number=page,
             page_size=page_size,
-            total=total,
+            total_items=total_items,
             total_pages=total_pages,
             has_next=page < total_pages,
-            has_prev=page > 1,
+            has_previous=page > 1,
         )
 
-
-class CursorPaginator:
-    """Cursor-based pagination."""
-
-    def __init__(self, cursor_field: str = "id"):
-        self.cursor_field = cursor_field
-        self._cursor_cache: Dict[int, Any] = {}
-
-    def paginate(
-        self,
-        data: List[Dict],
-        cursor: Optional[Any] = None,
-        page_size: int = 10,
-    ) -> Tuple[List[Dict], Optional[Any]]:
-        """Paginate with cursor."""
-        if not data:
-            return [], None
-
-        if cursor is not None:
-            data = [item for item in data if item.get(self.cursor_field) > cursor]
-
-        page_data = data[:page_size]
-        next_cursor = page_data[-1].get(self.cursor_field) if page_data else None
-
-        return page_data, next_cursor
-
-
-class OffsetPaginator:
-    """Offset-based pagination."""
-
-    def paginate(
-        self,
-        data: List[Any],
-        offset: int = 0,
-        limit: int = 10,
-    ) -> Tuple[List[Any], int]:
-        """Paginate with offset."""
-        total = len(data)
-        paginated = data[offset:offset + limit]
-        return paginated, total
-
-
-class DataPaginatorAction(BaseAction):
-    """Data paginator action."""
-    action_type = "data_paginator"
-    display_name = "数据分页器"
-    description = "数据分页处理"
-
-    def __init__(self):
-        super().__init__()
-        self._paginator = DataPaginator()
-        self._cursor_paginator = CursorPaginator()
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "paginate")
-            data = params.get("data", [])
-
-            if operation == "paginate":
-                return self._paginate(data, params)
-            elif operation == "cursor":
-                return self._cursor_paginate(data, params)
-            elif operation == "offset":
-                return self._offset_paginate(data, params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pagination error: {str(e)}")
-
-    def _paginate(self, data: List[Any], params: Dict) -> ActionResult:
-        """Page-based pagination."""
-        page = params.get("page", 1)
-        page_size = params.get("page_size", 10)
-
-        result = self._paginator.paginate(data, page, page_size)
-
-        return ActionResult(
-            success=True,
-            message=f"Page {result.page} of {result.total_pages}",
-            data={
-                "data": result.data,
-                "page": result.page,
-                "page_size": result.page_size,
-                "total": result.total,
-                "total_pages": result.total_pages,
-                "has_next": result.has_next,
-                "has_prev": result.has_prev,
-            },
+    def paginate_cursor(self, items: List[Dict[str, Any]], cursor: Optional[str] = None, page_size: Optional[int] = None) -> Page:
+        page_size = self._normalize_page_size(page_size)
+        start_index = 0
+        if cursor and self.config.cursor_field:
+            for i, item in enumerate(items):
+                if str(item.get(self.config.cursor_field)) == cursor:
+                    start_index = i + 1
+                    break
+        end_index = min(start_index + page_size, len(items))
+        page_items = items[start_index:end_index]
+        next_cursor = None
+        if end_index < len(items) and page_items:
+            last_item = page_items[-1]
+            next_cursor = str(last_item.get(self.config.cursor_field, ""))
+        previous_cursor = None
+        if start_index > 0 and page_items:
+            first_item = page_items[0]
+            previous_cursor = str(first_item.get(self.config.cursor_field, ""))
+        total_pages = (len(items) + page_size - 1) // page_size if len(items) > 0 else 1
+        current_page = start_index // page_size + 1
+        return Page(
+            items=page_items,
+            page_number=current_page,
+            page_size=page_size,
+            total_items=len(items),
+            total_pages=total_pages,
+            has_next=end_index < len(items),
+            has_previous=start_index > 0,
+            next_cursor=next_cursor,
+            previous_cursor=previous_cursor,
         )
 
-    def _cursor_paginate(self, data: List[Dict], params: Dict) -> ActionResult:
-        """Cursor-based pagination."""
-        cursor = params.get("cursor")
-        page_size = params.get("page_size", 10)
-        cursor_field = params.get("cursor_field", "id")
-
-        if cursor_field != self._cursor_paginator.cursor_field:
-            self._cursor_paginator = CursorPaginator(cursor_field)
-
-        paginated, next_cursor = self._cursor_paginator.paginate(data, cursor, page_size)
-
-        return ActionResult(
-            success=True,
-            message=f"Returned {len(paginated)} items",
-            data={
-                "data": paginated,
-                "next_cursor": next_cursor,
-                "count": len(paginated),
-            },
+    def paginate_keyset(self, items: List[Dict[str, Any]], last_key: Optional[Any] = None, page_size: Optional[int] = None, sort_field: str = "id") -> Page:
+        page_size = self._normalize_page_size(page_size)
+        filtered_items = items
+        if last_key is not None:
+            filtered_items = [item for item in items if item.get(sort_field, "") > last_key]
+        page_items = filtered_items[:page_size]
+        next_key = None
+        if len(page_items) == page_size and len(filtered_items) > page_size:
+            next_key = page_items[-1].get(sort_field)
+        total_pages = (len(items) + page_size - 1) // page_size if len(items) > 0 else 1
+        return Page(
+            items=page_items,
+            page_number=1,
+            page_size=page_size,
+            total_items=len(items),
+            total_pages=total_pages,
+            has_next=next_key is not None,
+            has_previous=last_key is not None,
         )
 
-    def _offset_paginate(self, data: List[Any], params: Dict) -> ActionResult:
-        """Offset-based pagination."""
-        offset = params.get("offset", 0)
-        limit = params.get("limit", 10)
+    def paginate(self, items: List[Dict[str, Any]], page: Optional[int] = None, cursor: Optional[str] = None, page_size: Optional[int] = None) -> Page:
+        if self.config.strategy == PaginationStrategy.OFFSET:
+            return self.paginate_offset(items, page or 1, page_size)
+        elif self.config.strategy == PaginationStrategy.CURSOR:
+            return self.paginate_cursor(items, cursor, page_size)
+        else:
+            return self.paginate_offset(items, page or 1, page_size)
 
-        paginator = OffsetPaginator()
-        paginated, total = paginator.paginate(data, offset, limit)
-
-        return ActionResult(
-            success=True,
-            message=f"Offset {offset}, limit {limit}",
-            data={
-                "data": paginated,
-                "offset": offset,
-                "limit": limit,
-                "total": total,
-            },
-        )
+    def _normalize_page_size(self, page_size: Optional[int]) -> int:
+        if page_size is None:
+            return self.config.default_page_size
+        return max(1, min(page_size, self.config.max_page_size))
