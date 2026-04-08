@@ -1,254 +1,278 @@
-"""Data comparison action module for RabAI AutoClick.
+"""
+Data Comparison Action Module.
 
-Provides data comparison operations:
-- SetOperationsAction: Set operations (union, intersection, difference)
-- DataMatchingAction: Match and align data records
-- FuzzyMatchAction: Fuzzy string matching
-- SimilarityScoreAction: Compute similarity scores
+Provides data comparison capabilities for records,
+schemas, and structured data diff.
 """
 
-from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+import asyncio
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class SetOperationsAction(BaseAction):
-    """Set operations (union, intersection, difference)."""
-    action_type = "set_operations"
-    display_name = "集合运算"
-    description = "集合操作：并集、交集、差集"
+class DiffType(Enum):
+    """Types of differences."""
+    ADDED = "added"
+    REMOVED = "removed"
+    MODIFIED = "modified"
+    UNMODIFIED = "unmodified"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            left = params.get("left", [])
-            right = params.get("right", [])
-            operation = params.get("operation", "union")
-            key_field = params.get("key_field", None)
 
-            if not isinstance(left, list):
-                left = [left]
-            if not isinstance(right, list):
-                right = [right]
+@dataclass
+class FieldDiff:
+    """Single field difference."""
+    field: str
+    diff_type: DiffType
+    old_value: Any = None
+    new_value: Any = None
 
-            if key_field:
-                left_set = {str(item.get(key_field, "")) for item in left if isinstance(item, dict)}
-                right_set = {str(item.get(key_field, "")) for item in right if isinstance(item, dict)}
+
+@dataclass
+class RecordDiff:
+    """Difference between two records."""
+    record_id: Any
+    diffs: List[FieldDiff] = field(default_factory=list)
+    status: DiffType = DiffType.UNMODIFIED
+
+
+@dataclass
+class ComparisonResult:
+    """Result of comparison."""
+    total_records: int
+    added_count: int
+    removed_count: int
+    modified_count: int
+    unmodified_count: int
+    record_diffs: List[RecordDiff] = field(default_factory=list)
+
+
+class DataComparator:
+    """Compares data records."""
+
+    def __init__(
+        self,
+        id_field: str = "id",
+        ignore_fields: Optional[List[str]] = None
+    ):
+        self.id_field = id_field
+        self.ignore_fields = ignore_fields or []
+
+    def _get_record_id(self, record: Dict[str, Any]) -> Any:
+        """Get record ID."""
+        return record.get(self.id_field)
+
+    def _compare_values(self, old: Any, new: Any) -> bool:
+        """Compare two values."""
+        return old == new
+
+    def _get_diffs(
+        self,
+        old_record: Dict[str, Any],
+        new_record: Dict[str, Any]
+    ) -> List[FieldDiff]:
+        """Get field-level differences."""
+        diffs = []
+
+        all_fields = set(old_record.keys()) | set(new_record.keys())
+
+        for field in all_fields:
+            if field in self.ignore_fields:
+                continue
+
+            old_val = old_record.get(field)
+            new_val = new_record.get(field)
+
+            if field not in old_record:
+                diffs.append(FieldDiff(
+                    field=field,
+                    diff_type=DiffType.ADDED,
+                    new_value=new_val
+                ))
+            elif field not in new_record:
+                diffs.append(FieldDiff(
+                    field=field,
+                    diff_type=DiffType.REMOVED,
+                    old_value=old_val
+                ))
+            elif not self._compare_values(old_val, new_val):
+                diffs.append(FieldDiff(
+                    field=field,
+                    diff_type=DiffType.MODIFIED,
+                    old_value=old_val,
+                    new_value=new_val
+                ))
+
+        return diffs
+
+    def compare(
+        self,
+        old_data: List[Dict[str, Any]],
+        new_data: List[Dict[str, Any]]
+    ) -> ComparisonResult:
+        """Compare two datasets."""
+        old_records = {self._get_record_id(r): r for r in old_data}
+        new_records = {self._get_record_id(r): r for r in new_data}
+
+        old_ids = set(old_records.keys())
+        new_ids = set(new_records.keys())
+
+        added_ids = new_ids - old_ids
+        removed_ids = old_ids - new_ids
+        common_ids = old_ids & new_ids
+
+        record_diffs = []
+        added_count = 0
+        removed_count = 0
+        modified_count = 0
+        unmodified_count = 0
+
+        for record_id in added_ids:
+            record_diffs.append(RecordDiff(
+                record_id=record_id,
+                status=DiffType.ADDED
+            ))
+            added_count += 1
+
+        for record_id in removed_ids:
+            record_diffs.append(RecordDiff(
+                record_id=record_id,
+                status=DiffType.REMOVED
+            ))
+            removed_count += 1
+
+        for record_id in common_ids:
+            old_record = old_records[record_id]
+            new_record = new_records[record_id]
+
+            diffs = self._get_diffs(old_record, new_record)
+
+            if diffs:
+                record_diffs.append(RecordDiff(
+                    record_id=record_id,
+                    diffs=diffs,
+                    status=DiffType.MODIFIED
+                ))
+                modified_count += 1
             else:
-                left_set = {str(item) for item in left}
-                right_set = {str(item) for item in right}
+                unmodified_count += 1
 
-            if operation == "union":
-                result_keys = left_set | right_set
-                result = [{"key": k} for k in result_keys]
-            elif operation == "intersection":
-                result_keys = left_set & right_set
-                result = [{"key": k} for k in result_keys]
-            elif operation == "difference":
-                result_keys = left_set - right_set
-                result = [{"key": k} for k in result_keys]
-            elif operation == "symmetric_difference":
-                result_keys = left_set ^ right_set
-                result = [{"key": k} for k in result_keys]
-            elif operation == "is_subset":
-                is_subset = left_set <= right_set
-                return ActionResult(success=is_subset, message=f"Left is subset of right: {is_subset}", data={"is_subset": is_subset})
-            elif operation == "is_superset":
-                is_superset = left_set >= right_set
-                return ActionResult(success=is_superset, message=f"Left is superset of right: {is_superset}", data={"is_superset": is_superset})
-            elif operation == "is_disjoint":
-                is_disjoint = left_set.isdisjoint(right_set)
-                return ActionResult(success=is_disjoint, message=f"Sets are disjoint: {is_disjoint}", data={"is_disjoint": is_disjoint})
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-            return ActionResult(
-                success=True,
-                message=f"Set {operation}: {len(result)} items",
-                data={
-                    "result": result,
-                    "count": len(result),
-                    "operation": operation,
-                    "left_count": len(left_set),
-                    "right_count": len(right_set),
-                },
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"SetOperations error: {e}")
+        return ComparisonResult(
+            total_records=len(new_data),
+            added_count=added_count,
+            removed_count=removed_count,
+            modified_count=modified_count,
+            unmodified_count=unmodified_count,
+            record_diffs=record_diffs
+        )
 
 
-class DataMatchingAction(BaseAction):
-    """Match and align data records."""
-    action_type = "data_matching"
-    display_name: "数据匹配"
-    description = "匹配和对齐数据记录"
+class SchemaComparator:
+    """Compares data schemas."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            left = params.get("left", [])
-            right = params.get("right", [])
-            left_key = params.get("left_key", "id")
-            right_key = params.get("right_key", "id")
-            match_type = params.get("match_type", "inner")
+    def compare_schemas(
+        self,
+        schema1: Dict[str, type],
+        schema2: Dict[str, type]
+    ) -> List[FieldDiff]:
+        """Compare two schemas."""
+        diffs = []
 
-            if not isinstance(left, list):
-                left = [left]
-            if not isinstance(right, list):
-                right = [right]
+        all_fields = set(schema1.keys()) | set(schema2.keys())
 
-            right_index = {str(item.get(right_key, "")): item for item in right if isinstance(item, dict)}
+        for field in all_fields:
+            if field not in schema1:
+                diffs.append(FieldDiff(
+                    field=field,
+                    diff_type=DiffType.ADDED
+                ))
+            elif field not in schema2:
+                diffs.append(FieldDiff(
+                    field=field,
+                    diff_type=DiffType.REMOVED
+                ))
+            elif schema1[field] != schema2[field]:
+                diffs.append(FieldDiff(
+                    field=field,
+                    diff_type=DiffType.MODIFIED,
+                    old_value=schema1[field],
+                    new_value=schema2[field]
+                ))
 
-            matched = []
-            left_unmatched = []
-            right_unmatched = list(right)
+        return diffs
 
-            for l_item in left:
-                if not isinstance(l_item, dict):
-                    continue
-                lkey = str(l_item.get(left_key, ""))
-                if lkey in right_index:
-                    matched.append({"left": l_item, "right": right_index[lkey]})
-                    right_unmatched = [r for r in right_unmatched if str(r.get(right_key, "")) != lkey]
+
+class DeepComparator:
+    """Performs deep comparison of nested structures."""
+
+    def compare(
+        self,
+        old: Any,
+        new: Any,
+        path: str = ""
+    ) -> List[Tuple[str, DiffType, Any, Any]]:
+        """Deep compare two structures."""
+        diffs = []
+
+        if type(old) != type(new):
+            diffs.append((path, DiffType.MODIFIED, old, new))
+            return diffs
+
+        if isinstance(old, dict):
+            all_keys = set(old.keys()) | set(new.keys())
+            for key in all_keys:
+                child_path = f"{path}.{key}" if path else key
+                if key not in old:
+                    diffs.append((child_path, DiffType.ADDED, None, new[key]))
+                elif key not in new:
+                    diffs.append((child_path, DiffType.REMOVED, old[key], None))
                 else:
-                    left_unmatched.append(l_item)
+                    child_diffs = self.compare(old[key], new[key], child_path)
+                    diffs.extend(child_diffs)
 
-            if match_type == "left":
-                return ActionResult(
-                    success=True,
-                    message=f"Matched {len(matched)} records, {len(left_unmatched)} left unmatched",
-                    data={"matched": matched, "left_unmatched": left_unmatched, "matched_count": len(matched)},
-                )
-            elif match_type == "right":
-                return ActionResult(
-                    success=True,
-                    message=f"Matched {len(matched)} records, {len(right_unmatched)} right unmatched",
-                    data={"matched": matched, "right_unmatched": right_unmatched, "matched_count": len(matched)},
-                )
-            elif match_type == "outer":
-                return ActionResult(
-                    success=True,
-                    message=f"Outer join: {len(matched)} matched, {len(left_unmatched)} left-only, {len(right_unmatched)} right-only",
-                    data={
-                        "matched": matched,
-                        "left_unmatched": left_unmatched,
-                        "right_unmatched": right_unmatched,
-                        "matched_count": len(matched),
-                    },
-                )
+        elif isinstance(old, list):
+            if len(old) != len(new):
+                diffs.append((path, DiffType.MODIFIED, old, new))
             else:
-                return ActionResult(
-                    success=True,
-                    message=f"Inner match: {len(matched)} matched",
-                    data={"matched": matched, "matched_count": len(matched)},
-                )
-        except Exception as e:
-            return ActionResult(success=False, message=f"DataMatching error: {e}")
+                for i, (old_item, new_item) in enumerate(zip(old, new)):
+                    child_path = f"{path}[{i}]"
+                    child_diffs = self.compare(old_item, new_item, child_path)
+                    diffs.extend(child_diffs)
+
+        else:
+            if old != new:
+                diffs.append((path, DiffType.MODIFIED, old, new))
+
+        return diffs
 
 
-class FuzzyMatchAction(BaseAction):
-    """Fuzzy string matching."""
-    action_type = "fuzzy_match"
-    display_name = "模糊匹配"
-    description = "模糊字符串匹配"
+def main():
+    """Demonstrate data comparison."""
+    old_data = [
+        {"id": 1, "name": "Alice", "age": 30},
+        {"id": 2, "name": "Bob", "age": 25},
+        {"id": 3, "name": "Charlie", "age": 35},
+    ]
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            strings = params.get("strings", [])
-            query = params.get("query", "")
-            threshold = params.get("threshold", 0.6)
-            limit = params.get("limit", 10)
+    new_data = [
+        {"id": 1, "name": "Alice", "age": 31},
+        {"id": 2, "name": "Bob", "age": 25},
+        {"id": 4, "name": "Diana", "age": 28},
+    ]
 
-            if not strings:
-                return ActionResult(success=False, message="strings is required")
-            if not query:
-                return ActionResult(success=False, message="query is required")
+    comparator = DataComparator(id_field="id")
+    result = comparator.compare(old_data, new_data)
 
-            results = []
-            for s in strings:
-                ratio = SequenceMatcher(None, query, str(s)).ratio()
-                if ratio >= threshold:
-                    results.append({"string": s, "score": round(ratio, 4)})
-
-            results.sort(key=lambda x: x["score"], reverse=True)
-            results = results[:limit]
-
-            return ActionResult(
-                success=True,
-                message=f"Fuzzy match: {len(results)} results above threshold {threshold}",
-                data={"results": results, "count": len(results), "threshold": threshold},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"FuzzyMatch error: {e}")
+    print(f"Total: {result.total_records}")
+    print(f"Added: {result.added_count}")
+    print(f"Removed: {result.removed_count}")
+    print(f"Modified: {result.modified_count}")
+    print(f"Unmodified: {result.unmodified_count}")
 
 
-class SimilarityScoreAction(BaseAction):
-    """Compute similarity scores."""
-    action_type = "similarity_score"
-    display_name = "相似度计算"
-    description = "计算数据相似度分数"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            left = params.get("left", "")
-            right = params.get("right", "")
-            metric = params.get("metric", "levenshtein")
-
-            if not left or not right:
-                return ActionResult(success=False, message="left and right are required")
-
-            if metric == "levenshtein":
-                score = self._levenshtein_similarity(str(left), str(right))
-            elif metric == "jaccard":
-                score = self._jaccard_similarity(str(left), str(right))
-            elif metric == "cosine":
-                score = self._cosine_similarity(str(left), str(right))
-            elif metric == "sequence":
-                score = SequenceMatcher(None, str(left), str(right)).ratio()
-            else:
-                score = SequenceMatcher(None, str(left), str(right)).ratio()
-
-            return ActionResult(
-                success=True,
-                message=f"Similarity ({metric}): {score:.4f}",
-                data={"similarity": round(score, 4), "metric": metric, "left": left, "right": right},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"SimilarityScore error: {e}")
-
-    def _levenshtein_similarity(self, s1: str, s2: str) -> float:
-        if len(s1) < len(s2):
-            return self._levenshtein_similarity(s2, s1)
-        if len(s2) == 0:
-            return 0.0
-        prev_row = range(len(s2) + 1)
-        for i, c1 in enumerate(s1):
-            curr_row = [i + 1]
-            for j, c2 in enumerate(s2):
-                insertions = prev_row[j + 1] + 1
-                deletions = curr_row[j] + 1
-                substitutions = prev_row[j] + (c1 != c2)
-                curr_row.append(min(insertions, deletions, substitutions))
-            prev_row = curr_row
-        distance = prev_row[-1]
-        max_len = max(len(s1), len(s2))
-        return 1 - distance / max_len if max_len > 0 else 1.0
-
-    def _jaccard_similarity(self, s1: str, s2: str) -> float:
-        set1 = set(s1.lower())
-        set2 = set(s2.lower())
-        intersection = len(set1 & set2)
-        union = len(set1 | set2)
-        return intersection / union if union > 0 else 0.0
-
-    def _cosine_similarity(self, s1: str, s2: str) -> float:
-        words1 = set(s1.lower().split())
-        words2 = set(s2.lower().split())
-        intersection = len(words1 & words2)
-        norm1 = len(words1) ** 0.5
-        norm2 = len(words2) ** 0.5
-        return intersection / (norm1 * norm2) if norm1 > 0 and norm2 > 0 else 0.0
+if __name__ == "__main__":
+    main()
