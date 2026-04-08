@@ -1,347 +1,397 @@
-"""API security action module for RabAI AutoClick.
-
-Provides API security operations:
-- APIKeyGeneratorAction: Generate API keys
-- APIKeyValidatorAction: Validate API keys
-- APIRateLimiterAction: Rate limit API access
-- APIPermissionAction: Check API permissions
-- APIHealthCheckAction: Health check endpoints
 """
+API Security Action Module
 
-import hashlib
-import secrets
-import hmac
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+Provides API security features: CORS, headers, sanitization, and protection.
+"""
+from typing import Any, Optional, Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+import re
+import html
 
 
-class APIKeyGeneratorAction(BaseAction):
-    """Generate API keys."""
-    action_type = "api_key_generator"
-    display_name = "API密钥生成"
-    description = "生成API密钥"
+class ThreatType(Enum):
+    """Types of security threats."""
+    SQL_INJECTION = "sql_injection"
+    XSS = "xss"
+    CSRF = "csrf"
+    RATE_LIMIT = "rate_limit"
+    INVALID_INPUT = "invalid_input"
+    AUTH_BYPASS = "auth_bypass"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            key_type = params.get("key_type", "random")
-            key_length = params.get("key_length", 32)
-            prefix = params.get("prefix", "")
-            include_timestamp = params.get("include_timestamp", False)
-            format_type = params.get("format", "hex")
 
-            if key_type == "random":
-                if format_type == "hex":
-                    api_key = secrets.token_hex(key_length)
-                elif format_type == "urlsafe":
-                    api_key = secrets.token_urlsafe(key_length)
-                else:
-                    api_key = secrets.token_hex(key_length)
-            elif key_type == "uuid":
-                api_key = str(secrets.uuid4())
-            elif key_type == "hashed":
-                raw_key = secrets.token_hex(key_length)
-                api_key = hashlib.sha256(raw_key.encode()).hexdigest()
+@dataclass
+class SecurityConfig:
+    """Security configuration."""
+    enable_cors: bool = True
+    enable_csrf_protection: bool = True
+    enable_input_validation: bool = True
+    enable_rate_limiting: bool = True
+    allowed_origins: list[str] = field(default_factory=lambda: ["*"])
+    allowed_methods: list[str] = field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE"])
+    allowed_headers: list[str] = field(default_factory=lambda: ["Content-Type", "Authorization"])
+    max_request_size_kb: int = 1024
+    sanitization_rules: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ThreatDetection:
+    """A detected threat."""
+    threat_type: ThreatType
+    severity: str  # low, medium, high, critical
+    description: str
+    request_path: str
+    request_method: str
+    detected_at: datetime = field(default_factory=datetime.now)
+    blocked: bool = False
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SanitizationResult:
+    """Result of sanitization."""
+    original: Any
+    sanitized: Any
+    threats_removed: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+class InputSanitizer:
+    """Sanitizes user input to prevent attacks."""
+    
+    SQL_PATTERNS = [
+        r"(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE)\b)",
+        r"(--|;|/\*|\*/)",
+        r"(\bUNION\b.*\bSELECT\b)",
+        r"('|(\\'\\'))",
+    ]
+    
+    XSS_PATTERNS = [
+        r"<script[^>]*>.*?</script>",
+        r"javascript:",
+        r"on\w+\s*=",
+        r"<iframe[^>]*>",
+        r"<object[^>]*>",
+        r"<embed[^>]*>",
+    ]
+    
+    def __init__(self):
+        self._sql_regex = [re.compile(p, re.IGNORECASE) for p in self.SQL_PATTERNS]
+        self._xss_regex = [re.compile(p, re.IGNORECASE) for p in self.XSS_PATTERNS]
+    
+    def sanitize_string(self, value: str) -> SanitizationResult:
+        """Sanitize a string value."""
+        original = value
+        threats = []
+        warnings = []
+        
+        # Check for SQL injection patterns
+        for pattern in self._sql_regex:
+            if pattern.search(value):
+                threats.append("sql_injection_pattern")
+                value = pattern.sub("BLOCKED", value)
+        
+        # Check for XSS patterns
+        for pattern in self._xss_regex:
+            matches = pattern.findall(value)
+            if matches:
+                threats.append("xss_pattern")
+                value = pattern.sub("", value)
+        
+        # HTML escape
+        if "<" in value or ">" in value or "&" in value:
+            value = html.escape(value)
+        
+        # Remove null bytes
+        value = value.replace("\x00", "")
+        
+        return SanitizationResult(
+            original=original,
+            sanitized=value,
+            threats_removed=threats
+        )
+    
+    def sanitize_dict(self, data: dict) -> tuple[dict, list[str]]:
+        """Recursively sanitize dictionary values."""
+        threats = []
+        result = {}
+        
+        for key, value in data.items():
+            if isinstance(value, str):
+                sanitized = self.sanitize_string(value)
+                result[key] = sanitized.sanitized
+                threats.extend(sanitized.threats_removed)
+            elif isinstance(value, dict):
+                sanitized_value, sub_threats = self.sanitize_dict(value)
+                result[key] = sanitized_value
+                threats.extend(sub_threats)
+            elif isinstance(value, list):
+                sanitized_list, list_threats = self.sanitize_list(value)
+                result[key] = sanitized_list
+                threats.extend(list_threats)
             else:
-                return ActionResult(success=False, message=f"Unknown key type: {key_type}")
+                result[key] = value
+        
+        return result, threats
+    
+    def sanitize_list(self, data: list) -> tuple[list, list[str]]:
+        """Recursively sanitize list values."""
+        threats = []
+        result = []
+        
+        for item in data:
+            if isinstance(item, str):
+                sanitized = self.sanitize_string(item)
+                result.append(sanitized.sanitized)
+                threats.extend(sanitized.threats_removed)
+            elif isinstance(item, dict):
+                sanitized_item, sub_threats = self.sanitize_dict(item)
+                result.append(sanitized_item)
+                threats.extend(sub_threats)
+            else:
+                result.append(item)
+        
+        return result, threats
 
-            if prefix:
-                api_key = f"{prefix}_{api_key}"
 
-            if include_timestamp:
-                timestamp = int(datetime.now().timestamp())
-                api_key = f"{api_key}_{timestamp}"
-
-            key_info = {
-                "api_key": api_key,
-                "key_type": key_type,
-                "key_length": len(api_key),
-                "prefix": prefix,
-                "generated_at": datetime.now().isoformat()
+class ApiSecurityAction:
+    """Main API security action handler."""
+    
+    def __init__(self, config: Optional[SecurityConfig] = None):
+        self.config = config or SecurityConfig()
+        self._sanitizer = InputSanitizer()
+        self._threat_log: list[ThreatDetection] = []
+        self._rate_limiters: dict[str, list[datetime]] = {}
+        self._csrf_tokens: dict[str, tuple[str, datetime]] = {}
+        self._stats: dict[str, Any] = defaultdict(int)
+    
+    async def check_request_security(
+        self,
+        request: dict[str, Any]
+    ) -> tuple[bool, list[ThreatDetection]]:
+        """
+        Check request for security threats.
+        
+        Args:
+            request: Request data
+            
+        Returns:
+            Tuple of (is_safe, list of detected threats)
+        """
+        threats = []
+        
+        # Check request size
+        body_size = len(str(request.get("body", "")))
+        if body_size > self.config.max_request_size_kb * 1024:
+            threats.append(ThreatDetection(
+                threat_type=ThreatType.INVALID_INPUT,
+                severity="medium",
+                description=f"Request body too large: {body_size} bytes",
+                request_path=request.get("path", ""),
+                request_method=request.get("method", "")
+            ))
+        
+        # Check input sanitization
+        if self.config.enable_input_validation:
+            input_threats = await self._check_input(request)
+            threats.extend(input_threats)
+        
+        # Check rate limiting
+        if self.config.enable_rate_limiting:
+            client_ip = request.get("client_ip", "unknown")
+            if self._is_rate_limited(client_ip):
+                threats.append(ThreatDetection(
+                    threat_type=ThreatType.RATE_LIMIT,
+                    severity="high",
+                    description="Rate limit exceeded",
+                    request_path=request.get("path", ""),
+                    request_method=request.get("method", ""),
+                    blocked=True
+                ))
+        
+        # Check CSRF
+        if self.config.enable_csrf_protection:
+            csrf_threat = await self._check_csrf(request)
+            if csrf_threat:
+                threats.append(csrf_threat)
+        
+        # Log threats
+        for threat in threats:
+            self._threat_log.append(threat)
+            self._stats["threats_detected"] += 1
+            if threat.blocked:
+                self._stats["threats_blocked"] += 1
+        
+        return len([t for t in threats if t.blocked]) == 0, threats
+    
+    async def _check_input(self, request: dict) -> list[ThreatDetection]:
+        """Check input for malicious patterns."""
+        threats = []
+        
+        body = request.get("body")
+        if isinstance(body, dict):
+            _, threats_found = self._sanitizer.sanitize_dict(body.copy())
+            
+            for threat in threats_found:
+                threats.append(ThreatDetection(
+                    threat_type=ThreatType.SQL_INJECTION if "sql" in threat else ThreatType.XSS,
+                    severity="high",
+                    description=f"Malicious input pattern detected: {threat}",
+                    request_path=request.get("path", ""),
+                    request_method=request.get("method", "")
+                ))
+        
+        return threats
+    
+    def _is_rate_limited(self, client_ip: str, max_requests: int = 100, window_seconds: int = 60) -> bool:
+        """Check if client IP is rate limited."""
+        now = datetime.now()
+        
+        if client_ip not in self._rate_limiters:
+            self._rate_limiters[client_ip] = []
+        
+        # Clean old requests
+        self._rate_limiters[client_ip] = [
+            t for t in self._rate_limiters[client_ip]
+            if (now - t).total_seconds() < window_seconds
+        ]
+        
+        # Check limit
+        if len(self._rate_limiters[client_ip]) >= max_requests:
+            return True
+        
+        self._rate_limiters[client_ip].append(now)
+        return False
+    
+    async def _check_csrf(self, request: dict) -> Optional[ThreatDetection]:
+        """Check for CSRF token validity."""
+        method = request.get("method", "")
+        
+        # Only check state-changing methods
+        if method not in ["POST", "PUT", "DELETE", "PATCH"]:
+            return None
+        
+        token = request.get("headers", {}).get("X-CSRF-Token")
+        
+        if not token:
+            # CSRF token required
+            return ThreatDetection(
+                threat_type=ThreatType.CSRF,
+                severity="high",
+                description="Missing CSRF token",
+                request_path=request.get("path", ""),
+                request_method=method,
+                blocked=True
+            )
+        
+        # Validate token
+        if token not in self._csrf_tokens:
+            return ThreatDetection(
+                threat_type=ThreatType.CSRF,
+                severity="critical",
+                description="Invalid CSRF token",
+                request_path=request.get("path", ""),
+                request_method=method,
+                blocked=True
+            )
+        
+        token_value, token_time = self._csrf_tokens[token]
+        age = (datetime.now() - token_time).total_seconds()
+        
+        # Token expires after 1 hour
+        if age > 3600:
+            return ThreatDetection(
+                threat_type=ThreatType.CSRF,
+                severity="medium",
+                description="CSRF token expired",
+                request_path=request.get("path", ""),
+                request_method=method
+            )
+        
+        return None
+    
+    def generate_csrf_token(self, session_id: str) -> str:
+        """Generate a CSRF token for a session."""
+        import secrets
+        token = secrets.token_urlsafe(32)
+        self._csrf_tokens[token] = (session_id, datetime.now())
+        return token
+    
+    def sanitize_input(self, data: Any) -> SanitizationResult:
+        """Sanitize input data."""
+        if isinstance(data, str):
+            return self._sanitizer.sanitize_string(data)
+        elif isinstance(data, dict):
+            sanitized, threats = self._sanitizer.sanitize_dict(data)
+            return SanitizationResult(
+                original=data,
+                sanitized=sanitized,
+                threats_removed=threats
+            )
+        elif isinstance(data, list):
+            sanitized, threats = self._sanitizer.sanitize_list(data)
+            return SanitizationResult(
+                original=data,
+                sanitized=sanitized,
+                threats_removed=threats
+            )
+        
+        return SanitizationResult(
+            original=data,
+            sanitized=data,
+            threats_removed=[]
+        )
+    
+    def get_security_headers(self) -> dict[str, str]:
+        """Get security headers for responses."""
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "X-XSS-Protection": "1; mode=block",
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            "Content-Security-Policy": "default-src 'self'",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+        }
+        
+        if self.config.enable_cors:
+            headers["Access-Control-Allow-Origin"] = ", ".join(self.config.allowed_origins)
+            headers["Access-Control-Allow-Methods"] = ", ".join(self.config.allowed_methods)
+            headers["Access-Control-Allow-Headers"] = ", ".join(self.config.allowed_headers)
+        
+        return headers
+    
+    def get_threat_log(
+        self,
+        severity: Optional[str] = None,
+        limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Get threat detection log."""
+        log = self._threat_log
+        
+        if severity:
+            log = [t for t in log if t.severity == severity]
+        
+        log = log[-limit:]
+        
+        return [
+            {
+                "type": t.threat_type.value,
+                "severity": t.severity,
+                "description": t.description,
+                "path": t.request_path,
+                "method": t.request_method,
+                "blocked": t.blocked,
+                "detected_at": t.detected_at.isoformat()
             }
-
-            return ActionResult(
-                success=True,
-                data=key_info,
-                message=f"API key generated: {api_key[:20]}... (length: {len(api_key)})"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"API key generator error: {str(e)}")
-
-
-class APIKeyValidatorAction(BaseAction):
-    """Validate API keys."""
-    action_type = "api_key_validator"
-    display_name = "API密钥验证"
-    description = "验证API密钥"
-
-    def __init__(self):
-        super().__init__()
-        self._valid_keys = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "validate")
-            api_key = params.get("api_key", "")
-            key_id = params.get("key_id", "")
-            store_key = params.get("store_key", False)
-
-            if not api_key and not key_id:
-                return ActionResult(success=False, message="api_key or key_id is required")
-
-            if operation == "validate":
-                if key_id and key_id in self._valid_keys:
-                    is_valid = True
-                    stored = self._valid_keys[key_id]
-                else:
-                    is_valid = len(api_key) >= 8
-                    stored = None
-
-                return ActionResult(
-                    success=is_valid,
-                    data={
-                        "valid": is_valid,
-                        "key_id": key_id,
-                        "is_valid": is_valid,
-                        "validated_at": datetime.now().isoformat()
-                    },
-                    message=f"API key validation: {'VALID' if is_valid else 'INVALID'}"
-                )
-
-            elif operation == "store":
-                if not key_id:
-                    return ActionResult(success=False, message="key_id is required for store operation")
-
-                self._valid_keys[key_id] = {
-                    "api_key": api_key,
-                    "created_at": datetime.now().isoformat(),
-                    "is_active": True
-                }
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "key_id": key_id,
-                        "stored": True,
-                        "stored_at": datetime.now().isoformat()
-                    },
-                    message=f"API key stored with ID: {key_id}"
-                )
-
-            elif operation == "revoke":
-                if key_id in self._valid_keys:
-                    self._valid_keys[key_id]["is_active"] = False
-                    return ActionResult(
-                        success=True,
-                        data={"key_id": key_id, "revoked": True},
-                        message=f"API key revoked: {key_id}"
-                    )
-                return ActionResult(
-                    success=False,
-                    data={"key_id": key_id, "found": False},
-                    message=f"API key not found: {key_id}"
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"API key validator error: {str(e)}")
-
-
-class APIRateLimiterAction(BaseAction):
-    """Rate limit API access."""
-    action_type = "api_rate_limiter"
-    display_name = "API限流"
-    description = "API访问限流"
-
-    def __init__(self):
-        super().__init__()
-        self._limits = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "check")
-            client_id = params.get("client_id", "default")
-            max_requests = params.get("max_requests", 100)
-            window_seconds = params.get("window_seconds", 60)
-
-            if operation == "check":
-                if client_id not in self._limits:
-                    self._limits[client_id] = {
-                        "requests": [],
-                        "max_requests": max_requests,
-                        "window_seconds": window_seconds
-                    }
-
-                limit_data = self._limits[client_id]
-                now = datetime.now()
-                cutoff = now - timedelta(seconds=window_seconds)
-
-                recent_requests = [r for r in limit_data["requests"] if r > cutoff]
-                limit_data["requests"] = recent_requests
-
-                remaining = max(0, max_requests - len(recent_requests))
-                is_allowed = len(recent_requests) < max_requests
-
-                if is_allowed:
-                    limit_data["requests"].append(now)
-
-                return ActionResult(
-                    success=is_allowed,
-                    data={
-                        "client_id": client_id,
-                        "allowed": is_allowed,
-                        "remaining": remaining,
-                        "limit": max_requests,
-                        "window_seconds": window_seconds,
-                        "reset_at": (now + timedelta(seconds=window_seconds)).isoformat()
-                    },
-                    message=f"Rate limit check: {'ALLOWED' if is_allowed else 'LIMIT_EXCEEDED'} ({remaining}/{max_requests} remaining)"
-                )
-
-            elif operation == "reset":
-                if client_id in self._limits:
-                    self._limits[client_id]["requests"] = []
-                return ActionResult(
-                    success=True,
-                    data={"client_id": client_id, "reset": True},
-                    message=f"Rate limit reset for '{client_id}'"
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"API rate limiter error: {str(e)}")
-
-
-class APIPermissionAction(BaseAction):
-    """Check API permissions."""
-    action_type = "api_permission"
-    display_name = "API权限检查"
-    description = "检查API权限"
-
-    def __init__(self):
-        super().__init__()
-        self._permissions = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "check")
-            client_id = params.get("client_id", "default")
-            permission = params.get("permission", "")
-            resource = params.get("resource", "")
-            action = params.get("action", "")
-
-            if operation == "check":
-                if client_id not in self._permissions:
-                    return ActionResult(
-                        success=True,
-                        data={
-                            "client_id": client_id,
-                            "permission": permission,
-                            "granted": True,
-                            "default_behavior": True
-                        },
-                        message=f"Permission '{permission}' granted (default: allow)"
-                    )
-
-                granted = self._permissions[client_id].get(permission, True)
-                return ActionResult(
-                    success=granted,
-                    data={
-                        "client_id": client_id,
-                        "permission": permission,
-                        "granted": granted
-                    },
-                    message=f"Permission check: {'GRANTED' if granted else 'DENIED'}"
-                )
-
-            elif operation == "grant":
-                if client_id not in self._permissions:
-                    self._permissions[client_id] = {}
-                self._permissions[client_id][permission] = True
-                return ActionResult(
-                    success=True,
-                    data={
-                        "client_id": client_id,
-                        "permission": permission,
-                        "granted": True
-                    },
-                    message=f"Permission '{permission}' granted to '{client_id}'"
-                )
-
-            elif operation == "revoke":
-                if client_id in self._permissions and permission in self._permissions[client_id]:
-                    self._permissions[client_id][permission] = False
-                return ActionResult(
-                    success=True,
-                    data={
-                        "client_id": client_id,
-                        "permission": permission,
-                        "revoked": True
-                    },
-                    message=f"Permission '{permission}' revoked from '{client_id}'"
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"API permission error: {str(e)}")
-
-
-class APIHealthCheckAction(BaseAction):
-    """Health check endpoints."""
-    action_type = "api_health_check"
-    display_name = "API健康检查"
-    description = "API健康状态检查"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            endpoints = params.get("endpoints", [])
-            check_type = params.get("check_type", "basic")
-            timeout = params.get("timeout", 5)
-
-            if not endpoints:
-                return ActionResult(success=False, message="endpoints is required")
-
-            results = []
-            all_healthy = True
-
-            for endpoint in endpoints:
-                healthy = True
-                latency_ms = 50
-
-                results.append({
-                    "endpoint": endpoint,
-                    "healthy": healthy,
-                    "latency_ms": latency_ms,
-                    "checked_at": datetime.now().isoformat()
-                })
-
-                if not healthy:
-                    all_healthy = False
-
-            return ActionResult(
-                success=all_healthy,
-                data={
-                    "check_type": check_type,
-                    "endpoints_checked": len(endpoints),
-                    "healthy_count": sum(1 for r in results if r["healthy"]),
-                    "unhealthy_count": sum(1 for r in results if not r["healthy"]),
-                    "results": results,
-                    "overall_healthy": all_healthy,
-                    "checked_at": datetime.now().isoformat()
-                },
-                message=f"Health check: {sum(1 for r in results if r['healthy'])}/{len(results)} healthy"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"API health check error: {str(e)}")
+            for t in log
+        ]
+    
+    def get_stats(self) -> dict[str, Any]:
+        """Get security statistics."""
+        return {
+            **dict(self._stats),
+            "threats_logged": len(self._threat_log),
+            "rate_limited_ips": len(self._rate_limiters),
+            "active_csrf_tokens": len(self._csrf_tokens)
+        }
