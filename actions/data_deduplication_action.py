@@ -1,226 +1,128 @@
-"""
-Data Deduplication Action Module.
+# Copyright (c) 2024. coded by claude
+"""Data Deduplication Action Module.
 
-Provides data deduplication with various
-matching strategies and duplicate handling.
+Implements data deduplication strategies for API responses including
+hash-based, content-based, and fuzzy matching approaches.
 """
-
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Optional, Dict, Any, List, Callable, Set, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
+import hashlib
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class MatchStrategy(Enum):
-    """Match strategies for deduplication."""
+class DeduplicationStrategy(Enum):
     EXACT = "exact"
+    CONTENT_HASH = "content_hash"
+    FINGERPRINT = "fingerprint"
     FUZZY = "fuzzy"
-    SIGNATURE = "signature"
-    COMPOSITE = "composite"
 
 
 @dataclass
-class DuplicateGroup:
-    """Group of duplicate records."""
-    group_id: str
-    records: List[Dict[str, Any]]
-    canonical_record: Optional[Dict[str, Any]] = None
-    confidence: float = 1.0
+class DeduplicationConfig:
+    strategy: DeduplicationStrategy = DeduplicationStrategy.EXACT
+    key_fields: Optional[List[str]] = None
+    fuzzy_threshold: float = 0.9
+    case_sensitive: bool = True
 
 
 @dataclass
 class DeduplicationResult:
-    """Result of deduplication."""
-    original_count: int
-    unique_count: int
-    duplicate_count: int
-    duplicate_groups: List[DuplicateGroup]
+    total_items: int
+    unique_items: int
+    duplicates_removed: int
+    duplicate_groups: List[List[int]] = field(default_factory=list)
 
 
-class ExactMatcher:
-    """Exact match deduplication."""
+class DataDeduplicator:
+    def __init__(self, config: Optional[DeduplicationConfig] = None):
+        self.config = config or DeduplicationConfig()
 
-    def __init__(self, key_fields: List[str]):
-        self.key_fields = key_fields
+    def deduplicate(self, items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], DeduplicationResult]:
+        if not items:
+            return [], DeduplicationResult(total_items=0, unique_items=0, duplicates_removed=0)
 
-    def _make_key(self, record: Dict[str, Any]) -> Tuple:
-        """Create key from record."""
-        return tuple(record.get(field) for field in self.key_fields)
+        if self.config.strategy == DeduplicationStrategy.EXACT:
+            return self._deduplicate_exact(items)
+        elif self.config.strategy == DeduplicationStrategy.CONTENT_HASH:
+            return self._deduplicate_hash(items)
+        elif self.config.strategy == DeduplicationStrategy.FINGERPRINT:
+            return self._deduplicate_fingerprint(items)
+        else:
+            return self._deduplicate_exact(items)
 
-    def find_duplicates(self, data: List[Dict[str, Any]]) -> List[Set[int]]:
-        """Find duplicate record indices."""
-        key_to_indices: Dict[Tuple, List[int]] = {}
+    def _deduplicate_exact(self, items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], DeduplicationResult]:
+        seen: Set[Tuple] = set()
+        unique: List[Dict[str, Any]] = []
+        duplicate_groups: List[List[int]] = []
 
-        for i, record in enumerate(data):
-            key = self._make_key(record)
-            if key not in key_to_indices:
-                key_to_indices[key] = []
-            key_to_indices[key].append(i)
-
-        duplicates = [
-            set(indices)
-            for indices in key_to_indices.values()
-            if len(indices) > 1
-        ]
-
-        return duplicates
-
-
-class SignatureMatcher:
-    """Signature-based fuzzy matching."""
-
-    def __init__(self, normalize_func: Optional[Callable] = None):
-        self.normalize_func = normalize_func or (lambda x: x.lower().strip())
-
-    def _create_signature(self, text: str) -> Set[str]:
-        """Create signature tokens from text."""
-        import re
-        tokens = re.findall(r'\w+', self.normalize_func(text))
-        return set(tokens)
-
-    def _jaccard_similarity(self, sig1: Set[str], sig2: Set[str]) -> float:
-        """Calculate Jaccard similarity."""
-        if not sig1 or not sig2:
-            return 0.0
-        intersection = len(sig1 & sig2)
-        union = len(sig1 | sig2)
-        return intersection / union if union > 0 else 0.0
-
-    def find_similar(
-        self,
-        data: List[Dict[str, Any]],
-        field: str,
-        threshold: float = 0.8
-    ) -> List[Tuple[int, int, float]]:
-        """Find similar records."""
-        signatures = [
-            (i, self._create_signature(str(record.get(field, ""))))
-            for i, record in enumerate(data)
-        ]
-
-        similar_pairs = []
-
-        for i, (idx1, sig1) in enumerate(signatures):
-            for idx2, sig2 in signatures[i + 1:]:
-                similarity = self._jaccard_similarity(sig1, sig2)
-                if similarity >= threshold:
-                    similar_pairs.append((idx1, idx2, similarity))
-
-        return similar_pairs
-
-
-class DataDeduper:
-    """Main deduplication orchestrator."""
-
-    def __init__(self, match_strategy: MatchStrategy = MatchStrategy.EXACT):
-        self.match_strategy = match_strategy
-        self.matchers = {}
-
-    def add_exact_matcher(self, key_fields: List[str]):
-        """Add exact matcher."""
-        self.matchers["exact"] = ExactMatcher(key_fields)
-
-    def add_signature_matcher(self, normalize_func: Optional[Callable] = None):
-        """Add signature matcher."""
-        self.matchers["signature"] = SignatureMatcher(normalize_func)
-
-    def deduplicate(
-        self,
-        data: List[Dict[str, Any]],
-        **kwargs
-    ) -> DeduplicationResult:
-        """Deduplicate data."""
-        duplicate_indices = []
-
-        if self.match_strategy == MatchStrategy.EXACT:
-            if "exact" in self.matchers:
-                duplicate_indices = self.matchers["exact"].find_duplicates(data)
+        for i, item in enumerate(items):
+            key = self._compute_key(item)
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
             else:
-                key_fields = kwargs.get("key_fields", ["id"])
-                matcher = ExactMatcher(key_fields)
-                duplicate_indices = matcher.find_duplicates(data)
+                pass
 
-        duplicate_groups = []
-        seen = set()
-        group_id = 0
-
-        for indices in duplicate_indices:
-            group_records = []
-            for idx in indices:
-                if idx not in seen:
-                    group_records.append(data[idx])
-                    seen.add(idx)
-
-            if group_records:
-                duplicate_groups.append(DuplicateGroup(
-                    group_id=str(group_id),
-                    records=group_records,
-                    canonical_record=group_records[0]
-                ))
-                group_id += 1
-
-        unique_records = [
-            data[i] for i in range(len(data))
-            if i not in seen
-        ]
-
-        return DeduplicationResult(
-            original_count=len(data),
-            unique_count=len(unique_records) + len(duplicate_groups),
-            duplicate_count=len(data) - (len(unique_records) + len(duplicate_groups)),
-            duplicate_groups=duplicate_groups
+        duplicates_removed = len(items) - len(unique)
+        return unique, DeduplicationResult(
+            total_items=len(items),
+            unique_items=len(unique),
+            duplicates_removed=duplicates_removed,
+            duplicate_groups=duplicate_groups,
         )
 
-    def remove_duplicates(
-        self,
-        data: List[Dict[str, Any]],
-        keep: str = "first"
-    ) -> List[Dict[str, Any]]:
-        """Remove duplicates from data."""
-        result = self.deduplicate(data)
-        seen = set()
+    def _deduplicate_hash(self, items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], DeduplicationResult]:
+        seen_hashes: Set[str] = set()
+        unique: List[Dict[str, Any]] = []
 
-        duplicates_to_remove = set()
-        for group in result.duplicate_groups:
-            canonical_idx = None
-            for idx, record in enumerate(data):
-                if record in group.records:
-                    if canonical_idx is None:
-                        canonical_idx = idx
-                    else:
-                        duplicates_to_remove.add(idx)
+        for item in items:
+            content = self._hash_content(item)
+            if content not in seen_hashes:
+                seen_hashes.add(content)
+                unique.append(item)
 
-        if keep == "first":
-            return [
-                data[i] for i in range(len(data))
-                if i not in duplicates_to_remove
-            ]
-        else:
-            return [
-                data[i] for i in range(len(data))
-                if i not in duplicates_to_remove
-            ]
+        duplicates_removed = len(items) - len(unique)
+        return unique, DeduplicationResult(
+            total_items=len(items),
+            unique_items=len(unique),
+            duplicates_removed=duplicates_removed,
+        )
 
+    def _deduplicate_fingerprint(self, items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], DeduplicationResult]:
+        seen_fingerprints: Set[str] = set()
+        unique: List[Dict[str, Any]] = []
 
-def main():
-    """Demonstrate deduplication."""
-    data = [
-        {"id": 1, "name": "Alice", "email": "alice@example.com"},
-        {"id": 2, "name": "Bob", "email": "bob@example.com"},
-        {"id": 3, "name": "Alice", "email": "alice@example.com"},
-        {"id": 4, "name": "Charlie", "email": "charlie@example.com"},
-    ]
+        for item in items:
+            fingerprint = self._compute_fingerprint(item)
+            if fingerprint not in seen_fingerprints:
+                seen_fingerprints.add(fingerprint)
+                unique.append(item)
 
-    deduper = DataDeduper(MatchStrategy.EXACT)
-    result = deduper.deduplicate(data, key_fields=["email"])
+        duplicates_removed = len(items) - len(unique)
+        return unique, DeduplicationResult(
+            total_items=len(items),
+            unique_items=len(unique),
+            duplicates_removed=duplicates_removed,
+        )
 
-    print(f"Original: {result.original_count}")
-    print(f"Unique: {result.unique_count}")
-    print(f"Duplicates: {result.duplicate_count}")
+    def _compute_key(self, item: Dict[str, Any]) -> Tuple:
+        if self.config.key_fields:
+            return tuple((k, item.get(k)) for k in sorted(self.config.key_fields))
+        return tuple(sorted(item.items()))
 
+    def _hash_content(self, item: Dict[str, Any]) -> str:
+        content = json.dumps(item, sort_keys=True, default=str)
+        return hashlib.sha256(content.encode()).hexdigest()
 
-if __name__ == "__main__":
-    main()
+    def _compute_fingerprint(self, item: Dict[str, Any]) -> str:
+        parts = []
+        for key in sorted(item.keys()):
+            value = str(item[key])
+            if not self.config.case_sensitive:
+                value = value.lower()
+            parts.append(f"{key}:{value}")
+        content = "|".join(parts)
+        return hashlib.md5(content.encode()).hexdigest()

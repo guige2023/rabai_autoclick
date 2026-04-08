@@ -1,106 +1,116 @@
-"""Data encoding action module for RabAI AutoClick.
+# Copyright (c) 2024. coded by claude
+"""Data Encoding Action Module.
 
-Provides data encoding:
-- DataEncodingAction: Encode/decode data
-- Base64EncoderAction: Base64 encoding
-- URLEncoderAction: URL encoding
+Provides encoding and decoding utilities for API data including
+base64, URL encoding, HTML escaping, and custom encodings.
 """
-
+from typing import Optional, Dict, Any, Tuple
+from dataclasses import dataclass
+from enum import Enum
 import base64
 import urllib.parse
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+import html
+import json
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class DataEncodingAction(BaseAction):
-    """Encode and decode data."""
-    action_type = "data_encoding"
-    display_name = "数据编码"
-    description = "编码和解码数据"
+class EncodingType(Enum):
+    BASE64 = "base64"
+    URL = "url"
+    HTML = "html"
+    JSON = "json"
+    UTF8 = "utf8"
+    HEX = "hex"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+@dataclass
+class EncodingResult:
+    success: bool
+    original: str
+    encoded: str
+    encoding_type: EncodingType
+    error: Optional[str] = None
+
+
+class DataEncoder:
+    @staticmethod
+    def encode_base64(data: str) -> EncodingResult:
         try:
-            operation = params.get("operation", "encode")
-            data = params.get("data", "")
-            encoding = params.get("encoding", "base64")
-
-            if operation == "encode":
-                if encoding == "base64":
-                    result = base64.b64encode(data.encode()).decode()
-                elif encoding == "url":
-                    result = urllib.parse.quote(data)
-                else:
-                    result = data
-            else:
-                if encoding == "base64":
-                    result = base64.b64decode(data.encode()).decode()
-                elif encoding == "url":
-                    result = urllib.parse.unquote(data)
-                else:
-                    result = data
-
-            return ActionResult(
-                success=True,
-                data={
-                    "operation": operation,
-                    "encoding": encoding,
-                    "result": result
-                },
-                message=f"Encoding {operation}: {encoding}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Data encoding error: {str(e)}")
-
-
-class Base64EncoderAction(BaseAction):
-    """Base64 encoding."""
-    action_type = "base64_encoder"
-    display_name = "Base64编码"
-    description = "Base64编码"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", "")
-
             encoded = base64.b64encode(data.encode()).decode()
-
-            return ActionResult(
-                success=True,
-                data={"encoded": encoded},
-                message=f"Base64 encoded: {len(encoded)} chars"
-            )
+            return EncodingResult(success=True, original=data, encoded=encoded, encoding_type=EncodingType.BASE64)
         except Exception as e:
-            return ActionResult(success=False, message=f"Base64 encoder error: {str(e)}")
+            return EncodingResult(success=False, original=data, encoded="", encoding_type=EncodingType.BASE64, error=str(e))
 
-
-class URLEncoderAction(BaseAction):
-    """URL encoding."""
-    action_type = "url_encoder"
-    display_name = "URL编码"
-    description = "URL编码"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+    @staticmethod
+    def decode_base64(data: str) -> Tuple[bool, Optional[str], Optional[str]]:
         try:
-            data = params.get("data", "")
-
-            encoded = urllib.parse.quote(data)
-            decoded = urllib.parse.unquote(encoded)
-
-            return ActionResult(
-                success=True,
-                data={
-                    "original": data,
-                    "encoded": encoded,
-                    "decoded": decoded
-                },
-                message=f"URL encoded: {encoded[:50]}..."
-            )
+            decoded = base64.b64decode(data.encode()).decode()
+            return True, decoded, None
         except Exception as e:
-            return ActionResult(success=False, message=f"URL encoder error: {str(e)}")
+            return False, None, str(e)
+
+    @staticmethod
+    def encode_url(data: str, safe: str = "") -> EncodingResult:
+        try:
+            encoded = urllib.parse.quote(data, safe=safe)
+            return EncodingResult(success=True, original=data, encoded=encoded, encoding_type=EncodingType.URL)
+        except Exception as e:
+            return EncodingResult(success=False, original=data, encoded="", encoding_type=EncodingType.URL, error=str(e))
+
+    @staticmethod
+    def decode_url(data: str) -> Tuple[bool, Optional[str], Optional[str]]:
+        try:
+            decoded = urllib.parse.unquote(data)
+            return True, decoded, None
+        except Exception as e:
+            return False, None, str(e)
+
+    @staticmethod
+    def encode_html(data: str) -> EncodingResult:
+        try:
+            encoded = html.escape(data)
+            return EncodingResult(success=True, original=data, encoded=encoded, encoding_type=EncodingType.HTML)
+        except Exception as e:
+            return EncodingResult(success=False, original=data, encoded="", encoding_type=EncodingType.HTML, error=str(e))
+
+    @staticmethod
+    def decode_html(data: str) -> Tuple[bool, Optional[str], Optional[str]]:
+        try:
+            decoded = html.unescape(data)
+            return True, decoded, None
+        except Exception as e:
+            return False, None, str(e)
+
+    @staticmethod
+    def encode_hex(data: str) -> EncodingResult:
+        try:
+            encoded = data.encode().hex()
+            return EncodingResult(success=True, original=data, encoded=encoded, encoding_type=EncodingType.HEX)
+        except Exception as e:
+            return EncodingResult(success=False, original=data, encoded="", encoding_type=EncodingType.HEX, error=str(e))
+
+    @staticmethod
+    def decode_hex(data: str) -> Tuple[bool, Optional[str], Optional[str]]:
+        try:
+            decoded = bytes.fromhex(data).decode()
+            return True, decoded, None
+        except Exception as e:
+            return False, None, str(e)
+
+    @staticmethod
+    def encode_json(data: Dict[str, Any]) -> Tuple[bool, Optional[str], Optional[str]]:
+        try:
+            encoded = json.dumps(data, ensure_ascii=False)
+            return True, encoded, None
+        except Exception as e:
+            return False, None, str(e)
+
+    @staticmethod
+    def decode_json(data: str) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        try:
+            decoded = json.loads(data)
+            return True, decoded, None
+        except Exception as e:
+            return False, None, str(e)
