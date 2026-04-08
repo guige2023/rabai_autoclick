@@ -1,228 +1,133 @@
-"""
-Version comparison utilities.
+"""Version comparison utilities for RabAI AutoClick.
 
-Provides semantic version parsing, comparison,
-and compatibility checking.
+Provides:
+- Semantic version comparison
+- Version parsing
+- Version requirement checking
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Literal
+from typing import (
+    Any,
+    List,
+    Optional,
+    Tuple,
+)
 
 
-@dataclass
 class Version:
-    """Semantic version representation."""
-    major: int
-    minor: int
-    patch: int
-    prerelease: str = ""
-    build: str = ""
+    """A parsed version."""
+
+    def __init__(self, version_string: str) -> None:
+        self._string = version_string
+        parts = re.match(r"(\d+)\.(\d+)\.(\d+)", version_string)
+        if parts:
+            self.major = int(parts.group(1))
+            self.minor = int(parts.group(2))
+            self.patch = int(parts.group(3))
+        else:
+            self.major = self.minor = self.patch = 0
 
     def __str__(self) -> str:
-        v = f"{self.major}.{self.minor}.{self.patch}"
-        if self.prerelease:
-            v += f"-{self.prerelease}"
-        if self.build:
-            v += f"+{self.build}"
-        return v
+        return self._string
 
-    def __lt__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self._compare(other) < 0
-
-    def __le__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self._compare(other) <= 0
-
-    def __gt__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self._compare(other) > 0
-
-    def __ge__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self._compare(other) >= 0
+    def __repr__(self) -> str:
+        return f"Version({self._string})"
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Version):
-            return NotImplemented
-        return self._compare(other) == 0
+            return False
+        return (self.major, self.minor, self.patch) == (
+            other.major, other.minor, other.patch
+        )
 
-    def __hash__(self) -> int:
-        return hash((self.major, self.minor, self.patch, self.prerelease, self.build))
+    def __lt__(self, other: "Version") -> bool:
+        return (self.major, self.minor, self.patch) < (
+            other.major, other.minor, other.patch
+        )
 
-    def _compare(self, other: "Version") -> int:
-        for a, b in [
-            (self.major, other.major),
-            (self.minor, other.minor),
-            (self.patch, other.patch),
-        ]:
-            if a < b:
-                return -1
-            if a > b:
-                return 1
-        if self.prerelease and not other.prerelease:
-            return -1
-        if not self.prerelease and other.prerelease:
-            return 1
-        if self.prerelease < other.prerelease:
-            return -1
-        if self.prerelease > other.prerelease:
-            return 1
-        return 0
+    def __le__(self, other: "Version") -> bool:
+        return self == other or self < other
+
+    def __gt__(self, other: "Version") -> bool:
+        return other < self
+
+    def __ge__(self, other: "Version") -> bool:
+        return not self < other
 
 
-def parse_version(version_str: str) -> Version:
-    """
-    Parse version string into Version object.
-
-    Supports:
-      - 1.2.3
-      - 1.2.3-beta
-      - 1.2.3+build
-      - 1.2.3-beta+build
-      - v1.2.3 (strips v prefix)
-      - 1.2 (treats patch as 0)
+def parse_version(version_string: str) -> Version:
+    """Parse a version string.
 
     Args:
-        version_str: Version string
+        version_string: Version like '1.2.3'.
 
     Returns:
-        Version object
-
-    Raises:
-        ValueError: If version string is invalid
+        Version object.
     """
-    version_str = version_str.strip().lstrip("v")
-    pattern = r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+])(.+)$"
-    match = re.match(pattern, version_str)
+    return Version(version_string)
 
-    if not match:
-        parts = version_str.split("-")[0].split("+")[0].split(".")
-        while len(parts) < 3:
-            parts.append("0")
-        try:
-            major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
-        except ValueError:
-            raise ValueError(f"Invalid version: {version_str}")
-        prerelease = ""
-        build = ""
-        if "-" in version_str:
-            prerelease = version_str.split("-", 1)[1].split("+")[0]
-        if "+" in version_str:
-            build = version_str.split("+")[1]
-        return Version(major, minor, patch, prerelease, build)
 
-    major = int(match.group(1))
-    minor = int(match.group(2)) if match.group(2) else 0
-    patch = int(match.group(3)) if match.group(3) else 0
-    rest = match.group(4)
-    prerelease = ""
-    build = ""
-    if "-" in rest:
-        prerelease, build = rest.split("-", 1)
-    elif "+" in rest:
-        build = rest.split("+")[1]
-    else:
-        prerelease = rest
+def compare_versions(a: str, b: str) -> int:
+    """Compare two version strings.
 
-    return Version(major, minor, patch, prerelease, build)
+    Args:
+        a: First version.
+        b: Second version.
+
+    Returns:
+        -1 if a < b, 0 if equal, 1 if a > b.
+    """
+    va = Version(a)
+    vb = Version(b)
+    if va < vb:
+        return -1
+    elif va > vb:
+        return 1
+    return 0
 
 
 def is_compatible(
-    version: Version,
-    constraint: str,
+    version: str,
+    requirement: str,
 ) -> bool:
-    """
-    Check if version satisfies constraint.
-
-    Constraint formats:
-      - "1.2.3" - exact match
-      - "^1.2.3" - compatible (major same)
-      - "~1.2.3" - roughly equivalent (major.minor same)
-      - ">=1.2.3" - greater than or equal
-      - ">1.2.3" - greater than
-      - "<=1.2.3" - less than or equal
-      - "<1.2.3" - less than
-      - "1.2.x" - any patch with given major.minor
+    """Check if version satisfies a requirement.
 
     Args:
-        version: Version to check
-        constraint: Constraint string
+        version: Version string.
+        requirement: Requirement like '>=1.0.0', '==2.0.0', '>1.5.0'.
 
     Returns:
-        True if compatible
+        True if version satisfies requirement.
     """
-    constraint = constraint.strip()
-
-    if constraint.startswith("^"):
-        min_ver = parse_version(constraint[1:])
-        return (
-            version.major == min_ver.major
-            and (version.minor > min_ver.minor
-                 or (version.minor == min_ver.minor and version.patch >= min_ver.patch))
-        )
-
-    if constraint.startswith("~"):
-        min_ver = parse_version(constraint[1:])
-        return (
-            version.major == min_ver.major
-            and version.minor == min_ver.minor
-            and version.patch >= min_ver.patch
-        )
-
-    operators = [">=", "<=", ">", "<", "="]
-    for op in operators:
-        if constraint.startswith(op):
-            target = parse_version(constraint[len(op):])
-            if op == ">=":
-                return version >= target
-            if op == "<=":
-                return version <= target
-            if op == ">":
-                return version > target
-            if op == "<":
-                return version < target
-            if op == "=":
-                return version == target
-
-    if "x" in constraint.lower() or "." in constraint:
-        parts = constraint.replace("x", "0").split(".")
-        while len(parts) < 3:
-            parts.append("0")
-        target = Version(int(parts[0]), int(parts[1]), int(parts[2]))
-        return version.major == target.major and version.minor == target.minor
-
-    try:
-        target = parse_version(constraint)
-        return version == target
-    except ValueError:
+    v = Version(version)
+    match = re.match(r"(>=|<=|==|!=|>|<)(\d+)\.(\d+)\.(\d+)", requirement)
+    if not match:
         return False
 
+    op = match.group(1)
+    req_v = Version(requirement)
 
-def compare_versions(
-    v1: str | Version,
-    v2: str | Version,
-) -> Literal[-1, 0, 1]:
-    """
-    Compare two versions.
+    if op == ">=":
+        return v >= req_v
+    elif op == "<=":
+        return v <= req_v
+    elif op == "==":
+        return v == req_v
+    elif op == "!=":
+        return v != req_v
+    elif op == ">":
+        return v > req_v
+    elif op == "<":
+        return v < req_v
+    return False
 
-    Returns:
-        -1 if v1 < v2, 0 if equal, 1 if v1 > v2
-    """
-    if isinstance(v1, str):
-        v1 = parse_version(v1)
-    if isinstance(v2, str):
-        v2 = parse_version(v2)
 
-    if v1 < v2:
-        return -1
-    if v1 > v2:
-        return 1
-    return 0
+__all__ = [
+    "Version",
+    "parse_version",
+    "compare_versions",
+    "is_compatible",
+]
