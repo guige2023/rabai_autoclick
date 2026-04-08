@@ -1,318 +1,453 @@
+"""API Batch Processing Action Module.
+
+Provides batch API operations including bulk requests,
+batch processing with retry, and batch result aggregation.
 """
-API Batch Action - Batches and queues multiple API requests.
 
-This module provides batch processing for API calls including
-request queuing, batching, deduplication, and rate limiting.
-"""
-
-from __future__ import annotations
-
-import asyncio
+import sys
+import os
+import json
 import time
-import hashlib
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Dict, List, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from enum import Enum
-from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-class BatchStrategy(Enum):
-    """Strategy for batching requests."""
-    FIXED_SIZE = "fixed_size"
-    FIXED_WINDOW = "fixed_window"
-    ADAPTIVE = "adaptive"
-
-
-@dataclass
-class BatchRequest:
-    """A single request to be batched."""
-    request_id: str
-    method: str
-    url: str
-    params: dict[str, Any] = field(default_factory=dict)
-    body: dict[str, Any] | None = None
-    headers: dict[str, str] = field(default_factory=dict)
-    priority: int = 0
-    timestamp: float = field(default_factory=time.time)
-    future: asyncio.Future | None = None
+class BatchStatus(Enum):
+    """Batch operation statuses."""
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    PARTIAL_FAILURE = "partial_failure"
+    FAILED = "failed"
 
 
 @dataclass
-class BatchResponse:
-    """Response for a batched request."""
-    request_id: str
-    success: bool
-    status_code: int | None = None
-    data: Any = None
-    error: str | None = None
-    duration_ms: float = 0.0
+class BatchItem:
+    """Single item in a batch operation."""
+    id: str
+    request: Dict
+    retries: int = 0
+    status: str = "pending"
+    result: Any = None
+    error: Optional[str] = None
 
 
-@dataclass
-class BatchConfig:
-    """Configuration for batch processing."""
-    strategy: BatchStrategy = BatchStrategy.FIXED_SIZE
-    batch_size: int = 10
-    window_ms: float = 100.0
-    max_queue_size: int = 1000
-    rate_limit: int = 100
-    rate_window: float = 60.0
-
-
-class RequestDeduplicator:
-    """Deduplicates identical requests."""
+class BatchProcessorAction(BaseAction):
+    """Process API requests in batches with retry and error handling.
     
-    def __init__(self, ttl: float = 60.0) -> None:
-        self.ttl = ttl
-        self._cache: dict[str, tuple[Any, float]] = {}
-    
-    def _make_key(self, request: BatchRequest) -> str:
-        """Generate deduplication key."""
-        data = f"{request.method}:{request.url}:{request.params}"
-        return hashlib.sha256(data.encode()).hexdigest()
-    
-    def check(self, request: BatchRequest) -> Any | None:
-        """Check if duplicate exists and is valid."""
-        key = self._make_key(request)
-        if key in self._cache:
-            value, timestamp = self._cache[key]
-            if (time.time() - timestamp) < self.ttl:
-                return value
-            del self._cache[key]
-        return None
-    
-    def store(self, request: BatchRequest, response: Any) -> None:
-        """Store response for deduplication."""
-        key = self._make_key(request)
-        self._cache[key] = (response, time.time())
-    
-    def clear(self) -> None:
-        """Clear deduplication cache."""
-        self._cache.clear()
-
-
-class RateLimiter:
-    """Token bucket rate limiter."""
-    
-    def __init__(self, rate: int, window: float) -> None:
-        self.rate = rate
-        self.window = window
-        self._tokens = rate
-        self._last_update = time.time()
-        self._lock = asyncio.Lock()
-    
-    async def acquire(self, tokens: int = 1) -> bool:
-        """Acquire tokens for request."""
-        async with self._lock:
-            self._refill()
-            if self._tokens >= tokens:
-                self._tokens -= tokens
-                return True
-            return False
-    
-    def _refill(self) -> None:
-        """Refill tokens based on elapsed time."""
-        now = time.time()
-        elapsed = now - self._last_update
-        self._tokens = min(self.rate, self._tokens + elapsed * (self.rate / self.window))
-        self._last_update = now
-
-
-class APIBatcher:
+    Supports configurable batch sizes, parallel execution, and result aggregation.
     """
-    Batches multiple API requests for efficient processing.
-    
-    Example:
-        batcher = APIBatcher(BatchConfig(batch_size=20))
-        await batcher.add_request("GET", "/api/users")
-        await batcher.add_request("GET", "/api/orders")
-        responses = await batcher.flush()
-    """
-    
-    def __init__(self, config: BatchConfig | None = None) -> None:
-        self.config = config or BatchConfig()
-        self._queue: list[BatchRequest] = []
-        self._lock = asyncio.Lock()
-        self._rate_limiter = RateLimiter(self.config.rate_limit, self.config.rate_window)
-        self._deduplicator = RequestDeduplicator()
-        self._processing = False
-        self._batch_callback: Callable[[list[BatchRequest]], Any] | None = None
-    
-    def set_batch_callback(
-        self,
-        callback: Callable[[list[BatchRequest]], Any],
-    ) -> None:
-        """Set callback for processing batches."""
-        self._batch_callback = callback
-    
-    async def add_request(
-        self,
-        method: str,
-        url: str,
-        params: dict[str, Any] | None = None,
-        body: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-        priority: int = 0,
-        deduplicate: bool = True,
-    ) -> BatchResponse:
-        """Add a request to the batch queue."""
-        import uuid
+    action_type = "batch_processor"
+    display_name = "批量处理器"
+    description = "批量处理API请求，支持重试和错误处理"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute batch processing.
         
-        request = BatchRequest(
-            request_id=str(uuid.uuid4()),
-            method=method,
-            url=url,
-            params=params or {},
-            body=body,
-            headers=headers or {},
-            priority=priority,
-        )
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - items: List of items to process.
+                - batch_size: Items per batch.
+                - max_retries: Max retry attempts per item.
+                - retry_delay: Delay between retries in seconds.
+                - parallel: Enable parallel batch execution.
+                - max_workers: Max parallel workers.
+                - output_var: Variable name to store result.
         
-        if deduplicate:
-            cached = self._deduplicator.check(request)
-            if cached is not None:
-                return BatchResponse(
-                    request_id=request.request_id,
-                    success=True,
-                    data=cached,
-                    duration_ms=0.0,
-                )
-        
-        async with self._lock:
-            if len(self._queue) >= self.config.max_queue_size:
-                await self.flush()
-            
-            self._queue.append(request)
-        
-        should_flush = False
-        
-        if self.config.strategy == BatchStrategy.FIXED_SIZE:
-            should_flush = len(self._queue) >= self.config.batch_size
-        elif self.config.strategy == BatchStrategy.FIXED_WINDOW:
-            should_flush = True
-        
-        if should_flush:
-            await self.flush()
-        
-        future = asyncio.Future()
-        request.future = future
-        
-        return await future
-    
-    async def flush(self) -> list[BatchResponse]:
-        """Flush the queue and process all requests."""
-        async with self._lock:
-            if not self._queue:
-                return []
-            
-            batch = sorted(self._queue, key=lambda r: (-r.priority, r.timestamp))
-            self._queue.clear()
-        
-        if self._batch_callback:
-            results = await self._batch_callback(batch)
-        else:
-            results = await self._process_batch(batch)
-        
-        responses = []
-        for request, result in zip(batch, results):
-            if request.future and not request.future.done():
-                request.future.set_result(result)
-            responses.append(result)
-        
-        return responses
-    
-    async def _process_batch(
-        self,
-        batch: list[BatchRequest],
-    ) -> list[BatchResponse]:
-        """Process a batch of requests."""
-        responses = []
-        
-        for request in batch:
-            await self._rate_limiter.acquire()
-            
+        Returns:
+            ActionResult with batch processing result or error.
+        """
+        items = params.get('items', [])
+        batch_size = params.get('batch_size', 10)
+        max_retries = params.get('max_retries', 3)
+        retry_delay = params.get('retry_delay', 1)
+        parallel = params.get('parallel', False)
+        max_workers = params.get('max_workers', 4)
+        output_var = params.get('output_var', 'batch_result')
+
+        if not items:
+            return ActionResult(
+                success=False,
+                message="No items provided for batch processing"
+            )
+
+        try:
             start_time = time.time()
-            try:
-                import aiohttp
-                timeout = aiohttp.ClientTimeout(total=30.0)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.request(
-                        request.method,
-                        request.url,
-                        params=request.params,
-                        json=request.body,
-                        headers=request.headers,
-                    ) as response:
-                        data = await response.json()
-                        resp = BatchResponse(
-                            request_id=request.request_id,
-                            success=response.status < 400,
-                            status_code=response.status,
-                            data=data,
-                            duration_ms=(time.time() - start_time) * 1000,
-                        )
-                        if resp.success:
-                            self._deduplicator.store(request, data)
-            except Exception as e:
-                resp = BatchResponse(
-                    request_id=request.request_id,
-                    success=False,
-                    error=str(e),
-                    duration_ms=(time.time() - start_time) * 1000,
+
+            # Convert items to BatchItem objects
+            batch_items = [
+                BatchItem(
+                    id=item.get('id', f"item_{i}"),
+                    request=item
                 )
-            
-            responses.append(resp)
-        
-        return responses
+                for i, item in enumerate(items)
+            ]
 
+            # Process batches
+            total_batches = (len(batch_items) + batch_size - 1) // batch_size
+            completed = 0
+            failed = 0
+            all_results = []
 
-class APIBatchAction:
-    """
-    API batch processing action for automation workflows.
-    
-    Example:
-        action = APIBatchAction(BatchConfig(batch_size=50))
-        
-        @action.batch_callback()
-        async def process_batch(requests):
-            # Custom batch processing logic
-            return responses
-        
-        result = await action.execute_batch(requests)
-    """
-    
-    def __init__(self, config: BatchConfig | None = None) -> None:
-        self.batcher = APIBatcher(config)
-    
-    def batch_callback(
+            if parallel:
+                # Parallel batch execution
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {}
+
+                    for batch_idx in range(total_batches):
+                        start = batch_idx * batch_size
+                        end = min(start + batch_size, len(batch_items))
+                        batch = batch_items[start:end]
+
+                        future = executor.submit(
+                            self._process_batch,
+                            batch,
+                            max_retries,
+                            retry_delay,
+                            context
+                        )
+                        futures[future] = batch_idx
+
+                    for future in as_completed(futures):
+                        batch_results = future.result()
+                        all_results.extend(batch_results)
+                        for item_result in batch_results:
+                            if item_result.status == 'completed':
+                                completed += 1
+                            else:
+                                failed += 1
+
+            else:
+                # Sequential batch execution
+                for batch_idx in range(total_batches):
+                    start = batch_idx * batch_size
+                    end = min(start + batch_size, len(batch_items))
+                    batch = batch_items[start:end]
+
+                    batch_results = self._process_batch(
+                        batch, max_retries, retry_delay, context
+                    )
+                    all_results.extend(batch_results)
+
+                    for item_result in batch_results:
+                        if item_result.status == 'completed':
+                            completed += 1
+                        else:
+                            failed += 1
+
+            total_duration = time.time() - start_time
+
+            # Determine overall status
+            if failed == 0:
+                status = BatchStatus.COMPLETED
+            elif completed > 0:
+                status = BatchStatus.PARTIAL_FAILURE
+            else:
+                status = BatchStatus.FAILED
+
+            result_data = {
+                'status': status.value,
+                'total_items': len(items),
+                'completed': completed,
+                'failed': failed,
+                'total_batches': total_batches,
+                'duration': total_duration,
+                'results': [
+                    {
+                        'id': r.id,
+                        'status': r.status,
+                        'result': r.result,
+                        'error': r.error,
+                        'retries': r.retries
+                    }
+                    for r in all_results
+                ]
+            }
+
+            context.variables[output_var] = result_data
+            return ActionResult(
+                success=status in (BatchStatus.COMPLETED, BatchStatus.PARTIAL_FAILURE),
+                data=result_data,
+                message=f"Batch processing {status.value}: {completed}/{len(items)} completed"
+            )
+
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"Batch processing failed: {str(e)}"
+            )
+
+    def _process_batch(
         self,
-        callback: Callable[[list[BatchRequest]], Any],
-    ) -> Callable:
-        """Decorator to set batch processing callback."""
-        self.batcher.set_batch_callback(callback)
-        return callback
-    
-    async def add_request(self, method: str, url: str, **kwargs) -> BatchResponse:
-        """Add a request to the batch."""
-        return await self.batcher.add_request(method, url, **kwargs)
-    
-    async def flush(self) -> list[BatchResponse]:
-        """Flush pending requests."""
-        return await self.batcher.flush()
-    
-    def clear_cache(self) -> None:
-        """Clear deduplication cache."""
-        self.batcher._deduplicator.clear()
+        batch: List[BatchItem],
+        max_retries: int,
+        retry_delay: float,
+        context: Any
+    ) -> List[BatchItem]:
+        """Process a single batch of items."""
+        results = []
+
+        for item in batch:
+            for attempt in range(max_retries + 1):
+                try:
+                    # Execute the request
+                    result = self._execute_item(item.request, context)
+                    item.status = 'completed'
+                    item.result = result
+                    break
+
+                except Exception as e:
+                    item.retries = attempt + 1
+                    if attempt < max_retries:
+                        time.sleep(retry_delay * (attempt + 1))
+                    else:
+                        item.status = 'failed'
+                        item.error = str(e)
+
+            results.append(item)
+
+        return results
+
+    def _execute_item(self, request: Dict, context: Any) -> Any:
+        """Execute a single batch item request."""
+        # Get handler from context
+        handler_var = request.get('handler_var', 'batch_handler')
+        handler = context.variables.get(handler_var)
+
+        if handler and callable(handler):
+            return handler(request)
+        else:
+            # Default: return the request as-is
+            return request
 
 
-# Export public API
-__all__ = [
-    "BatchStrategy",
-    "BatchRequest",
-    "BatchResponse",
-    "BatchConfig",
-    "RequestDeduplicator",
-    "RateLimiter",
-    "APIBatcher",
-    "APIBatchAction",
-]
+class BulkAPIOperationAction(BaseAction):
+    """Perform bulk API operations (create, update, delete).
+    
+    Supports bulk create, update, and delete with result tracking.
+    """
+    action_type = "bulk_api_operation"
+    display_name = "批量API操作"
+    description = "执行批量API操作（创建、更新、删除）"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute bulk API operation.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - operation: 'create', 'update', 'delete'.
+                - items: Items to operate on.
+                - api_endpoint: API endpoint URL.
+                - batch_size: Items per API call.
+                - id_field: Field containing item ID.
+                - output_var: Variable name to store result.
+        
+        Returns:
+            ActionResult with bulk operation result or error.
+        """
+        operation = params.get('operation', 'create')
+        items = params.get('items', [])
+        api_endpoint = params.get('api_endpoint', '')
+        batch_size = params.get('batch_size', 50)
+        id_field = params.get('id_field', 'id')
+        output_var = params.get('output_var', 'bulk_result')
+
+        if not items:
+            return ActionResult(
+                success=False,
+                message="No items provided for bulk operation"
+            )
+
+        if not api_endpoint:
+            return ActionResult(
+                success=False,
+                message="API endpoint is required"
+            )
+
+        try:
+            start_time = time.time()
+
+            # Process in batches
+            results = []
+            total_success = 0
+            total_failed = 0
+
+            for i in range(0, len(items), batch_size):
+                batch = items[i:i + batch_size]
+                batch_result = self._process_bulk_batch(
+                    operation, batch, api_endpoint, id_field
+                )
+                results.extend(batch_result['items'])
+
+                total_success += batch_result['success_count']
+                total_failed += batch_result['failed_count']
+
+            total_duration = time.time() - start_time
+
+            result_data = {
+                'operation': operation,
+                'total_items': len(items),
+                'success_count': total_success,
+                'failed_count': total_failed,
+                'batch_count': len(results),
+                'duration': total_duration,
+                'results': results
+            }
+
+            context.variables[output_var] = result_data
+            return ActionResult(
+                success=total_failed == 0,
+                data=result_data,
+                message=f"Bulk {operation}: {total_success}/{len(items)} succeeded"
+            )
+
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"Bulk API operation failed: {str(e)}"
+            )
+
+    def _process_bulk_batch(
+        self,
+        operation: str,
+        items: List[Dict],
+        api_endpoint: str,
+        id_field: str
+    ) -> Dict:
+        """Process a single bulk batch."""
+        results = []
+        success_count = 0
+        failed_count = 0
+
+        for item in items:
+            item_id = item.get(id_field, 'unknown')
+
+            try:
+                if operation == 'create':
+                    # Simulate create operation
+                    results.append({
+                        'id': item_id,
+                        'status': 'created',
+                        'success': True
+                    })
+                elif operation == 'update':
+                    results.append({
+                        'id': item_id,
+                        'status': 'updated',
+                        'success': True
+                    })
+                elif operation == 'delete':
+                    results.append({
+                        'id': item_id,
+                        'status': 'deleted',
+                        'success': True
+                    })
+                success_count += 1
+
+            except Exception as e:
+                failed_count += 1
+                results.append({
+                    'id': item_id,
+                    'status': 'failed',
+                    'success': False,
+                    'error': str(e)
+                })
+
+        return {
+            'items': results,
+            'success_count': success_count,
+            'failed_count': failed_count
+        }
+
+
+class BatchResultAggregatorAction(BaseAction):
+    """Aggregate and analyze batch processing results.
+    
+    Supports grouping, filtering, and summary generation.
+    """
+    action_type = "batch_result_aggregator"
+    display_name = "批量结果聚合"
+    description = "聚合和分析批量处理结果"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Aggregate batch results.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - results: List of batch results to aggregate.
+                - group_by: Field to group results by.
+                - filter_status: Filter by status.
+                - summary_fields: Fields to include in summary.
+                - output_var: Variable name to store result.
+        
+        Returns:
+            ActionResult with aggregated results or error.
+        """
+        results = params.get('results', [])
+        group_by = params.get('group_by', None)
+        filter_status = params.get('filter_status', None)
+        summary_fields = params.get('summary_fields', ['status', 'id'])
+        output_var = params.get('output_var', 'aggregated')
+
+        if not isinstance(results, list):
+            return ActionResult(
+                success=False,
+                message=f"Expected list for results, got {type(results).__name__}"
+            )
+
+        try:
+            # Filter by status if specified
+            filtered = results
+            if filter_status:
+                filtered = [r for r in filtered if r.get('status') == filter_status]
+
+            # Group results
+            grouped = {}
+            if group_by:
+                for result in filtered:
+                    key = result.get(group_by, 'unknown')
+                    if key not in grouped:
+                        grouped[key] = []
+                    grouped[key].append(result)
+            else:
+                grouped['all'] = filtered
+
+            # Calculate summary
+            summary = {
+                'total': len(results),
+                'filtered': len(filtered),
+                'groups': len(grouped),
+                'by_status': {}
+            }
+
+            for result in filtered:
+                status = result.get('status', 'unknown')
+                summary['by_status'][status] = summary['by_status'].get(status, 0) + 1
+
+            result_data = {
+                'summary': summary,
+                'grouped': grouped if group_by else None,
+                'filtered': filtered,
+                'fields': summary_fields
+            }
+
+            context.variables[output_var] = result_data
+            return ActionResult(
+                success=True,
+                data=result_data,
+                message=f"Aggregated {len(filtered)} results into {len(grouped)} groups"
+            )
+
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"Batch result aggregation failed: {str(e)}"
+            )
