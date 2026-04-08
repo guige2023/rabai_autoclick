@@ -1,365 +1,380 @@
-"""
-Feature flag and A/B testing module for controlled feature rollouts.
+"""Feature Flag Action Module.
 
-Supports targeting rules, percentage rollouts, user segmentation,
-and experiment tracking.
+Provides feature flag management with targeting rules,
+percentage rollouts, user segments, and A/B testing support.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Dict, List, Optional
+
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
 
 
-class VariationType(Enum):
-    """Type of variation."""
+class FlagType(Enum):
+    """Feature flag type."""
     BOOLEAN = "boolean"
     STRING = "string"
     NUMBER = "number"
     JSON = "json"
 
 
-@dataclass
-class Variation:
-    """A possible value for a feature flag."""
-    name: str
-    value: Any
-    weight: int = 100
-    description: str = ""
+class RolloutStrategy(Enum):
+    """Rollout strategy."""
+    ALL = "all"
+    PERCENTAGE = "percentage"
+    USER_LIST = "user_list"
+    RULE_BASED = "rule_based"
 
 
 @dataclass
 class TargetingRule:
-    """A targeting rule for feature flag evaluation."""
+    """Targeting rule for flag."""
     attribute: str
     operator: str
     value: Any
-    variation: str
-
-
-@dataclass
-class Segment:
-    """User segment for targeting."""
-    name: str
-    conditions: list[dict]
-    percentage: int = 100
 
 
 @dataclass
 class FeatureFlag:
-    """A feature flag definition."""
+    """Feature flag definition."""
+    id: str
     key: str
     name: str
-    description: str = ""
-    enabled: bool = False
-    variations: list[Variation] = field(default_factory=list)
-    default_variation: Optional[str] = None
-    targeting_rules: list[TargetingRule] = field(default_factory=list)
-    segments: list[Segment] = field(default_factory=list)
-    rollout_percentage: int = 100
+    flag_type: FlagType
+    enabled: bool
+    default_value: Any
+    rollout_strategy: RolloutStrategy
+    rollout_percentage: float = 100.0
+    user_list: List[str] = field(default_factory=list)
+    rules: List[TargetingRule] = field(default_factory=list)
+    variants: Dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
-class Experiment:
-    """An A/B experiment."""
+class EvaluationResult:
+    """Flag evaluation result."""
     key: str
-    name: str
-    flags: list[str]
-    variations: list[Variation]
-    status: str = "draft"
-    start_time: Optional[float] = None
-    end_time: Optional[float] = None
-    primary_metric: Optional[str] = None
-    minimum_sample_size: int = 1000
+    enabled: bool
+    value: Any
+    reason: str
+    variation: Optional[str] = None
 
 
-@dataclass
-class ExperimentResult:
-    """Result of an experiment evaluation."""
-    experiment_key: str
-    variation_name: str
-    variation_value: Any
-    user_id: str
-    assigned_at: float = field(default_factory=time.time)
-    context: dict = field(default_factory=dict)
+class FeatureFlagStore:
+    """In-memory feature flag store."""
 
+    def __init__(self):
+        self._flags: Dict[str, FeatureFlag] = {}
+        self._evaluations: Dict[str, List[EvaluationResult]] = defaultdict(list)
 
-@dataclass
-class MetricEvent:
-    """A metric event for experiment tracking."""
-    experiment_key: str
-    variation_name: str
-    user_id: str
-    metric_key: str
-    value: float
-    timestamp: float = field(default_factory=time.time)
-    metadata: dict = field(default_factory=dict)
-
-
-class FeatureFlagService:
-    """
-    Feature flag and A/B testing service.
-
-    Provides flag evaluation, targeting rules, percentage rollouts,
-    and experiment tracking.
-    """
-
-    def __init__(self, environment: str = "development"):
-        self.environment = environment
-        self._flags: dict[str, FeatureFlag] = {}
-        self._experiments: dict[str, Experiment] = {}
-        self._user_assignments: dict[str, dict[str, str]] = {}
-        self._metric_events: list[MetricEvent] = []
-
-    def create_flag(
-        self,
-        key: str,
-        name: str,
-        enabled: bool = False,
-        variations: Optional[list[Variation]] = None,
-        default_variation: Optional[str] = None,
-    ) -> FeatureFlag:
-        """Create a new feature flag."""
+    def create(self, key: str, name: str,
+               flag_type: FlagType = FlagType.BOOLEAN,
+               default_value: Any = False,
+               rollout_strategy: RolloutStrategy = RolloutStrategy.ALL) -> FeatureFlag:
+        """Create feature flag."""
         flag = FeatureFlag(
+            id=uuid.uuid4().hex,
             key=key,
             name=name,
-            enabled=enabled,
-            variations=variations or [Variation(name="control", value=True, weight=100)],
-            default_variation=default_variation or "control",
+            flag_type=flag_type,
+            enabled=True,
+            default_value=default_value,
+            rollout_strategy=rollout_strategy
         )
         self._flags[key] = flag
         return flag
 
-    def get_flag(self, key: str) -> Optional[FeatureFlag]:
-        """Get a feature flag by key."""
+    def get(self, key: str) -> Optional[FeatureFlag]:
+        """Get flag by key."""
         return self._flags.get(key)
 
-    def update_flag(self, key: str, **kwargs) -> Optional[FeatureFlag]:
-        """Update a feature flag."""
+    def update(self, key: str, **kwargs) -> Optional[FeatureFlag]:
+        """Update flag."""
         flag = self._flags.get(key)
         if not flag:
             return None
 
-        for key_arg, value in kwargs.items():
-            if hasattr(flag, key_arg):
-                setattr(flag, key_arg, value)
+        for k, v in kwargs.items():
+            if hasattr(flag, k):
+                setattr(flag, k, v)
         flag.updated_at = time.time()
-
         return flag
 
-    def evaluate_flag(
-        self,
-        flag_key: str,
-        user_id: str,
-        context: Optional[dict] = None,
-    ) -> Any:
-        """Evaluate a feature flag for a user."""
-        flag = self._flags.get(flag_key)
-        if not flag:
-            return None
-
-        context = context or {}
-
-        if not flag.enabled:
-            return flag.default_variation
-
-        for rule in flag.targeting_rules:
-            if self._evaluate_condition(context.get(rule.attribute), rule.operator, rule.value):
-                for variation in flag.variations:
-                    if variation.name == rule.variation:
-                        return variation.value
-
-        for segment in flag.segments:
-            if self._evaluate_segment(context, segment):
-                assigned_variation = self._get_percentage_variation(
-                    user_id, flag_key, flag.variations, segment.percentage
-                )
-                return assigned_variation.value
-
-        if flag.rollout_percentage < 100:
-            assigned_variation = self._get_percentage_variation(
-                user_id, flag_key, flag.variations, flag.rollout_percentage
-            )
-            return assigned_variation.value
-
-        return flag.variations[0].value if flag.variations else flag.default_variation
-
-    def _evaluate_condition(self, value: Any, operator: str, target: Any) -> bool:
-        """Evaluate a targeting condition."""
-        if operator == "eq":
-            return value == target
-        elif operator == "neq":
-            return value != target
-        elif operator == "gt":
-            return value > target
-        elif operator == "gte":
-            return value >= target
-        elif operator == "lt":
-            return value < target
-        elif operator == "lte":
-            return value <= target
-        elif operator == "in":
-            return value in target
-        elif operator == "not_in":
-            return value not in target
-        elif operator == "contains":
-            return target in value
-        elif operator == "regex":
-            import re
-            return bool(re.match(target, str(value)))
+    def delete(self, key: str) -> bool:
+        """Delete flag."""
+        if key in self._flags:
+            del self._flags[key]
+            return True
         return False
 
-    def _evaluate_segment(self, context: dict, segment: Segment) -> bool:
-        """Evaluate if a user matches a segment."""
-        for condition in segment.conditions:
-            attribute = condition.get("attribute")
-            operator = condition.get("operator")
-            value = condition.get("value")
-            if not self._evaluate_condition(context.get(attribute), operator, value):
-                return False
-        return True
+    def evaluate(self, key: str, user_id: Optional[str] = None,
+                 attributes: Optional[Dict[str, Any]] = None) -> EvaluationResult:
+        """Evaluate flag for user."""
+        flag = self._flags.get(key)
 
-    def _get_percentage_variation(
-        self,
-        user_id: str,
-        flag_key: str,
-        variations: list[Variation],
-        percentage: int,
-    ) -> Variation:
-        """Get a variation based on percentage rollout."""
-        hash_input = f"{user_id}:{flag_key}"
-        hash_value = int(hashlib.md5(hash_input.encode()).hexdigest(), 16)
-        bucket = hash_value % 100
+        if not flag:
+            return EvaluationResult(
+                key=key,
+                enabled=False,
+                value=None,
+                reason="flag_not_found"
+            )
 
-        if bucket >= percentage:
-            return variations[-1]
+        if not flag.enabled:
+            return EvaluationResult(
+                key=key,
+                enabled=False,
+                value=flag.default_value,
+                reason="flag_disabled"
+            )
 
-        cumulative = 0
-        for variation in variations:
-            cumulative += variation.weight
-            if bucket < cumulative:
-                return variation
+        attributes = attributes or {}
 
-        return variations[0]
+        if user_id and flag.user_list:
+            if user_id in flag.user_list:
+                return EvaluationResult(
+                    key=key,
+                    enabled=True,
+                    value=True,
+                    reason="user_in_list"
+                )
 
-    def create_experiment(
-        self,
-        key: str,
-        name: str,
-        variations: list[Variation],
-        flags: Optional[list[str]] = None,
-    ) -> Experiment:
-        """Create a new A/B experiment."""
-        experiment = Experiment(
-            key=key,
-            name=name,
-            flags=flags or [],
-            variations=variations,
-        )
-        self._experiments[key] = experiment
-        return experiment
+        if flag.rollout_strategy == RolloutStrategy.PERCENTAGE:
+            bucket = self._get_bucket(user_id or "anonymous", key)
+            if bucket < flag.rollout_percentage:
+                return EvaluationResult(
+                    key=key,
+                    enabled=True,
+                    value=True,
+                    reason=f"percentage_rollout_{flag.rollout_percentage}"
+                )
+            return EvaluationResult(
+                key=key,
+                enabled=False,
+                value=flag.default_value,
+                reason="percentage_rollout_excluded"
+            )
 
-    def evaluate_experiment(
-        self,
-        experiment_key: str,
-        user_id: str,
-        context: Optional[dict] = None,
-    ) -> Optional[ExperimentResult]:
-        """Evaluate an experiment for a user."""
-        experiment = self._experiments.get(experiment_key)
-        if not experiment or experiment.status != "running":
-            return None
-
-        context = context or {}
-
-        assignment_key = f"{experiment_key}:{user_id}"
-        if assignment_key in self._user_assignments:
-            variation_name = self._user_assignments[assignment_key]
-            for variation in experiment.variations:
-                if variation.name == variation_name:
-                    return ExperimentResult(
-                        experiment_key=experiment_key,
-                        variation_name=variation_name,
-                        variation_value=variation.value,
-                        user_id=user_id,
-                        context=context,
+        if flag.rules:
+            for rule in flag.rules:
+                attr_value = attributes.get(rule.attribute)
+                if self._evaluate_condition(attr_value, rule.operator, rule.value):
+                    return EvaluationResult(
+                        key=key,
+                        enabled=True,
+                        value=True,
+                        reason="rule_matched"
                     )
 
-        hash_input = f"{experiment_key}:{user_id}"
-        hash_value = int(hashlib.md5(hash_input.encode()).hexdigest(), 16)
-        bucket = hash_value % 100
-
-        cumulative = 0
-        selected_variation = experiment.variations[0]
-        for variation in experiment.variations:
-            cumulative += variation.weight
-            if bucket < cumulative:
-                selected_variation = variation
-                break
-
-        self._user_assignments[assignment_key] = selected_variation.name
-
-        return ExperimentResult(
-            experiment_key=experiment_key,
-            variation_name=selected_variation.name,
-            variation_value=selected_variation.value,
-            user_id=user_id,
-            context=context,
+        return EvaluationResult(
+            key=key,
+            enabled=True,
+            value=flag.default_value,
+            reason="default"
         )
 
-    def track_metric(
-        self,
-        experiment_key: str,
-        variation_name: str,
-        user_id: str,
-        metric_key: str,
-        value: float,
-        metadata: Optional[dict] = None,
-    ) -> None:
-        """Track a metric event for an experiment."""
-        event = MetricEvent(
-            experiment_key=experiment_key,
-            variation_name=variation_name,
-            user_id=user_id,
-            metric_key=metric_key,
-            value=value,
-            metadata=metadata or {},
-        )
-        self._metric_events.append(event)
+    def _get_bucket(self, user_id: str, flag_key: str) -> float:
+        """Get bucket percentage for user."""
+        hash_input = f"{user_id}:{flag_key}"
+        hash_val = int(hashlib.md5(hash_input.encode()).hexdigest(), 16)
+        return (hash_val % 10000) / 100.0
 
-    def get_experiment_stats(self, experiment_key: str) -> dict:
-        """Get statistics for an experiment."""
-        experiment = self._experiments.get(experiment_key)
-        if not experiment:
-            return {}
+    def _evaluate_condition(self, value: Any, operator: str, target: Any) -> bool:
+        """Evaluate targeting condition."""
+        if operator == "eq":
+            return value == target
+        if operator == "ne":
+            return value != target
+        if operator == "gt":
+            return value > target
+        if operator == "gte":
+            return value >= target
+        if operator == "lt":
+            return value < target
+        if operator == "lte":
+            return value <= target
+        if operator == "contains":
+            return target in str(value)
+        if operator == "in":
+            return value in target
+        return False
 
-        relevant_events = [e for e in self._metric_events if e.experiment_key == experiment_key]
 
-        stats = {}
-        for variation in experiment.variations:
-            variation_events = [e for e in relevant_events if e.variation_name == variation.name]
-            count = len(variation_events)
-            total_value = sum(e.value for e in variation_events)
-            stats[variation.name] = {
-                "sample_size": count,
-                "total_value": total_value,
-                "mean_value": total_value / count if count > 0 else 0,
+_global_store = FeatureFlagStore()
+
+
+class FeatureFlagAction:
+    """Feature flag action.
+
+    Example:
+        action = FeatureFlagAction()
+
+        action.create("new-checkout", "New Checkout Flow")
+        action.update("new-checkout", rollout_percentage=50)
+
+        result = action.evaluate("new-checkout", user_id="user-123")
+    """
+
+    def __init__(self, store: Optional[FeatureFlagStore] = None):
+        self._store = store or _global_store
+
+    def create(self, key: str, name: str,
+               flag_type: str = "boolean",
+               default_value: Any = False,
+               rollout_strategy: str = "all") -> Dict[str, Any]:
+        """Create feature flag."""
+        try:
+            ft = FlagType(flag_type)
+            rs = RolloutStrategy(rollout_strategy)
+        except ValueError as e:
+            return {"success": False, "message": f"Invalid type: {e}"}
+
+        flag = self._store.create(key, name, ft, default_value, rs)
+
+        return {
+            "success": True,
+            "flag": {
+                "id": flag.id,
+                "key": flag.key,
+                "name": flag.name,
+                "type": flag.flag_type.value,
+                "enabled": flag.enabled,
+                "default_value": flag.default_value,
+                "rollout_strategy": flag.rollout_strategy.value
+            },
+            "message": f"Created flag: {key}"
+        }
+
+    def get(self, key: str) -> Dict[str, Any]:
+        """Get flag."""
+        flag = self._store.get(key)
+        if flag:
+            return {
+                "success": True,
+                "flag": {
+                    "key": flag.key,
+                    "name": flag.name,
+                    "type": flag.flag_type.value,
+                    "enabled": flag.enabled,
+                    "rollout_percentage": flag.rollout_percentage,
+                    "user_list_count": len(flag.user_list),
+                    "rules_count": len(flag.rules)
+                }
             }
+        return {"success": False, "message": "Flag not found"}
 
-        return stats
+    def update(self, key: str, **kwargs) -> Dict[str, Any]:
+        """Update flag."""
+        valid_fields = ["name", "enabled", "default_value", "rollout_strategy",
+                        "rollout_percentage", "user_list", "rules"]
+        update_kwargs = {k: v for k, v in kwargs.items() if k in valid_fields}
 
-    def list_flags(self) -> list[FeatureFlag]:
-        """List all feature flags."""
-        return list(self._flags.values())
+        flag = self._store.update(key, **update_kwargs)
+        if flag:
+            return {"success": True, "message": f"Updated flag: {key}"}
+        return {"success": False, "message": "Flag not found"}
 
-    def list_experiments(self) -> list[Experiment]:
-        """List all experiments."""
-        return list(self._experiments.values())
+    def delete(self, key: str) -> Dict[str, Any]:
+        """Delete flag."""
+        if self._store.delete(key):
+            return {"success": True, "message": f"Deleted flag: {key}"}
+        return {"success": False, "message": "Flag not found"}
+
+    def evaluate(self, key: str, user_id: Optional[str] = None,
+                 attributes: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Evaluate flag for user."""
+        result = self._store.evaluate(key, user_id, attributes)
+
+        return {
+            "success": True,
+            "key": result.key,
+            "enabled": result.enabled,
+            "value": result.value,
+            "reason": result.reason,
+            "variation": result.variation
+        }
+
+    def list_flags(self) -> Dict[str, Any]:
+        """List all flags."""
+        flags = list(self._store._flags.values())
+        return {
+            "success": True,
+            "flags": [
+                {
+                    "key": f.key,
+                    "name": f.name,
+                    "enabled": f.enabled,
+                    "rollout_percentage": f.rollout_percentage
+                }
+                for f in flags
+            ],
+            "count": len(flags)
+        }
+
+
+def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute feature flag action."""
+    operation = params.get("operation", "")
+    action = FeatureFlagAction()
+
+    try:
+        if operation == "create":
+            key = params.get("key", "")
+            name = params.get("name", "")
+            if not key or not name:
+                return {"success": False, "message": "key and name required"}
+            return action.create(
+                key=key,
+                name=name,
+                flag_type=params.get("type", "boolean"),
+                default_value=params.get("default_value", False),
+                rollout_strategy=params.get("rollout_strategy", "all")
+            )
+
+        elif operation == "get":
+            key = params.get("key", "")
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.get(key)
+
+        elif operation == "update":
+            key = params.get("key", "")
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.update(key, **params)
+
+        elif operation == "delete":
+            key = params.get("key", "")
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.delete(key)
+
+        elif operation == "evaluate":
+            key = params.get("key", "")
+            if not key:
+                return {"success": False, "message": "key required"}
+            return action.evaluate(
+                key=key,
+                user_id=params.get("user_id"),
+                attributes=params.get("attributes")
+            )
+
+        elif operation == "list":
+            return action.list_flags()
+
+        else:
+            return {"success": False, "message": f"Unknown operation: {operation}"}
+
+    except Exception as e:
+        return {"success": False, "message": f"Feature flag error: {str(e)}"}
