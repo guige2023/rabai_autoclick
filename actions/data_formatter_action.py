@@ -1,217 +1,319 @@
-"""Data formatter action module for RabAI AutoClick.
+"""Data Formatter action module for RabAI AutoClick.
 
-Provides data formatting capabilities including string formatting,
-date/time formatting, and number formatting.
+Formats data between various formats (CSV, JSON, XML, YAML, etc.)
+with schema validation and transformation.
 """
 
+import json
+import csv
+import io
 import sys
 import os
-import re
-from typing import Any, Dict, List, Optional
+import base64
+from typing import Any, Dict, List, Optional, Union
 from datetime import datetime
-from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
 class DataFormatterAction(BaseAction):
-    """Data formatter action for formatting data values.
-    
-    Supports string formatting, date/time formatting,
-    number formatting, and currency formatting.
+    """Format data between different serialization formats.
+
+    Converts between JSON, CSV, XML, YAML, and other formats
+    with configurable options.
     """
     action_type = "data_formatter"
-    display_name = "数据格式化"
-    description = "字符串与日期格式化"
-    
+    display_name = "数据格式化器"
+    description = "在不同数据格式之间转换"
+
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute formatting operation.
-        
+        """Format data.
+
         Args:
             context: Execution context.
-            params: Dict with keys:
-                operation: format|format_date|format_number|format_string
-                data: Data to format
-                field: Field to format
-                format_string: Format pattern
-                locale: Locale for formatting.
-        
+            params: Dict with keys: data, input_format, output_format,
+                   options (format-specific options).
+
         Returns:
             ActionResult with formatted data.
         """
-        operation = params.get('operation', 'format')
-        data = params.get('data', [])
-        field = params.get('field')
-        format_string = params.get('format_string', '')
-        locale = params.get('locale', 'en_US')
-        
-        if isinstance(data, list):
-            return self._format_list(data, field, operation, format_string, locale)
-        else:
-            return self._format_single(data, operation, format_string, locale)
-    
-    def _format_list(
-        self,
-        data: List[Any],
-        field: Optional[str],
-        operation: str,
-        format_string: str,
-        locale: str
-    ) -> ActionResult:
-        """Format list of items."""
-        if not data:
-            return ActionResult(success=False, message="No data provided")
-        
-        formatted = []
-        
-        for item in data:
-            if field and isinstance(item, dict):
-                value = item.get(field)
-                new_item = dict(item)
-                new_item[f'{field}_formatted'] = self._format_value(value, operation, format_string, locale)
-                formatted.append(new_item)
-            else:
-                formatted.append(self._format_value(item, operation, format_string, locale))
-        
-        return ActionResult(
-            success=True,
-            message=f"Formatted {len(formatted)} items",
-            data={
-                'items': formatted,
-                'count': len(formatted)
-            }
-        )
-    
-    def _format_single(
-        self,
-        data: Any,
-        operation: str,
-        format_string: str,
-        locale: str
-    ) -> ActionResult:
-        """Format single value."""
-        result = self._format_value(data, operation, format_string, locale)
-        
-        return ActionResult(
-            success=True,
-            message=f"Formatted: {result}",
-            data={
-                'value': result,
-                'original': data
-            }
-        )
-    
-    def _format_value(
-        self,
-        value: Any,
-        operation: str,
-        format_string: str,
-        locale: str
-    ) -> Any:
-        """Format a single value."""
-        if value is None:
-            return None
-        
-        if operation == 'format' or operation == 'format_string':
-            return self._format_string(value, format_string)
-        elif operation == 'format_date':
-            return self._format_date(value, format_string)
-        elif operation == 'format_number':
-            return self._format_number(value, format_string, locale)
-        elif operation == 'uppercase':
-            return str(value).upper()
-        elif operation == 'lowercase':
-            return str(value).lower()
-        elif operation == 'titlecase':
-            return str(value).title()
-        elif operation == 'capitalize':
-            return str(value).capitalize()
-        elif operation == 'strip':
-            return str(value).strip()
-        elif operation == 'pad_left':
-            width = int(format_string) if format_string else 10
-            return str(value).zfill(width)
-        elif operation == 'pad_right':
-            width = int(format_string) if format_string else 10
-            return str(value).ljust(width)
-        
-        return value
-    
-    def _format_string(self, value: Any, format_string: str) -> str:
-        """Format string with pattern."""
-        if not format_string:
-            return str(value)
-        
-        if format_string == 'upper':
-            return str(value).upper()
-        elif format_string == 'lower':
-            return str(value).lower()
-        elif format_string == 'title':
-            return str(value).title()
-        elif format_string == 'capitalize':
-            return str(value).capitalize()
-        elif format_string == 'reverse':
-            return str(value)[::-1]
-        elif format_string == 'slugify':
-            return re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
-        elif format_string == 'md5':
-            import hashlib
-            return hashlib.md5(str(value).encode()).hexdigest()
-        elif format_string == 'sha256':
-            import hashlib
-            return hashlib.sha256(str(value).encode()).hexdigest()
-        
-        return str(value)
-    
-    def _format_date(self, value: Any, format_string: str) -> str:
-        """Format date/datetime value."""
-        if format_string is None:
-            format_string = '%Y-%m-%d %H:%M:%S'
-        
-        if isinstance(value, datetime):
-            return value.strftime(format_string)
-        
-        if isinstance(value, str):
-            for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d']:
-                try:
-                    dt = datetime.strptime(value, fmt)
-                    return dt.strftime(format_string)
-                except ValueError:
-                    continue
-        
-        return str(value)
-    
-    def _format_number(self, value: Any, format_string: str, locale: str) -> str:
-        """Format number with pattern."""
+        start_time = time.time()
         try:
-            num = float(value)
-        except (TypeError, ValueError):
+            data = params.get('data')
+            input_format = params.get('input_format', 'auto')
+            output_format = params.get('output_format', 'json')
+            options = params.get('options', {})
+
+            if data is None:
+                return ActionResult(
+                    success=False,
+                    message="Data is required",
+                    duration=time.time() - start_time,
+                )
+
+            # Auto-detect input format
+            if input_format == 'auto':
+                input_format = self._detect_format(data)
+
+            # Parse input to normalized dict/list
+            parsed = self._parse(data, input_format)
+
+            # Format output
+            output = self._format(parsed, output_format, options)
+
+            duration = time.time() - start_time
+            return ActionResult(
+                success=True,
+                message=f"Formatted {input_format} -> {output_format}",
+                data={'format': output_format, 'data': output, 'size': len(str(output))},
+                duration=duration,
+            )
+
+        except Exception as e:
+            duration = time.time() - start_time
+            return ActionResult(
+                success=False,
+                message=f"Formatting failed: {str(e)}",
+                duration=duration,
+            )
+
+    def _detect_format(self, data: Any) -> str:
+        """Auto-detect data format."""
+        if isinstance(data, (dict, list)):
+            return 'json'
+        if isinstance(data, str):
+            data = data.strip()
+            if data.startswith('{') or data.startswith('['):
+                return 'json'
+            if data.startswith('<') and data.endswith('>'):
+                return 'xml'
+            if data.startswith('---') or '\n  ' in data:
+                return 'yaml'
+            if ',' in data and '\n' in data:
+                return 'csv'
+        return 'json'
+
+    def _parse(self, data: Any, fmt: str) -> Any:
+        """Parse data from format."""
+        if fmt == 'json':
+            if isinstance(data, (dict, list)):
+                return data
+            return json.loads(data)
+        elif fmt == 'csv':
+            if isinstance(data, str):
+                reader = csv.DictReader(io.StringIO(data))
+                return list(reader)
+            return data
+        elif fmt == 'xml':
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(data)
+            return self._xml_to_dict(root)
+        elif fmt == 'yaml':
+            try:
+                import yaml
+                return yaml.safe_load(data)
+            except ImportError:
+                return json.loads(data)
+        return data
+
+    def _format(self, data: Any, fmt: str, options: Dict) -> str:
+        """Format data to output format."""
+        indent = options.get('indent', 2)
+        if fmt == 'json':
+            return json.dumps(data, indent=indent, ensure_ascii=False)
+        elif fmt == 'csv':
+            return self._to_csv(data, options)
+        elif fmt == 'xml':
+            return self._to_xml(data, options)
+        elif fmt == 'yaml':
+            try:
+                import yaml
+                return yaml.dump(data, indent=indent, allow_unicode=True)
+            except ImportError:
+                return json.dumps(data, indent=indent)
+        elif fmt == 'base64':
+            return base64.b64encode(str(data).encode('utf-8')).decode('ascii')
+        return str(data)
+
+    def _to_csv(self, data: Any, options: Dict) -> str:
+        """Convert data to CSV."""
+        if not isinstance(data, list):
+            data = [data]
+        if not data:
+            return ''
+        keys = options.get('fields') or (list(data[0].keys()) if isinstance(data[0], dict) else [])
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=keys, extrasaction='ignore')
+        writer.writeheader()
+        for row in data:
+            writer.writerow({k: row.get(k, '') for k in keys})
+        return output.getvalue()
+
+    def _to_xml(self, data: Any, options: Dict) -> str:
+        """Convert data to XML."""
+        root_name = options.get('root_name', 'root')
+        item_name = options.get('item_name', 'item')
+        import xml.etree.ElementTree as ET
+        if isinstance(data, dict):
+            root = ET.Element(root_name)
+            self._dict_to_xml(data, root)
+        elif isinstance(data, list):
+            root = ET.Element(root_name)
+            for item in data:
+                item_elem = ET.SubElement(root, item_name)
+                if isinstance(item, dict):
+                    self._dict_to_xml(item, item_elem)
+                else:
+                    item_elem.text = str(item)
+        else:
+            root = ET.Element(root_name)
+            root.text = str(data)
+        return ET.tostring(root, encoding='unicode')
+
+    def _dict_to_xml(self, d: Dict, parent: Any) -> None:
+        """Convert dict to XML element."""
+        import xml.etree.ElementTree as ET
+        for key, value in d.items():
+            child = ET.SubElement(parent, str(key))
+            if isinstance(value, dict):
+                self._dict_to_xml(value, child)
+            elif isinstance(value, list):
+                for item in value:
+                    item_elem = ET.SubElement(child, 'item')
+                    if isinstance(item, dict):
+                        self._dict_to_xml(item, item_elem)
+                    else:
+                        item_elem.text = str(item)
+            else:
+                child.text = str(value) if value is not None else ''
+
+    def _xml_to_dict(self, elem: Any) -> Dict:
+        """Convert XML element to dict."""
+        result = {}
+        for child in elem:
+            value = self._xml_to_dict(child) if len(child) else child.text
+            if child.tag in result:
+                if not isinstance(result[child.tag], list):
+                    result[child.tag] = [result[child.tag]]
+                result[child.tag].append(value)
+            else:
+                result[child.tag] = value
+        return result
+
+
+class DataNormalizerAction(BaseAction):
+    """Normalize data to standard schemas.
+
+    Transforms data to conform to a target schema,
+    handling missing fields and type coercion.
+    """
+    action_type = "data_normalizer"
+    display_name = "数据标准化器"
+    description = "将数据标准化为目标模式"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Normalize data.
+
+        Args:
+            context: Execution context.
+            params: Dict with keys: data, schema, strict_mode.
+
+        Returns:
+            ActionResult with normalized data.
+        """
+        start_time = time.time()
+        try:
+            data = params.get('data')
+            schema = params.get('schema', {})
+            strict_mode = params.get('strict_mode', False)
+
+            if data is None:
+                return ActionResult(
+                    success=False,
+                    message="Data is required",
+                    duration=time.time() - start_time,
+                )
+
+            errors = []
+            normalized = {}
+
+            for field_name, field_spec in schema.items():
+                field_type = field_spec.get('type', 'string')
+                required = field_spec.get('required', False)
+                default = field_spec.get('default')
+                transform = field_spec.get('transform')
+
+                value = data.get(field_name, default)
+
+                if value is None:
+                    if required:
+                        errors.append(f"Missing required field: {field_name}")
+                    normalized[field_name] = default
+                    continue
+
+                # Type coercion
+                try:
+                    normalized[field_name] = self._coerce(value, field_type)
+                except Exception as e:
+                    if strict_mode:
+                        errors.append(f"Field {field_name}: {str(e)}")
+                    normalized[field_name] = default
+
+                # Apply transform
+                if transform and callable(transform):
+                    try:
+                        normalized[field_name] = transform(normalized[field_name])
+                    except Exception as e:
+                        errors.append(f"Transform failed for {field_name}: {str(e)}")
+
+            # Add fields not in schema
+            for key, value in data.items():
+                if key not in schema:
+                    normalized[key] = value
+
+            duration = time.time() - start_time
+            return ActionResult(
+                success=len(errors) == 0 or not strict_mode,
+                message=f"Normalized: {len(normalized)} fields" + (f", {len(errors)} errors" if errors else ""),
+                data={'normalized': normalized, 'errors': errors},
+                duration=duration,
+            )
+
+        except Exception as e:
+            duration = time.time() - start_time
+            return ActionResult(
+                success=False,
+                message=f"Normalization failed: {str(e)}",
+                duration=duration,
+            )
+
+    def _coerce(self, value: Any, target_type: str) -> Any:
+        """Coerce value to target type."""
+        if target_type == 'string':
             return str(value)
-        
-        if not format_string:
-            if num == int(num):
-                return f'{int(num):,}'
-            return f'{num:,.2f}'
-        
-        if format_string == 'currency':
-            if locale.startswith('en'):
-                return f'${num:,.2f}'
-            elif locale.startswith('de'):
-                return f'{num:,.2f} €'.replace(',', 'X').replace('.', ',').replace('X', '.')
-        
-        if format_string == 'percent':
-            return f'{num * 100:.1f}%'
-        
-        if format_string == 'compact':
-            if abs(num) >= 1_000_000:
-                return f'{num / 1_000_000:.1f}M'
-            elif abs(num) >= 1_000:
-                return f'{num / 1_000:.1f}K'
-            return str(num)
-        
-        return str(num)
+        elif target_type == 'integer':
+            return int(float(value))
+        elif target_type == 'float':
+            return float(value)
+        elif target_type == 'boolean':
+            if isinstance(value, bool):
+                return value
+            return str(value).lower() in ('true', '1', 'yes', 'on')
+        elif target_type == 'array':
+            if isinstance(value, list):
+                return value
+            return [value]
+        elif target_type == 'object':
+            if isinstance(value, dict):
+                return value
+            return {'value': value}
+        return value
