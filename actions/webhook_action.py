@@ -1,422 +1,572 @@
-"""Webhook integration for event-driven integrations.
+"""Webhook Action Module.
 
-Handles webhook operations including sending webhooks,
-signature verification, retry logic, and event parsing.
+Provides webhook delivery, retry logic, signature verification,
+and event routing capabilities for building event-driven workflows.
 """
+from __future__ import annotations
 
-from typing import Any, Optional, Callable
-import logging
-from dataclasses import dataclass, field
-from datetime import datetime
 import hashlib
 import hmac
-import time
 import json
+import time
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
-try:
-    import requests
-except ImportError:
-    requests = None
+import sys
+import os
 
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class WebhookConfig:
-    """Configuration for webhook operations."""
-    url: str
-    secret: Optional[str] = None
-    timeout: float = 30.0
-    max_retries: int = 3
-    retry_delay: float = 1.0
-    headers: dict = field(default_factory=dict)
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
 
 
-@dataclass
-class WebhookEvent:
-    """Represents a webhook event."""
-    id: str
-    type: str
-    payload: dict
-    timestamp: datetime
-    headers: dict = field(default_factory=dict)
-    signature: Optional[str] = None
+class DeliveryStatus(Enum):
+    """Webhook delivery status."""
+    PENDING = "pending"
+    SUCCESS = "success"
+    FAILED = "failed"
+    RETRYING = "retrying"
+    DROPPED = "dropped"
 
 
 @dataclass
 class WebhookDelivery:
-    """Result of a webhook delivery attempt."""
+    """Single webhook delivery attempt."""
+    id: str
+    webhook_id: str
+    endpoint: str
+    payload: Dict[str, Any]
+    headers: Dict[str, str]
+    status: DeliveryStatus
+    attempts: int = 0
+    max_attempts: int = 3
+    next_retry: float = 0.0
+    last_attempt: float = 0.0
+    response_status: Optional[int] = None
+    response_body: str = ""
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class Webhook:
+    """Webhook configuration."""
+    id: str
+    name: str
+    endpoint: str
+    secret: Optional[str] = None
+    events: List[str] = field(default_factory=list)
+    enabled: bool = True
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    filters: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DeliveryResult:
+    """Result of webhook delivery."""
     success: bool
-    status_code: Optional[int] = None
-    response_body: Optional[str] = None
-    attempt: int = 1
+    delivery_id: str
+    webhook_id: str
+    status: DeliveryStatus
+    attempts: int
+    response_status: Optional[int]
+    duration_ms: float
     error: Optional[str] = None
 
 
-class WebhookError(Exception):
-    """Raised when webhook operations fail."""
-    def __init__(self, message: str, status_code: Optional[int] = None):
-        super().__init__(message)
-        self.status_code = status_code
+def _generate_signature(payload: str, secret: str, timestamp: Optional[str] = None) -> str:
+    """Generate HMAC signature for webhook payload."""
+    if timestamp:
+        signed_payload = f"{timestamp}.{payload}"
+    else:
+        signed_payload = payload
+    return hmac.new(
+        secret.encode(),
+        signed_payload.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+
+class WebhookStore:
+    """In-memory webhook store."""
+
+    def __init__(self):
+        self._webhooks: Dict[str, Webhook] = {}
+        self._deliveries: Dict[str, WebhookDelivery] = {}
+
+    def create_webhook(self, name: str, endpoint: str,
+                       secret: Optional[str] = None,
+                       events: Optional[List[str]] = None) -> Webhook:
+        """Create new webhook."""
+        webhook = Webhook(
+            id=uuid.uuid4().hex,
+            name=name,
+            endpoint=endpoint,
+            secret=secret,
+            events=events or ["*"]
+        )
+        self._webhooks[webhook.id] = webhook
+        return webhook
+
+    def get_webhook(self, webhook_id: str) -> Optional[Webhook]:
+        """Get webhook by ID."""
+        return self._webhooks.get(webhook_id)
+
+    def list_webhooks(self, event: Optional[str] = None) -> List[Webhook]:
+        """List all webhooks, optionally filtered by event."""
+        webhooks = list(self._webhooks.values())
+        if event:
+            webhooks = [w for w in webhooks if event in w.events or "*" in w.events]
+        return webhooks
+
+    def delete_webhook(self, webhook_id: str) -> bool:
+        """Delete webhook."""
+        if webhook_id in self._webhooks:
+            del self._webhooks[webhook_id]
+            return True
+        return False
+
+    def create_delivery(self, webhook_id: str, endpoint: str,
+                        payload: Dict[str, Any],
+                        headers: Optional[Dict[str, str]] = None) -> WebhookDelivery:
+        """Create new delivery."""
+        delivery = WebhookDelivery(
+            id=uuid.uuid4().hex,
+            webhook_id=webhook_id,
+            endpoint=endpoint,
+            payload=payload,
+            headers=headers or {},
+            status=DeliveryStatus.PENDING
+        )
+        self._deliveries[delivery.id] = delivery
+        return delivery
+
+    def get_delivery(self, delivery_id: str) -> Optional[WebhookDelivery]:
+        """Get delivery by ID."""
+        return self._deliveries.get(delivery_id)
+
+    def update_delivery(self, delivery: WebhookDelivery) -> None:
+        """Update delivery."""
+        self._deliveries[delivery.id] = delivery
+
+
+class WebhookSimulator:
+    """Simulated webhook delivery for testing."""
+
+    def __init__(self, success_rate: float = 0.9, avg_latency_ms: float = 100.0):
+        self._success_rate = success_rate
+        self._avg_latency_ms = avg_latency_ms
+
+    def deliver(self, delivery: WebhookDelivery) -> tuple[int, str]:
+        """Simulate webhook delivery.
+
+        Returns:
+            Tuple of (response_status, response_body)
+        """
+        import random
+        time.sleep(self._avg_latency_ms / 1000.0 * random.uniform(0.5, 1.5))
+
+        if random.random() < self._success_rate:
+            return (200, '{"status": "received"}')
+        else:
+            status = random.choice([500, 502, 503, 504])
+            return (status, f'{{"error": "Server error {status}"}}')
+
+
+_global_store = WebhookStore()
+_global_simulator = WebhookSimulator()
 
 
 class WebhookAction:
-    """Webhook client for sending and receiving webhooks."""
+    """Webhook delivery and management action.
 
-    def __init__(self, config: Optional[WebhookConfig] = None):
-        """Initialize Webhook processor with configuration.
+    Example:
+        action = WebhookAction()
 
-        Args:
-            config: WebhookConfig with endpoint and settings
-
-        Raises:
-            ImportError: If requests is not installed
-        """
-        if requests is None:
-            raise ImportError("requests library required: pip install requests")
-
-        self.config = config
-        self._session = requests.Session()
-
-    def send(self, payload: dict,
-            event_type: Optional[str] = None,
-            headers: Optional[dict] = None,
-            signature_key: str = "signature",
-            timestamp_key: str = "timestamp") -> WebhookDelivery:
-        """Send a webhook with the configured URL.
-
-        Args:
-            payload: Event payload dict
-            event_type: Event type header
-            headers: Additional headers
-            signature_key: Header name for signature
-            timestamp_key: Header name for timestamp
-
-        Returns:
-            WebhookDelivery with result
-        """
-        if not self.config:
-            return WebhookDelivery(success=False, error="No webhook URL configured")
-
-        return self.send_to_url(
-            url=self.config.url,
-            payload=payload,
-            secret=self.config.secret,
-            event_type=event_type,
-            headers=headers,
-            timeout=self.config.timeout,
-            max_retries=self.config.max_retries,
-            retry_delay=self.config.retry_delay,
-            signature_key=signature_key,
-            timestamp_key=timestamp_key
+        webhook = action.create_webhook(
+            name="my-hook",
+            endpoint="https://example.com/webhook",
+            secret="my-secret",
+            events=["user.created", "order.completed"]
         )
 
-    def send_to_url(self, url: str,
-                   payload: dict,
-                   secret: Optional[str] = None,
-                   event_type: Optional[str] = None,
-                   headers: Optional[dict] = None,
-                   timeout: float = 30.0,
-                   max_retries: int = 3,
-                   retry_delay: float = 1.0,
-                   signature_key: str = "signature",
-                   timestamp_key: str = "timestamp") -> WebhookDelivery:
-        """Send a webhook to a specific URL.
+        result = action.send(webhook.id, {"event": "user.created", "data": {...}})
+    """
+
+    def __init__(self, simulator: Optional[WebhookSimulator] = None):
+        self._store = _global_store
+        self._simulator = simulator or _global_simulator
+
+    def create_webhook(self, name: str, endpoint: str,
+                       secret: Optional[str] = None,
+                       events: Optional[List[str]] = None,
+                       metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Create new webhook.
 
         Args:
-            url: Webhook URL
-            payload: Event payload dict
-            secret: Secret for HMAC signature
-            event_type: Event type header
-            headers: Additional headers
-            timeout: Request timeout
-            max_retries: Maximum retry attempts
-            retry_delay: Delay between retries
-            signature_key: Header name for signature
-            timestamp_key: Header name for timestamp
+            name: Webhook name
+            endpoint: Webhook endpoint URL
+            secret: Optional signing secret
+            events: List of events to subscribe
+            metadata: Additional metadata
 
         Returns:
-            WebhookDelivery with result
+            Dict with webhook info
         """
-        request_headers: dict[str, str] = {
-            "Content-Type": "application/json",
-            "User-Agent": "WebhookAgent/1.0"
+        try:
+            webhook = self._store.create_webhook(name, endpoint, secret, events)
+            if metadata:
+                webhook.metadata.update(metadata)
+            return {
+                "success": True,
+                "webhook": {
+                    "id": webhook.id,
+                    "name": webhook.name,
+                    "endpoint": webhook.endpoint,
+                    "events": webhook.events,
+                    "enabled": webhook.enabled
+                },
+                "message": f"Created webhook {webhook.id}"
+            }
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def get_webhook(self, webhook_id: str) -> Dict[str, Any]:
+        """Get webhook by ID.
+
+        Args:
+            webhook_id: Webhook ID
+
+        Returns:
+            Dict with webhook info
+        """
+        webhook = self._store.get_webhook(webhook_id)
+        if webhook:
+            return {
+                "success": True,
+                "webhook": {
+                    "id": webhook.id,
+                    "name": webhook.name,
+                    "endpoint": webhook.endpoint,
+                    "events": webhook.events,
+                    "enabled": webhook.enabled,
+                    "metadata": webhook.metadata
+                }
+            }
+        return {"success": False, "message": "Webhook not found"}
+
+    def list_webhooks(self, event: Optional[str] = None) -> Dict[str, Any]:
+        """List webhooks.
+
+        Args:
+            event: Optional event filter
+
+        Returns:
+            Dict with list of webhooks
+        """
+        webhooks = self._store.list_webhooks(event)
+        return {
+            "success": True,
+            "webhooks": [
+                {
+                    "id": w.id,
+                    "name": w.name,
+                    "endpoint": w.endpoint,
+                    "events": w.events,
+                    "enabled": w.enabled
+                }
+                for w in webhooks
+            ],
+            "count": len(webhooks)
         }
 
-        if self.config and self.config.headers:
-            request_headers.update(self.config.headers)
+    def delete_webhook(self, webhook_id: str) -> Dict[str, Any]:
+        """Delete webhook.
 
-        if headers:
-            request_headers.update(headers)
+        Args:
+            webhook_id: Webhook ID
 
-        timestamp = str(int(time.time()))
-        request_headers[f"X-Webhook-{timestamp_key}"] = timestamp
+        Returns:
+            Dict with success status
+        """
+        if self._store.delete_webhook(webhook_id):
+            return {"success": True, "message": "Webhook deleted"}
+        return {"success": False, "message": "Webhook not found"}
 
-        if event_type:
-            request_headers["X-Webhook-Event"] = event_type
+    def send(self, webhook_id: str, payload: Dict[str, Any],
+             headers: Optional[Dict[str, str]] = None,
+             async_delivery: bool = True) -> DeliveryResult:
+        """Send event to webhook.
 
-        json_payload = json.dumps(payload, default=str)
-        request_headers["X-Webhook-Content"] = hashlib.sha256(json_payload.encode()).hexdigest()
+        Args:
+            webhook_id: Target webhook ID
+            payload: Event payload
+            headers: Additional headers
+            async_delivery: If True, simulate async delivery
 
-        if secret:
-            signature = self._generate_signature(
-                timestamp,
-                json_payload,
-                secret,
-                signature_key
+        Returns:
+            DeliveryResult with delivery status
+        """
+        start = time.time()
+        webhook = self._store.get_webhook(webhook_id)
+
+        if not webhook:
+            return DeliveryResult(
+                success=False,
+                delivery_id="",
+                webhook_id=webhook_id,
+                status=DeliveryStatus.DROPPED,
+                attempts=0,
+                response_status=None,
+                duration_ms=(time.time() - start) * 1000,
+                error="Webhook not found"
             )
-            request_headers[f"X-Webhook-{signature_key}"] = signature
 
-        attempt = 0
-        last_error = None
+        if not webhook.enabled:
+            return DeliveryResult(
+                success=False,
+                delivery_id="",
+                webhook_id=webhook_id,
+                status=DeliveryStatus.DROPPED,
+                attempts=0,
+                response_status=None,
+                duration_ms=(time.time() - start) * 1000,
+                error="Webhook disabled"
+            )
 
-        while attempt < max_retries:
-            attempt += 1
+        event_type = payload.get("event", "*")
+        if event_type not in webhook.events and "*" not in webhook.events:
+            return DeliveryResult(
+                success=False,
+                delivery_id="",
+                webhook_id=webhook_id,
+                status=DeliveryStatus.DROPPED,
+                attempts=0,
+                response_status=None,
+                duration_ms=(time.time() - start) * 1000,
+                error=f"Event {event_type} not subscribed"
+            )
 
-            try:
-                response = self._session.post(
-                    url,
-                    data=json_payload,
-                    headers=request_headers,
-                    timeout=timeout
-                )
-
-                delivery = WebhookDelivery(
-                    success=response.ok,
-                    status_code=response.status_code,
-                    response_body=response.text[:1000] if response.text else None,
-                    attempt=attempt
-                )
-
-                if response.ok:
-                    return delivery
-
-                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-
-                if response.status_code >= 400 and response.status_code < 500:
-                    return WebhookDelivery(
-                        success=False,
-                        status_code=response.status_code,
-                        response_body=response.text[:1000],
-                        attempt=attempt,
-                        error=f"Client error: {response.status_code}"
-                    )
-
-            except requests.RequestException as e:
-                last_error = str(e)
-
-            if attempt < max_retries:
-                time.sleep(retry_delay * attempt)
-
-        return WebhookDelivery(
-            success=False,
-            attempt=attempt,
-            error=last_error or "Max retries exceeded"
+        delivery = self._store.create_delivery(
+            webhook_id,
+            webhook.endpoint,
+            payload,
+            headers
         )
 
-    def verify_signature(self, payload: bytes,
-                       signature: str,
-                       timestamp: str,
-                       secret: Optional[str] = None,
-                       tolerance: int = 300) -> bool:
+        if not async_delivery:
+            return self._deliver_with_retry(delivery, webhook, start)
+
+        return DeliveryResult(
+            success=True,
+            delivery_id=delivery.id,
+            webhook_id=webhook_id,
+            status=DeliveryStatus.PENDING,
+            attempts=0,
+            response_status=None,
+            duration_ms=(time.time() - start) * 1000,
+            error=None
+        )
+
+    def _deliver_with_retry(self, delivery: WebhookDelivery,
+                            webhook: Webhook,
+                            start_time: float) -> DeliveryResult:
+        """Deliver webhook with retry logic."""
+        retry_delays = [1, 5, 30]
+
+        while delivery.attempts < delivery.max_attempts:
+            delivery.attempts += 1
+            delivery.last_attempt = time.time()
+
+            try:
+                response_status, response_body = self._simulator.deliver(delivery)
+                delivery.response_status = response_status
+                delivery.response_body = response_body
+
+                if 200 <= response_status < 300:
+                    delivery.status = DeliveryStatus.SUCCESS
+                    self._store.update_delivery(delivery)
+                    return DeliveryResult(
+                        success=True,
+                        delivery_id=delivery.id,
+                        webhook_id=webhook.id,
+                        status=DeliveryStatus.SUCCESS,
+                        attempts=delivery.attempts,
+                        response_status=response_status,
+                        duration_ms=(time.time() - start_time) * 1000
+                    )
+
+                delivery.error = f"HTTP {response_status}: {response_body}"
+
+                if delivery.attempts < delivery.max_attempts:
+                    delivery.status = DeliveryStatus.RETRYING
+                    delay = retry_delays[min(delivery.attempts - 1, len(retry_delays) - 1)]
+                    delivery.next_retry = time.time() + delay
+                    self._store.update_delivery(delivery)
+                    time.sleep(0.1)
+
+            except Exception as e:
+                delivery.error = str(e)
+                delivery.status = DeliveryStatus.RETRYING
+                if delivery.attempts < delivery.max_attempts:
+                    delay = retry_delays[min(delivery.attempts - 1, len(retry_delays) - 1)]
+                    delivery.next_retry = time.time() + delay
+
+        delivery.status = DeliveryStatus.FAILED
+        self._store.update_delivery(delivery)
+
+        return DeliveryResult(
+            success=False,
+            delivery_id=delivery.id,
+            webhook_id=webhook.id,
+            status=DeliveryStatus.FAILED,
+            attempts=delivery.attempts,
+            response_status=delivery.response_status,
+            duration_ms=(time.time() - start_time) * 1000,
+            error=delivery.error
+        )
+
+    def get_delivery(self, delivery_id: str) -> Dict[str, Any]:
+        """Get delivery status.
+
+        Args:
+            delivery_id: Delivery ID
+
+        Returns:
+            Dict with delivery info
+        """
+        delivery = self._store.get_delivery(delivery_id)
+        if delivery:
+            return {
+                "success": True,
+                "delivery": {
+                    "id": delivery.id,
+                    "webhook_id": delivery.webhook_id,
+                    "endpoint": delivery.endpoint,
+                    "status": delivery.status.value,
+                    "attempts": delivery.attempts,
+                    "response_status": delivery.response_status,
+                    "error": delivery.error,
+                    "created_at": delivery.created_at,
+                    "last_attempt": delivery.last_attempt
+                }
+            }
+        return {"success": False, "message": "Delivery not found"}
+
+    def verify_signature(self, payload: str, signature: str,
+                         secret: str, timestamp: Optional[str] = None) -> bool:
         """Verify webhook signature.
 
         Args:
-            payload: Raw request body
-            signature: Signature header value
-            timestamp: Timestamp header value
-            secret: Secret key
-            tolerance: Timestamp tolerance in seconds
+            payload: Raw payload string
+            signature: Signature to verify
+            secret: Webhook secret
+            timestamp: Optional timestamp
 
         Returns:
             True if signature is valid
-
-        Raises:
-            WebhookError: If verification fails
         """
-        secret = secret or (self.config.secret if self.config else None)
+        expected = _generate_signature(payload, secret, timestamp)
+        return hmac.compare_digest(expected, signature)
 
-        if not secret:
-            logger.warning("No secret configured, skipping signature verification")
-            return True
 
-        try:
-            ts = int(timestamp)
-        except ValueError:
-            raise WebhookError("Invalid timestamp format")
+def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute webhook action.
 
-        current_time = int(time.time())
-        if abs(current_time - ts) > tolerance:
-            raise WebhookError("Timestamp outside tolerance window")
+    Args:
+        context: Execution context
+        params: Dict with keys:
+            - operation: "create", "get", "list", "delete", "send", "get_delivery", "verify"
+            - name: Webhook name (for create)
+            - endpoint: Webhook endpoint (for create)
+            - secret: Webhook secret (for create)
+            - events: Event list (for create)
+            - webhook_id: Webhook ID
+            - payload: Event payload (for send)
+            - headers: Additional headers (for send)
+            - async_delivery: Async delivery flag (for send)
+            - delivery_id: Delivery ID (for get_delivery)
+            - signature: Signature to verify (for verify)
 
-        expected_signature = self._compute_hmac(
-            timestamp,
-            payload.decode("utf-8"),
-            secret
-        )
+    Returns:
+        Dict with success, data, message
+    """
+    operation = params.get("operation", "send")
+    action = WebhookAction()
 
-        if not hmac.compare_digest(expected_signature, signature):
-            raise WebhookError("Invalid webhook signature")
-
-        return True
-
-    def parse_event(self, payload: dict,
-                   headers: Optional[dict] = None,
-                   signature: Optional[str] = None) -> WebhookEvent:
-        """Parse webhook payload into WebhookEvent.
-
-        Args:
-            payload: Event payload dict
-            headers: Request headers
-            signature: Signature for verification
-
-        Returns:
-            WebhookEvent object
-        """
-        headers = headers or {}
-
-        event_id = headers.get("X-Webhook-Event-Id", headers.get("X-GitHub-Delivery", ""))
-        event_type = headers.get("X-Webhook-Event", headers.get("X-GitHub-Event", ""))
-
-        return WebhookEvent(
-            id=event_id or self._generate_event_id(payload),
-            type=event_type or "unknown",
-            payload=payload,
-            timestamp=datetime.now(),
-            headers=headers,
-            signature=signature
-        )
-
-    def create_response(self, event: WebhookEvent,
-                       status_code: int = 200,
-                       body: Optional[dict] = None) -> dict:
-        """Create a webhook response.
-
-        Args:
-            event: Received event
-            status_code: HTTP status code
-            body: Response body
-
-        Returns:
-            Response dict for framework integration
-        """
-        response_body = json.dumps(body or {"received": True}) if body else ""
-
-        return {
-            "statusCode": status_code,
-            "body": response_body,
-            "headers": {
-                "Content-Type": "application/json"
-            }
-        }
-
-    def retry_failed_delivery(self, delivery: WebhookDelivery,
-                            payload: dict,
-                            event_type: Optional[str] = None) -> WebhookDelivery:
-        """Retry a failed webhook delivery.
-
-        Args:
-            delivery: Previous failed delivery
-            payload: Original payload
-            event_type: Event type header
-
-        Returns:
-            New WebhookDelivery with retry result
-        """
-        if not self.config:
-            return WebhookDelivery(success=False, error="No webhook URL configured")
-
-        if delivery.attempt >= self.config.max_retries:
-            return WebhookDelivery(
-                success=False,
-                error="Max retries exceeded",
-                attempt=delivery.attempt
+    try:
+        if operation == "create":
+            name = params.get("name", "")
+            endpoint = params.get("endpoint", "")
+            if not name or not endpoint:
+                return {"success": False, "message": "name and endpoint required"}
+            return action.create_webhook(
+                name=name,
+                endpoint=endpoint,
+                secret=params.get("secret"),
+                events=params.get("events"),
+                metadata=params.get("metadata")
             )
 
-        return self.send(
-            payload=payload,
-            event_type=event_type
-        )
+        elif operation == "get":
+            webhook_id = params.get("webhook_id", "")
+            if not webhook_id:
+                return {"success": False, "message": "webhook_id required"}
+            return action.get_webhook(webhook_id)
 
-    def batch_send(self, url: str,
-                  events: list[tuple[dict, Optional[str]]],
-                  secret: Optional[str] = None,
-                  concurrency: int = 5) -> list[WebhookDelivery]:
-        """Send multiple webhooks in batch.
+        elif operation == "list":
+            return action.list_webhooks(params.get("event"))
 
-        Args:
-            url: Webhook URL
-            events: List of (payload, event_type) tuples
-            secret: Secret for signature
-            concurrency: Max concurrent requests
+        elif operation == "delete":
+            webhook_id = params.get("webhook_id", "")
+            if not webhook_id:
+                return {"success": False, "message": "webhook_id required"}
+            return action.delete_webhook(webhook_id)
 
-        Returns:
-            List of WebhookDelivery results
-        """
-        results = []
-
-        for i in range(0, len(events), concurrency):
-            batch = events[i:i + concurrency]
-            batch_results = []
-
-            for payload, event_type in batch:
-                result = self.send_to_url(
-                    url=url,
-                    payload=payload,
-                    secret=secret,
-                    event_type=event_type
-                )
-                batch_results.append(result)
-
-            results.extend(batch_results)
-
-        return results
-
-    def generate_test_payload(self, event_type: str = "test.event",
-                            custom_data: Optional[dict] = None) -> dict:
-        """Generate a test webhook payload.
-
-        Args:
-            event_type: Event type name
-            custom_data: Optional custom data to include
-
-        Returns:
-            Test payload dict
-        """
-        return {
-            "event_type": event_type,
-            "timestamp": datetime.now().isoformat(),
-            "id": self._generate_event_id({"test": True}),
-            "data": custom_data or {
-                "test": True,
-                "message": "This is a test webhook payload"
+        elif operation == "send":
+            webhook_id = params.get("webhook_id", "")
+            payload = params.get("payload", {})
+            if not webhook_id:
+                return {"success": False, "message": "webhook_id required"}
+            result = action.send(
+                webhook_id=webhook_id,
+                payload=payload,
+                headers=params.get("headers"),
+                async_delivery=params.get("async_delivery", True)
+            )
+            return {
+                "success": result.success,
+                "delivery_id": result.delivery_id,
+                "webhook_id": result.webhook_id,
+                "status": result.status.value,
+                "attempts": result.attempts,
+                "response_status": result.response_status,
+                "duration_ms": result.duration_ms,
+                "error": result.error,
+                "message": f"Delivery {result.status.value}"
             }
-        }
 
-    def _generate_signature(self, timestamp: str,
-                          payload: str,
-                          secret: str,
-                          signature_key: str) -> str:
-        """Generate HMAC signature for webhook."""
-        signed_payload = f"{timestamp}.{payload}"
-        signature = hmac.new(
-            secret.encode("utf-8"),
-            signed_payload.encode("utf-8"),
-            hashlib.sha256
-        ).digest()
-        return f"{signature_key}=v1={signature.hex()}"
+        elif operation == "get_delivery":
+            delivery_id = params.get("delivery_id", "")
+            if not delivery_id:
+                return {"success": False, "message": "delivery_id required"}
+            return action.get_delivery(delivery_id)
 
-    def _compute_hmac(self, timestamp: str, payload: str, secret: str) -> str:
-        """Compute HMAC for verification."""
-        signed_payload = f"{timestamp}.{payload}"
-        signature = hmac.new(
-            secret.encode("utf-8"),
-            signed_payload.encode("utf-8"),
-            hashlib.sha256
-        ).digest()
-        return f"v1={signature.hex()}"
+        elif operation == "verify":
+            payload = params.get("payload", "")
+            signature = params.get("signature", "")
+            secret = params.get("secret", "")
+            timestamp = params.get("timestamp")
+            valid = action.verify_signature(payload, signature, secret, timestamp)
+            return {
+                "success": True,
+                "valid": valid,
+                "message": "Signature valid" if valid else "Invalid signature"
+            }
 
-    def _generate_event_id(self, payload: dict) -> str:
-        """Generate a unique event ID."""
-        content = json.dumps(payload, sort_keys=True, default=str)
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        else:
+            return {"success": False, "message": f"Unknown operation: {operation}"}
+
+    except Exception as e:
+        return {"success": False, "message": f"Webhook error: {str(e)}"}
