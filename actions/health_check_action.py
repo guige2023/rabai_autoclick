@@ -1,12 +1,11 @@
 """Health Check Action Module.
 
-Provides health check system for monitoring
-service and component health.
+Provides health check for services
+and dependencies.
 """
 
 import time
-import threading
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import sys
@@ -21,30 +20,17 @@ class HealthStatus(Enum):
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
-    UNKNOWN = "unknown"
 
 
 @dataclass
 class HealthCheck:
-    """Health check definition."""
+    """Health check entry."""
     check_id: str
     name: str
-    check_func: Callable
-    interval_seconds: float = 60.0
-    timeout_seconds: float = 10.0
-    enabled: bool = True
-    critical: bool = False
-
-
-@dataclass
-class HealthReport:
-    """Health report."""
-    check_id: str
-    name: str
-    status: HealthStatus
-    message: Optional[str]
-    timestamp: float
-    latency_ms: Optional[float] = None
+    checker: Callable
+    status: HealthStatus = HealthStatus.HEALTHY
+    last_check: float = 0
+    message: str = ""
 
 
 class HealthCheckManager:
@@ -52,130 +38,63 @@ class HealthCheckManager:
 
     def __init__(self):
         self._checks: Dict[str, HealthCheck] = {}
-        self._reports: Dict[str, HealthReport] = {}
-        self._lock = threading.Lock()
-        self._last_full_check: Optional[float] = None
 
     def register(
         self,
         name: str,
-        check_func: Callable,
-        interval_seconds: float = 60.0,
-        critical: bool = False
+        checker: Callable
     ) -> str:
-        """Register a health check."""
-        check_id = f"check_{name.lower().replace(' ', '_')}"
+        """Register health check."""
+        check_id = f"health_{name.lower().replace(' ', '_')}"
 
-        check = HealthCheck(
+        self._checks[check_id] = HealthCheck(
             check_id=check_id,
             name=name,
-            check_func=check_func,
-            interval_seconds=interval_seconds,
-            critical=critical
+            checker=checker
         )
-
-        with self._lock:
-            self._checks[check_id] = check
 
         return check_id
 
-    def unregister(self, check_id: str) -> bool:
-        """Unregister a health check."""
-        with self._lock:
-            if check_id in self._checks:
-                del self._checks[check_id]
-                return True
-        return False
-
-    def run_check(self, check_id: str) -> HealthReport:
-        """Run a single health check."""
+    def run_check(self, check_id: str) -> HealthStatus:
+        """Run a health check."""
         check = self._checks.get(check_id)
         if not check:
-            return HealthReport(
-                check_id=check_id,
-                name=check_id,
-                status=HealthStatus.UNKNOWN,
-                message="Check not found",
-                timestamp=time.time()
-            )
+            return HealthStatus.UNHEALTHY
 
-        start = time.time()
         try:
-            result = check.check_func()
-            latency = (time.time() - start) * 1000
-
-            if result is True:
-                status = HealthStatus.HEALTHY
-                message = "OK"
-            elif result is False:
-                status = HealthStatus.UNHEALTHY
-                message = "Check failed"
-            elif isinstance(result, dict):
-                status = HealthStatus(result.get("status", "unknown"))
-                message = result.get("message")
-            else:
-                status = HealthStatus.UNKNOWN
-                message = str(result)
-
-            report = HealthReport(
-                check_id=check_id,
-                name=check.name,
-                status=status,
-                message=message,
-                timestamp=time.time(),
-                latency_ms=latency
-            )
-
+            result = check.checker()
+            check.status = HealthStatus.HEALTHY if result else HealthStatus.UNHEALTHY
+            check.message = "OK" if result else "Failed"
         except Exception as e:
-            report = HealthReport(
-                check_id=check_id,
-                name=check.name,
-                status=HealthStatus.UNHEALTHY,
-                message=str(e),
-                timestamp=time.time(),
-                latency_ms=(time.time() - start) * 1000
-            )
+            check.status = HealthStatus.UNHEALTHY
+            check.message = str(e)
 
-        with self._lock:
-            self._reports[check_id] = report
+        check.last_check = time.time()
+        return check.status
 
-        return report
-
-    def run_all_checks(self) -> Dict[str, Any]:
+    def run_all(self) -> Dict[str, Any]:
         """Run all health checks."""
         results = {}
         overall_status = HealthStatus.HEALTHY
 
-        for check_id in self._checks:
-            if not self._checks[check_id].enabled:
-                continue
-
-            report = self.run_check(check_id)
+        for check_id, check in self._checks.items():
+            status = self.run_check(check_id)
             results[check_id] = {
-                "name": report.name,
-                "status": report.status.value,
-                "message": report.message,
-                "latency_ms": report.latency_ms
+                "name": check.name,
+                "status": status.value,
+                "message": check.message,
+                "last_check": check.last_check
             }
 
-            if report.status == HealthStatus.UNHEALTHY:
-                if self._checks[check_id].critical:
-                    overall_status = HealthStatus.UNHEALTHY
-                elif overall_status != HealthStatus.UNHEALTHY:
-                    overall_status = HealthStatus.DEGRADED
-
-        self._last_full_check = time.time()
+            if status == HealthStatus.UNHEALTHY:
+                overall_status = HealthStatus.UNHEALTHY
+            elif status == HealthStatus.DEGRADED and overall_status == HealthStatus.HEALTHY:
+                overall_status = HealthStatus.DEGRADED
 
         return {
-            "overall_status": overall_status.value,
-            "check_count": len(results),
-            "checks": results,
-            "timestamp": self._last_full_check
+            "overall": overall_status.value,
+            "checks": results
         }
-
-    def get_report(self, check_id: str) -> Optional[HealthReport]:
-        """Get last report for check."""
-        return self._reports.get(check_id)
 
 
 class HealthCheckAction(BaseAction):
@@ -192,14 +111,10 @@ class HealthCheckAction(BaseAction):
 
             if operation == "register":
                 return self._register(params)
-            elif operation == "unregister":
-                return self._unregister(params)
             elif operation == "run":
                 return self._run(params)
             elif operation == "run_all":
                 return self._run_all(params)
-            elif operation == "report":
-                return self._report(params)
             else:
                 return ActionResult(success=False, message=f"Unknown: {operation}")
 
@@ -208,44 +123,21 @@ class HealthCheckAction(BaseAction):
 
     def _register(self, params: Dict) -> ActionResult:
         """Register health check."""
-        def placeholder():
+        def default_checker():
             return True
 
         check_id = self._manager.register(
             name=params.get("name", ""),
-            check_func=params.get("check_func") or placeholder,
-            interval_seconds=params.get("interval_seconds", 60),
-            critical=params.get("critical", False)
+            checker=params.get("checker") or default_checker
         )
         return ActionResult(success=True, data={"check_id": check_id})
 
-    def _unregister(self, params: Dict) -> ActionResult:
-        """Unregister health check."""
-        success = self._manager.unregister(params.get("check_id", ""))
-        return ActionResult(success=success)
-
     def _run(self, params: Dict) -> ActionResult:
         """Run single check."""
-        report = self._manager.run_check(params.get("check_id", ""))
-        return ActionResult(success=True, data={
-            "check_id": report.check_id,
-            "status": report.status.value,
-            "message": report.message,
-            "latency_ms": report.latency_ms
-        })
+        status = self._manager.run_check(params.get("check_id", ""))
+        return ActionResult(success=True, data={"status": status.value})
 
     def _run_all(self, params: Dict) -> ActionResult:
         """Run all checks."""
-        result = self._manager.run_all_checks()
+        result = self._manager.run_all()
         return ActionResult(success=True, data=result)
-
-    def _report(self, params: Dict) -> ActionResult:
-        """Get check report."""
-        report = self._manager.get_report(params.get("check_id", ""))
-        if not report:
-            return ActionResult(success=False, message="Report not found")
-        return ActionResult(success=True, data={
-            "check_id": report.check_id,
-            "status": report.status.value,
-            "message": report.message
-        })
