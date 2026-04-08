@@ -1,157 +1,274 @@
-"""Data statistics action module for RabAI AutoClick.
+"""Data Statistics Action Module.
 
-Provides statistical operations:
-- StatsMeanAction: Calculate mean
-- StatsMedianAction: Calculate median
-- StatsModeAction: Calculate mode
-- StatsStdDevAction: Standard deviation
-- StatsPercentileAction: Calculate percentiles
+Provides statistical analysis: descriptive statistics,
+distributions, correlations, and outlier detection.
 """
+from __future__ import annotations
 
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 import math
-from typing import Any, Dict, List
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
 
 
-class StatsMeanAction(BaseAction):
-    """Calculate mean."""
-    action_type = "stats_mean"
-    display_name = "计算均值"
-    description = "计算平均值"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", "value")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            values = [d.get(field, 0) for d in data]
-            mean = sum(values) / len(values) if values else 0
-
-            return ActionResult(success=True, data={"mean": mean, "count": len(values), "field": field}, message=f"Mean of {field}: {mean:.4f}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stats mean failed: {e}")
+@dataclass
+class DescriptiveStats:
+    """Descriptive statistics."""
+    count: int = 0
+    sum: float = 0.0
+    mean: float = 0.0
+    median: float = 0.0
+    mode: Any = None
+    stddev: float = 0.0
+    variance: float = 0.0
+    min: float = 0.0
+    max: float = 0.0
+    q1: float = 0.0
+    q3: float = 0.0
 
 
-class StatsMedianAction(BaseAction):
-    """Calculate median."""
-    action_type = "stats_median"
-    display_name = "计算中位数"
-    description = "计算中位数"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", "value")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            values = sorted([d.get(field, 0) for d in data])
-            n = len(values)
-            median = values[n // 2] if n % 2 == 1 else (values[n // 2 - 1] + values[n // 2]) / 2
-
-            return ActionResult(success=True, data={"median": median, "count": len(values), "field": field}, message=f"Median of {field}: {median:.4f}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stats median failed: {e}")
+@dataclass
+class CorrelationResult:
+    """Correlation result between two variables."""
+    variable_x: str
+    variable_y: str
+    pearson: float = 0.0
+    spearman: float = 0.0
 
 
-class StatsModeAction(BaseAction):
-    """Calculate mode."""
-    action_type = "stats_mode"
-    display_name = "计算众数"
-    description = "计算众数"
+class DataStatisticsAction:
+    """Statistical analysis for data.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", "value")
+    Example:
+        stats = DataStatisticsAction()
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+        result = stats.describe([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        print(result.mean)  # 5.5
+        print(result.stddev)
+    """
 
-            values = [d.get(field, 0) for d in data]
-            freq: Dict = {}
-            for v in values:
-                freq[v] = freq.get(v, 0) + 1
-            mode_val = max(freq, key=freq.get)
-            mode_count = freq[mode_val]
+    def __init__(self) -> None:
+        pass
 
-            return ActionResult(
-                success=True,
-                data={"mode": mode_val, "mode_count": mode_count, "unique_values": len(freq), "field": field},
-                message=f"Mode of {field}: {mode_val} (appears {mode_count} times)",
+    def describe(self, data: List[float]) -> DescriptiveStats:
+        """Calculate descriptive statistics.
+
+        Args:
+            data: List of numeric values
+
+        Returns:
+            DescriptiveStats object
+        """
+        if not data:
+            return DescriptiveStats()
+
+        sorted_data = sorted(data)
+        n = len(data)
+        total = sum(data)
+        mean_val = total / n
+
+        variance_val = sum((x - mean_val) ** 2 for x in data) / n
+        stddev_val = math.sqrt(variance_val)
+
+        median_val = self._median(sorted_data)
+        mode_val = self._mode(data)
+        q1_val = self._percentile(sorted_data, 25)
+        q3_val = self._percentile(sorted_data, 75)
+
+        return DescriptiveStats(
+            count=n,
+            sum=total,
+            mean=mean_val,
+            median=median_val,
+            mode=mode_val,
+            stddev=stddev_val,
+            variance=variance_val,
+            min=min(data),
+            max=max(data),
+            q1=q1_val,
+            q3=q3_val,
+        )
+
+    def _median(self, sorted_data: List[float]) -> float:
+        """Calculate median."""
+        n = len(sorted_data)
+        mid = n // 2
+        if n % 2 == 0:
+            return (sorted_data[mid - 1] + sorted_data[mid]) / 2
+        return sorted_data[mid]
+
+    def _mode(self, data: List[float]) -> Any:
+        """Calculate mode."""
+        if not data:
+            return None
+        counter = Counter(data)
+        most_common = counter.most_common(1)
+        return most_common[0][0] if most_common else None
+
+    def _percentile(self, sorted_data: List[float], p: float) -> float:
+        """Calculate percentile."""
+        n = len(sorted_data)
+        index = (p / 100) * (n - 1)
+        lower = int(index)
+        upper = lower + 1
+        weight = index - lower
+
+        if upper >= n:
+            return sorted_data[-1]
+        return sorted_data[lower] * (1 - weight) + sorted_data[upper] * weight
+
+    def correlate(
+        self,
+        x: List[float],
+        y: List[float],
+    ) -> CorrelationResult:
+        """Calculate correlation between two variables.
+
+        Args:
+            x: First variable
+            y: Second variable
+
+        Returns:
+            CorrelationResult with pearson and spearman correlations
+        """
+        if len(x) != len(y) or len(x) < 2:
+            return CorrelationResult(
+                variable_x="x",
+                variable_y="y",
+                pearson=0.0,
+                spearman=0.0,
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stats mode failed: {e}")
 
+        n = len(x)
+        mean_x = sum(x) / n
+        mean_y = sum(y) / n
 
-class StatsStdDevAction(BaseAction):
-    """Calculate standard deviation."""
-    action_type = "stats_stddev"
-    display_name = "计算标准差"
-    description = "计算标准差"
+        cov = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n)) / n
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", "value")
+        std_x = math.sqrt(sum((xi - mean_x) ** 2 for xi in x) / n)
+        std_y = math.sqrt(sum((yi - mean_y) ** 2 for yi in y) / n)
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+        pearson = cov / (std_x * std_y) if std_x * std_y != 0 else 0.0
 
-            values = [d.get(field, 0) for d in data]
-            n = len(values)
-            mean = sum(values) / n
-            variance = sum((v - mean) ** 2 for v in values) / n
-            stddev = math.sqrt(variance)
+        spearman = self._spearman_rank_correlation(
+            list(zip(x, y))
+        )
 
-            return ActionResult(
-                success=True,
-                data={"stddev": stddev, "variance": variance, "mean": mean, "count": n, "field": field},
-                message=f"StdDev of {field}: {stddev:.4f} (variance={variance:.4f})",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stats stddev failed: {e}")
+        return CorrelationResult(
+            variable_x="x",
+            variable_y="y",
+            pearson=pearson,
+            spearman=spearman,
+        )
 
+    def _spearman_rank_correlation(self, pairs: List[Tuple]) -> float:
+        """Calculate Spearman rank correlation."""
+        n = len(pairs)
+        if n < 2:
+            return 0.0
 
-class StatsPercentileAction(BaseAction):
-    """Calculate percentiles."""
-    action_type = "stats_percentile"
-    display_name = "计算百分位数"
-    description = "计算百分位数"
+        ranked_x = sorted(range(n), key=lambda i: pairs[i][0])
+        ranked_y = sorted(range(n), key=lambda i: pairs[i][1])
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", "value")
-            percentiles = params.get("percentiles", [25, 50, 75, 90, 95, 99])
+        d_squared = sum((ranked_x[i] - ranked_y[i]) ** 2 for i in range(n))
+        spearman = 1 - (6 * d_squared) / (n * (n**2 - 1))
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+        return spearman
 
-            values = sorted([d.get(field, 0) for d in data])
-            n = len(values)
-            result = {}
+    def detect_outliers(
+        self,
+        data: List[float],
+        method: str = "iqr",
+        threshold: float = 1.5,
+    ) -> List[int]:
+        """Detect outliers in data.
 
-            for p in percentiles:
-                idx = int(n * p / 100)
-                if idx >= n:
-                    idx = n - 1
-                result[f"p{p}"] = values[idx]
+        Args:
+            data: List of numeric values
+            method: Detection method ("iqr" or "zscore")
+            threshold: Threshold for outlier detection
 
-            return ActionResult(
-                success=True,
-                data={"percentiles": result, "count": n, "field": field},
-                message=f"Percentiles of {field}: " + ", ".join(f"p{p}={result[f'p{p}']:.2f}" for p in percentiles),
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stats percentile failed: {e}")
+        Returns:
+            List of indices of outliers
+        """
+        if not data:
+            return []
+
+        if method == "iqr":
+            return self._detect_outliers_iqr(data, threshold)
+        elif method == "zscore":
+            return self._detect_outliers_zscore(data, threshold)
+
+        return []
+
+    def _detect_outliers_iqr(
+        self,
+        data: List[float],
+        threshold: float,
+    ) -> List[int]:
+        """Detect outliers using IQR method."""
+        sorted_data = sorted(data)
+        q1 = self._percentile(sorted_data, 25)
+        q3 = self._percentile(sorted_data, 75)
+        iqr = q3 - q1
+
+        lower_bound = q1 - threshold * iqr
+        upper_bound = q3 + threshold * iqr
+
+        outliers = [
+            i for i, value in enumerate(data)
+            if value < lower_bound or value > upper_bound
+        ]
+
+        return outliers
+
+    def _detect_outliers_zscore(
+        self,
+        data: List[float],
+        threshold: float,
+    ) -> List[int]:
+        """Detect outliers using Z-score method."""
+        mean_val = sum(data) / len(data)
+        std_val = math.sqrt(sum((x - mean_val) ** 2 for x in data) / len(data))
+
+        if std_val == 0:
+            return []
+
+        outliers = [
+            i for i, value in enumerate(data)
+            if abs((value - mean_val) / std_val) > threshold
+        ]
+
+        return outliers
+
+    def histogram(
+        self,
+        data: List[float],
+        bins: int = 10,
+    ) -> Tuple[List[float], List[int]]:
+        """Create histogram of data.
+
+        Args:
+            data: List of numeric values
+            bins: Number of bins
+
+        Returns:
+            Tuple of (bin_edges, frequencies)
+        """
+        if not data:
+            return [], []
+
+        min_val = min(data)
+        max_val = max(data)
+        bin_width = (max_val - min_val) / bins
+
+        edges = [min_val + i * bin_width for i in range(bins + 1)]
+        frequencies = [0] * bins
+
+        for value in data:
+            bin_index = min(int((value - min_val) / bin_width), bins - 1)
+            frequencies[bin_index] += 1
+
+        return edges, frequencies
