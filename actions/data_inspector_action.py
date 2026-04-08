@@ -1,174 +1,110 @@
-"""Data inspector action module for RabAI AutoClick.
+# Copyright (c) 2024. coded by claude
+"""Data Inspector Action Module.
 
-Provides data inspection operations:
-- InspectSchemaAction: Inspect schema
-- InspectTypesAction: Inspect data types
-- InspectSampleAction: Sample data inspection
-- InspectStructureAction: Inspect data structure
-- InspectValidateAction: Validate data structure
+Inspects API responses to extract structure, validate schema,
+and identify data quality issues.
 """
+from typing import Optional, Dict, Any, List, Set
+from dataclasses import dataclass, field
+from enum import Enum
+import logging
 
-from typing import Any, Dict, List
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class InspectSchemaAction(BaseAction):
-    """Inspect data schema."""
-    action_type = "inspect_schema"
-    display_name = "检查Schema"
-    description = "检查数据Schema"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            schema = {}
-            for item in data:
-                for key, value in item.items():
-                    if key not in schema:
-                        schema[key] = {"type": type(value).__name__, "first_value": value}
-                        break
-
-            return ActionResult(
-                success=True,
-                data={"schema": schema, "field_count": len(schema), "sample": data[0] if data else {}},
-                message=f"Schema inspection: {len(schema)} fields detected",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Inspect schema failed: {e}")
+class DataIssue(Enum):
+    MISSING_FIELD = "missing_field"
+    TYPE_MISMATCH = "type_mismatch"
+    NULL_VALUE = "null_value"
+    EMPTY_COLLECTION = "empty_collection"
+    DUPLICATE_KEY = "duplicate_key"
+    UNEXPECTED_FIELD = "unexpected_field"
 
 
-class InspectTypesAction(BaseAction):
-    """Inspect data types."""
-    action_type = "inspect_types"
-    display_name = "检查类型"
-    description = "检查数据类型"
+@dataclass
+class InspectionResult:
+    has_issues: bool
+    issue_count: int
+    issues: List[Dict[str, Any]]
+    structure: Dict[str, Any]
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", None)
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+class DataInspector:
+    def __init__(self):
+        self._expected_fields: Set[str] = set()
+        self._required_fields: Set[str] = set()
 
-            if field:
-                types = set(type(item.get(field)).__name__ for item in data)
-                return ActionResult(
-                    success=True,
-                    data={"field": field, "types": list(types), "dominant_type": max(types, key=lambda t: sum(1 for i in data if type(i.get(field)).__name__ == t))},
-                    message=f"Types for {field}: {types}",
-                )
+    def set_expected_fields(self, fields: Set[str]) -> None:
+        self._expected_fields = fields
+
+    def set_required_fields(self, fields: Set[str]) -> None:
+        self._required_fields = fields
+
+    def inspect(self, data: Any, path: str = "") -> InspectionResult:
+        issues: List[Dict[str, Any]] = []
+        if isinstance(data, dict):
+            structure = self._inspect_dict(data, path, issues)
+        elif isinstance(data, list):
+            structure = self._inspect_list(data, path, issues)
+        else:
+            structure = {"type": type(data).__name__, "value": str(data)[:100]}
+        return InspectionResult(
+            has_issues=len(issues) > 0,
+            issue_count=len(issues),
+            issues=issues,
+            structure=structure,
+        )
+
+    def _inspect_dict(self, data: dict, path: str, issues: List) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"type": "object", "fields": {}}
+        actual_fields = set(data.keys())
+        for field_name in self._required_fields:
+            if field_name not in actual_fields:
+                issues.append({
+                    "type": DataIssue.MISSING_FIELD.value,
+                    "path": f"{path}.{field_name}" if path else field_name,
+                    "message": f"Required field '{field_name}' is missing",
+                })
+        for key, value in data.items():
+            full_path = f"{path}.{key}" if path else key
+            if value is None:
+                issues.append({
+                    "type": DataIssue.NULL_VALUE.value,
+                    "path": full_path,
+                    "message": f"Field '{key}' has null value",
+                })
+            elif isinstance(value, dict):
+                result["fields"][key] = self._inspect_dict(value, full_path, issues)
+            elif isinstance(value, list):
+                result["fields"][key] = self._inspect_list(value, full_path, issues)
             else:
-                type_map = {}
-                for item in data:
-                    for k, v in item.items():
-                        t = type(v).__name__
-                        type_map[k] = type_map.get(k, set())
-                        type_map[k].add(t)
-                return ActionResult(success=True, data={"type_map": {k: list(v) for k, v in type_map.items()}}, message=f"Type inspection complete")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Inspect types failed: {e}")
+                result["fields"][key] = {"type": type(value).__name__}
+        return result
 
+    def _inspect_list(self, data: list, path: str, issues: List) -> Dict[str, Any]:
+        if len(data) == 0:
+            issues.append({
+                "type": DataIssue.EMPTY_COLLECTION.value,
+                "path": path,
+                "message": f"List at '{path}' is empty",
+            })
+            return {"type": "array", "length": 0}
+        first_item = data[0]
+        if isinstance(first_item, dict):
+            return {"type": "array", "length": len(data), "item_type": "object"}
+        return {"type": "array", "length": len(data), "item_type": type(first_item).__name__}
 
-class InspectSampleAction(BaseAction):
-    """Sample data inspection."""
-    action_type = "inspect_sample"
-    display_name = "抽样检查"
-    description = "抽样检查数据"
+    def get_summary(self, result: InspectionResult) -> Dict[str, Any]:
+        return {
+            "has_issues": result.has_issues,
+            "issue_count": result.issue_count,
+            "structure_summary": self._summarize_structure(result.structure),
+        }
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            sample_size = params.get("sample_size", 5)
-            method = params.get("method", "first")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if method == "first":
-                sample = data[:sample_size]
-            elif method == "last":
-                sample = data[-sample_size:]
-            elif method == "random":
-                import random
-                sample = random.sample(data, min(sample_size, len(data)))
-            else:
-                sample = data[:sample_size]
-
-            return ActionResult(
-                success=True,
-                data={"sample": sample, "sample_size": len(sample), "method": method},
-                message=f"Sampled {len(sample)} items using {method} method",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Inspect sample failed: {e}")
-
-
-class InspectStructureAction(BaseAction):
-    """Inspect data structure."""
-    action_type = "inspect_structure"
-    display_name = "检查结构"
-    description = "检查数据结构"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            structures = []
-            for i, item in enumerate(data[:10]):
-                structures.append({"index": i, "keys": list(item.keys()), "value_types": {k: type(v).__name__ for k, v in item.items()}})
-
-            return ActionResult(
-                success=True,
-                data={"structures": structures, "uniform": all(set(s["keys"]) == set(structures[0]["keys"]) for s in structures) if structures else False},
-                message=f"Structure inspection: {'uniform' if all(set(s['keys']) == set(structures[0]['keys']) for s in structures) else 'mixed'} structure",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Inspect structure failed: {e}")
-
-
-class InspectValidateAction(BaseAction):
-    """Validate data structure."""
-    action_type = "inspect_validate"
-    display_name = "验证结构"
-    description = "验证数据结构"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            expected_fields = params.get("expected_fields", [])
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            errors = []
-            for i, item in enumerate(data):
-                missing = [f for f in expected_fields if f not in item]
-                if missing:
-                    errors.append(f"Row {i}: missing fields {missing}")
-                extra = [k for k in item.keys() if k not in expected_fields]
-                if extra:
-                    errors.append(f"Row {i}: extra fields {extra}")
-
-            is_valid = len(errors) == 0
-
-            return ActionResult(
-                success=True,
-                data={"is_valid": is_valid, "errors": errors, "error_count": len(errors), "validated_rows": len(data)},
-                message=f"Validation: {'PASSED' if is_valid else f'FAILED ({len(errors)} errors)'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Inspect validate failed: {e}")
+    def _summarize_structure(self, structure: Dict[str, Any]) -> str:
+        if structure.get("type") == "object":
+            field_count = len(structure.get("fields", {}))
+            return f"Object with {field_count} fields"
+        elif structure.get("type") == "array":
+            return f"Array of {structure.get('item_type', 'unknown')} ({structure.get('length', 0)} items)"
+        return f"Primitive: {structure.get('type', 'unknown')}"
