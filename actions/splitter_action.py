@@ -1,191 +1,417 @@
 """Splitter action module for RabAI AutoClick.
 
-Provides data splitting and partitioning operations.
+Provides data splitting and partitioning actions for
+lists, strings, and structured data.
 """
 
 import sys
 import os
-from typing import Any, Dict, List, Optional, Union
+import json
+import re
+from typing import Any, Dict, List, Optional, Union, Callable
+from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class SplitterAction(BaseAction):
-    """Data splitting and partitioning operations.
+class DataSplitter:
+    """Split and partition data structures."""
     
-    Supports train/test split, stratified split, chunking,
-    bucket partitioning, and conditional splitting.
-    """
-    action_type = "splitter"
-    display_name = "数据分割"
-    description = "数据分割：训练测试集、分层、桶、分块"
+    @staticmethod
+    def split_list(data: List[Any], size: int, allow_partial: bool = True) -> List[List[Any]]:
+        """Split list into chunks.
+        
+        Args:
+            data: List to split.
+            size: Chunk size.
+            allow_partial: Allow last chunk smaller than size.
+        
+        Returns:
+            List of chunks.
+        """
+        if size <= 0:
+            return [data]
+        
+        chunks = []
+        for i in range(0, len(data), size):
+            chunk = data[i:i + size]
+            if chunk or allow_partial:
+                chunks.append(chunk)
+        
+        return chunks
     
-    def __init__(self) -> None:
-        super().__init__()
+    @staticmethod
+    def split_dict(data: Dict[str, Any], keys: List[str]) -> List[Dict[str, Any]]:
+        """Split dictionary into multiple dicts by keys.
+        
+        Args:
+            data: Dict to split.
+            keys: List of keys for each output dict.
+        
+        Returns:
+            List of dictionaries.
+        """
+        if not isinstance(keys, list) or not isinstance(keys[0], list):
+            keys = [keys]
+        
+        result = []
+        for key_group in keys:
+            result.append({k: data.get(k) for k in key_group if k in data})
+        
+        return result
     
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute split operation.
+    @staticmethod
+    def split_by_delimiter(text: str, delimiter: str, max_split: int = -1) -> List[str]:
+        """Split text by delimiter.
+        
+        Args:
+            text: Text to split.
+            delimiter: Delimiter string.
+            max_split: Maximum splits (-1 for all).
+        
+        Returns:
+            List of text parts.
+        """
+        if max_split > 0:
+            parts = text.split(delimiter, max_split)
+        else:
+            parts = text.split(delimiter)
+        
+        return parts
+    
+    @staticmethod
+    def split_by_length(text: str, length: int) -> List[str]:
+        """Split text into fixed-length chunks.
+        
+        Args:
+            text: Text to split.
+            length: Chunk length.
+        
+        Returns:
+            List of text chunks.
+        """
+        return [text[i:i + length] for i in range(0, len(text), length)]
+    
+    @staticmethod
+    def split_by_pattern(text: str, pattern: str) -> List[str]:
+        """Split text by regex pattern.
+        
+        Args:
+            text: Text to split.
+            pattern: Regex pattern.
+        
+        Returns:
+            List of text parts.
+        """
+        try:
+            return re.split(pattern, text)
+        except re.error:
+            return [text]
+    
+    @staticmethod
+    def partition_list(data: List[Any], predicate: Callable[[Any], bool]) -> tuple:
+        """Partition list by predicate.
+        
+        Args:
+            data: List to partition.
+            predicate: Function that returns True for first partition.
+        
+        Returns:
+            Tuple of (matching, non_matching).
+        """
+        matching = []
+        non_matching = []
+        
+        for item in data:
+            if predicate(item):
+                matching.append(item)
+            else:
+                non_matching.append(item)
+        
+        return (matching, non_matching)
+    
+    @staticmethod
+    def split_by_index(data: List[Any], indices: List[int]) -> List[List[Any]]:
+        """Split list at specific indices.
+        
+        Args:
+            data: List to split.
+            indices: Split positions.
+        
+        Returns:
+            List of split parts.
+        """
+        if not indices:
+            return [data]
+        
+        indices = sorted(set(indices))
+        result = []
+        prev = 0
+        
+        for idx in indices:
+            if 0 < idx < len(data):
+                result.append(data[prev:idx])
+                prev = idx
+        
+        result.append(data[prev:])
+        
+        return result
+    
+    @staticmethod
+    def split_lines(text: str, strip: bool = True) -> List[str]:
+        """Split text into lines.
+        
+        Args:
+            text: Text to split.
+            strip: Whether to strip whitespace.
+        
+        Returns:
+            List of lines.
+        """
+        lines = text.split('\n')
+        
+        if strip:
+            lines = [line.strip() for line in lines]
+        
+        return [line for line in lines if line]
+
+
+class SplitListAction(BaseAction):
+    """Split list into chunks."""
+    action_type = "split_list"
+    display_name = "拆分列表"
+    description = "将列表拆分为多个块"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Split list.
         
         Args:
             context: Execution context.
-            params: Dict with keys:
-                - command: 'train_test', 'stratified', 'chunk', 'bucket', 'conditional'
-                - data: List of items to split
-                - test_size: Fraction for test set (default 0.2)
-                - train_size: Fraction for train set (alternative to test_size)
-                - stratify_by: Field name for stratified split
-                - num_chunks: Number of chunks (for chunk command)
-                - num_buckets: Number of buckets (for bucket command)
-                - bucket_by: Field to hash for bucketing
-                - conditions: Dict of field -> values for conditional split
+            params: Dict with keys: data, size, allow_partial.
         
         Returns:
-            ActionResult with split data.
+            ActionResult with split chunks.
         """
-        command = params.get('command', 'train_test')
         data = params.get('data', [])
-        test_size = params.get('test_size', 0.2)
-        train_size = params.get('train_size')
-        stratify_by = params.get('stratify_by')
-        num_chunks = params.get('num_chunks', 3)
-        num_buckets = params.get('num_buckets', 5)
-        bucket_by = params.get('bucket_by')
-        conditions = params.get('conditions')
-        seed = params.get('seed')
+        size = params.get('size', 10)
+        allow_partial = params.get('allow_partial', True)
         
         if not isinstance(data, list):
             return ActionResult(success=False, message="data must be a list")
         
-        if seed is not None:
-            import random
-            random.seed(seed)
-            random.shuffle(data)
-        
-        if command == 'train_test':
-            return self._train_test_split(data, test_size, train_size)
-        if command == 'stratified':
-            return self._stratified_split(data, test_size, stratify_by)
-        if command == 'chunk':
-            return self._chunk_split(data, num_chunks)
-        if command == 'bucket':
-            return self._bucket_split(data, num_buckets, bucket_by)
-        if command == 'conditional':
-            return self._conditional_split(data, conditions)
-        
-        return ActionResult(success=False, message=f"Unknown command: {command}")
+        try:
+            chunks = DataSplitter.split_list(data, size, allow_partial)
+            
+            return ActionResult(
+                success=True,
+                message=f"Split into {len(chunks)} chunks",
+                data={"chunks": chunks, "chunk_count": len(chunks), "chunk_size": size}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Split error: {str(e)}")
+
+
+class SplitTextAction(BaseAction):
+    """Split text by delimiter."""
+    action_type = "split_text"
+    display_name = "拆分文本"
+    description = "按分隔符拆分文本"
     
-    def _train_test_split(self, data: List[Any], test_size: float, train_size: Optional[float]) -> ActionResult:
-        """Split into train and test sets."""
-        if train_size is not None:
-            test_size = 1 - train_size
-        n_test = max(1, int(len(data) * test_size))
-        n_train = len(data) - n_test
-        train = data[:n_train]
-        test = data[n_train:]
-        return ActionResult(
-            success=True,
-            message=f"Train/test split: {len(train)}/{len(test)}",
-            data={'train': train, 'test': test, 'train_size': len(train), 'test_size': len(test)}
-        )
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Split text.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: text, delimiter, max_split.
+        
+        Returns:
+            ActionResult with text parts.
+        """
+        text = params.get('text', '')
+        delimiter = params.get('delimiter', ',')
+        max_split = params.get('max_split', -1)
+        
+        if not isinstance(text, str):
+            return ActionResult(success=False, message="text must be a string")
+        
+        try:
+            parts = DataSplitter.split_by_delimiter(text, delimiter, max_split)
+            
+            return ActionResult(
+                success=True,
+                message=f"Split into {len(parts)} parts",
+                data={"parts": parts, "count": len(parts)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Split error: {str(e)}")
+
+
+class SplitByLengthAction(BaseAction):
+    """Split text by fixed length."""
+    action_type = "split_by_length"
+    display_name = "按长度拆分"
+    description = "按固定长度拆分文本"
     
-    def _stratified_split(self, data: List[Dict], test_size: float, stratify_by: str) -> ActionResult:
-        """Stratified split preserving class distribution."""
-        if stratify_by is None:
-            return self._train_test_split(data, test_size, None)
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Split by length.
         
-        groups: Dict[Any, List[Dict]] = {}
-        for row in data:
-            key = str(row.get(stratify_by, 'unknown'))
-            if key not in groups:
-                groups[key] = []
-            groups[key].append(row)
+        Args:
+            context: Execution context.
+            params: Dict with keys: text, length.
         
-        train = []
-        test = []
-        for key, group in groups.items():
-            n_test = max(1, int(len(group) * test_size))
-            n_train = len(group) - n_test
-            train.extend(group[:n_train])
-            test.extend(group[n_train:])
+        Returns:
+            ActionResult with chunks.
+        """
+        text = params.get('text', '')
+        length = params.get('length', 80)
         
-        return ActionResult(
-            success=True,
-            message=f"Stratified split: {len(train)}/{len(test)} across {len(groups)} strata",
-            data={'train': train, 'test': test, 'train_size': len(train), 'test_size': len(test), 'strata': len(groups)}
-        )
+        if not isinstance(text, str):
+            return ActionResult(success=False, message="text must be a string")
+        
+        try:
+            chunks = DataSplitter.split_by_length(text, length)
+            
+            return ActionResult(
+                success=True,
+                message=f"Split into {len(chunks)} chunks",
+                data={"chunks": chunks, "count": len(chunks), "chunk_length": length}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Split error: {str(e)}")
+
+
+class SplitByPatternAction(BaseAction):
+    """Split text by regex pattern."""
+    action_type = "split_by_pattern"
+    display_name = "按模式拆分"
+    description = "按正则表达式拆分"
     
-    def _chunk_split(self, data: List[Any], num_chunks: int) -> ActionResult:
-        """Split data into N chunks."""
-        num_chunks = min(num_chunks, len(data))
-        chunk_size = len(data) // num_chunks
-        chunks = []
-        for i in range(num_chunks):
-            start = i * chunk_size
-            if i == num_chunks - 1:
-                end = len(data)
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Split by pattern.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: text, pattern.
+        
+        Returns:
+            ActionResult with parts.
+        """
+        text = params.get('text', '')
+        pattern = params.get('pattern', r'\s+')
+        
+        if not isinstance(text, str):
+            return ActionResult(success=False, message="text must be a string")
+        
+        try:
+            parts = DataSplitter.split_by_pattern(text, pattern)
+            
+            return ActionResult(
+                success=True,
+                message=f"Split into {len(parts)} parts",
+                data={"parts": parts, "count": len(parts)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Split error: {str(e)}")
+
+
+class PartitionListAction(BaseAction):
+    """Partition list by predicate."""
+    action_type = "partition_list"
+    display_name = "分割列表"
+    description = "按条件分割列表"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Partition list.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: data, predicate.
+        
+        Returns:
+            ActionResult with partitioned lists.
+        """
+        data = params.get('data', [])
+        predicate = params.get('predicate', 'lambda x: bool(x)')
+        
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data must be a list")
+        
+        try:
+            if isinstance(predicate, str):
+                pred_func = eval(f"lambda x: {predicate}")
             else:
-                end = start + chunk_size
-            chunks.append(data[start:end])
-        return ActionResult(
-            success=True,
-            message=f"Split into {len(chunks)} chunks",
-            data={'chunks': chunks, 'num_chunks': len(chunks), 'chunk_sizes': [len(c) for c in chunks]}
-        )
+                pred_func = predicate
+            
+            matching, non_matching = DataSplitter.partition_list(data, pred_func)
+            
+            return ActionResult(
+                success=True,
+                message=f"Partitioned: {len(matching)} matching, {len(non_matching)} non-matching",
+                data={
+                    "matching": matching,
+                    "non_matching": non_matching,
+                    "matching_count": len(matching),
+                    "non_matching_count": len(non_matching)
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Partition error: {str(e)}")
+
+
+class SplitLinesAction(BaseAction):
+    """Split text into lines."""
+    action_type = "split_lines"
+    display_name = "拆分行"
+    description = "将文本拆分为行"
     
-    def _bucket_split(self, data: List[Dict], num_buckets: int, bucket_by: Optional[str]) -> ActionResult:
-        """Partition into N buckets by hash."""
-        import hashlib
-        buckets: List[List[Dict]] = [[] for _ in range(num_buckets)]
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Split lines.
         
-        for row in data:
-            if bucket_by:
-                val = str(row.get(bucket_by, ''))
-                hash_val = int(hashlib.md5(val.encode()).hexdigest(), 16)
-                bucket_idx = hash_val % num_buckets
-            else:
-                import random
-                bucket_idx = random.randint(0, num_buckets - 1)
-            buckets[bucket_idx].append(row)
+        Args:
+            context: Execution context.
+            params: Dict with keys: text, strip.
         
-        return ActionResult(
-            success=True,
-            message=f"Partitioned into {num_buckets} buckets",
-            data={'buckets': buckets, 'num_buckets': num_buckets, 'bucket_sizes': [len(b) for b in buckets]}
-        )
-    
-    def _conditional_split(self, data: List[Dict], conditions: Optional[Dict]) -> ActionResult:
-        """Split by conditions (each condition gets its own bucket)."""
-        if not conditions:
-            return ActionResult(success=False, message="conditions required for conditional split")
+        Returns:
+            ActionResult with lines.
+        """
+        text = params.get('text', '')
+        strip = params.get('strip', True)
         
-        results: Dict[str, List[Dict]] = {name: [] for name in conditions.keys()}
-        results['_unmatched'] = []
+        if not isinstance(text, str):
+            return ActionResult(success=False, message="text must be a string")
         
-        for row in data:
-            matched = False
-            for name, condition in conditions.items():
-                if self._matches_condition(row, condition):
-                    results[name].append(row)
-                    matched = True
-                    break
-            if not matched:
-                results['_unmatched'].append(row)
-        
-        return ActionResult(
-            success=True,
-            message=f"Conditional split: {sum(len(v) for v in results.values())} total",
-            data={'splits': results, 'split_counts': {k: len(v) for k, v in results.items()}}
-        )
-    
-    def _matches_condition(self, row: Dict, condition: Dict) -> bool:
-        """Check if a row matches a condition."""
-        for field, expected in condition.items():
-            actual = row.get(field)
-            if isinstance(expected, list):
-                if actual not in expected:
-                    return False
-            else:
-                if actual != expected:
-                    return False
-        return True
+        try:
+            lines = DataSplitter.split_lines(text, strip)
+            
+            return ActionResult(
+                success=True,
+                message=f"Split into {len(lines)} lines",
+                data={"lines": lines, "count": len(lines)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Split error: {str(e)}")
