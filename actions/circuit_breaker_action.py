@@ -1,247 +1,333 @@
-"""Circuit breaker action module for RabAI AutoClick.
+"""Circuit Breaker Action Module.
 
-Provides circuit breaker utilities:
-- CircuitBreaker: Circuit breaker pattern
-- CircuitBreakerRegistry: Manage breakers
+Provides circuit breaker pattern implementation for fault tolerance
+with configurable thresholds and state transitions.
 """
+from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
-from enum import Enum
-import threading
 import time
-import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
 import sys
 import os
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
 
 
 class CircuitState(Enum):
-    """Circuit states."""
+    """Circuit breaker state."""
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
 
 
+class FailureReason(Enum):
+    """Reason for circuit trip."""
+    TIMEOUT = "timeout"
+    ERROR = "error"
+    SERVICE_UNAVAILABLE = "service_unavailable"
+
+
+@dataclass
+class CircuitBreakerConfig:
+    """Circuit breaker configuration."""
+    failure_threshold: int = 5
+    success_threshold: int = 2
+    timeout_seconds: float = 60.0
+    half_open_max_calls: int = 3
+    name: str = ""
+
+
+@dataclass
 class CircuitBreaker:
-    """Circuit breaker implementation."""
-
-    def __init__(
-        self,
-        failure_threshold: int = 5,
-        recovery_timeout: float = 60.0,
-        half_open_max_calls: int = 3,
-    ):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.half_open_max_calls = half_open_max_calls
-
-        self._state = CircuitState.CLOSED
-        self._failure_count = 0
-        self._success_count = 0
-        self._last_failure_time: Optional[float] = None
-        self._half_open_calls = 0
-        self._lock = threading.RLock()
-
-    @property
-    def state(self) -> CircuitState:
-        """Get current state."""
-        with self._lock:
-            if self._state == CircuitState.OPEN:
-                if time.time() - self._last_failure_time >= self.recovery_timeout:
-                    self._state = CircuitState.HALF_OPEN
-                    self._half_open_calls = 0
-            return self._state
-
-    def allow_request(self) -> bool:
-        """Check if request is allowed."""
-        with self._lock:
-            state = self.state
-
-            if state == CircuitState.CLOSED:
-                return True
-
-            if state == CircuitState.HALF_OPEN:
-                if self._half_open_calls < self.half_open_max_calls:
-                    self._half_open_calls += 1
-                    return True
-                return False
-
-            return False
-
-    def record_success(self) -> None:
-        """Record a successful call."""
-        with self._lock:
-            if self._state == CircuitState.HALF_OPEN:
-                self._success_count += 1
-                if self._success_count >= self.half_open_max_calls:
-                    self._state = CircuitState.CLOSED
-                    self._failure_count = 0
-                    self._success_count = 0
-            else:
-                self._failure_count = 0
-
-    def record_failure(self) -> None:
-        """Record a failed call."""
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-
-            if self._state == CircuitState.HALF_OPEN:
-                self._state = CircuitState.OPEN
-                self._success_count = 0
-            elif self._failure_count >= self.failure_threshold:
-                self._state = CircuitState.OPEN
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get circuit breaker stats."""
-        with self._lock:
-            return {
-                "state": self.state.value,
-                "failure_count": self._failure_count,
-                "success_count": self._success_count,
-                "last_failure_time": self._last_failure_time,
-            }
+    """Circuit breaker state."""
+    name: str
+    state: CircuitState
+    config: CircuitBreakerConfig
+    failures: int = 0
+    successes: int = 0
+    consecutive_failures: int = 0
+    consecutive_successes: int = 0
+    last_failure_time: float = 0.0
+    last_state_change: float = field(default_factory=time.time)
+    half_open_calls: int = 0
+    total_calls: int = 0
+    total_failures: int = 0
 
 
-class CircuitBreakerRegistry:
-    """Registry for circuit breakers."""
+class CircuitBreakerStore:
+    """In-memory circuit breaker store."""
 
     def __init__(self):
         self._breakers: Dict[str, CircuitBreaker] = {}
-        self._lock = threading.RLock()
 
-    def get_or_create(self, name: str, **kwargs) -> CircuitBreaker:
-        """Get or create a circuit breaker."""
-        with self._lock:
-            if name not in self._breakers:
-                self._breakers[name] = CircuitBreaker(**kwargs)
-            return self._breakers[name]
-
-    def get(self, name: str) -> Optional[CircuitBreaker]:
-        """Get a circuit breaker."""
-        with self._lock:
-            return self._breakers.get(name)
-
-    def list_breakers(self) -> List[str]:
-        """List all breakers."""
-        with self._lock:
-            return list(self._breakers.keys())
+    def get_or_create(self, name: str, config: CircuitBreakerConfig) -> CircuitBreaker:
+        """Get or create circuit breaker."""
+        if name not in self._breakers:
+            self._breakers[name] = CircuitBreaker(
+                name=name,
+                state=CircuitState.CLOSED,
+                config=config
+            )
+        return self._breakers[name]
 
 
-class CircuitBreakerAction(BaseAction):
-    """Circuit breaker management action."""
-    action_type = "circuit_breaker"
-    display_name = "断路器"
-    description = "熔断保护"
+_global_store = CircuitBreakerStore()
 
-    def __init__(self):
-        super().__init__()
-        self._registry = CircuitBreakerRegistry()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "create")
+class CircuitBreakerAction:
+    """Circuit breaker action.
 
-            if operation == "create":
-                return self._create(params)
-            elif operation == "get":
-                return self._get(params)
-            elif operation == "record_success":
-                return self._record_success(params)
-            elif operation == "record_failure":
-                return self._record_failure(params)
-            elif operation == "stats":
-                return self._stats(params)
-            elif operation == "list":
-                return self._list()
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+    Example:
+        action = CircuitBreakerAction()
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"CircuitBreaker error: {str(e)}")
+        action.configure("payment-service", failure_threshold=5, timeout_seconds=30)
+        result = action.execute("payment-service", lambda: call_service())
+    """
 
-    def _create(self, params: Dict[str, Any]) -> ActionResult:
-        """Create a circuit breaker."""
-        name = params.get("name", str(uuid.uuid4()))
-        failure_threshold = params.get("failure_threshold", 5)
-        recovery_timeout = params.get("recovery_timeout", 60.0)
-        half_open_max_calls = params.get("half_open_max_calls", 3)
+    def __init__(self, store: Optional[CircuitBreakerStore] = None):
+        self._store = store or _global_store
+        self._handlers: Dict[str, Callable] = {}
 
-        breaker = self._registry.get_or_create(
-            name,
+    def configure(self, name: str,
+                  failure_threshold: int = 5,
+                  success_threshold: int = 2,
+                  timeout_seconds: float = 60.0,
+                  half_open_max_calls: int = 3) -> Dict[str, Any]:
+        """Configure circuit breaker."""
+        config = CircuitBreakerConfig(
             failure_threshold=failure_threshold,
-            recovery_timeout=recovery_timeout,
+            success_threshold=success_threshold,
+            timeout_seconds=timeout_seconds,
             half_open_max_calls=half_open_max_calls,
+            name=name
         )
+        self._store.get_or_create(name, config)
 
-        return ActionResult(success=True, message=f"Circuit breaker created: {name}", data={"name": name})
+        return {
+            "success": True,
+            "name": name,
+            "failure_threshold": failure_threshold,
+            "success_threshold": success_threshold,
+            "timeout_seconds": timeout_seconds,
+            "message": f"Configured circuit breaker: {name}"
+        }
 
-    def _get(self, params: Dict[str, Any]) -> ActionResult:
+    def record_success(self, name: str) -> Dict[str, Any]:
+        """Record successful call."""
+        breaker = self._store._breakers.get(name)
+        if not breaker:
+            return {"success": False, "message": "Circuit breaker not found"}
+
+        breaker.total_calls += 1
+        breaker.consecutive_failures = 0
+
+        if breaker.state == CircuitState.HALF_OPEN:
+            breaker.consecutive_successes += 1
+            breaker.half_open_calls -= 1
+            if breaker.consecutive_successes >= breaker.config.success_threshold:
+                breaker.state = CircuitState.CLOSED
+                breaker.consecutive_successes = 0
+                breaker.consecutive_failures = 0
+        else:
+            breaker.successes += 1
+
+        return {
+            "success": True,
+            "name": name,
+            "state": breaker.state.value,
+            "message": f"Success recorded for {name}"
+        }
+
+    def record_failure(self, name: str, reason: str = "error") -> Dict[str, Any]:
+        """Record failed call."""
+        breaker = self._store._breakers.get(name)
+        if not breaker:
+            return {"success": False, "message": "Circuit breaker not found"}
+
+        breaker.total_calls += 1
+        breaker.total_failures += 1
+        breaker.consecutive_failures += 1
+        breaker.consecutive_successes = 0
+        breaker.last_failure_time = time.time()
+
+        if breaker.state == CircuitState.HALF_OPEN:
+            breaker.half_open_calls -= 1
+            breaker.state = CircuitState.OPEN
+            breaker.last_state_change = time.time()
+
+        elif (breaker.consecutive_failures >= breaker.config.failure_threshold and
+              breaker.state == CircuitState.CLOSED):
+            breaker.state = CircuitState.OPEN
+            breaker.last_state_change = time.time()
+
+        return {
+            "success": True,
+            "name": name,
+            "state": breaker.state.value,
+            "consecutive_failures": breaker.consecutive_failures,
+            "message": f"Failure recorded for {name}"
+        }
+
+    def get_state(self, name: str) -> Dict[str, Any]:
         """Get circuit breaker state."""
-        name = params.get("name")
-
-        if not name:
-            return ActionResult(success=False, message="name is required")
-
-        breaker = self._registry.get(name)
+        breaker = self._store._breakers.get(name)
         if not breaker:
-            return ActionResult(success=False, message=f"Circuit breaker not found: {name}")
+            return {"success": False, "message": "Circuit breaker not found"}
 
-        state = breaker.state
+        now = time.time()
+        time_since_last_failure = now - breaker.last_failure_time
 
-        return ActionResult(success=True, message=f"State: {state.value}", data={"name": name, "state": state.value})
+        if (breaker.state == CircuitState.OPEN and
+            time_since_last_failure >= breaker.config.timeout_seconds):
+            breaker.state = CircuitState.HALF_OPEN
+            breaker.consecutive_successes = 0
+            breaker.consecutive_failures = 0
+            breaker.half_open_calls = 0
+            breaker.last_state_change = now
 
-    def _record_success(self, params: Dict[str, Any]) -> ActionResult:
-        """Record a success."""
-        name = params.get("name")
+        return {
+            "success": True,
+            "name": name,
+            "state": breaker.state.value,
+            "failures": breaker.failures,
+            "successes": breaker.successes,
+            "consecutive_failures": breaker.consecutive_failures,
+            "total_calls": breaker.total_calls,
+            "total_failures": breaker.total_failures,
+            "last_failure_time": breaker.last_failure_time,
+            "last_state_change": breaker.last_state_change,
+            "time_until_half_open": max(0, breaker.config.timeout_seconds - time_since_last_failure)
+                                 if breaker.state == CircuitState.OPEN else 0
+        }
 
-        if not name:
-            return ActionResult(success=False, message="name is required")
-
-        breaker = self._registry.get(name)
+    def is_allowed(self, name: str) -> Dict[str, Any]:
+        """Check if call is allowed."""
+        breaker = self._store._breakers.get(name)
         if not breaker:
-            return ActionResult(success=False, message=f"Circuit breaker not found: {name}")
+            return {"success": False, "message": "Circuit breaker not found", "allowed": True}
 
-        breaker.record_success()
+        if breaker.state == CircuitState.CLOSED:
+            return {"success": True, "allowed": True, "state": "closed"}
 
-        return ActionResult(success=True, message="Success recorded")
+        if breaker.state == CircuitState.OPEN:
+            time_since_open = time.time() - breaker.last_state_change
+            if time_since_open >= breaker.config.timeout_seconds:
+                breaker.state = CircuitState.HALF_OPEN
+                breaker.last_state_change = time.time()
+                return {"success": True, "allowed": True, "state": "half_open"}
 
-    def _record_failure(self, params: Dict[str, Any]) -> ActionResult:
-        """Record a failure."""
-        name = params.get("name")
+            return {
+                "success": True,
+                "allowed": False,
+                "state": "open",
+                "retry_after": breaker.config.timeout_seconds - time_since_open
+            }
 
-        if not name:
-            return ActionResult(success=False, message="name is required")
+        if breaker.state == CircuitState.HALF_OPEN:
+            if breaker.half_open_calls < breaker.config.half_open_max_calls:
+                breaker.half_open_calls += 1
+                return {"success": True, "allowed": True, "state": "half_open"}
 
-        breaker = self._registry.get(name)
+            return {"success": True, "allowed": False, "state": "half_open"}
+
+        return {"success": True, "allowed": True, "state": "unknown"}
+
+    def reset(self, name: str) -> Dict[str, Any]:
+        """Reset circuit breaker to closed state."""
+        breaker = self._store._breakers.get(name)
         if not breaker:
-            return ActionResult(success=False, message=f"Circuit breaker not found: {name}")
+            return {"success": False, "message": "Circuit breaker not found"}
 
-        breaker.record_failure()
+        breaker.state = CircuitState.CLOSED
+        breaker.failures = 0
+        breaker.successes = 0
+        breaker.consecutive_failures = 0
+        breaker.consecutive_successes = 0
+        breaker.half_open_calls = 0
+        breaker.last_state_change = time.time()
 
-        return ActionResult(success=True, message="Failure recorded")
+        return {
+            "success": True,
+            "name": name,
+            "state": breaker.state.value,
+            "message": f"Reset circuit breaker: {name}"
+        }
 
-    def _stats(self, params: Dict[str, Any]) -> ActionResult:
-        """Get circuit breaker stats."""
-        name = params.get("name")
-
-        if not name:
-            return ActionResult(success=False, message="name is required")
-
-        breaker = self._registry.get(name)
-        if not breaker:
-            return ActionResult(success=False, message=f"Circuit breaker not found: {name}")
-
-        stats = breaker.get_stats()
-
-        return ActionResult(success=True, message="Stats retrieved", data={"name": name, "stats": stats})
-
-    def _list(self) -> ActionResult:
+    def list_breakers(self) -> Dict[str, Any]:
         """List all circuit breakers."""
-        breakers = self._registry.list_breakers()
+        breakers = list(self._store._breakers.values())
+        return {
+            "success": True,
+            "breakers": [
+                {
+                    "name": b.name,
+                    "state": b.state.value,
+                    "total_calls": b.total_calls,
+                    "total_failures": b.total_failures
+                }
+                for b in breakers
+            ],
+            "count": len(breakers)
+        }
 
-        return ActionResult(success=True, message=f"{len(breakers)} breakers", data={"breakers": breakers})
+
+def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute circuit breaker action."""
+    operation = params.get("operation", "")
+    action = CircuitBreakerAction()
+
+    try:
+        if operation == "configure":
+            name = params.get("name", "")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.configure(
+                name=name,
+                failure_threshold=params.get("failure_threshold", 5),
+                success_threshold=params.get("success_threshold", 2),
+                timeout_seconds=params.get("timeout_seconds", 60.0),
+                half_open_max_calls=params.get("half_open_max_calls", 3)
+            )
+
+        elif operation == "record_success":
+            name = params.get("name", "")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.record_success(name)
+
+        elif operation == "record_failure":
+            name = params.get("name", "")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.record_failure(name, params.get("reason", "error"))
+
+        elif operation == "get_state":
+            name = params.get("name", "")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.get_state(name)
+
+        elif operation == "is_allowed":
+            name = params.get("name", "")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.is_allowed(name)
+
+        elif operation == "reset":
+            name = params.get("name", "")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.reset(name)
+
+        elif operation == "list":
+            return action.list_breakers()
+
+        else:
+            return {"success": False, "message": f"Unknown operation: {operation}"}
+
+    except Exception as e:
+        return {"success": False, "message": f"Circuit breaker error: {str(e)}"}
