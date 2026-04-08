@@ -1,299 +1,335 @@
-"""
-State machine module for modeling and executing finite state machines.
+"""State Machine Action Module.
 
-Supports states, transitions, guards, actions, and hierarchical state machines.
+Provides state machine implementation for workflow automation
+with configurable states, transitions, and guards.
 """
 from __future__ import annotations
 
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
 
 
 class TransitionType(Enum):
-    """Type of state transition."""
+    """Transition type."""
     EXTERNAL = "external"
     INTERNAL = "internal"
-    LOCAL = "local"
-
-
-@dataclass
-class State:
-    """A state in the state machine."""
-    id: str
-    name: str
-    entry_action: Optional[Callable] = None
-    exit_action: Optional[Callable] = None
-    do_action: Optional[Callable] = None
-    is_initial: bool = False
-    is_final: bool = False
-    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
 class Transition:
-    """A state transition."""
-    id: str
-    source_state: str
-    target_state: str
+    """State transition definition."""
+    from_state: str
+    to_state: str
     event: str
     guard: Optional[Callable] = None
     action: Optional[Callable] = None
     transition_type: TransitionType = TransitionType.EXTERNAL
-    conditions: list[str] = field(default_factory=list)
+
+
+@dataclass
+class State:
+    """State definition."""
+    name: str
+    entry_action: Optional[Callable] = None
+    exit_action: Optional[Callable] = None
+    is_initial: bool = False
+    is_final: bool = False
 
 
 @dataclass
 class StateMachineContext:
-    """Context for state machine execution."""
+    """State machine execution context."""
     machine_id: str
     current_state: str
-    history: list[dict] = field(default_factory=list)
-    variables: dict = field(default_factory=dict)
-    metadata: dict = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
+    history: List[str]
+    data: Dict[str, Any]
+    started_at: float = field(default_factory=time.time)
     last_updated: float = field(default_factory=time.time)
 
 
 @dataclass
-class TransitionEvent:
-    """An event that triggered a transition."""
-    event_name: str
-    payload: Any
-    timestamp: float = field(default_factory=time.time)
+class TransitionResult:
+    """Transition execution result."""
+    success: bool
+    from_state: str
+    to_state: str
+    event: str
+    error: Optional[str] = None
 
 
-class StateMachine:
+class StateMachineStore:
+    """In-memory state machine store."""
+
+    def __init__(self):
+        self._machines: Dict[str, Dict[str, Any]] = {}
+        self._contexts: Dict[str, StateMachineContext] = {}
+
+    def define(self, name: str, states: List[str],
+               transitions: List[Dict[str, Any]],
+               initial_state: str) -> bool:
+        """Define state machine."""
+        self._machines[name] = {
+            "states": states,
+            "transitions": transitions,
+            "initial_state": initial_state,
+            "current_states": {}
+        }
+        return True
+
+    def get(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get machine definition."""
+        return self._machines.get(name)
+
+    def create_context(self, name: str, instance_id: str,
+                      initial_state: str, data: Optional[Dict[str, Any]] = None) -> StateMachineContext:
+        """Create machine context."""
+        ctx = StateMachineContext(
+            machine_id=f"{name}:{instance_id}",
+            current_state=initial_state,
+            history=[initial_state],
+            data=data or {}
+        )
+        self._contexts[ctx.machine_id] = ctx
+        return ctx
+
+    def get_context(self, machine_id: str) -> Optional[StateMachineContext]:
+        """Get machine context."""
+        return self._contexts.get(machine_id)
+
+
+_global_store = StateMachineStore()
+
+
+class StateMachineAction:
+    """State machine action.
+
+    Example:
+        action = StateMachineAction()
+
+        action.define("order", ["pending", "paid", "shipped", "delivered"],
+                     [("pending", "paid", "pay"), ("paid", "shipped", "ship")],
+                     "pending")
+
+        action.create_instance("order", "order-123")
+        action.trigger("order:order-123", "pay")
     """
-    Finite state machine implementation.
 
-    Supports states, transitions, guards, actions,
-    and hierarchical state machines.
-    """
+    def __init__(self, store: Optional[StateMachineStore] = None):
+        self._store = store or _global_store
 
-    def __init__(self, machine_id: str, initial_state: Optional[str] = None):
-        self.machine_id = machine_id
-        self._states: dict[str, State] = {}
-        self._transitions: list[Transition] = []
-        self._initial_state = initial_state
-        self._context: Optional[StateMachineContext] = None
-
-    def add_state(
-        self,
-        state_id: str,
-        name: str,
-        entry_action: Optional[Callable] = None,
-        exit_action: Optional[Callable] = None,
-        do_action: Optional[Callable] = None,
-        is_initial: bool = False,
-        is_final: bool = False,
-    ) -> State:
-        """Add a state to the state machine."""
-        state = State(
-            id=state_id,
-            name=name,
-            entry_action=entry_action,
-            exit_action=exit_action,
-            do_action=do_action,
-            is_initial=is_initial,
-            is_final=is_final,
-        )
-
-        self._states[state_id] = state
-
-        if is_initial:
-            self._initial_state = state_id
-
-        return state
-
-    def add_transition(
-        self,
-        source_state: str,
-        target_state: str,
-        event: str,
-        guard: Optional[Callable] = None,
-        action: Optional[Callable] = None,
-        transition_type: TransitionType = TransitionType.EXTERNAL,
-    ) -> Transition:
-        """Add a transition to the state machine."""
-        transition = Transition(
-            id=str(uuid.uuid4())[:8],
-            source_state=source_state,
-            target_state=target_state,
-            event=event,
-            guard=guard,
-            action=action,
-            transition_type=transition_type,
-        )
-
-        self._transitions.append(transition)
-        return transition
-
-    def initialize(self, variables: Optional[dict] = None) -> StateMachineContext:
-        """Initialize the state machine context."""
-        if not self._initial_state:
-            raise ValueError("No initial state defined")
-
-        self._context = StateMachineContext(
-            machine_id=self.machine_id,
-            current_state=self._initial_state,
-            variables=variables or {},
-        )
-
-        initial = self._states.get(self._initial_state)
-        if initial and initial.entry_action:
-            initial.entry_action(self._context)
-
-        return self._context
-
-    def send_event(
-        self,
-        event_name: str,
-        payload: Optional[Any] = None,
-    ) -> bool:
-        """Send an event to the state machine."""
-        if not self._context:
-            raise ValueError("State machine not initialized")
-
-        current_state_id = self._context.current_state
-        current_state = self._states.get(current_state_id)
-
-        matching_transitions = [
-            t for t in self._transitions
-            if t.source_state == current_state_id and t.event == event_name
-        ]
-
-        if not matching_transitions:
-            return False
-
-        for transition in matching_transitions:
-            if transition.guard:
-                guard_result = transition.guard(self._context, payload)
-                if not guard_result:
-                    continue
-
-            if current_state and current_state.exit_action:
-                current_state.exit_action(self._context)
-
-            if transition.action:
-                transition.action(self._context, payload)
-
-            self._context.current_state = transition.target_state
-            self._context.last_updated = time.time()
-
-            self._context.history.append({
-                "event": event_name,
-                "from_state": transition.source_state,
-                "to_state": transition.target_state,
-                "timestamp": time.time(),
+    def define(self, name: str, states: List[str],
+              transitions: List[Dict[str, Any]],
+              initial_state: str) -> Dict[str, Any]:
+        """Define state machine."""
+        trans_list = []
+        for t in transitions:
+            trans_list.append({
+                "from_state": t.get("from_state"),
+                "to_state": t.get("to_state"),
+                "event": t.get("event")
             })
 
-            target_state = self._states.get(transition.target_state)
-            if target_state:
-                if target_state.is_final:
-                    return True
+        if self._store.define(name, states, trans_list, initial_state):
+            return {
+                "success": True,
+                "name": name,
+                "states": states,
+                "initial_state": initial_state,
+                "message": f"Defined state machine: {name}"
+            }
+        return {"success": False, "message": "Failed to define"}
 
-                if target_state.entry_action:
-                    target_state.entry_action(self._context)
+    def create_instance(self, name: str, instance_id: str,
+                       initial_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Create state machine instance."""
+        machine = self._store.get(name)
+        if not machine:
+            return {"success": False, "message": "Machine not found"}
 
-            return True
+        ctx = self._store.create_context(
+            name, instance_id,
+            machine["initial_state"],
+            initial_data
+        )
 
-        return False
+        return {
+            "success": True,
+            "instance_id": ctx.machine_id,
+            "current_state": ctx.current_state,
+            "message": f"Created instance: {ctx.machine_id}"
+        }
 
-    def get_current_state(self) -> Optional[str]:
-        """Get the current state ID."""
-        return self._context.current_state if self._context else None
+    def trigger(self, instance_id: str, event: str) -> Dict[str, Any]:
+        """Trigger event on instance."""
+        ctx = self._store.get_context(instance_id)
+        if not ctx:
+            return {"success": False, "message": "Instance not found"}
 
-    def get_state_info(self, state_id: Optional[str] = None) -> Optional[dict]:
-        """Get information about a state."""
-        state = self._states.get(state_id or self._context.current_state)
-        if not state:
-            return None
+        machine_name = instance_id.split(":")[0]
+        machine = self._store.get(machine_name)
+        if not machine:
+            return {"success": False, "message": "Machine not found"}
 
-        outgoing = [
-            {"event": t.event, "target": t.target_state}
-            for t in self._transitions if t.source_state == state.id
-        ]
+        for trans in machine["transitions"]:
+            if (trans["from_state"] == ctx.current_state and
+                trans["event"] == event):
+                old_state = ctx.current_state
+                ctx.current_state = trans["to_state"]
+                ctx.history.append(trans["to_state"])
+                ctx.last_updated = time.time()
 
-        incoming = [
-            {"source": t.source_state, "event": t.event}
-            for t in self._transitions if t.target_state == state.id
+                return {
+                    "success": True,
+                    "instance_id": instance_id,
+                    "from_state": old_state,
+                    "to_state": trans["to_state"],
+                    "event": event,
+                    "message": f"Transitioned {old_state} -> {trans['to_state']}"
+                }
+
+        return {
+            "success": False,
+            "instance_id": instance_id,
+            "current_state": ctx.current_state,
+            "message": f"No transition for event '{event}' from state '{ctx.current_state}'"
+        }
+
+    def get_state(self, instance_id: str) -> Dict[str, Any]:
+        """Get current state of instance."""
+        ctx = self._store.get_context(instance_id)
+        if not ctx:
+            return {"success": False, "message": "Instance not found"}
+
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "current_state": ctx.current_state,
+            "history": ctx.history,
+            "data": ctx.data,
+            "started_at": ctx.started_at,
+            "last_updated": ctx.last_updated
+        }
+
+    def set_data(self, instance_id: str, key: str, value: Any) -> Dict[str, Any]:
+        """Set data on instance."""
+        ctx = self._store.get_context(instance_id)
+        if not ctx:
+            return {"success": False, "message": "Instance not found"}
+
+        ctx.data[key] = value
+        ctx.last_updated = time.time()
+
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "key": key,
+            "message": f"Set {key} on {instance_id}"
+        }
+
+    def get_data(self, instance_id: str) -> Dict[str, Any]:
+        """Get all data from instance."""
+        ctx = self._store.get_context(instance_id)
+        if not ctx:
+            return {"success": False, "message": "Instance not found"}
+
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "data": ctx.data
+        }
+
+    def list_instances(self, name: str) -> Dict[str, Any]:
+        """List all instances of machine."""
+        instances = [
+            ctx for ctx in self._store._contexts.values()
+            if ctx.machine_id.startswith(name + ":")
         ]
 
         return {
-            "id": state.id,
-            "name": state.name,
-            "is_initial": state.is_initial,
-            "is_final": state.is_final,
-            "outgoing_transitions": outgoing,
-            "incoming_transitions": incoming,
+            "success": True,
+            "name": name,
+            "instances": [
+                {
+                    "instance_id": ctx.machine_id,
+                    "current_state": ctx.current_state,
+                    "history": ctx.history
+                }
+                for ctx in instances
+            ],
+            "count": len(instances)
         }
 
-    def get_available_events(self) -> list[str]:
-        """Get events that can be triggered from current state."""
-        if not self._context:
-            return []
 
-        current_state_id = self._context.current_state
+def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute state machine action."""
+    operation = params.get("operation", "")
+    action = StateMachineAction()
 
-        return [
-            t.event for t in self._transitions
-            if t.source_state == current_state_id
-        ]
+    try:
+        if operation == "define":
+            name = params.get("name", "")
+            states = params.get("states", [])
+            transitions = params.get("transitions", [])
+            initial_state = params.get("initial_state", "")
+            if not name or not states or not initial_state:
+                return {"success": False, "message": "name, states, and initial_state required"}
+            return action.define(name, states, transitions, initial_state)
 
-    def is_in_state(self, state_id: str) -> bool:
-        """Check if the state machine is in a specific state."""
-        return self._context.current_state == state_id if self._context else False
+        elif operation == "create":
+            name = params.get("name", "")
+            instance_id = params.get("instance_id", "")
+            if not name or not instance_id:
+                return {"success": False, "message": "name and instance_id required"}
+            return action.create_instance(
+                name=name,
+                instance_id=instance_id,
+                initial_data=params.get("initial_data")
+            )
 
-    def is_final_state(self) -> bool:
-        """Check if the current state is a final state."""
-        if not self._context:
-            return False
+        elif operation == "trigger":
+            instance_id = params.get("instance_id", "")
+            event = params.get("event", "")
+            if not instance_id or not event:
+                return {"success": False, "message": "instance_id and event required"}
+            return action.trigger(instance_id, event)
 
-        state = self._states.get(self._context.current_state)
-        return state.is_final if state else False
+        elif operation == "get_state":
+            instance_id = params.get("instance_id", "")
+            if not instance_id:
+                return {"success": False, "message": "instance_id required"}
+            return action.get_state(instance_id)
 
-    def get_history(self, limit: int = 100) -> list[dict]:
-        """Get transition history."""
-        return self._context.history[-limit:] if self._context else []
+        elif operation == "set_data":
+            instance_id = params.get("instance_id", "")
+            key = params.get("key", "")
+            value = params.get("value")
+            if not instance_id or not key:
+                return {"success": False, "message": "instance_id and key required"}
+            return action.set_data(instance_id, key, value)
 
-    def get_context(self) -> Optional[StateMachineContext]:
-        """Get the current context."""
-        return self._context
+        elif operation == "get_data":
+            instance_id = params.get("instance_id", "")
+            if not instance_id:
+                return {"success": False, "message": "instance_id required"}
+            return action.get_data(instance_id)
 
-    def set_variable(self, key: str, value: Any) -> None:
-        """Set a context variable."""
-        if self._context:
-            self._context.variables[key] = value
+        elif operation == "list":
+            name = params.get("name", "")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.list_instances(name)
 
-    def get_variable(self, key: str) -> Optional[Any]:
-        """Get a context variable."""
-        return self._context.variables.get(key) if self._context else None
+        else:
+            return {"success": False, "message": f"Unknown operation: {operation}"}
 
-    def list_states(self) -> list[dict]:
-        """List all states."""
-        return [
-            {
-                "id": s.id,
-                "name": s.name,
-                "is_initial": s.is_initial,
-                "is_final": s.is_final,
-            }
-            for s in self._states.values()
-        ]
-
-    def list_transitions(self) -> list[dict]:
-        """List all transitions."""
-        return [
-            {
-                "id": t.id,
-                "source": t.source_state,
-                "target": t.target_state,
-                "event": t.event,
-                "type": t.transition_type.value,
-            }
-            for t in self._transitions
-        ]
+    except Exception as e:
+        return {"success": False, "message": f"State machine error: {str(e)}"}
