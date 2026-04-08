@@ -1,361 +1,218 @@
-"""
-API Batch Action Module.
+"""API batch action module for RabAI AutoClick.
 
-Executes multiple API requests in batch with concurrency control,
-request batching, response aggregation, and error handling.
-
-Author: RabAi Team
+Provides API batch request processing with support for
+request bundling, parallel execution, and result aggregation.
 """
 
-from __future__ import annotations
-
-import asyncio
-import json
 import sys
 import os
 import time
-import threading
+from typing import Any, Dict, List, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class BatchMode(Enum):
-    """Batch execution modes."""
-    SEQUENTIAL = "sequential"
-    PARALLEL = "parallel"
-    CHUNKED = "chunked"
-    PRIORITY = "priority"
-
-
-class RequestMethod(Enum):
-    """HTTP methods."""
-    GET = "GET"
-    POST = "POST"
-    PUT = "PUT"
-    PATCH = "PATCH"
-    DELETE = "DELETE"
-    HEAD = "HEAD"
-    OPTIONS = "OPTIONS"
-
-
-@dataclass
-class BatchRequest:
-    """A single request in a batch."""
-    id: str
-    url: str
-    method: str = "GET"
-    headers: Dict[str, str] = field(default_factory=dict)
-    body: Optional[Any] = None
-    timeout: float = 30.0
-    priority: int = 0
-    retry_count: int = 0
-    max_retries: int = 3
-    expected_status: int = 200
-
-    def __post_init__(self):
-        if isinstance(self.method, str):
-            self.method = self.method.upper()
-
-
-@dataclass
-class BatchResponse:
-    """Response from a batch request."""
-    request_id: str
-    status_code: int
-    headers: Dict[str, str]
-    body: Any
-    latency_ms: float
-    success: bool
-    error: Optional[str] = None
-    timestamp: float = field(default_factory=time.time)
-
-
-@dataclass
-class BatchResult:
-    """Result of a batch execution."""
-    total: int
-    succeeded: int
-    failed: int
-    total_duration_ms: float
-    responses: List[BatchResponse]
-    errors: List[Dict[str, Any]]
-    rate_limit_hits: int = 0
-
-
 class ApiBatchAction(BaseAction):
-    """Batch API execution action.
+    """API batch action for processing multiple requests.
     
-    Executes multiple API requests with configurable concurrency,
-    batching strategies, and comprehensive error handling.
+    Supports batch request execution with concurrency control,
+    error handling, and result aggregation.
     """
     action_type = "api_batch"
-    display_name = "API批量请求"
-    description = "批量执行多个API请求"
+    display_name = "API批量处理"
+    description = "API批量请求处理"
     
-    def __init__(self):
-        super().__init__()
-        self._executor: Optional[ThreadPoolExecutor] = None
-        self._lock = threading.Lock()
-        self._rate_limiter: Optional[Dict[str, Any]] = None
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute a batch of API requests.
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute batch operation.
         
         Args:
-            context: The execution context.
-            params: Dictionary containing:
-                - requests: List of request dicts
-                - mode: Execution mode (sequential/parallel/chunked/priority)
-                - max_concurrency: Max parallel requests (default 10)
-                - chunk_size: Size of chunks for chunked mode (default 5)
-                - global_timeout: Overall timeout in seconds (default 300)
-                
-        Returns:
-            ActionResult with batch execution results.
-        """
-        start_time = time.time()
+            context: Execution context.
+            params: Dict with keys:
+                requests: List of request definitions
+                concurrency: Max concurrent requests
+                stop_on_error: Stop on first error
+                continue_on_error: Continue after errors
+                timeout: Per-request timeout.
         
-        requests = params.get("requests", [])
-        mode = BatchMode(params.get("mode", "parallel"))
-        max_concurrency = params.get("max_concurrency", 10)
-        chunk_size = params.get("chunk_size", 5)
-        global_timeout = params.get("global_timeout", 300)
+        Returns:
+            ActionResult with batch results.
+        """
+        requests = params.get('requests', [])
+        concurrency = params.get('concurrency', 5)
+        stop_on_error = params.get('stop_on_error', False)
+        continue_on_error = params.get('continue_on_error', True)
+        timeout = params.get('timeout', 30)
         
         if not requests:
-            return ActionResult(
-                success=False,
-                message="No requests provided",
-                duration=time.time() - start_time
-            )
+            return ActionResult(success=False, message="No requests provided")
         
-        batch_requests = [self._parse_request(r) for r in requests]
+        if len(requests) == 1:
+            return self._execute_single(requests[0], timeout)
         
-        try:
-            if mode == BatchMode.SEQUENTIAL:
-                result = self._execute_sequential(batch_requests, global_timeout)
-            elif mode == BatchMode.PARALLEL:
-                result = self._execute_parallel(batch_requests, max_concurrency, global_timeout)
-            elif mode == BatchMode.CHUNKED:
-                result = self._execute_chunked(batch_requests, chunk_size, global_timeout)
-            elif mode == BatchMode.PRIORITY:
-                result = self._execute_priority(batch_requests, max_concurrency, global_timeout)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown batch mode: {mode}",
-                    duration=time.time() - start_time
-                )
-            
-            return ActionResult(
-                success=result.failed == 0,
-                message=f"Batch completed: {result.succeeded}/{result.total} succeeded",
-                data={
-                    "total": result.total,
-                    "succeeded": result.succeeded,
-                    "failed": result.failed,
-                    "total_duration_ms": result.total_duration_ms,
-                    "rate_limit_hits": result.rate_limit_hits,
-                    "responses": [
-                        {"request_id": r.request_id, "status_code": r.status_code,
-                         "latency_ms": r.latency_ms, "success": r.success}
-                        for r in result.responses
-                    ],
-                    "errors": result.errors
-                },
-                duration=time.time() - start_time
-            )
-            
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Batch execution failed: {str(e)}",
-                duration=time.time() - start_time
-            )
-    
-    def _parse_request(self, req: Dict[str, Any]) -> BatchRequest:
-        """Parse a request dict into a BatchRequest."""
-        return BatchRequest(
-            id=req.get("id", str(hash(str(req)))),
-            url=req.get("url", ""),
-            method=req.get("method", "GET"),
-            headers=req.get("headers", {}),
-            body=req.get("body"),
-            timeout=req.get("timeout", 30.0),
-            priority=req.get("priority", 0),
-            max_retries=req.get("max_retries", 3),
-            expected_status=req.get("expected_status", 200)
+        return self._execute_batch(
+            requests, concurrency, stop_on_error, continue_on_error, timeout
         )
     
-    def _execute_request(self, request: BatchRequest) -> BatchResponse:
-        """Execute a single HTTP request."""
-        req_start = time.time()
-        try:
-            body_data = None
-            if request.body is not None:
-                if isinstance(request.body, dict):
-                    body_data = json.dumps(request.body).encode("utf-8")
-                elif isinstance(request.body, str):
-                    body_data = request.body.encode("utf-8")
-                else:
-                    body_data = str(request.body).encode("utf-8")
-            
-            headers = dict(request.headers)
-            if body_data and "Content-Type" not in headers:
-                headers["Content-Type"] = "application/json"
-            
-            req = Request(request.url, data=body_data, headers=headers, method=request.method)
-            
-            with urlopen(req, timeout=request.timeout) as response:
-                response_body = response.read()
-                try:
-                    body = json.loads(response_body)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    body = response_body.decode("utf-8", errors="replace")
-                
-                return BatchResponse(
-                    request_id=request.id,
-                    status_code=response.status,
-                    headers=dict(response.headers),
-                    body=body,
-                    latency_ms=(time.time() - req_start) * 1000,
-                    success=response.status == request.expected_status
-                )
-                
-        except HTTPError as e:
-            return BatchResponse(
-                request_id=request.id,
-                status_code=e.code,
-                headers=dict(e.headers) if e.headers else {},
-                body=e.read().decode("utf-8", errors="replace") if e.fp else None,
-                latency_ms=(time.time() - req_start) * 1000,
-                success=False,
-                error=f"HTTP {e.code}: {str(e)}"
-            )
-        except URLError as e:
-            return BatchResponse(
-                request_id=request.id,
-                status_code=0,
-                headers={},
-                body=None,
-                latency_ms=(time.time() - req_start) * 1000,
-                success=False,
-                error=f"URL error: {str(e)}"
-            )
-        except Exception as e:
-            return BatchResponse(
-                request_id=request.id,
-                status_code=0,
-                headers={},
-                body=None,
-                latency_ms=(time.time() - req_start) * 1000,
-                success=False,
-                error=f"Request failed: {str(e)}"
-            )
-    
-    def _execute_sequential(self, requests: List[BatchRequest], timeout: float) -> BatchResult:
-        """Execute requests sequentially."""
-        responses = []
-        errors = []
-        start_time = time.time()
+    def _execute_single(
+        self,
+        request: Dict[str, Any],
+        timeout: int
+    ) -> ActionResult:
+        """Execute a single request."""
+        result = self._do_request(request, timeout)
         
-        for req in requests:
-            if time.time() - start_time > timeout:
-                errors.append({"request_id": req.id, "error": "Global timeout exceeded"})
-                continue
-            response = self._execute_request(req)
-            responses.append(response)
-            if not response.success:
-                errors.append({"request_id": req.id, "error": response.error})
-        
-        succeeded = sum(1 for r in responses if r.success)
-        failed = len(responses) - succeeded
-        
-        return BatchResult(
-            total=len(requests),
-            succeeded=succeeded,
-            failed=failed,
-            total_duration_ms=(time.time() - start_time) * 1000,
-            responses=responses,
-            errors=errors
+        return ActionResult(
+            success=result['success'],
+            message=result.get('error', 'Request completed'),
+            data={
+                'results': [result],
+                'total': 1,
+                'successful': 1 if result['success'] else 0,
+                'failed': 0 if result['success'] else 1
+            }
         )
     
-    def _execute_parallel(self, requests: List[BatchRequest], max_concurrency: int, timeout: float) -> BatchResult:
-        """Execute requests in parallel with concurrency limit."""
-        responses = []
+    def _execute_batch(
+        self,
+        requests: List[Dict[str, Any]],
+        concurrency: int,
+        stop_on_error: bool,
+        continue_on_error: bool,
+        timeout: int
+    ) -> ActionResult:
+        """Execute batch requests with concurrency control."""
+        results = []
+        successful = 0
+        failed = 0
         errors = []
-        start_time = time.time()
         
-        with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
-            future_to_req = {executor.submit(self._execute_request, req): req for req in requests}
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {
+                executor.submit(self._do_request, req, timeout): (i, req)
+                for i, req in enumerate(requests)
+            }
             
-            for future in as_completed(future_to_req, timeout=timeout):
-                req = future_to_req[future]
+            for future in as_completed(futures):
+                i, req = futures[future]
+                
                 try:
-                    response = future.result()
-                    responses.append(response)
-                    if not response.success:
-                        errors.append({"request_id": req.id, "error": response.error})
+                    result = future.result()
+                    results.append({**result, 'index': i})
+                    
+                    if result.get('success'):
+                        successful += 1
+                    else:
+                        failed += 1
+                        errors.append({
+                            'index': i,
+                            'error': result.get('error'),
+                            'request': self._summarize_request(req)
+                        })
+                        
+                        if stop_on_error:
+                            for f in futures:
+                                f.cancel()
+                            break
                 except Exception as e:
-                    errors.append({"request_id": req.id, "error": str(e)})
+                    failed += 1
+                    errors.append({
+                        'index': i,
+                        'error': str(e),
+                        'request': self._summarize_request(req)
+                    })
+                    
+                    if stop_on_error:
+                        for f in futures:
+                            f.cancel()
+                        break
         
-        succeeded = sum(1 for r in responses if r.success)
-        failed = len(responses) - succeeded
+        success = failed == 0 or continue_on_error
         
-        return BatchResult(
-            total=len(requests),
-            succeeded=succeeded,
-            failed=failed,
-            total_duration_ms=(time.time() - start_time) * 1000,
-            responses=responses,
-            errors=errors
+        return ActionResult(
+            success=success,
+            message=f"Batch completed: {successful}/{len(requests)} successful",
+            data={
+                'results': results,
+                'total': len(requests),
+                'successful': successful,
+                'failed': failed,
+                'errors': errors[:10]
+            }
         )
     
-    def _execute_chunked(self, requests: List[BatchRequest], chunk_size: int, timeout: float) -> BatchResult:
-        """Execute requests in chunks."""
-        all_responses = []
-        all_errors = []
-        start_time = time.time()
+    def _do_request(
+        self,
+        request: Dict[str, Any],
+        timeout: int
+    ) -> Dict[str, Any]:
+        """Execute a single HTTP request."""
+        url = request.get('url', '')
+        method = request.get('method', 'GET')
+        headers = request.get('headers', {})
+        body = request.get('body')
         
-        for i in range(0, len(requests), chunk_size):
-            if time.time() - start_time > timeout:
-                break
-            chunk = requests[i:i + chunk_size]
-            chunk_result = self._execute_parallel(chunk, chunk_size, timeout - (time.time() - start_time))
-            all_responses.extend(chunk_result.responses)
-            all_errors.extend(chunk_result.errors)
+        if not url:
+            return {'success': False, 'error': 'URL is required'}
         
-        succeeded = sum(1 for r in all_responses if r.success)
-        failed = len(all_responses) - succeeded
+        data = None
+        if body:
+            if isinstance(body, dict):
+                data = json.dumps(body).encode('utf-8')
+                headers = {**headers, 'Content-Type': 'application/json'}
+            elif isinstance(body, str):
+                data = body.encode('utf-8')
+            else:
+                data = body
         
-        return BatchResult(
-            total=len(requests),
-            succeeded=succeeded,
-            failed=failed,
-            total_duration_ms=(time.time() - start_time) * 1000,
-            responses=all_responses,
-            errors=all_errors
-        )
+        try:
+            req = Request(url, data=data, headers=headers, method=method)
+            
+            with urlopen(req, timeout=timeout) as response:
+                body_bytes = response.read()
+                
+                try:
+                    body_json = json.loads(body_bytes.decode('utf-8', errors='replace'))
+                    body_result = body_json
+                except json.JSONDecodeError:
+                    body_result = body_bytes.decode('utf-8', errors='replace')
+                
+                return {
+                    'success': True,
+                    'status': response.status,
+                    'body': body_result,
+                    'headers': dict(response.headers)
+                }
+        except HTTPError as e:
+            body = e.read() if e.fp else b''
+            return {
+                'success': False,
+                'error': f"HTTP {e.code}: {e.reason}",
+                'status': e.code,
+                'body': body.decode('utf-8', errors='replace') if body else ''
+            }
+        except URLError as e:
+            return {
+                'success': False,
+                'error': f"URL error: {str(e.reason)}"
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
     
-    def _execute_priority(self, requests: List[BatchRequest], max_concurrency: int, timeout: float) -> BatchResult:
-        """Execute requests by priority order."""
-        sorted_requests = sorted(requests, key=lambda r: -r.priority)
-        return self._execute_parallel(sorted_requests, max_concurrency, timeout)
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate batch parameters."""
-        if "requests" not in params:
-            return False, "Missing required parameter: requests"
-        if not isinstance(params["requests"], list):
-            return False, "Parameter 'requests' must be a list"
-        return True, ""
-    
-    def get_required_params(self) -> List[str]:
-        """Return required parameters."""
-        return ["requests"]
+    def _summarize_request(self, request: Dict) -> Dict:
+        """Summarize request for error reporting."""
+        return {
+            'url': request.get('url', ''),
+            'method': request.get('method', 'GET')
+        }
