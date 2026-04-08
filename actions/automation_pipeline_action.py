@@ -1,173 +1,260 @@
 """
 Automation Pipeline Action Module.
 
-Builds and executes data processing pipelines with stages,
-branching, error handling, and checkpointing for long-running workflows.
+Chains automation steps into pipelines with error handling,
+ branching, and conditional execution support.
 """
-from typing import Any, Optional, Callable
+
+from __future__ import annotations
+
+from typing import Any, Callable, Optional, Union
 from dataclasses import dataclass, field
-from actions.base_action import BaseAction
+from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class StepStatus(Enum):
+    """Status of a pipeline step."""
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    RETRYING = "retrying"
 
 
 @dataclass
-class PipelineStage:
-    """A single stage in the pipeline."""
+class PipelineStep:
+    """A single step in the automation pipeline."""
     name: str
-    handler: Callable[[dict], dict]
+    func: Callable[..., Any]
+    args: tuple[Any, ...] = field(default_factory=tuple)
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    condition: Optional[Callable[..., bool]] = None
     retry_count: int = 0
     timeout: Optional[float] = None
-    on_error: Optional[str] = None  # next stage name on error
+    on_failure: Optional[str] = None
+    continue_on_failure: bool = False
+
+
+@dataclass
+class StepResult:
+    """Result of executing a pipeline step."""
+    name: str
+    status: StepStatus
+    output: Any = None
+    error: Optional[str] = None
+    duration_ms: float = 0.0
+    attempts: int = 1
 
 
 @dataclass
 class PipelineResult:
-    """Result of pipeline execution."""
+    """Result of a complete pipeline execution."""
     success: bool
-    stages_completed: list[str]
-    stages_failed: list[str]
-    output: Any
-    error: Optional[str] = None
-    checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    step_results: list[StepResult]
+    total_duration_ms: float = 0.0
+    failed_step: Optional[str] = None
+    outputs: dict[str, Any] = field(default_factory=dict)
 
 
-class AutomationPipelineAction(BaseAction):
-    """Execute multi-stage data processing pipelines."""
+class AutomationPipelineAction:
+    """
+    Pipeline executor for chained automation steps.
 
-    def __init__(self) -> None:
-        super().__init__("automation_pipeline")
-        self._stages: list[PipelineStage] = []
-        self._checkpoints: list[dict[str, Any]] = []
+    Supports sequential execution, conditional steps, retry logic,
+    and configurable error handling strategies.
 
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Execute a pipeline.
+    Example:
+        pipeline = AutomationPipelineAction()
+        pipeline.add_step("login", login_func)
+        pipeline.add_step("scrape", scrape_func, condition=lambda ctx: ctx["logged_in"])
+        pipeline.add_step("logout", logout_func, on_failure="scrape")
+        result = await pipeline.execute(context={"logged_in": False})
+    """
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - data: Input data for pipeline
-                - stages: List of stage configs
-                - checkpoint_enabled: Enable checkpointing (default: False)
-                - stop_on_error: Stop pipeline on first error (default: True)
+    def __init__(
+        self,
+        name: str = "pipeline",
+        continue_on_failure: bool = False,
+        max_step_retries: int = 3,
+    ) -> None:
+        self.name = name
+        self.continue_on_failure = continue_on_failure
+        self.max_step_retries = max_step_retries
+        self._steps: list[PipelineStep] = []
+        self._step_map: dict[str, PipelineStep] = {}
 
-        Returns:
-            PipelineResult with execution details
-        """
+    def add_step(
+        self,
+        name: str,
+        func: Callable[..., Any],
+        args: tuple[Any, ...] = (),
+        kwargs: Optional[dict[str, Any]] = None,
+        condition: Optional[Callable[..., bool]] = None,
+        retry_count: int = 0,
+        timeout: Optional[float] = None,
+        on_failure: Optional[str] = None,
+        continue_on_failure: bool = False,
+    ) -> "AutomationPipelineAction":
+        """Add a step to the pipeline."""
+        step = PipelineStep(
+            name=name,
+            func=func,
+            args=args,
+            kwargs=kwargs or {},
+            condition=condition,
+            retry_count=retry_count,
+            timeout=timeout,
+            on_failure=on_failure,
+            continue_on_failure=continue_on_failure,
+        )
+        self._steps.append(step)
+        self._step_map[name] = step
+        return self
+
+    def add_branch(
+        self,
+        name: str,
+        steps: list[tuple[str, Callable]],
+        condition: Callable[..., bool],
+    ) -> "AutomationPipelineAction":
+        """Add a conditional branch of steps."""
+        for step_name, func in steps:
+            self.add_step(
+                name=f"{name}.{step_name}",
+                func=func,
+                condition=condition,
+            )
+        return self
+
+    async def execute(
+        self,
+        context: Optional[dict[str, Any]] = None,
+        initial_input: Any = None,
+    ) -> PipelineResult:
+        """Execute the pipeline from start to finish."""
         import time
+        start_time = time.monotonic()
+        context = context or {}
+        context["_pipeline_input"] = initial_input
+        context["_pipeline_outputs"] = {}
 
-        data = params.get("data")
-        stage_configs = params.get("stages", [])
-        checkpoint_enabled = params.get("checkpoint_enabled", False)
-        stop_on_error = params.get("stop_on_error", True)
+        step_results: list[StepResult] = []
+        failed_step: Optional[str] = None
+        should_stop = False
 
-        stages = []
-        for cfg in stage_configs:
-            handler = cfg.get("handler")
-            stages.append(PipelineStage(
-                name=cfg.get("name", "unnamed"),
-                handler=handler,
-                retry_count=cfg.get("retry_count", 0),
-                timeout=cfg.get("timeout"),
-                on_error=cfg.get("on_error")
-            ))
+        for step in self._steps:
+            if should_stop and not step.continue_on_failure:
+                result = StepResult(
+                    name=step.name,
+                    status=StepStatus.SKIPPED,
+                    output=None,
+                )
+                step_results.append(result)
+                continue
 
-        completed = []
-        failed = []
-        current_data = data
+            if step.condition and not self._evaluate_condition(step.condition, context):
+                logger.debug(f"Step {step.name} skipped: condition not met")
+                result = StepResult(
+                    name=step.name,
+                    status=StepStatus.SKIPPED,
+                    output=None,
+                )
+                step_results.append(result)
+                continue
 
-        for stage in stages:
-            start_time = time.time()
-            try:
-                if stage.timeout:
-                    current_data = self._execute_with_timeout(stage.handler, current_data, stage.timeout)
-                else:
-                    current_data = stage.handler(current_data)
+            step_start = time.monotonic()
+            result = await self._execute_step(step, context)
+            result.duration_ms = (time.monotonic() - step_start) * 1000
+            step_results.append(result)
 
-                elapsed = time.time() - start_time
-                completed.append(stage.name)
+            context["_pipeline_outputs"][step.name] = result.output
 
-                if checkpoint_enabled:
-                    checkpoint = {"stage": stage.name, "data": current_data, "timestamp": start_time, "elapsed": elapsed}
-                    self._checkpoints.append(checkpoint)
+            if result.status == StepStatus.FAILED:
+                failed_step = step.name
+                if step.on_failure:
+                    await self._handle_failure(step.on_failure, context)
+                if not step.continue_on_failure and not self.continue_on_failure:
+                    should_stop = True
 
-            except Exception as e:
-                elapsed = time.time() - start_time
-                if stage.retry_count > 0:
-                    for retry in range(stage.retry_count):
-                        try:
-                            time.sleep(1 * (retry + 1))
-                            current_data = stage.handler(current_data)
-                            completed.append(stage.name)
-                            break
-                        except Exception:
-                            if retry == stage.retry_count - 1:
-                                if stop_on_error:
-                                    return PipelineResult(
-                                        success=False,
-                                        stages_completed=completed,
-                                        stages_failed=[stage.name],
-                                        output=current_data,
-                                        error=f"Stage {stage.name} failed after retries: {str(e)}",
-                                        checkpoints=self._checkpoints
-                                    )
-                                else:
-                                    failed.append(stage.name)
-                            else:
-                                continue
-                else:
-                    if stop_on_error:
-                        return PipelineResult(
-                            success=False,
-                            stages_completed=completed,
-                            stages_failed=[stage.name],
-                            output=current_data,
-                            error=f"Stage {stage.name} failed: {str(e)}",
-                            checkpoints=self._checkpoints
-                        )
-                    else:
-                        failed.append(stage.name)
-                        if stage.on_error:
-                            continue_stage_name = stage.on_error
-                            next_stage = next((s for s in stages if s.name == continue_stage_name), None)
-                            if next_stage:
-                                idx = stages.index(next_stage)
-                                stages = stages[idx:]
+        success = failed_step is None
 
         return PipelineResult(
-            success=len(failed) == 0,
-            stages_completed=completed,
-            stages_failed=failed,
-            output=current_data,
-            checkpoints=self._checkpoints
+            success=success,
+            step_results=step_results,
+            total_duration_ms=(time.monotonic() - start_time) * 1000,
+            failed_step=failed_step,
+            outputs=context.get("_pipeline_outputs", {}),
         )
 
-    def _execute_with_timeout(self, handler: Callable, data: Any, timeout: float) -> Any:
-        """Execute handler with timeout."""
+    async def _execute_step(
+        self,
+        step: PipelineStep,
+        context: dict[str, Any],
+    ) -> StepResult:
+        """Execute a single step with retry logic."""
         import time
-        import threading
 
-        result = [None]
-        error = [None]
-
-        def target():
+        for attempt in range(1, step.retry_count + 2):
             try:
-                result[0] = handler(data)
+                func = step.func
+                args = step.args
+                kwargs = step.kwargs.copy()
+                kwargs["context"] = context
+
+                if asyncio.iscoroutinefunction(func):
+                    output = await func(*args, **kwargs)
+                else:
+                    output = func(*args, **kwargs)
+
+                return StepResult(
+                    name=step.name,
+                    status=StepStatus.SUCCESS,
+                    output=output,
+                    attempts=attempt,
+                )
+
             except Exception as e:
-                error[0] = e
+                logger.warning(f"Step {step.name} attempt {attempt} failed: {e}")
+                if attempt < step.retry_count + 1:
+                    await asyncio.sleep(0.5 * attempt)
+                    continue
 
-        t = threading.Thread(target=target)
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
-            raise TimeoutError(f"Handler execution timed out after {timeout}s")
-        if error[0]:
-            raise error[0]
-        return result[0]
+                return StepResult(
+                    name=step.name,
+                    status=StepStatus.FAILED,
+                    error=str(e),
+                    attempts=attempt,
+                )
 
-    def add_stage(self, name: str, handler: Callable, retry_count: int = 0, timeout: Optional[float] = None) -> None:
-        """Add a stage to the pipeline."""
-        self._stages.append(PipelineStage(name=name, handler=handler, retry_count=retry_count, timeout=timeout))
+        return StepResult(name=step.name, status=StepStatus.FAILED)
 
-    def get_checkpoints(self) -> list[dict[str, Any]]:
-        """Get pipeline checkpoints."""
-        return self._checkpoints.copy()
+    def _evaluate_condition(
+        self,
+        condition: Callable[..., bool],
+        context: dict[str, Any],
+    ) -> bool:
+        """Evaluate a condition function."""
+        try:
+            return condition(context)
+        except Exception as e:
+            logger.warning(f"Condition evaluation failed: {e}")
+            return False
+
+    async def _handle_failure(
+        self,
+        target_step: str,
+        context: dict[str, Any],
+    ) -> None:
+        """Handle step failure by executing recovery steps."""
+        if target_step in self._step_map:
+            step = self._step_map[target_step]
+            logger.info(f"Executing failure handler: {target_step}")
+            result = await self._execute_step(step, context)
+            context["_pipeline_outputs"][step.name] = result.output
+
+
+import asyncio
