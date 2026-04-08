@@ -1,399 +1,373 @@
-"""Automation orchestrator action module for RabAI AutoClick.
+"""
+Automation Orchestrator Action Module.
 
-Provides workflow orchestration:
-- WorkflowOrchestratorAction: Orchestrate complex workflows
-- StepCoordinatorAction: Coordinate workflow steps
-- DependencyResolverAction: Resolve step dependencies
-- ExecutionPlanAction: Plan workflow execution
+Provides workflow orchestration with dependency resolution,
+parallel execution, error handling, and state management.
 """
 
-import time
-from typing import Any, Dict, List, Optional, Callable, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import asyncio
+import logging
+from collections import defaultdict, deque
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class WorkflowStatus(Enum):
+class TaskStatus(Enum):
+    """Task execution status."""
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    SKIPPED = "skipped"
     CANCELLED = "cancelled"
 
 
-class WorkflowOrchestratorAction(BaseAction):
-    """Orchestrate complex workflows."""
-    action_type = "automation_workflow_orchestrator"
-    display_name = "工作流编排器"
-    description = "编排复杂工作流"
+class RetryPolicy(Enum):
+    """Retry policy types."""
+    NONE = "none"
+    EXPONENTIAL = "exponential"
+    LINEAR = "linear"
+    FIXED = "fixed"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+@dataclass
+class TaskConfig:
+    """Configuration for a task."""
+    name: str
+    handler: Callable
+    dependencies: List[str] = field(default_factory=list)
+    retry_policy: RetryPolicy = RetryPolicy.NONE
+    max_retries: int = 3
+    timeout: float = 300.0
+    required: bool = True
+    priority: int = 0
+    retry_delay: float = 1.0
+
+
+@dataclass
+class TaskResult:
+    """Result of a task execution."""
+    task_name: str
+    status: TaskStatus
+    result: Any = None
+    error: Optional[Exception] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    retry_count: int = 0
+
+    @property
+    def duration(self) -> Optional[float]:
+        """Get task duration in seconds."""
+        if self.start_time and self.end_time:
+            return (self.end_time - self.start_time).total_seconds()
+        return None
+
+
+@dataclass
+class WorkflowState:
+    """State of the workflow execution."""
+    tasks: Dict[str, TaskResult] = field(default_factory=dict)
+    current_task: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    cancelled: bool = False
+
+    @property
+    def is_complete(self) -> bool:
+        """Check if workflow is complete."""
+        return any(
+            t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.SKIPPED)
+            for t in self.tasks.values()
+        ) and self._all_tasks_done()
+
+    def _all_tasks_done(self) -> bool:
+        """Check if all tasks have finished."""
+        return all(
+            t.status != TaskStatus.PENDING and t.status != TaskStatus.RUNNING
+            for t in self.tasks.values()
+        )
+
+
+class DependencyGraph:
+    """Manages task dependencies and execution order."""
+
+    def __init__(self):
+        self.tasks: Dict[str, TaskConfig] = {}
+        self.graph: Dict[str, Set[str]] = defaultdict(set)
+        self.reverse_graph: Dict[str, Set[str]] = defaultdict(set)
+
+    def add_task(self, config: TaskConfig):
+        """Add a task to the dependency graph."""
+        self.tasks[config.name] = config
+        self.graph[config.name] = set(config.dependencies)
+        for dep in config.dependencies:
+            self.reverse_graph[dep].add(config.name)
+
+    def get_execution_order(self) -> List[List[str]]:
+        """Get tasks grouped by execution level (parallelizable within each level)."""
+        in_degree: Dict[str, int] = {
+            name: len(deps) for name, deps in self.graph.items()
+        }
+        levels: List[List[str]] = []
+        remaining = set(self.tasks.keys())
+        completed = set()
+
+        while remaining:
+            current_level = [
+                name for name in remaining
+                if in_degree[name] == 0
+            ]
+            if not current_level:
+                raise ValueError("Circular dependency detected")
+
+            levels.append(current_level)
+            for name in current_level:
+                remaining.remove(name)
+                completed.add(name)
+                for dependent in self.reverse_graph[name]:
+                    in_degree[dependent] -= 1
+
+        return levels
+
+    def get_ready_tasks(
+        self,
+        completed: Set[str],
+        running: Set[str]
+    ) -> List[str]:
+        """Get tasks that are ready to execute."""
+        ready = []
+        for name, deps in self.graph.items():
+            if name not in completed and name not in running:
+                if deps.issubset(completed):
+                    ready.append(name)
+        return ready
+
+    def validate(self) -> Tuple[bool, Optional[str]]:
+        """Validate the dependency graph."""
         try:
-            action = params.get("action", "execute")
-            workflow = params.get("workflow", {})
-            steps = workflow.get("steps", [])
+            self.get_execution_order()
+            return True, None
+        except ValueError as e:
+            return False, str(e)
 
-            if action == "execute":
-                if not steps:
-                    return ActionResult(success=False, message="No steps to execute")
 
-                execution_order = self._topological_sort(steps)
-                execution_results = []
+class WorkflowOrchestrator:
+    """Main orchestrator for workflow execution."""
 
-                for step in execution_order:
-                    step_name = step.get("name", "unnamed")
-                    step_action = step.get("action", {})
-                    depends_on = step.get("depends_on", [])
-                    timeout = step.get("timeout", 60)
+    def __init__(self, max_parallel: int = 5):
+        self.max_parallel = max_parallel
+        self.dependency_graph = DependencyGraph()
+        self.state = WorkflowState()
+        self.task_handlers: Dict[str, Callable] = {}
+        self.on_task_start: Optional[Callable] = None
+        self.on_task_complete: Optional[Callable] = None
+        self.on_workflow_complete: Optional[Callable] = None
 
-                    depends_satisfied = all(
-                        any(r.get("step") == dep for r in execution_results if r.get("success"))
-                        for dep in depends_on
+    def register_task(self, config: TaskConfig):
+        """Register a task with the orchestrator."""
+        self.dependency_graph.add_task(config)
+        self.task_handlers[config.name] = config.handler
+        self.state.tasks[config.name] = TaskResult(
+            task_name=config.name,
+            status=TaskStatus.PENDING
+        )
+
+    def set_task_start_callback(self, callback: Callable):
+        """Set callback for task start events."""
+        self.on_task_start = callback
+
+    def set_task_complete_callback(self, callback: Callable):
+        """Set callback for task complete events."""
+        self.on_task_complete = callback
+
+    def set_workflow_complete_callback(self, callback: Callable):
+        """Set callback for workflow completion."""
+        self.on_workflow_complete = callback
+
+    def cancel(self):
+        """Cancel workflow execution."""
+        self.state.cancelled = True
+
+    async def _execute_task(
+        self,
+        task_name: str,
+        task_config: TaskConfig,
+        initial_context: Dict[str, Any]
+    ) -> TaskResult:
+        """Execute a single task with retry logic."""
+        result = self.state.tasks[task_name]
+        result.start_time = datetime.now()
+        result.status = TaskStatus.RUNNING
+        self.state.current_task = task_name
+
+        if self.on_task_start:
+            await asyncio.to_thread(self.on_task_start, task_name, initial_context)
+
+        for attempt in range(task_config.max_retries + 1):
+            try:
+                if asyncio.iscoroutinefunction(task_config.handler):
+                    task_result = await asyncio.wait_for(
+                        task_config.handler(initial_context),
+                        timeout=task_config.timeout
+                    )
+                else:
+                    task_result = await asyncio.wait_for(
+                        asyncio.to_thread(task_config.handler, initial_context),
+                        timeout=task_config.timeout
                     )
 
-                    if not depends_satisfied:
-                        execution_results.append({
-                            "step": step_name,
-                            "success": False,
-                            "error": "Dependencies not satisfied"
-                        })
-                        continue
+                result.status = TaskStatus.COMPLETED
+                result.result = task_result
+                result.retry_count = attempt
+                break
 
-                    success = step_action.get("success", True)
-                    execution_results.append({
-                        "step": step_name,
-                        "success": success,
-                        "duration_ms": 100
-                    })
+            except asyncio.TimeoutError:
+                result.error = TimeoutError(f"Task {task_name} timed out")
+                if attempt == task_config.max_retries:
+                    result.status = TaskStatus.FAILED
+                else:
+                    await asyncio.sleep(task_config.retry_delay * (attempt + 1))
 
-                failed_steps = [r for r in execution_results if not r["success"]]
-                all_success = len(failed_steps) == 0
-
-                return ActionResult(
-                    success=all_success,
-                    data={
-                        "execution_results": execution_results,
-                        "total_steps": len(steps),
-                        "executed_steps": len(execution_results),
-                        "failed_steps": len(failed_steps),
-                        "status": WorkflowStatus.COMPLETED.value if all_success else WorkflowStatus.FAILED.value
-                    },
-                    message=f"Workflow executed: {len(execution_results)}/{len(steps)} steps, {len(failed_steps)} failed"
-                )
-
-            elif action == "validate":
-                errors = []
-                step_names = set()
-
-                for step in steps:
-                    name = step.get("name")
-                    if not name:
-                        errors.append("Step without name found")
-                    elif name in step_names:
-                        errors.append(f"Duplicate step name: {name}")
+            except Exception as e:
+                result.error = e
+                if attempt == task_config.max_retries:
+                    result.status = TaskStatus.FAILED
+                else:
+                    if task_config.retry_policy == RetryPolicy.EXPONENTIAL:
+                        delay = task_config.retry_delay * (2 ** attempt)
+                    elif task_config.retry_policy == RetryPolicy.LINEAR:
+                        delay = task_config.retry_delay * (attempt + 1)
                     else:
-                        step_names.add(name)
+                        delay = task_config.retry_delay
+                    await asyncio.sleep(delay)
 
-                    depends_on = step.get("depends_on", [])
-                    for dep in depends_on:
-                        if dep not in step_names and dep not in [s.get("name") for s in steps]:
-                            errors.append(f"Step '{name}' depends on unknown step: {dep}")
+        result.end_time = datetime.now()
 
-                circular_deps = self._detect_circular_dependencies(steps)
-                if circular_deps:
-                    errors.append(f"Circular dependencies detected: {circular_deps}")
+        if self.on_task_complete:
+            await asyncio.to_thread(
+                self.on_task_complete, task_name, result, initial_context
+            )
 
-                return ActionResult(
-                    success=len(errors) == 0,
-                    data={
-                        "valid": len(errors) == 0,
-                        "errors": errors,
-                        "steps_count": len(steps)
-                    },
-                    message=f"Workflow validation: {'passed' if len(errors) == 0 else f'{len(errors)} errors'}"
-                )
-
-            elif action == "plan":
-                execution_order = self._topological_sort(steps)
-                return ActionResult(
-                    success=True,
-                    data={
-                        "execution_plan": execution_order,
-                        "total_steps": len(steps),
-                        "parallelizable_steps": self._find_parallel_steps(steps)
-                    },
-                    message=f"Execution plan: {len(execution_order)} steps in order"
-                )
-
-            return ActionResult(success=False, message=f"Unknown action: {action}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Workflow orchestrator error: {str(e)}")
-
-    def _topological_sort(self, steps: List[Dict]) -> List[Dict]:
-        step_map = {s.get("name"): s for s in steps}
-        in_degree = {s.get("name"): 0 for s in steps}
-
-        for step in steps:
-            for dep in step.get("depends_on", []):
-                if dep in in_degree:
-                    in_degree[step.get("name")] += 1
-
-        queue = [name for name, degree in in_degree.items() if degree == 0]
-        result = []
-
-        while queue:
-            current = queue.pop(0)
-            result.append(step_map[current])
-
-            for step in steps:
-                if current in step.get("depends_on", []):
-                    in_degree[step.get("name")] -= 1
-                    if in_degree[step.get("name")] == 0:
-                        queue.append(step.get("name"))
-
+        self.state.current_task = None
         return result
 
-    def _detect_circular_dependencies(self, steps: List[Dict]) -> List[str]:
-        step_map = {s.get("name"): s for s in steps}
-        visited = set()
-        rec_stack = set()
-        cycle = []
+    async def execute(self, initial_context: Dict[str, Any] = None) -> WorkflowState:
+        """Execute the workflow."""
+        if initial_context is None:
+            initial_context = {}
 
-        def dfs(name: str) -> bool:
-            visited.add(name)
-            rec_stack.add(name)
+        is_valid, error = self.dependency_graph.validate()
+        if not is_valid:
+            raise ValueError(f"Invalid workflow: {error}")
 
-            step = step_map.get(name)
-            if step:
-                for dep in step.get("depends_on", []):
-                    if dep not in visited:
-                        if dfs(dep):
-                            cycle.append(name)
-                            return True
-                    elif dep in rec_stack:
-                        cycle.append(name)
-                        return True
+        self.state.start_time = datetime.now()
+        completed: Set[str] = set()
+        running: Set[str] = set()
 
-            rec_stack.remove(name)
-            return False
-
-        for step in steps:
-            name = step.get("name")
-            if name and name not in visited:
-                if dfs(name):
-                    return cycle
-
-        return []
-
-    def _find_parallel_steps(self, steps: List[Dict]) -> List[List[str]]:
-        parallel_groups = []
-        step_map = {s.get("name"): s for s in steps}
-        in_degree = {s.get("name"): len(s.get("depends_on", [])) for s in steps}
-
-        while len(parallel_groups) < len(steps):
-            current_group = [name for name, degree in in_degree.items() if degree == 0 and name not in [s for g in parallel_groups for s in g]]
-            if not current_group:
-                break
-            parallel_groups.append(current_group)
-
-            for step in steps:
-                for dep in step.get("depends_on", []):
-                    if dep in current_group:
-                        in_degree[step.get("name")] -= 1
-
-        return parallel_groups
-
-    def get_required_params(self) -> List[str]:
-        return ["action"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"workflow": {}, "steps": []}
-
-
-class StepCoordinatorAction(BaseAction):
-    """Coordinate workflow steps."""
-    action_type = "automation_step_coordinator"
-    display_name = "步骤协调器"
-    description = "协调工作流步骤"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            action = params.get("action", "coordinate")
-            step = params.get("step", {})
-            execution_context = params.get("execution_context", {})
+            while not self.state.is_complete and not self.state.cancelled:
+                ready = self.dependency_graph.get_ready_tasks(completed, running)
 
-            if action == "coordinate":
-                step_name = step.get("name", "unnamed")
-                step_type = step.get("type", "action")
-                config = step.get("config", {})
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "coordinated_step": step_name,
-                        "step_type": step_type,
-                        "config": config,
-                        "execution_context": execution_context
-                    },
-                    message=f"Coordinated step: {step_name}"
-                )
-
-            elif action == "batch":
-                steps = params.get("steps", [])
-                batch_size = params.get("batch_size", 5)
-
-                batches = []
-                for i in range(0, len(steps), batch_size):
-                    batches.append(steps[i:i + batch_size])
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "batches": batches,
-                        "batch_count": len(batches),
-                        "batch_size": batch_size
-                    },
-                    message=f"Coordinated {len(steps)} steps into {len(batches)} batches"
-                )
-
-            return ActionResult(success=False, message=f"Unknown action: {action}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Step coordinator error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["action"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"step": {}, "execution_context": {}, "steps": [], "batch_size": 5}
-
-
-class DependencyResolverAction(BaseAction):
-    """Resolve step dependencies."""
-    action_type = "automation_dependency_resolver"
-    display_name = "依赖解析器"
-    description = "解析步骤依赖"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            steps = params.get("steps", [])
-            resolution_strategy = params.get("resolution_strategy", " breadth_first")
-
-            if not steps:
-                return ActionResult(success=False, message="No steps provided")
-
-            resolved_order = []
-            unresolved = set(step.get("name") for step in steps)
-            resolved_deps = {}
-
-            while unresolved:
-                ready = []
-                for step in steps:
-                    name = step.get("name")
-                    if name not in unresolved:
-                        continue
-
-                    depends_on = step.get("depends_on", [])
-                    if all(dep not in unresolved for dep in depends_on):
-                        ready.append(name)
-
-                if not ready:
-                    return ActionResult(success=False, message="Circular dependency detected")
-
-                resolved_order.extend(ready)
-                for name in ready:
-                    unresolved.remove(name)
-                    resolved_deps[name] = steps[[s.get("name") for s in steps].index(name)].get("depends_on", [])
-
-            return ActionResult(
-                success=True,
-                data={
-                    "resolved_order": resolved_order,
-                    "total_steps": len(steps),
-                    "resolution_strategy": resolution_strategy,
-                    "dependency_graph": resolved_deps
-                },
-                message=f"Resolved dependencies: {len(resolved_order)} steps in order"
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Dependency resolver error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["steps"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"resolution_strategy": "breadth_first"}
-
-
-class ExecutionPlanAction(BaseAction):
-    """Plan workflow execution."""
-    action_type = "automation_execution_plan"
-    display_name = "执行计划器"
-    description = "规划工作流执行"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            workflow = params.get("workflow", {})
-            steps = workflow.get("steps", [])
-            optimization_level = params.get("optimization_level", "none")
-
-            if not steps:
-                return ActionResult(success=False, message="No steps to plan")
-
-            execution_phases = []
-            step_map = {s.get("name"): s for s in steps}
-            in_degree = {s.get("name"): len(s.get("depends_on", [])) for s in steps}
-
-            phase_num = 0
-            while in_degree:
-                current_phase = [name for name, degree in in_degree.items() if degree == 0]
-
-                if not current_phase:
+                if not ready and len(running) == 0:
                     break
 
-                execution_phases.append({
-                    "phase": phase_num,
-                    "steps": current_phase,
-                    "can_parallelize": len(current_phase) > 1
-                })
+                tasks_to_start = ready[:self.max_parallel - len(running)]
 
-                for name in current_phase:
-                    del in_degree[name]
-                    for step in steps:
-                        if name in step.get("depends_on", []):
-                            in_degree[step.get("name")] -= 1
+                for task_name in tasks_to_start:
+                    task_config = self.dependency_graph.tasks[task_name]
+                    running.add(task_name)
+                    asyncio.create_task(
+                        self._execute_task(task_name, task_config, initial_context)
+                    )
 
-                phase_num += 1
+                await asyncio.sleep(0.01)
 
-            estimated_duration = sum(phase.get("estimated_duration", 100) for phase in execution_phases)
-            max_parallel = max(len(phase.get("steps", [])) for phase in execution_phases) if execution_phases else 0
+                for task_name in list(running):
+                    if self.state.tasks[task_name].status in (
+                        TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.SKIPPED
+                    ):
+                        if self.state.tasks[task_name].status == TaskStatus.COMPLETED:
+                            completed.add(task_name)
+                        running.remove(task_name)
 
-            return ActionResult(
-                success=True,
-                data={
-                    "execution_phases": execution_phases,
-                    "total_phases": len(execution_phases),
-                    "estimated_duration_ms": estimated_duration,
-                    "max_parallelizable_steps": max_parallel,
-                    "optimization_level": optimization_level
-                },
-                message=f"Execution plan: {len(execution_phases)} phases, max {max_parallel} parallel steps"
-            )
+        finally:
+            self.state.end_time = datetime.now()
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Execution plan error: {str(e)}")
+        if self.on_workflow_complete:
+            await asyncio.to_thread(self.on_workflow_complete, self.state)
 
-    def get_required_params(self) -> List[str]:
-        return ["workflow"]
+        return self.state
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"steps": [], "optimization_level": "none"}
+    def get_state(self) -> WorkflowState:
+        """Get current workflow state."""
+        return self.state
+
+    def get_results(self) -> Dict[str, Any]:
+        """Get results from completed tasks."""
+        return {
+            name: result.result
+            for name, result in self.state.tasks.items()
+            if result.status == TaskStatus.COMPLETED
+        }
+
+
+async def demo_task_1(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Demo task 1."""
+    await asyncio.sleep(0.1)
+    context["task1_done"] = True
+    return {"task1": "completed"}
+
+async def demo_task_2(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Demo task 2."""
+    await asyncio.sleep(0.1)
+    context["task2_done"] = True
+    return {"task2": "completed"}
+
+async def demo_task_3(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Demo task 3."""
+    await asyncio.sleep(0.1)
+    context["task3_done"] = True
+    return {"task3": "completed"}
+
+
+async def main():
+    """Demonstrate workflow orchestration."""
+    orchestrator = WorkflowOrchestrator(max_parallel=2)
+
+    orchestrator.register_task(TaskConfig(
+        name="task1",
+        handler=demo_task_1
+    ))
+
+    orchestrator.register_task(TaskConfig(
+        name="task2",
+        handler=demo_task_2,
+        dependencies=["task1"]
+    ))
+
+    orchestrator.register_task(TaskConfig(
+        name="task3",
+        handler=demo_task_3,
+        dependencies=["task1"],
+        retry_policy=RetryPolicy.EXPONENTIAL
+    ))
+
+    orchestrator.register_task(TaskConfig(
+        name="task4",
+        handler=demo_task_2,
+        dependencies=["task2", "task3"]
+    ))
+
+    print("Execution order:", orchestrator.dependency_graph.get_execution_order())
+
+    state = await orchestrator.execute({})
+    print(f"Workflow complete: {state.end_time is not None}")
+    print(f"Results: {orchestrator.get_results()}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

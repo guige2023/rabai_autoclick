@@ -1,372 +1,374 @@
 """
-API gateway module for request routing, rate limiting, and authentication.
+API Gateway Action Module.
 
-Provides request routing, load balancing, circuit breaking,
-rate limiting, and authentication middleware.
+Provides unified API gateway functionality with routing, rate limiting,
+authentication, and request/response transformation.
 """
-from __future__ import annotations
 
+from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+import asyncio
 import hashlib
+import hmac
 import json
 import time
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Any, Callable, Optional
+import logging
+from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 
-class LoadBalancingStrategy(Enum):
-    """Load balancing strategies."""
-    ROUND_ROBIN = "round_robin"
-    LEAST_CONNECTIONS = "least_connections"
-    IP_HASH = "ip_hash"
-    RANDOM = "random"
-
-
-class RateLimitAlgorithm(Enum):
-    """Rate limiting algorithms."""
-    TOKEN_BUCKET = "token_bucket"
-    SLIDING_WINDOW = "sliding_window"
+class RateLimitType(Enum):
+    """Rate limiting algorithm types."""
     FIXED_WINDOW = "fixed_window"
+    SLIDING_WINDOW = "sliding_window"
+    TOKEN_BUCKET = "token_bucket"
     LEAKY_BUCKET = "leaky_bucket"
 
 
 @dataclass
-class Upstream:
-    """An upstream service endpoint."""
-    id: str
-    name: str
-    url: str
-    weight: int = 100
-    max_connections: int = 100
-    timeout_seconds: int = 30
-    healthy: bool = True
-    latency_ms: float = 0.0
-    failures: int = 0
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class Route:
-    """A routing rule."""
-    id: str
-    path: str
-    method: str
-    upstream_ids: list[str]
-    strip_path: bool = False
-    prefix_rewrite: str = ""
-    timeout_seconds: int = 30
-    rate_limit_enabled: bool = True
-    auth_enabled: bool = True
-
-
-@dataclass
 class RateLimitConfig:
-    """Rate limiting configuration."""
-    algorithm: RateLimitAlgorithm = RateLimitAlgorithm.TOKEN_BUCKET
-    requests_per_second: int = 100
+    """Configuration for rate limiting."""
+    requests_per_second: float = 100.0
     burst_size: int = 200
-    block_duration_seconds: int = 60
+    limit_type: RateLimitType = RateLimitType.TOKEN_BUCKET
 
 
 @dataclass
-class AuthConfig:
-    """Authentication configuration."""
-    type: str = "none"
-    api_key_header: str = "X-API-Key"
-    jwt_secret: str = ""
-    jwt_issuer: str = ""
-    oauth2_audience: str = ""
-
-
-@dataclass
-class RequestLog:
-    """Log of a proxied request."""
-    id: str
-    route_id: str
-    upstream_id: str
-    client_ip: str
-    method: str
+class RouteConfig:
+    """Configuration for a single route."""
     path: str
-    status_code: int
-    latency_ms: float
-    timestamp: float = field(default_factory=time.time)
+    method: str
+    handler: Callable
+    auth_required: bool = False
+    rate_limit: Optional[RateLimitConfig] = None
+    timeout: float = 30.0
+    retry_count: int = 0
+    circuit_breaker: bool = False
 
 
 @dataclass
-class CircuitState:
-    """Circuit breaker state."""
-    state: str = "closed"
+class CircuitBreakerState:
+    """State for circuit breaker pattern."""
     failure_count: int = 0
     success_count: int = 0
-    last_failure_time: Optional[float] = None
-    next_retry_time: Optional[float] = None
+    last_failure_time: Optional[datetime] = None
+    state: str = "closed"  # closed, open, half_open
+    next_retry_time: Optional[datetime] = None
 
 
-class APIGateway:
-    """
-    API gateway for request routing, rate limiting, and authentication.
+class TokenBucket:
+    """Token bucket algorithm implementation."""
 
-    Provides request routing, load balancing, circuit breaking,
-    rate limiting, and authentication middleware.
-    """
+    def __init__(self, rate: float, capacity: int):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_update = time.monotonic()
+
+    def consume(self, tokens: int = 1) -> bool:
+        """Attempt to consume tokens from the bucket."""
+        now = time.monotonic()
+        elapsed = now - self.last_update
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.last_update = now
+
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return True
+        return False
+
+
+class CircuitBreaker:
+    """Circuit breaker for fault tolerance."""
 
     def __init__(
         self,
-        name: str = "api-gateway",
-        rate_limit: Optional[RateLimitConfig] = None,
-        auth: Optional[AuthConfig] = None,
+        failure_threshold: int = 5,
+        success_threshold: int = 2,
+        timeout: float = 60.0
     ):
-        self.name = name
-        self.rate_limit = rate_limit or RateLimitConfig()
-        self.auth = auth or AuthConfig()
-        self._upstreams: dict[str, Upstream] = {}
-        self._routes: dict[str, Route] = {}
-        self._circuit_breakers: dict[str, CircuitState] = {}
-        self._rate_limiters: dict[str, dict] = {}
-        self._request_logs: list[RequestLog] = []
-        self._round_robin_index: dict[str, int] = {}
+        self.failure_threshold = failure_threshold
+        self.success_threshold = success_threshold
+        self.timeout = timeout
+        self.state = CircuitBreakerState()
 
-    def add_upstream(self, upstream: Upstream) -> None:
-        """Add an upstream service."""
-        self._upstreams[upstream.id] = upstream
-        self._circuit_breakers[upstream.id] = CircuitState()
-        self._round_robin_index[upstream.id] = 0
+    def call(self, func: Callable, *args, **kwargs) -> Any:
+        """Execute function with circuit breaker protection."""
+        if self.state.state == "open":
+            if self.state.next_retry_time and datetime.now() >= self.state.next_retry_time:
+                self.state.state = "half_open"
+                self.state.success_count = 0
+            else:
+                raise CircuitBreakerOpenError("Circuit breaker is open")
 
-    def get_upstream(self, upstream_id: str) -> Optional[Upstream]:
-        """Get an upstream by ID."""
-        return self._upstreams.get(upstream_id)
+        try:
+            result = func(*args, **kwargs)
+            self._on_success()
+            return result
+        except Exception as e:
+            self._on_failure()
+            raise
 
-    def add_route(self, route: Route) -> None:
-        """Add a routing rule."""
-        self._routes[route.id] = route
+    def _on_success(self):
+        """Handle successful call."""
+        self.state.success_count += 1
+        if self.state.state == "half_open":
+            if self.state.success_count >= self.success_threshold:
+                self.state.state = "closed"
+                self.state.failure_count = 0
+        elif self.state.state == "closed":
+            self.state.failure_count = max(0, self.state.failure_count - 1)
 
-    def get_route(self, route_id: str) -> Optional[Route]:
-        """Get a route by ID."""
-        return self._routes.get(route_id)
+    def _on_failure(self):
+        """Handle failed call."""
+        self.state.failure_count += 1
+        self.state.last_failure_time = datetime.now()
+        if self.state.failure_count >= self.failure_threshold:
+            self.state.state = "open"
+            self.state.next_retry_time = datetime.now() + timedelta(seconds=self.timeout)
 
-    def find_route(self, method: str, path: str) -> Optional[Route]:
-        """Find a matching route for a request."""
-        for route in self._routes.values():
-            if route.method and route.method != method:
-                continue
 
-            if path.startswith(route.path):
-                return route
+class CircuitBreakerOpenError(Exception):
+    """Raised when circuit breaker is open."""
+    pass
 
-        return None
 
-    def select_upstream(
+@dataclass
+class AuthToken:
+    """Authentication token."""
+    token: str
+    user_id: str
+    scopes: List[str]
+    expires_at: datetime
+
+
+class JWTAuthenticator:
+    """JWT-based authentication."""
+
+    def __init__(self, secret_key: str, algorithm: str = "HS256"):
+        self.secret_key = secret_key
+        self.algorithm = algorithm
+
+    def create_token(
         self,
-        route: Route,
-        client_ip: str = "",
-        strategy: LoadBalancingStrategy = LoadBalancingStrategy.ROUND_ROBIN,
-    ) -> Optional[Upstream]:
-        """Select an upstream using load balancing strategy."""
-        available = [
-            u for u in self._upstreams.values()
-            if u.id in route.upstream_ids and u.healthy
-        ]
+        user_id: str,
+        scopes: List[str],
+        expires_in: int = 3600
+    ) -> AuthToken:
+        """Create a new authentication token."""
+        expiry = datetime.now() + timedelta(seconds=expires_in)
+        token_data = f"{user_id}:{','.join(scopes)}:{expiry.isoformat()}"
+        signature = hmac.new(
+            self.secret_key.encode(),
+            token_data.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        token = f"{token_data}:{signature}"
+        return AuthToken(token=token, user_id=user_id, scopes=scopes, expires_at=expiry)
 
-        if not available:
+    def verify_token(self, token: str) -> Optional[AuthToken]:
+        """Verify and decode a token."""
+        try:
+            parts = token.split(":")
+            if len(parts) != 4:
+                return None
+            user_id, scopes_str, expiry_str, signature = parts
+            expected_sig = hmac.new(
+                self.secret_key.encode(),
+                f"{user_id}:{scopes_str}:{expiry_str}".encode(),
+                hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(signature, expected_sig):
+                return None
+            expiry = datetime.fromisoformat(expiry_str)
+            if expiry < datetime.now():
+                return None
+            return AuthToken(
+                token=token,
+                user_id=user_id,
+                scopes=scopes_str.split(","),
+                expires_at=expiry
+            )
+        except Exception:
             return None
 
-        if strategy == LoadBalancingStrategy.ROUND_ROBIN:
-            upstream = available[self._round_robin_index[route.id] % len(available)]
-            self._round_robin_index[route.id] += 1
-            return upstream
 
-        elif strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
-            return min(available, key=lambda u: u.failures)
+class RequestTransformer:
+    """Transform request/response data."""
 
-        elif strategy == LoadBalancingStrategy.IP_HASH:
-            hash_val = int(hashlib.md5(client_ip.encode()).hexdigest(), 16)
-            return available[hash_val % len(available)]
-
-        elif strategy == LoadBalancingStrategy.RANDOM:
-            import random
-            return random.choice(available)
-
-        return available[0]
-
-    def check_rate_limit(
+    def transform_request(
         self,
-        key: str,
-        requests_per_second: Optional[int] = None,
-        burst_size: Optional[int] = None,
-    ) -> tuple[bool, dict]:
-        """Check if a request is within rate limits."""
-        rps = requests_per_second or self.rate_limit.requests_per_second
-        burst = burst_size or self.rate_limit.burst_size
+        data: Dict[str, Any],
+        transformers: List[Callable]
+    ) -> Dict[str, Any]:
+        """Apply a series of transformations to request data."""
+        result = data.copy()
+        for transformer in transformers:
+            result = transformer(result)
+        return result
 
-        if key not in self._rate_limiters:
-            self._rate_limiters[key] = {
-                "tokens": float(burst),
-                "last_update": time.time(),
-            }
-
-        limiter = self._rate_limiters[key]
-        now = time.time()
-        elapsed = now - limiter["last_update"]
-
-        limiter["tokens"] = min(burst, limiter["tokens"] + elapsed * rps)
-        limiter["last_update"] = now
-
-        if limiter["tokens"] >= 1:
-            limiter["tokens"] -= 1
-            return True, {
-                "allowed": True,
-                "remaining": int(limiter["tokens"]),
-                "reset_at": now + (burst - limiter["tokens"]) / rps,
-            }
-
-        return False, {
-            "allowed": False,
-            "remaining": 0,
-            "reset_at": now + 1 / rps,
-        }
-
-    def check_circuit_breaker(self, upstream_id: str) -> bool:
-        """Check if circuit breaker allows requests."""
-        cb = self._circuit_breakers.get(upstream_id)
-        if not cb:
-            return True
-
-        if cb.state == "open":
-            if cb.next_retry_time and time.time() >= cb.next_retry_time:
-                cb.state = "half_open"
-                return True
-            return False
-
-        return True
-
-    def record_success(self, upstream_id: str) -> None:
-        """Record a successful request to an upstream."""
-        upstream = self._upstreams.get(upstream_id)
-        cb = self._circuit_breakers.get(upstream_id)
-
-        if upstream:
-            upstream.failures = 0
-
-        if cb:
-            cb.success_count += 1
-            cb.failure_count = 0
-            if cb.state == "half_open":
-                cb.state = "closed"
-
-    def record_failure(self, upstream_id: str, threshold: int = 5) -> None:
-        """Record a failed request to an upstream."""
-        upstream = self._upstreams.get(upstream_id)
-        cb = self._circuit_breakers.get(upstream_id)
-
-        if upstream:
-            upstream.failures += 1
-
-        if cb:
-            cb.failure_count += 1
-            cb.last_failure_time = time.time()
-
-            if cb.failure_count >= threshold:
-                cb.state = "open"
-                cb.next_retry_time = time.time() + 30
-
-    def authenticate_request(
+    def transform_response(
         self,
-        headers: dict,
-        auth_type: Optional[str] = None,
-    ) -> tuple[bool, Optional[str]]:
-        """Authenticate a request."""
-        auth_type = auth_type or self.auth.type
+        data: Any,
+        formatters: List[Callable]
+    ) -> Any:
+        """Apply a series of formatters to response data."""
+        result = data
+        for formatter in formatters:
+            result = formatter(result)
+        return result
 
-        if auth_type == "none":
-            return True, None
 
-        elif auth_type == "api_key":
-            api_key = headers.get(self.auth.api_key_header)
-            if not api_key:
-                return False, "Missing API key"
-            return True, None
+class APIRouter:
+    """Main API Gateway Router."""
 
-        elif auth_type == "jwt":
-            import jwt
-            token = headers.get("Authorization", "").replace("Bearer ", "")
-            if not token:
-                return False, "Missing token"
-            try:
-                jwt.decode(token, self.auth.jwt_secret, algorithms=["HS256"])
-                return True, None
-            except jwt.InvalidTokenError as e:
-                return False, str(e)
+    def __init__(self):
+        self.routes: Dict[str, RouteConfig] = {}
+        self.middlewares: List[Callable] = []
+        self.rate_limiters: Dict[str, TokenBucket] = defaultdict(
+            lambda: TokenBucket(100.0, 200)
+        )
+        self.circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self.authenticator: Optional[JWTAuthenticator] = None
+        self.transformer = RequestTransformer()
 
-        return True, None
+    def add_route(self, config: RouteConfig):
+        """Add a new route configuration."""
+        key = f"{config.method}:{config.path}"
+        self.routes[key] = config
+        if config.rate_limit:
+            self.rate_limiters[key] = TokenBucket(
+                config.rate_limit.requests_per_second,
+                config.rate_limit.burst_size
+            )
+        if config.circuit_breaker:
+            self.circuit_breakers[key] = CircuitBreaker()
 
-    def log_request(
+    def set_authenticator(self, secret_key: str):
+        """Set JWT authenticator."""
+        self.authenticator = JWTAuthenticator(secret_key)
+
+    def add_middleware(self, middleware: Callable):
+        """Add middleware function."""
+        self.middlewares.append(middleware)
+
+    async def handle_request(
         self,
-        route_id: str,
-        upstream_id: str,
-        client_ip: str,
         method: str,
         path: str,
-        status_code: int,
-        latency_ms: float,
-    ) -> None:
-        """Log a proxied request."""
-        log = RequestLog(
-            id=str(uuid.uuid4())[:8],
-            route_id=route_id,
-            upstream_id=upstream_id,
-            client_ip=client_ip,
-            method=method,
-            path=path,
-            status_code=status_code,
-            latency_ms=latency_ms,
-        )
-        self._request_logs.append(log)
+        headers: Dict[str, str],
+        body: Optional[bytes] = None
+    ) -> Dict[str, Any]:
+        """Handle incoming API request."""
+        route_key = f"{method}:{path}"
+        route = self.routes.get(route_key)
 
-        if len(self._request_logs) > 10000:
-            self._request_logs = self._request_logs[-5000:]
+        if not route:
+            return {"status": 404, "error": "Route not found"}
 
-    def get_upstream_stats(self, upstream_id: str) -> dict:
-        """Get statistics for an upstream."""
-        upstream = self._upstreams.get(upstream_id)
-        cb = self._circuit_breakers.get(upstream_id)
+        for middleware in self.middlewares:
+            result = middleware(method, path, headers, body)
+            if result is not None:
+                return result
 
-        logs = [l for l in self._request_logs if l.upstream_id == upstream_id]
-        total_requests = len(logs)
-        failed_requests = sum(1 for l in logs if l.status_code >= 500)
+        if route.auth_required:
+            token = headers.get("Authorization", "").replace("Bearer ", "")
+            if self.authenticator:
+                auth_token = self.authenticator.verify_token(token)
+                if not auth_token:
+                    return {"status": 401, "error": "Unauthorized"}
+            else:
+                return {"status": 401, "error": "Authentication not configured"}
 
+        rate_limiter = self.rate_limiters.get(route_key)
+        if rate_limiter and not rate_limiter.consume():
+            return {"status": 429, "error": "Rate limit exceeded"}
+
+        try:
+            request_data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return {"status": 400, "error": "Invalid JSON"}
+
+        if route.circuit_breaker and route_key in self.circuit_breakers:
+            cb = self.circuit_breakers[route_key]
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(cb.call, route.handler, request_data),
+                    timeout=route.timeout
+                )
+            except CircuitBreakerOpenError:
+                return {"status": 503, "error": "Service unavailable"}
+        else:
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(route.handler, request_data),
+                    timeout=route.timeout
+                )
+            except asyncio.TimeoutError:
+                return {"status": 504, "error": "Gateway timeout"}
+
+        return {"status": 200, "data": result}
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get gateway statistics."""
         return {
-            "upstream_id": upstream_id,
-            "name": upstream.name if upstream else "",
-            "healthy": upstream.healthy if upstream else False,
-            "circuit_state": cb.state if cb else "unknown",
-            "total_requests": total_requests,
-            "failed_requests": failed_requests,
-            "failure_rate": failed_requests / total_requests if total_requests > 0 else 0,
-            "avg_latency_ms": sum(l.latency_ms for l in logs) / total_requests if logs else 0,
+            "total_routes": len(self.routes),
+            "middleware_count": len(self.middlewares),
+            "rate_limiter_count": len(self.rate_limiters),
+            "circuit_breaker_count": len(self.circuit_breakers),
+            "authenticator_configured": self.authenticator is not None
         }
 
-    def list_routes(self) -> list[Route]:
-        """List all routes."""
-        return list(self._routes.values())
 
-    def list_upstreams(self) -> list[Upstream]:
-        """List all upstreams."""
-        return list(self._upstreams.values())
+async def demo_handler(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Demo request handler."""
+    await asyncio.sleep(0.01)
+    return {"message": "Hello from API Gateway", "received": request}
 
-    def get_request_logs(
-        self,
-        route_id: Optional[str] = None,
-        upstream_id: Optional[str] = None,
-        limit: int = 100,
-    ) -> list[RequestLog]:
-        """Get request logs with optional filters."""
-        logs = self._request_logs
 
-        if route_id:
-            logs = [l for l in logs if l.route_id == route_id]
-        if upstream_id:
-            logs = [l for l in logs if l.upstream_id == upstream_id]
+async def main():
+    """Demonstrate API Gateway functionality."""
+    router = APIRouter()
 
-        return logs[-limit:]
+    router.add_route(RouteConfig(
+        path="/api/v1/hello",
+        method="GET",
+        handler=lambda r: {"message": "Hello"},
+        rate_limit=RateLimitConfig(requests_per_second=10.0, burst_size=20)
+    ))
+
+    router.add_route(RouteConfig(
+        path="/api/v1/echo",
+        method="POST",
+        handler=demo_handler,
+        auth_required=True,
+        circuit_breaker=True
+    ))
+
+    router.set_authenticator("super_secret_key_123")
+    router.add_middleware(
+        lambda m, p, h, b: None  # Allow all requests
+    )
+
+    response = await router.handle_request(
+        "GET",
+        "/api/v1/hello",
+        {}
+    )
+    print(f"Response: {response}")
+
+    response = await router.handle_request(
+        "POST",
+        "/api/v1/echo",
+        {"Authorization": "Bearer user1:read,write:2026-12-31T23:59:59:signature"}
+    )
+    print(f"Response: {response}")
+
+    print(f"Stats: {router.get_stats()}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

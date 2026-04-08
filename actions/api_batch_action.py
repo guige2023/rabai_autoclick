@@ -1,340 +1,463 @@
-"""API batch operation action module for RabAI AutoClick.
+"""
+API Batch Action Module.
 
-Provides batch API operations:
-- BatchApiCallAction: Execute multiple API calls in batch
-- BatchApiParallelAction: Execute API calls in parallel
-- BatchApiSequentialAction: Execute API calls sequentially
-- BatchApiChunkedAction: Chunk large requests
-- BatchApiResultMergeAction: Merge batch results
+Provides batch processing capabilities for API operations including
+bulk operations, batch scheduling, parallel execution, and result aggregation.
 """
 
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
 import asyncio
+import hashlib
+import json
+import logging
 import time
-from typing import Any, Dict, List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import uuid
+from collections import defaultdict
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class BatchApiCallAction(BaseAction):
-    """Execute multiple API calls in batch."""
-    action_type = "batch_api_call"
-    display_name = "批量API调用"
-    description = "批量执行多个API调用"
+class BatchStatus(Enum):
+    """Batch job status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    PAUSED = "paused"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            requests = params.get("requests", [])
-            mode = params.get("mode", "sequential")
-            max_workers = params.get("max_workers", 5)
-            stop_on_error = params.get("stop_on_error", False)
 
-            if not requests:
-                return ActionResult(success=False, message="requests is required")
+class BatchStrategy(Enum):
+    """Batch execution strategies."""
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"
+    PRIORITY = "priority"
+    ROUND_ROBIN = "round_robin"
+    WEIGHTED = "weighted"
 
-            results = []
-            start_time = time.time()
 
-            if mode == "sequential":
-                for i, req in enumerate(requests):
-                    try:
-                        result = self._execute_single_request(req)
-                        results.append({"index": i, **result})
-                        if stop_on_error and not result.get("success", False):
-                            break
-                    except Exception as e:
-                        results.append({
-                            "index": i,
-                            "success": False,
-                            "message": str(e)
-                        })
-                        if stop_on_error:
-                            break
-            elif mode == "parallel":
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(self._execute_single_request, req): i
-                        for i, req in enumerate(requests)
-                    }
-                    for future in as_completed(futures):
-                        i = futures[future]
-                        try:
-                            result = future.result()
-                            results.append({"index": i, **result})
-                        except Exception as e:
-                            results.append({
-                                "index": i,
-                                "success": False,
-                                "message": str(e)
-                            })
-                results.sort(key=lambda x: x["index"])
+@dataclass
+class BatchItem:
+    """Single item in a batch operation."""
+    item_id: str
+    data: Any
+    priority: int = 0
+    created_at: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-            elapsed = time.time() - start_time
-            success_count = sum(1 for r in results if r.get("success", False))
+    def __hash__(self):
+        return hash(self.item_id)
 
-            return ActionResult(
-                success=True,
-                data={
-                    "mode": mode,
-                    "total": len(requests),
-                    "success": success_count,
-                    "failed": len(requests) - success_count,
-                    "elapsed_seconds": round(elapsed, 3),
-                    "results": results
-                },
-                message=f"Batch API completed: {success_count}/{len(requests)} successful"
+
+@dataclass
+class BatchResult:
+    """Result of processing a single batch item."""
+    item_id: str
+    success: bool
+    result: Any = None
+    error: Optional[str] = None
+    processed_at: datetime = field(default_factory=datetime.now)
+    execution_time: float = 0.0
+    retry_count: int = 0
+
+
+@dataclass
+class BatchJob:
+    """A batch processing job."""
+    job_id: str
+    name: str
+    items: List[BatchItem] = field(default_factory=list)
+    status: BatchStatus = BatchStatus.PENDING
+    results: List[BatchResult] = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.now)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    progress: float = 0.0
+    error_threshold: float = 1.0
+
+    @property
+    def total_items(self) -> int:
+        """Get total number of items."""
+        return len(self.items)
+
+    @property
+    def processed_items(self) -> int:
+        """Get number of processed items."""
+        return len(self.results)
+
+    @property
+    def success_count(self) -> int:
+        """Get number of successful items."""
+        return sum(1 for r in self.results if r.success)
+
+    @property
+    def failure_count(self) -> int:
+        """Get number of failed items."""
+        return sum(1 for r in self.results if not r.success)
+
+    @property
+    def is_complete(self) -> bool:
+        """Check if batch is complete."""
+        return self.processed_items >= self.total_items
+
+    @property
+    def success_rate(self) -> float:
+        """Get success rate."""
+        if self.processed_items == 0:
+            return 0.0
+        return self.success_count / self.processed_items
+
+
+@dataclass
+class BatchConfig:
+    """Configuration for batch processing."""
+    name: str
+    batch_size: int = 100
+    max_parallel: int = 5
+    strategy: BatchStrategy = BatchStrategy.PARALLEL
+    timeout: float = 300.0
+    retry_count: int = 0
+    retry_delay: float = 1.0
+    continue_on_error: bool = True
+    enable_progress: bool = True
+
+
+@dataclass
+class BatchMetrics:
+    """Metrics for batch processing."""
+    total_batches: int = 0
+    completed_batches: int = 0
+    failed_batches: int = 0
+    total_items_processed: int = 0
+    total_items_failed: int = 0
+    total_processing_time: float = 0.0
+
+    @property
+    def overall_success_rate(self) -> float:
+        """Get overall success rate."""
+        total = self.total_items_processed + self.total_items_failed
+        if total == 0:
+            return 0.0
+        return self.total_items_processed / total
+
+
+class BatchQueue:
+    """Queue for managing batch items."""
+
+    def __init__(self, max_size: int = 10000):
+        self.max_size = max_size
+        self._queue: List[BatchItem] = []
+        self._priority_map: Dict[int, List[BatchItem]] = defaultdict(list)
+        self._item_ids: Set[str] = set()
+
+    def add(self, item: BatchItem) -> bool:
+        """Add item to queue."""
+        if len(self._queue) >= self.max_size:
+            return False
+        if item.item_id in self._item_ids:
+            return False
+
+        self._queue.append(item)
+        self._priority_map[item.priority].append(item)
+        self._item_ids.add(item.item_id)
+        return True
+
+    def add_batch(self, items: List[BatchItem]) -> int:
+        """Add multiple items to queue."""
+        count = 0
+        for item in items:
+            if self.add(item):
+                count += 1
+        return count
+
+    def get_next(self, strategy: BatchStrategy = BatchStrategy.PARALLEL) -> Optional[BatchItem]:
+        """Get next item from queue."""
+        if not self._queue:
+            return None
+
+        if strategy == BatchStrategy.PRIORITY:
+            priorities = sorted(self._priority_map.keys(), reverse=True)
+            for priority in priorities:
+                if self._priority_map[priority]:
+                    item = self._priority_map[priority].pop(0)
+                    self._queue.remove(item)
+                    self._item_ids.remove(item.item_id)
+                    return item
+
+        elif strategy == BatchStrategy.ROUND_ROBIN:
+            item = self._queue.pop(0)
+            self._item_ids.remove(item.item_id)
+            if item.priority in self._priority_map and item in self._priority_map[item.priority]:
+                self._priority_map[item.priority].remove(item)
+            return item
+
+        else:
+            item = self._queue.pop(0)
+            self._item_ids.remove(item.item_id)
+            return item
+
+    def get_batch(self, size: int, strategy: BatchStrategy = BatchStrategy.PARALLEL) -> List[BatchItem]:
+        """Get batch of items."""
+        items = []
+        for _ in range(min(size, len(self._queue))):
+            item = self.get_next(strategy)
+            if item:
+                items.append(item)
+        return items
+
+    def size(self) -> int:
+        """Get queue size."""
+        return len(self._queue)
+
+    def is_empty(self) -> bool:
+        """Check if queue is empty."""
+        return len(self._queue) == 0
+
+
+class BatchProcessor:
+    """Main batch processor with execution engine."""
+
+    def __init__(self, config: BatchConfig):
+        self.config = config
+        self.queue = BatchQueue()
+        self.jobs: Dict[str, BatchJob] = {}
+        self.handlers: Dict[str, Callable] = {}
+        self._running = False
+        self._cancelled_jobs: Set[str] = set()
+        self._metrics = BatchMetrics()
+
+    def register_handler(self, job_type: str, handler: Callable):
+        """Register handler for job type."""
+        self.handlers[job_type] = handler
+
+    def create_job(
+        self,
+        name: str,
+        items: List[Any],
+        job_type: Optional[str] = None,
+        priority: Optional[int] = None
+    ) -> str:
+        """Create a new batch job."""
+        job_id = str(uuid.uuid4())
+
+        batch_items = [
+            BatchItem(
+                item_id=str(uuid.uuid4()),
+                data=item,
+                priority=priority or 0
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Batch API error: {str(e)}")
+            for item in items
+        ]
 
-    def _execute_single_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        url = request.get("url", "")
-        method = request.get("method", "GET").upper()
+        job = BatchJob(
+            job_id=job_id,
+            name=name,
+            items=batch_items
+        )
+
+        self.jobs[job_id] = job
+        self.queue.add_batch(batch_items)
+
+        self._metrics.total_batches += 1
+        return job_id
+
+    def get_job(self, job_id: str) -> Optional[BatchJob]:
+        """Get job by ID."""
+        return self.jobs.get(job_id)
+
+    def cancel_job(self, job_id: str):
+        """Cancel a running job."""
+        if job_id in self.jobs:
+            self.jobs[job_id].status = BatchStatus.CANCELLED
+            self._cancelled_jobs.add(job_id)
+
+    async def _process_item(
+        self,
+        item: BatchItem,
+        handler: Callable,
+        job: BatchJob
+    ) -> BatchResult:
+        """Process a single batch item."""
+        start_time = time.time()
+        result = BatchResult(item_id=item.item_id, success=False)
+
+        for attempt in range(self.config.retry_count + 1):
+            try:
+                if asyncio.iscoroutinefunction(handler):
+                    processed_result = await asyncio.wait_for(
+                        handler(item.data),
+                        timeout=self.config.timeout
+                    )
+                else:
+                    processed_result = await asyncio.wait_for(
+                        asyncio.to_thread(handler, item.data),
+                        timeout=self.config.timeout
+                    )
+
+                result.success = True
+                result.result = processed_result
+                break
+
+            except asyncio.TimeoutError:
+                result.error = "Processing timeout"
+                result.retry_count = attempt
+
+            except Exception as e:
+                result.error = str(e)
+                result.retry_count = attempt
+
+            if attempt < self.config.retry_count:
+                await asyncio.sleep(self.config.retry_delay * (attempt + 1))
+
+        result.execution_time = time.time() - start_time
+        return result
+
+    async def _process_job(self, job_id: str, job_type: str):
+        """Process a batch job."""
+        job = self.jobs.get(job_id)
+        if not job or job_id in self._cancelled_jobs:
+            return
+
+        handler = self.handlers.get(job_type)
+        if not handler:
+            job.status = BatchStatus.FAILED
+            return
+
+        job.status = BatchStatus.RUNNING
+        job.started_at = datetime.now()
+
+        try:
+            while not job.is_complete and job_id not in self._cancelled_jobs:
+                items = self.queue.get_batch(self.config.max_parallel)
+
+                if not items:
+                    break
+
+                tasks = [
+                    self._process_item(item, handler, job)
+                    for item in items
+                ]
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for i, result in enumerate(results):
+                    if isinstance(result, BatchResult):
+                        job.results.append(result)
+                    elif isinstance(result, Exception):
+                        job.results.append(BatchResult(
+                            item_id=items[i].item_id,
+                            success=False,
+                            error=str(result)
+                        ))
+
+                    job.progress = job.processed_items / job.total_items
+
+                self._metrics.total_items_processed += len(results)
+
+                if not self.config.continue_on_error:
+                    if job.failure_count / job.processed_items > job.error_threshold:
+                        job.status = BatchStatus.PAUSED
+                        break
+
+            if job_id in self._cancelled_jobs:
+                job.status = BatchStatus.CANCELLED
+            elif job.is_complete:
+                job.status = BatchStatus.COMPLETED
+                self._metrics.completed_batches += 1
+            else:
+                job.status = BatchStatus.FAILED
+                self._metrics.failed_batches += 1
+
+        except Exception as e:
+            job.status = BatchStatus.FAILED
+            logger.error(f"Job {job_id} failed: {e}")
+
+        finally:
+            job.completed_at = datetime.now()
+            self._metrics.total_processing_time += (
+                (job.completed_at - job.started_at).total_seconds()
+                if job.started_at else 0
+            )
+
+    async def run(self, job_id: str, job_type: Optional[str] = None):
+        """Run a specific job."""
+        await self._process_job(job_id, job_type or "default")
+
+    async def run_all(self):
+        """Run all pending jobs."""
+        self._running = True
+        tasks = []
+
+        for job_id, job in self.jobs.items():
+            if job.status == BatchStatus.PENDING:
+                task = asyncio.create_task(
+                    self._process_job(job_id, "default")
+                )
+                tasks.append(task)
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        self._running = False
+
+    def get_metrics(self) -> BatchMetrics:
+        """Get batch processing metrics."""
+        return self._metrics
+
+    def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed job status."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return None
 
         return {
-            "success": True,
-            "url": url,
-            "method": method,
-            "status": 200
+            "job_id": job.job_id,
+            "name": job.name,
+            "status": job.status.value,
+            "total_items": job.total_items,
+            "processed_items": job.processed_items,
+            "success_count": job.success_count,
+            "failure_count": job.failure_count,
+            "progress": job.progress,
+            "success_rate": job.success_rate,
+            "created_at": job.created_at.isoformat(),
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None
         }
 
 
-class BatchApiParallelAction(BaseAction):
-    """Execute API calls in parallel with concurrency control."""
-    action_type = "batch_api_parallel"
-    display_name = "并行API调用"
-    description = "并发执行多个API调用"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            requests = params.get("requests", [])
-            max_concurrency = params.get("max_concurrency", 10)
-            timeout = params.get("timeout", 30)
-            retry_count = params.get("retry_count", 0)
-
-            if not requests:
-                return ActionResult(success=False, message="requests is required")
-
-            semaphore = asyncio.Semaphore(max_concurrency)
-
-            async def execute_with_semaphore(req, idx):
-                async with semaphore:
-                    return await self._async_execute_request(req, idx, retry_count)
-
-            async def run_all():
-                tasks = [execute_with_semaphore(req, i) for i, req in enumerate(requests)]
-                return await asyncio.gather(*tasks, return_exceptions=True)
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                results = loop.run_until_complete(run_all())
-            finally:
-                loop.close()
-
-            success_count = sum(1 for r in results if isinstance(r, dict) and r.get("success", False))
-
-            return ActionResult(
-                success=True,
-                data={
-                    "total": len(requests),
-                    "success": success_count,
-                    "failed": len(requests) - success_count,
-                    "max_concurrency": max_concurrency,
-                    "results": results
-                },
-                message=f"Parallel API completed: {success_count}/{len(requests)} successful"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Parallel API error: {str(e)}")
-
-    async def _async_execute_request(self, request: Dict, idx: int, retry_count: int) -> Dict:
-        url = request.get("url", "")
-        method = request.get("method", "GET").upper()
-
-        for attempt in range(retry_count + 1):
-            try:
-                return {
-                    "index": idx,
-                    "success": True,
-                    "url": url,
-                    "method": method,
-                    "attempt": attempt + 1,
-                    "status": 200
-                }
-            except Exception as e:
-                if attempt == retry_count:
-                    return {
-                        "index": idx,
-                        "success": False,
-                        "url": url,
-                        "error": str(e),
-                        "attempt": attempt + 1
-                    }
+async def demo_handler(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Demo batch item handler."""
+    await asyncio.sleep(0.1)
+    return {"processed": True, "data": data}
 
 
-class BatchApiSequentialAction(BaseAction):
-    """Execute API calls sequentially with dependency support."""
-    action_type = "batch_api_sequential"
-    display_name = "顺序API调用"
-    description = "按顺序执行API调用并支持依赖"
+async def main():
+    """Demonstrate batch processing."""
+    config = BatchConfig(
+        name="demo_batch",
+        batch_size=10,
+        max_parallel=3,
+        retry_count=1
+    )
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            requests = params.get("requests", [])
-            dependencies = params.get("dependencies", {})
-            delay_between = params.get("delay_between", 0)
-            continue_on_error = params.get("continue_on_error", True)
+    processor = BatchProcessor(config)
+    processor.register_handler("demo", demo_handler)
 
-            if not requests:
-                return ActionResult(success=False, message="requests is required")
+    items = [{"id": i, "value": f"item_{i}"} for i in range(20)]
+    job_id = processor.create_job("Demo Job", items, "demo")
 
-            results = {}
-            completed = set()
+    print(f"Created job: {job_id}")
 
-            def can_execute(req_idx: int) -> bool:
-                deps = dependencies.get(str(req_idx), [])
-                return all(str(d) in completed for d in deps)
+    await processor.run(job_id, "demo")
 
-            for i, req in enumerate(requests):
-                if not can_execute(i):
-                    results[str(i)] = {
-                        "success": False,
-                        "message": "Dependencies not satisfied",
-                        "skipped": True
-                    }
-                    continue
-
-                try:
-                    result = self._execute_single_request(req)
-                    results[str(i)] = result
-                    if result.get("success", False):
-                        completed.add(str(i))
-                except Exception as e:
-                    results[str(i)] = {
-                        "success": False,
-                        "message": str(e)
-                    }
-                    if not continue_on_error:
-                        break
-
-                if delay_between > 0 and i < len(requests) - 1:
-                    time.sleep(delay_between)
-
-            success_count = sum(1 for r in results.values() if r.get("success", False))
-
-            return ActionResult(
-                success=True,
-                data={
-                    "total": len(requests),
-                    "success": success_count,
-                    "failed": len(requests) - success_count,
-                    "completed": list(completed),
-                    "results": results
-                },
-                message=f"Sequential API completed: {success_count}/{len(requests)} successful"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Sequential API error: {str(e)}")
-
-    def _execute_single_request(self, request: Dict) -> Dict:
-        url = request.get("url", "")
-        method = request.get("method", "GET").upper()
-        return {"success": True, "url": url, "method": method, "status": 200}
+    status = processor.get_job_status(job_id)
+    print(f"Job status: {status}")
+    print(f"Metrics: {processor.get_metrics()}")
 
 
-class BatchApiChunkedAction(BaseAction):
-    """Chunk large requests into smaller batches."""
-    action_type = "batch_api_chunked"
-    display_name = "分块API调用"
-    description = "将大请求分块处理"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            items = params.get("items", [])
-            chunk_size = params.get("chunk_size", 100)
-            api_template = params.get("api_template", {})
-            overlap = params.get("overlap", 0)
-
-            if not items:
-                return ActionResult(success=False, message="items is required")
-
-            if chunk_size <= 0:
-                return ActionResult(success=False, message="chunk_size must be positive")
-
-            chunks = []
-            for i in range(0, len(items), chunk_size - overlap):
-                chunk = items[i:i + chunk_size]
-                if chunk:
-                    chunks.append(chunk)
-                if i + chunk_size >= len(items):
-                    break
-
-            return ActionResult(
-                success=True,
-                data={
-                    "total_items": len(items),
-                    "chunk_size": chunk_size,
-                    "overlap": overlap,
-                    "chunk_count": len(chunks),
-                    "chunk_sizes": [len(c) for c in chunks],
-                    "chunks": chunks
-                },
-                message=f"Created {len(chunks)} chunks from {len(items)} items"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Chunked API error: {str(e)}")
-
-
-class BatchApiResultMergeAction(BaseAction):
-    """Merge results from multiple batch API calls."""
-    action_type = "batch_api_result_merge"
-    display_name = "合并API结果"
-    description = "合并批量API调用的结果"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            batch_results = params.get("batch_results", [])
-            merge_strategy = params.get("merge_strategy", "append")
-            deduplicate_by = params.get("deduplicate_by", None)
-
-            if not batch_results:
-                return ActionResult(success=False, message="batch_results is required")
-
-            merged = []
-
-            for batch in batch_results:
-                if isinstance(batch, dict) and "results" in batch:
-                    merged.extend(batch["results"])
-                elif isinstance(batch, list):
-                    merged.extend(batch)
-
-            if deduplicate_by:
-                seen = set()
-                unique = []
-                for item in merged:
-                    key = item.get(deduplicate_by) if isinstance(item, dict) else item
-                    if key not in seen:
-                        seen.add(key)
-                        unique.append(item)
-                merged = unique
-
-            return ActionResult(
-                success=True,
-                data={
-                    "batch_count": len(batch_results),
-                    "original_count": sum(len(b.get("results", []) if isinstance(b, dict) else b) for b in batch_results),
-                    "merged_count": len(merged),
-                    "merge_strategy": merge_strategy,
-                    "deduplicated": deduplicate_by is not None,
-                    "results": merged
-                },
-                message=f"Merged results: {len(merged)} items"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Result merge error: {str(e)}")
+if __name__ == "__main__":
+    asyncio.run(main())

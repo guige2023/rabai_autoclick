@@ -1,341 +1,407 @@
 """
-Data pipeline module for building ETL/ELT data processing workflows.
+Data Pipeline Action Module.
 
-Supports multi-stage pipelines, branching, merging, error handling,
-checkpointing, and backpressure handling.
+Provides streaming data processing pipeline with stage composition,
+backpressure handling, error recovery, and checkpointing.
 """
-from __future__ import annotations
 
-import time
-import uuid
-from collections import defaultdict
+from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Generator, Optional
+import asyncio
+import logging
+import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+U = TypeVar("U")
 
 
-class PipelineStatus(Enum):
-    """Pipeline execution status."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    PAUSED = "paused"
+class BackpressureStrategy(Enum):
+    """Backpressure handling strategies."""
+    DROP_OLDEST = "drop_oldest"
+    DROP_NEWEST = "drop_newest"
+    BLOCK = "block"
+    BUFFER = "buffer"
 
 
-class StageType(Enum):
-    """Type of pipeline stage."""
-    EXTRACT = "extract"
-    TRANSFORM = "transform"
-    LOAD = "load"
-    FILTER = "filter"
-    AGGREGATE = "aggregate"
-    JOIN = "join"
-    BRANCH = "branch"
-    MERGE = "merge"
+class CheckpointStrategy(Enum):
+    """Checkpoint saving strategies."""
+    NONE = "none"
+    ON_COMPLETE = "on_complete"
+    PERIODIC = "periodic"
+    ON_ERROR = "on_error"
 
 
 @dataclass
-class PipelineStage:
-    """A stage in a data pipeline."""
-    id: str
+class PipelineConfig:
+    """Configuration for data pipeline."""
     name: str
-    stage_type: StageType
-    processor: Callable
-    input_key: str = "default"
-    output_key: str = "default"
-    error_handler: Optional[Callable] = None
-    skip_on_error: bool = False
-    timeout_seconds: int = 3600
-    metadata: dict = field(default_factory=dict)
-
-    def __post_init__(self):
-        if not self.id:
-            self.id = str(uuid.uuid4())[:8]
+    buffer_size: int = 1000
+    max_workers: int = 4
+    backpressure: BackpressureStrategy = BackpressureStrategy.BUFFER
+    checkpoint_strategy: CheckpointStrategy = CheckpointStrategy.NONE
+    checkpoint_interval: float = 60.0
+    error_threshold: int = 10
+    enable_metrics: bool = True
 
 
 @dataclass
-class PipelineBranch:
-    """A branch in a pipeline."""
-    condition: Callable
-    output_key: str
+class PipelineMetrics:
+    """Metrics for pipeline monitoring."""
+    items_processed: int = 0
+    items_failed: int = 0
+    items_dropped: int = 0
+    total_latency: float = 0.0
+    stage_latencies: Dict[str, float] = field(default_factory=dict)
+    start_time: Optional[datetime] = None
+    last_checkpoint_time: Optional[datetime] = None
+
+    @property
+    def average_latency(self) -> float:
+        """Get average processing latency."""
+        if self.items_processed == 0:
+            return 0.0
+        return self.total_latency / self.items_processed
+
+    @property
+    def throughput(self) -> float:
+        """Get throughput in items per second."""
+        if not self.start_time or self.items_processed == 0:
+            return 0.0
+        elapsed = (datetime.now() - self.start_time).total_seconds()
+        return self.items_processed / elapsed if elapsed > 0 else 0.0
 
 
 @dataclass
-class StageExecution:
-    """Execution state of a pipeline stage."""
-    stage: PipelineStage
-    input_data: Any = None
-    output_data: Any = None
-    error: Optional[str] = None
-    status: str = "pending"
-    start_time: Optional[float] = None
-    end_time: Optional[float] = None
-    records_in: int = 0
-    records_out: int = 0
-
-    def duration_ms(self) -> float:
-        if self.start_time and self.end_time:
-            return (self.end_time - self.start_time) * 1000
-        return 0.0
-
-
-@dataclass
-class DataPipeline:
-    """A complete data pipeline."""
-    id: str
+class StageMetrics:
+    """Metrics for individual pipeline stage."""
     name: str
-    stages: list[PipelineStage]
-    description: str = ""
-    version: str = "1.0.0"
-    checkpoint_enabled: bool = True
-    parallel_execution: bool = False
+    items_in: int = 0
+    items_out: int = 0
+    items_failed: int = 0
+    total_latency: float = 0.0
 
-    def __post_init__(self):
-        if not self.id:
-            self.id = str(uuid.uuid4())[:8]
-
-    def get_stage(self, stage_id: str) -> Optional[PipelineStage]:
-        for stage in self.stages:
-            if stage.id == stage_id:
-                return stage
-        return None
+    @property
+    def average_latency(self) -> float:
+        """Get average stage latency."""
+        if self.items_out == 0:
+            return 0.0
+        return self.total_latency / self.items_out
 
 
-@dataclass
-class PipelineExecution:
-    """A pipeline execution instance."""
-    id: str
-    pipeline: DataPipeline
-    status: PipelineStatus = PipelineStatus.PENDING
-    stage_executions: dict[str, StageExecution] = field(default_factory=dict)
-    context: dict = field(default_factory=dict)
-    start_time: float = field(default_factory=time.time)
-    end_time: Optional[float] = None
-    error: Optional[str] = None
-    checkpoint_data: dict = field(default_factory=dict)
+class PipelineStage(Generic[T, U]):
+    """A single stage in the data pipeline."""
 
-    def duration_seconds(self) -> float:
-        if self.start_time and self.end_time:
-            return self.end_time - self.start_time
-        return 0.0
-
-
-class DataPipelineExecutor:
-    """
-    Data pipeline executor for ETL/ELT workflows.
-
-    Supports multi-stage pipelines, branching, merging,
-    error handling, and checkpointing.
-    """
-
-    def __init__(self):
-        self._pipelines: dict[str, DataPipeline] = {}
-        self._executions: dict[str, PipelineExecution] = {}
-        self._checkpoints: dict[str, dict] = {}
-
-    def create_pipeline(
+    def __init__(
         self,
         name: str,
-        stages: list[PipelineStage],
-        description: str = "",
-        checkpoint_enabled: bool = True,
-        parallel_execution: bool = False,
-    ) -> DataPipeline:
-        """Create a new data pipeline."""
-        pipeline = DataPipeline(
-            id=str(uuid.uuid4())[:12],
-            name=name,
-            stages=stages,
-            description=description,
-            checkpoint_enabled=checkpoint_enabled,
-            parallel_execution=parallel_execution,
-        )
-        self._pipelines[pipeline.id] = pipeline
-        return pipeline
+        processor: Callable[[T], U],
+        batch_size: int = 1,
+        timeout: float = 30.0
+    ):
+        self.name = name
+        self.processor = processor
+        self.batch_size = batch_size
+        self.timeout = timeout
+        self.metrics = StageMetrics(name=name)
+        self._is_async = asyncio.iscoroutinefunction(processor)
 
-    def execute(
-        self,
-        pipeline_id: str,
-        initial_data: Any = None,
-        execution_id: Optional[str] = None,
-    ) -> PipelineExecution:
-        """Execute a pipeline."""
-        pipeline = self._pipelines.get(pipeline_id)
-        if not pipeline:
-            raise ValueError(f"Pipeline not found: {pipeline_id}")
-
-        execution = PipelineExecution(
-            id=execution_id or str(uuid.uuid4())[:8],
-            pipeline=pipeline,
-            context={"data": initial_data},
-        )
-        self._executions[execution.id] = execution
-
-        return self._execute_pipeline(execution)
-
-    def _execute_pipeline(self, execution: PipelineExecution) -> PipelineExecution:
-        """Execute a pipeline's stages."""
-        execution.status = PipelineStatus.RUNNING
-        pipeline = execution.pipeline
-
-        checkpoint = self._checkpoints.get(execution.id) if pipeline.checkpoint_enabled else None
-        start_idx = checkpoint.get("last_completed_stage_idx", 0) if checkpoint else 0
+    async def process(self, item: T) -> Optional[U]:
+        """Process a single item."""
+        self.metrics.items_in += 1
+        start_time = time.monotonic()
 
         try:
-            for i, stage in enumerate(pipeline.stages):
-                if i < start_idx:
-                    continue
-
-                if execution.status == PipelineStatus.CANCELLED:
-                    break
-
-                stage_exec = self._execute_stage(stage, execution)
-                execution.stage_executions[stage.id] = stage_exec
-
-                if stage_exec.error and not stage.skip_on_error:
-                    execution.status = PipelineStatus.FAILED
-                    execution.error = stage_exec.error
-                    execution.end_time = time.time()
-                    return execution
-
-                if pipeline.checkpoint_enabled and (i + 1) % 5 == 0:
-                    self._save_checkpoint(execution, i)
-
-            execution.status = PipelineStatus.COMPLETED
-
-        except Exception as e:
-            execution.status = PipelineStatus.FAILED
-            execution.error = str(e)
-
-        execution.end_time = time.time()
-        return execution
-
-    def _execute_stage(
-        self,
-        stage: PipelineStage,
-        execution: PipelineExecution,
-    ) -> StageExecution:
-        """Execute a single pipeline stage."""
-        stage_exec = StageExecution(stage=stage)
-        stage_exec.start_time = time.time()
-
-        input_data = execution.context.get(stage.input_key)
-        stage_exec.input_data = input_data
-
-        if input_data is not None and hasattr(input_data, "__len__"):
-            stage_exec.records_in = len(input_data)
-
-        try:
-            if stage.stage_type == StageType.FILTER:
-                result = [item for item in input_data if stage.processor(item)]
-            elif stage.stage_type == StageType.AGGREGATE:
-                result = stage.processor(input_data)
-            elif stage.stage_type == StageType.JOIN:
-                result = stage.processor(
-                    execution.context.get("left", []),
-                    execution.context.get("right", []),
+            if self._is_async:
+                result = await asyncio.wait_for(
+                    self.processor(item),
+                    timeout=self.timeout
                 )
-            elif stage.stage_type == StageType.BRANCH:
-                branches = stage.processor(input_data)
-                for branch_output in branches:
-                    output_key = branch_output.get("key", "default")
-                    execution.context[output_key] = branch_output.get("data")
-                result = branches
             else:
-                result = stage.processor(input_data)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self.processor, item),
+                    timeout=self.timeout
+                )
+            self.metrics.items_out += 1
+            self.metrics.total_latency += time.monotonic() - start_time
+            return result
 
-            stage_exec.output_data = result
-            execution.context[stage.output_key] = result
-
-            if hasattr(result, "__len__"):
-                stage_exec.records_out = len(result)
-
-            stage_exec.status = "completed"
-
+        except asyncio.TimeoutError:
+            self.metrics.items_failed += 1
+            logger.error(f"Stage {self.name} timeout processing item")
+            return None
         except Exception as e:
-            stage_exec.error = str(e)
-            stage_exec.status = "failed"
+            self.metrics.items_failed += 1
+            logger.error(f"Stage {self.name} failed: {e}")
+            return None
 
-            if stage.error_handler:
-                stage_exec.output_data = stage.error_handler(input_data, e)
-                stage_exec.status = "completed_with_error"
 
-        stage_exec.end_time = time.time()
-        return stage_exec
+class Checkpoint:
+    """Pipeline checkpoint for recovery."""
 
-    def _save_checkpoint(self, execution: PipelineExecution, stage_idx: int) -> None:
-        """Save a pipeline checkpoint."""
-        self._checkpoints[execution.id] = {
-            "last_completed_stage_idx": stage_idx,
-            "context": execution.context,
-            "timestamp": time.time(),
+    def __init__(self, pipeline_name: str):
+        self.pipeline_name = pipeline_name
+        self.checkpoint_id = f"{pipeline_name}_{int(time.time())}"
+        self.timestamp = datetime.now()
+        self.stage_states: Dict[str, Any] = {}
+        self.items_processed: int = 0
+        self.metrics: Optional[PipelineMetrics] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize checkpoint to dictionary."""
+        return {
+            "checkpoint_id": self.checkpoint_id,
+            "pipeline_name": self.pipeline_name,
+            "timestamp": self.timestamp.isoformat(),
+            "stage_states": self.stage_states,
+            "items_processed": self.items_processed
         }
 
-    def resume(
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Checkpoint":
+        """Deserialize checkpoint from dictionary."""
+        checkpoint = cls(data["pipeline_name"])
+        checkpoint.checkpoint_id = data["checkpoint_id"]
+        checkpoint.timestamp = datetime.fromisoformat(data["timestamp"])
+        checkpoint.stage_states = data.get("stage_states", {})
+        checkpoint.items_processed = data.get("items_processed", 0)
+        return checkpoint
+
+
+class DataBuffer(Generic[T]):
+    """Thread-safe data buffer with backpressure handling."""
+
+    def __init__(
         self,
-        execution_id: str,
-    ) -> PipelineExecution:
-        """Resume a failed or paused pipeline execution."""
-        execution = self._executions.get(execution_id)
-        if not execution:
-            raise ValueError(f"Execution not found: {execution_id}")
+        max_size: int,
+        strategy: BackpressureStrategy = BackpressureStrategy.BUFFER
+    ):
+        self.max_size = max_size
+        self.strategy = strategy
+        self._buffer: deque[T] = deque(maxlen=max_size if strategy == BackpressureStrategy.DROP_OLDEST else None)
+        self._lock = asyncio.Lock()
+        self._not_full = asyncio.Condition(self._lock)
+        self._not_empty = asyncio.Condition(self._lock)
 
-        execution.status = PipelineStatus.RUNNING
-        return self._execute_pipeline(execution)
+    async def put(self, item: T, blocking: bool = True) -> bool:
+        """Put an item into the buffer."""
+        async with self._not_full:
+            if not blocking and len(self._buffer) >= self.max_size:
+                if self.strategy == BackpressureStrategy.DROP_NEWEST:
+                    return False
+                elif self.strategy == BackpressureStrategy.DROP_OLDEST:
+                    self._buffer.popleft()
+                    self._buffer.append(item)
+                    return True
 
-    def cancel(self, execution_id: str) -> bool:
-        """Cancel a pipeline execution."""
-        execution = self._executions.get(execution_id)
-        if execution and execution.status == PipelineStatus.RUNNING:
-            execution.status = PipelineStatus.CANCELLED
-            execution.end_time = time.time()
+            while len(self._buffer) >= self.max_size:
+                if not blocking:
+                    return False
+                await self._not_full.wait()
+
+            self._buffer.append(item)
+            self._not_empty.notify()
             return True
-        return False
 
-    def get_execution(self, execution_id: str) -> Optional[PipelineExecution]:
-        """Get a pipeline execution."""
-        return self._executions.get(execution_id)
+    async def get(self, blocking: bool = True, timeout: Optional[float] = None) -> Optional[T]:
+        """Get an item from the buffer."""
+        async with self._not_empty:
+            if not blocking and len(self._buffer) == 0:
+                return None
 
-    def list_executions(
+            if len(self._buffer) == 0:
+                try:
+                    await asyncio.wait_for(
+                        self._not_empty.wait(),
+                        timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    return None
+
+            item = self._buffer.popleft()
+            self._not_full.notify()
+            return item
+
+    def size(self) -> int:
+        """Get current buffer size."""
+        return len(self._buffer)
+
+    def is_empty(self) -> bool:
+        """Check if buffer is empty."""
+        return len(self._buffer) == 0
+
+    def is_full(self) -> bool:
+        """Check if buffer is full."""
+        return len(self._buffer) >= self.max_size
+
+
+class DataPipeline(Generic[T]):
+    """Main data pipeline with multi-stage processing."""
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.stages: List[PipelineStage] = []
+        self.buffers: List[DataBuffer] = []
+        self.metrics = PipelineMetrics()
+        self.checkpoints: List[Checkpoint] = []
+        self._running = False
+        self._cancelled = False
+        self._executor = ThreadPoolExecutor(max_workers=config.max_workers)
+        self._checkpoint_callbacks: List[Callable] = []
+
+    def add_stage(
         self,
-        pipeline_id: Optional[str] = None,
-        status: Optional[PipelineStatus] = None,
-    ) -> list[dict]:
-        """List pipeline executions."""
-        executions = list(self._executions.values())
+        name: str,
+        processor: Callable,
+        batch_size: int = 1,
+        buffer_size: Optional[int] = None
+    ) -> "DataPipeline":
+        """Add a processing stage to the pipeline."""
+        stage = PipelineStage(name, processor, batch_size)
+        self.stages.append(stage)
+        self.buffers.append(DataBuffer(
+            buffer_size or self.config.buffer_size,
+            self.config.backpressure
+        ))
+        self.metrics.stage_latencies[name] = 0.0
+        return self
 
-        if pipeline_id:
-            executions = [e for e in executions if e.pipeline.id == pipeline_id]
-        if status:
-            executions = [e for e in executions if e.status == status]
+    def on_checkpoint(self, callback: Callable[[Checkpoint], None]):
+        """Register checkpoint callback."""
+        self._checkpoint_callbacks.append(callback)
 
-        return [
-            {
-                "id": e.id,
-                "pipeline_id": e.pipeline.id,
-                "pipeline_name": e.pipeline.name,
-                "status": e.status.value,
-                "start_time": e.start_time,
-                "end_time": e.end_time,
-                "duration_seconds": e.duration_seconds(),
+    async def _process_stage(
+        self,
+        stage_index: int,
+        input_buffer: DataBuffer,
+        output_buffer: Optional[DataBuffer]
+    ):
+        """Process items through a single stage."""
+        stage = self.stages[stage_index]
+
+        while not self._cancelled:
+            item = await input_buffer.get(blocking=True, timeout=1.0)
+            if item is None:
+                continue
+
+            result = await stage.process(item)
+
+            if result is not None and output_buffer:
+                await output_buffer.put(result)
+
+            if self.config.enable_metrics:
+                self.metrics.items_processed += 1
+
+    async def _checkpoint_loop(self):
+        """Periodically save checkpoints."""
+        while not self._cancelled:
+            await asyncio.sleep(self.config.checkpoint_interval)
+            if self.config.checkpoint_strategy == CheckpointStrategy.PERIODIC:
+                await self._save_checkpoint()
+
+    async def _save_checkpoint(self):
+        """Save current pipeline checkpoint."""
+        checkpoint = Checkpoint(self.config.name)
+        checkpoint.items_processed = self.metrics.items_processed
+        checkpoint.metrics = self.metrics
+
+        for i, stage in enumerate(self.stages):
+            checkpoint.stage_states[stage.name] = {
+                "items_in": stage.metrics.items_in,
+                "items_out": stage.metrics.items_out,
+                "items_failed": stage.metrics.items_failed
             }
-            for e in sorted(executions, key=lambda x: x.start_time, reverse=True)
-        ]
 
-    def get_pipeline(self, pipeline_id: str) -> Optional[DataPipeline]:
-        """Get a pipeline by ID."""
-        return self._pipelines.get(pipeline_id)
+        self.checkpoints.append(checkpoint)
+        self.metrics.last_checkpoint_time = datetime.now()
 
-    def list_pipelines(self) -> list[DataPipeline]:
-        """List all pipelines."""
-        return list(self._pipelines.values())
+        for callback in self._checkpoint_callbacks:
+            await asyncio.to_thread(callback, checkpoint)
 
-    def delete_pipeline(self, pipeline_id: str) -> bool:
-        """Delete a pipeline."""
-        if pipeline_id in self._pipelines:
-            del self._pipelines[pipeline_id]
-            return True
-        return False
+        logger.info(f"Checkpoint saved: {checkpoint.checkpoint_id}")
+
+    async def start(self):
+        """Start the pipeline."""
+        self._running = True
+        self._cancelled = False
+        self.metrics.start_time = datetime.now()
+
+        workers = []
+        for i in range(len(self.stages)):
+            output_buffer = self.buffers[i + 1] if i + 1 < len(self.buffers) else None
+            workers.append(
+                asyncio.create_task(
+                    self._process_stage(i, self.buffers[i], output_buffer)
+                )
+            )
+
+        if self.config.checkpoint_strategy != CheckpointStrategy.NONE:
+            workers.append(asyncio.create_task(self._checkpoint_loop()))
+
+        return workers
+
+    async def stop(self):
+        """Stop the pipeline."""
+        self._cancelled = True
+        self._running = False
+        await asyncio.sleep(0.1)
+
+    async def push(self, item: T) -> bool:
+        """Push an item into the pipeline."""
+        if not self._running:
+            raise RuntimeError("Pipeline not running")
+        return await self.buffers[0].put(item)
+
+    async def pull(self) -> Any:
+        """Pull an item from the pipeline output."""
+        if not self._running:
+            raise RuntimeError("Pipeline not running")
+        output_buffer = self.buffers[-1]
+        return await output_buffer.get(blocking=False)
+
+    def get_metrics(self) -> PipelineMetrics:
+        """Get pipeline metrics."""
+        return self.metrics
+
+
+def identity(x: T) -> T:
+    """Identity function for testing."""
+    return x
+
+
+def double(x: int) -> int:
+    """Double function for testing."""
+    return x * 2
+
+
+async def main():
+    """Demonstrate data pipeline."""
+    config = PipelineConfig(
+        name="test_pipeline",
+        buffer_size=100,
+        max_workers=2
+    )
+
+    pipeline = DataPipeline[int](config)
+    pipeline.add_stage("double", double)
+    pipeline.add_stage("triple", lambda x: x * 3)
+
+    workers = await pipeline.start()
+
+    for i in range(10):
+        await pipeline.push(i)
+
+    await asyncio.sleep(1)
+    await pipeline.stop()
+
+    print(f"Metrics: {pipeline.get_metrics()}")
+    print(f"Stage metrics: {[s.metrics for s in pipeline.stages]}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
