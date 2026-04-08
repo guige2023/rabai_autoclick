@@ -1,419 +1,194 @@
 """
-Automation Hooks Action Module
+Automation Hooks Action Module.
 
-Provides hook-based automation for lifecycle events, callbacks, and event handling.
+Provides hook/extension points for automation
+workflows with event handling.
 """
-from typing import Any, Optional, Callable, Awaitable
+
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from collections import defaultdict
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class HookType(Enum):
-    """Types of hooks."""
-    PRE = "pre"
-    POST = "post"
-    ON_ERROR = "on_error"
+    """Hook types."""
+    PRE_EXECUTE = "pre_execute"
+    POST_EXECUTE = "post_execute"
     ON_SUCCESS = "on_success"
-    ON_COMPLETE = "on_complete"
+    ON_FAILURE = "on_failure"
     ON_TIMEOUT = "on_timeout"
-    ON_CANCEL = "on_cancel"
+    PRE_COMMIT = "pre_commit"
+    POST_COMMIT = "post_commit"
 
 
 @dataclass
 class Hook:
-    """A hook definition."""
+    """Automation hook."""
     hook_id: str
-    hook_type: HookType
     name: str
-    callback: Callable[..., Awaitable]
-    filter: Optional[Callable[[dict], bool]] = None
-    priority: int = 0
-    timeout_seconds: float = 30.0
-    async_execution: bool = True
-    metadata: dict[str, Any] = field(default_factory=dict)
+    hook_type: HookType
+    handler: Callable
+    enabled: bool = True
+    order: int = 0
+    timeout: float = 30.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class HookContext:
-    """Context passed to hook callbacks."""
-    operation_name: str
-    operation_id: str
-    timestamp: datetime
-    input_data: dict[str, Any]
-    output_data: Optional[Any] = None
+    """Context passed to hooks."""
+    workflow_id: Optional[str] = None
+    action_id: Optional[str] = None
+    action_name: Optional[str] = None
+    input_data: Any = None
+    output_data: Any = None
     error: Optional[str] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class HookExecutionResult:
-    """Result of hook execution."""
-    hook_id: str
-    success: bool
-    execution_time_ms: float
-    error: Optional[str] = None
-    output: Any = None
+class HookExecutor:
+    """Executes hooks."""
 
-
-@dataclass
-class HookRegistration:
-    """Registration details for a hook."""
-    hook: Hook
-    registered_at: datetime = field(default_factory=datetime.now)
-    execution_count: int = 0
-    failure_count: int = 0
-
-
-class AutomationHooksAction:
-    """Main hook automation action handler."""
-    
     def __init__(self):
-        self._hooks: dict[str, list[HookRegistration]] = defaultdict(list)
-        self._global_hooks: dict[HookType, list[Hook]] = defaultdict(list)
-        self._execution_history: list[HookExecutionResult] = []
-        self._max_history: int = 1000
-        self._stats: dict[str, Any] = defaultdict(int)
-    
-    def register_hook(
-        self,
-        operation: str,
-        hook: Hook
-    ) -> "AutomationHooksAction":
-        """Register a hook for an operation."""
-        registration = HookRegistration(hook=hook)
-        self._hooks[operation].append(registration)
-        
-        # Sort by priority (higher priority first)
-        self._hooks[operation].sort(
-            key=lambda r: r.hook.priority,
-            reverse=True
-        )
-        
-        return self
-    
-    def register_global_hook(
-        self,
-        hook_type: HookType,
-        callback: Callable[..., Awaitable],
-        priority: int = 0
-    ) -> "AutomationHooksAction":
-        """Register a global hook that runs for all operations."""
-        hook = Hook(
-            hook_id=f"global_{hook_type.value}_{len(self._global_hooks[hook_type])}",
-            hook_type=hook_type,
-            name=f"Global {hook_type.value}",
-            callback=callback,
-            priority=priority
-        )
-        
-        self._global_hooks[hook_type].append(hook)
-        self._global_hooks[hook_type].sort(key=lambda h: h.priority, reverse=True)
-        
-        return self
-    
-    def unregister_hook(
-        self,
-        operation: str,
-        hook_id: str
-    ) -> bool:
-        """Unregister a hook."""
-        if operation not in self._hooks:
-            return False
-        
-        original_len = len(self._hooks[operation])
-        self._hooks[operation] = [
-            r for r in self._hooks[operation]
-            if r.hook.hook_id != hook_id
-        ]
-        
-        return len(self._hooks[operation]) < original_len
-    
-    async def execute_hooks(
-        self,
-        operation: str,
-        hook_type: HookType,
-        context: HookContext
-    ) -> list[HookExecutionResult]:
-        """
-        Execute all hooks for an operation and hook type.
-        
-        Args:
-            operation: Operation name
-            hook_type: Type of hooks to execute
-            context: Hook context with operation details
-            
-        Returns:
-            List of execution results
-        """
-        results = []
-        
-        # Execute global hooks first
-        for hook in self._global_hooks.get(hook_type, []):
-            if hook.filter and not hook.filter(context.input_data):
-                continue
-            
-            result = await self._execute_single_hook(hook, context)
-            results.append(result)
-        
-        # Execute operation-specific hooks
-        for registration in self._hooks.get(operation, []):
-            hook = registration.hook
-            
-            if hook.hook_type != hook_type:
-                continue
-            
-            if hook.filter and not hook.filter(context.input_data):
-                continue
-            
-            result = await self._execute_single_hook(hook, context)
-            registration.execution_count += 1
-            
-            if not result.success:
-                registration.failure_count += 1
-            
-            results.append(result)
-        
-        self._stats["hooks_executed"] += len(results)
-        
-        return results
-    
-    async def _execute_single_hook(
-        self,
-        hook: Hook,
-        context: HookContext
-    ) -> HookExecutionResult:
-        """Execute a single hook with timeout."""
-        start_time = datetime.now()
-        
-        try:
-            if asyncio.iscoroutinefunction(hook.callback):
-                result = await asyncio.wait_for(
-                    hook.callback(context),
-                    timeout=hook.timeout_seconds
-                )
-            else:
-                result = hook.callback(context)
-            
-            execution_time = (datetime.now() - start_time).total_seconds() * 1000
-            
-            execution_result = HookExecutionResult(
-                hook_id=hook.hook_id,
-                success=True,
-                execution_time_ms=execution_time,
-                output=result
-            )
-            
-        except asyncio.TimeoutError:
-            execution_time = (datetime.now() - start_time).total_seconds() * 1000
-            
-            execution_result = HookExecutionResult(
-                hook_id=hook.hook_id,
-                success=False,
-                execution_time_ms=execution_time,
-                error=f"Hook execution timed out after {hook.timeout_seconds}s"
-            )
-            self._stats["hook_timeouts"] += 1
-        
-        except Exception as e:
-            execution_time = (datetime.now() - start_time).total_seconds() * 1000
-            
-            execution_result = HookExecutionResult(
-                hook_id=hook.hook_id,
-                success=False,
-                execution_time_ms=execution_time,
-                error=str(e)
-            )
-            self._stats["hook_errors"] += 1
-        
-        # Record in history
-        self._execution_history.append(execution_result)
-        if len(self._execution_history) > self._max_history:
-            self._execution_history = self._execution_history[-self._max_history:]
-        
-        return execution_result
-    
-    async def execute_pre_hooks(
-        self,
-        operation: str,
-        operation_id: str,
-        input_data: dict[str, Any]
-    ) -> list[HookExecutionResult]:
-        """Execute pre-operation hooks."""
-        context = HookContext(
-            operation_name=operation,
-            operation_id=operation_id,
-            timestamp=datetime.now(),
-            input_data=input_data
-        )
-        
-        return await self.execute_hooks(operation, HookType.PRE, context)
-    
-    async def execute_post_hooks(
-        self,
-        operation: str,
-        operation_id: str,
-        input_data: dict[str, Any],
-        output_data: Any
-    ) -> list[HookExecutionResult]:
-        """Execute post-operation hooks."""
-        context = HookContext(
-            operation_name=operation,
-            operation_id=operation_id,
-            timestamp=datetime.now(),
-            input_data=input_data,
-            output_data=output_data
-        )
-        
-        return await self.execute_hooks(operation, HookType.POST, context)
-    
-    async def execute_error_hooks(
-        self,
-        operation: str,
-        operation_id: str,
-        input_data: dict[str, Any],
-        error: Exception
-    ) -> list[HookExecutionResult]:
-        """Execute error hooks."""
-        context = HookContext(
-            operation_name=operation,
-            operation_id=operation_id,
-            timestamp=datetime.now(),
-            input_data=input_data,
-            error=str(error)
-        )
-        
-        return await self.execute_hooks(operation, HookType.ON_ERROR, context)
-    
-    async def execute_success_hooks(
-        self,
-        operation: str,
-        operation_id: str,
-        input_data: dict[str, Any],
-        output_data: Any
-    ) -> list[HookExecutionResult]:
-        """Execute success hooks."""
-        context = HookContext(
-            operation_name=operation,
-            operation_id=operation_id,
-            timestamp=datetime.now(),
-            input_data=input_data,
-            output_data=output_data
-        )
-        
-        return await self.execute_hooks(operation, HookType.ON_SUCCESS, context)
-    
-    async def wrap_operation(
-        self,
-        operation_name: str,
-        operation_id: str,
-        input_data: dict[str, Any],
-        operation: Callable[[], Awaitable[Any]]
-    ) -> tuple[Any, list[HookExecutionResult]]:
-        """
-        Wrap an operation with all relevant hooks.
-        
-        Executes pre-hooks, runs operation, then executes post/success/error hooks.
-        
-        Returns:
-            Tuple of (result, list of all hook execution results)
-        """
-        all_results = []
-        
-        # Execute pre-hooks
-        pre_results = await self.execute_pre_hooks(
-            operation_name, operation_id, input_data
-        )
-        all_results.extend(pre_results)
-        
-        # Check if any pre-hook failed critically
-        if any(not r.success for r in pre_results):
-            # Execute error hooks
-            error_results = await self.execute_error_hooks(
-                operation_name, operation_id, input_data,
-                Exception("Pre-hook failed")
-            )
-            all_results.extend(error_results)
-            raise Exception("Pre-hook execution failed")
-        
-        try:
-            # Execute the operation
-            result = await operation()
-            
-            # Execute success hooks
-            success_results = await self.execute_success_hooks(
-                operation_name, operation_id, input_data, result
-            )
-            all_results.extend(success_results)
-            
-            # Execute post-hooks
-            post_results = await self.execute_post_hooks(
-                operation_name, operation_id, input_data, result
-            )
-            all_results.extend(post_results)
-            
-            return result, all_results
-            
-        except Exception as e:
-            # Execute error hooks
-            error_results = await self.execute_error_hooks(
-                operation_name, operation_id, input_data, e
-            )
-            all_results.extend(error_results)
-            raise
-    
-    def get_hooks_for_operation(
-        self,
-        operation: str,
-        hook_type: Optional[HookType] = None
-    ) -> list[HookRegistration]:
-        """Get all hooks registered for an operation."""
-        registrations = self._hooks.get(operation, [])
-        
-        if hook_type:
-            registrations = [
-                r for r in registrations
-                if r.hook.hook_type == hook_type
-            ]
-        
-        return registrations
-    
-    def get_global_hooks(
-        self,
-        hook_type: Optional[HookType] = None
-    ) -> list[Hook]:
-        """Get all global hooks."""
-        if hook_type:
-            return list(self._global_hooks.get(hook_type, []))
-        return [
-            hook for hooks in self._global_hooks.values()
-            for hook in hooks
-        ]
-    
-    def get_stats(self) -> dict[str, Any]:
-        """Get hook execution statistics."""
-        return {
-            "total_hooks_registered": sum(len(hooks) for hooks in self._hooks.values()),
-            "global_hooks_registered": len([
-                h for hooks in self._global_hooks.values() for h in hooks
-            ]),
-            "hooks_executed": self._stats["hooks_executed"],
-            "hook_errors": self._stats["hook_errors"],
-            "hook_timeouts": self._stats["hook_timeouts"],
-            "execution_history_size": len(self._execution_history)
+        self.hooks: Dict[HookType, List[Hook]] = {
+            hook_type: [] for hook_type in HookType
         }
-    
-    def get_execution_history(
+
+    def register(self, hook: Hook):
+        """Register a hook."""
+        self.hooks[hook.hook_type].append(hook)
+        self.hooks[hook.hook_type].sort(key=lambda h: h.order)
+
+    def unregister(self, hook_id: str) -> bool:
+        """Unregister a hook."""
+        for hooks in self.hooks.values():
+            for i, hook in enumerate(hooks):
+                if hook.hook_id == hook_id:
+                    hooks.pop(i)
+                    return True
+        return False
+
+    def get_hooks(self, hook_type: HookType) -> List[Hook]:
+        """Get hooks for type."""
+        return [h for h in self.hooks.get(hook_type, []) if h.enabled]
+
+    async def execute(self, hook_type: HookType, context: HookContext) -> List[Any]:
+        """Execute all hooks of a type."""
+        results = []
+        hooks = self.get_hooks(hook_type)
+
+        for hook in hooks:
+            try:
+                result = await asyncio.wait_for(
+                    hook.handler(context),
+                    timeout=hook.timeout
+                )
+                results.append(result)
+            except asyncio.TimeoutError:
+                logger.warning(f"Hook {hook.name} timed out")
+            except Exception as e:
+                logger.error(f"Hook {hook.name} error: {e}")
+
+        return results
+
+    async def execute_pre_execute(self, context: HookContext) -> List[Any]:
+        """Execute pre-execute hooks."""
+        return await self.execute(HookType.PRE_EXECUTE, context)
+
+    async def execute_post_execute(self, context: HookContext) -> List[Any]:
+        """Execute post-execute hooks."""
+        return await self.execute(HookType.POST_EXECUTE, context)
+
+    async def execute_on_success(self, context: HookContext) -> List[Any]:
+        """Execute success hooks."""
+        return await self.execute(HookType.ON_SUCCESS, context)
+
+    async def execute_on_failure(self, context: HookContext) -> List[Any]:
+        """Execute failure hooks."""
+        return await self.execute(HookType.ON_FAILURE, context)
+
+
+class WorkflowHookManager:
+    """Manages workflow-level hooks."""
+
+    def __init__(self, executor: HookExecutor):
+        self.executor = executor
+        self.workflow_hooks: Dict[str, List[Hook]] = {}
+
+    def register_workflow_hook(
         self,
-        hook_id: Optional[str] = None,
-        limit: int = 100
-    ) -> list[HookExecutionResult]:
-        """Get hook execution history."""
-        history = self._execution_history
-        
-        if hook_id:
-            history = [r for r in history if r.hook_id == hook_id]
-        
-        return history[-limit:]
+        workflow_id: str,
+        hook: Hook
+    ):
+        """Register hook for specific workflow."""
+        if workflow_id not in self.workflow_hooks:
+            self.workflow_hooks[workflow_id] = []
+        self.workflow_hooks[workflow_id].append(hook)
+
+    async def execute_workflow_hooks(
+        self,
+        workflow_id: str,
+        hook_type: HookType,
+        context: HookContext
+    ) -> List[Any]:
+        """Execute hooks for specific workflow."""
+        hooks = self.workflow_hooks.get(workflow_id, [])
+        hooks = [h for h in hooks if h.hook_type == hook_type and h.enabled]
+
+        results = []
+        for hook in hooks:
+            try:
+                result = await asyncio.wait_for(
+                    hook.handler(context),
+                    timeout=hook.timeout
+                )
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Workflow hook error: {e}")
+
+        return results
+
+
+def create_hook(
+    name: str,
+    hook_type: HookType,
+    handler: Callable
+) -> Hook:
+    """Create a new hook."""
+    import uuid
+    return Hook(
+        hook_id=str(uuid.uuid4()),
+        name=name,
+        hook_type=hook_type,
+        handler=handler
+    )
+
+
+def main():
+    """Demonstrate hooks."""
+    executor = HookExecutor()
+
+    async def pre_hook(context: HookContext):
+        print(f"Pre-execute: {context.action_name}")
+
+    async def post_hook(context: HookContext):
+        print(f"Post-execute: {context.action_name}")
+
+    executor.register(create_hook("pre", HookType.PRE_EXECUTE, pre_hook))
+    executor.register(create_hook("post", HookType.POST_EXECUTE, post_hook))
+
+    context = HookContext(
+        action_name="test_action",
+        input_data={"test": "data"}
+    )
+
+    asyncio.run(executor.execute_pre_execute(context))
+
+
+if __name__ == "__main__":
+    main()
