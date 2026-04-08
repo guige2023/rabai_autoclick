@@ -1,293 +1,190 @@
 """Sort action module for RabAI AutoClick.
 
 Provides sorting operations:
-- SortNumbersAction: Sort numbers
-- SortStringsAction: Sort strings
-- SortDictByKeyAction: Sort dict by key
-- SortDictByValueAction: Sort dict by value
-- SortReverseAction: Reverse order
+- SortByFieldAction: Sort by field
+- SortMultiFieldAction: Sort by multiple fields
+- SortCustomAction: Custom sort order
+- SortTopNAction: Get top N sorted
 """
 
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
+
 
 import sys
 import os
+
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class SortNumbersAction(BaseAction):
-    """Sort numbers."""
-    action_type = "sort_numbers"
-    display_name = "数字排序"
-    description = "对数字排序"
-    version = "1.0"
+class SortByFieldAction(BaseAction):
+    """Sort by field."""
+    action_type = "sort_by_field"
+    display_name = "字段排序"
+    description = "按字段排序"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sort.
-
-        Args:
-            context: Execution context.
-            params: Dict with numbers, order, output_var.
-
-        Returns:
-            ActionResult with sorted numbers.
-        """
-        numbers = params.get('numbers', [])
-        order = params.get('order', 'asc')
-        output_var = params.get('output_var', 'sorted_numbers')
-
-        valid, msg = self.validate_type(numbers, list, 'numbers')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            resolved_nums = context.resolve_value(numbers)
-            resolved_order = context.resolve_value(order)
+            data = params.get("data", [])
+            field = params.get("field", "")
+            ascending = params.get("ascending", True)
+            nulls_first = params.get("nulls_first", False)
+            case_sensitive = params.get("case_sensitive", True)
 
-            reverse = resolved_order == 'desc'
-            sorted_nums = sorted(resolved_nums, key=lambda x: float(x) if isinstance(x, (int, float, str)) else 0, reverse=reverse)
+            if not data:
+                return ActionResult(success=False, message="data is required")
 
-            context.set(output_var, sorted_nums)
+            if not field:
+                result = sorted(data, key=lambda x: (x is None, x if not isinstance(x, str) else x.lower() if not case_sensitive else x), reverse=not ascending)
+                if nulls_first:
+                    result = sorted(data, key=lambda x: (x is None, x))
+                return ActionResult(success=True, message=f"Sorted {len(result)} items", data={"result": result, "count": len(result)})
+
+            def get_sort_key(item):
+                if isinstance(item, dict):
+                    val = item.get(field)
+                else:
+                    val = getattr(item, field, None)
+
+                if val is None:
+                    return (0 if nulls_first else 1, "")
+                if isinstance(val, (int, float)):
+                    return (0 if nulls_first else 1, val)
+                if isinstance(val, str):
+                    return (0 if nulls_first else 1, val.lower() if not case_sensitive else val)
+                return (0 if nulls_first else 1, str(val))
+
+            result = sorted(data, key=get_sort_key, reverse=not ascending)
 
             return ActionResult(
                 success=True,
-                message=f"数字排序完成: {len(sorted_nums)} 个",
-                data={'sorted': sorted_nums, 'output_var': output_var}
+                message=f"Sorted {len(result)} items by '{field}'",
+                data={"result": result, "count": len(result), "field": field}
             )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"数字排序失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['numbers', 'order']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'sorted_numbers'}
+            return ActionResult(success=False, message=f"Sort by field failed: {str(e)}")
 
 
-class SortStringsAction(BaseAction):
-    """Sort strings."""
-    action_type = "sort_strings"
-    display_name = "字符串排序"
-    description = "对字符串排序"
-    version = "1.0"
+class SortMultiFieldAction(BaseAction):
+    """Sort by multiple fields."""
+    action_type = "sort_multi_field"
+    display_name = "多字段排序"
+    description = "按多个字段排序"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sort.
-
-        Args:
-            context: Execution context.
-            params: Dict with strings, order, case_sensitive, output_var.
-
-        Returns:
-            ActionResult with sorted strings.
-        """
-        strings = params.get('strings', [])
-        order = params.get('order', 'asc')
-        case_sensitive = params.get('case_sensitive', False)
-        output_var = params.get('output_var', 'sorted_strings')
-
-        valid, msg = self.validate_type(strings, list, 'strings')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            resolved_strs = context.resolve_value(strings)
-            resolved_order = context.resolve_value(order)
-            resolved_case = context.resolve_value(case_sensitive)
+            data = params.get("data", [])
+            sort_fields = params.get("sort_fields", [])
 
-            reverse = resolved_order == 'desc'
+            if not data:
+                return ActionResult(success=False, message="data is required")
+            if not sort_fields:
+                return ActionResult(success=False, message="sort_fields are required")
 
-            if resolved_case:
-                sorted_strs = sorted(resolved_strs, key=lambda x: str(x), reverse=reverse)
+            def get_sort_key(item):
+                keys = []
+                for sf in sort_fields:
+                    field = sf.get("field", "")
+                    ascending = sf.get("ascending", True)
+                    nulls_first = sf.get("nulls_first", False)
+
+                    if isinstance(item, dict):
+                        val = item.get(field)
+                    else:
+                        val = getattr(item, field, None)
+
+                    if val is None:
+                        keys.append((0 if nulls_first else 1, ""))
+                    elif isinstance(val, (int, float)):
+                        keys.append((0 if nulls_first else 1, val))
+                    else:
+                        keys.append((0 if nulls_first else 1, str(val).lower()))
+                return keys
+
+            result = sorted(data, key=get_sort_key)
+
+            return ActionResult(
+                success=True,
+                message=f"Sorted {len(result)} items by {len(sort_fields)} fields",
+                data={"result": result, "count": len(result)}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Sort multi field failed: {str(e)}")
+
+
+class SortCustomAction(BaseAction):
+    """Custom sort order."""
+    action_type = "sort_custom"
+    display_name = "自定义排序"
+    description = "自定义排序"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            sort_order = params.get("sort_order", [])
+            sort_key = params.get("sort_key", "value")
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+            if not sort_order:
+                return ActionResult(success=False, message="sort_order is required")
+
+            order_map = {v: i for i, v in enumerate(sort_order)}
+
+            def custom_sort_key(item):
+                if isinstance(item, dict):
+                    val = item.get(sort_key)
+                else:
+                    val = item
+                return order_map.get(val, len(order_map))
+
+            result = sorted(data, key=custom_sort_key)
+
+            return ActionResult(
+                success=True,
+                message=f"Custom sorted {len(result)} items",
+                data={"result": result, "count": len(result)}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Sort custom failed: {str(e)}")
+
+
+class SortTopNAction(BaseAction):
+    """Get top N sorted."""
+    action_type = "sort_top_n"
+    display_name = "Top N排序"
+    description = "获取排序后的Top N"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            n = params.get("n", 10)
+            field = params.get("field", "")
+            ascending = params.get("ascending", False)
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+
+            if field:
+                result = sorted(
+                    data,
+                    key=lambda x: (x.get(field) if isinstance(x, dict) else getattr(x, field, 0)) if field else x,
+                    reverse=not ascending
+                )
             else:
-                sorted_strs = sorted(resolved_strs, key=lambda x: str(x).lower(), reverse=reverse)
+                result = sorted(data, reverse=not ascending)
 
-            context.set(output_var, sorted_strs)
-
-            return ActionResult(
-                success=True,
-                message=f"字符串排序完成: {len(sorted_strs)} 个",
-                data={'sorted': sorted_strs, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"字符串排序失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['strings', 'order']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'case_sensitive': False, 'output_var': 'sorted_strings'}
-
-
-class SortDictByKeyAction(BaseAction):
-    """Sort dict by key."""
-    action_type = "sort_dict_by_key"
-    display_name = "字典按键排序"
-    description = "按键排序字典"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sort.
-
-        Args:
-            context: Execution context.
-            params: Dict with dictionary, order, output_var.
-
-        Returns:
-            ActionResult with sorted dict.
-        """
-        dictionary = params.get('dictionary', {})
-        order = params.get('order', 'asc')
-        output_var = params.get('output_var', 'sorted_dict')
-
-        valid, msg = self.validate_type(dictionary, dict, 'dictionary')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_dict = context.resolve_value(dictionary)
-            resolved_order = context.resolve_value(order)
-
-            reverse = resolved_order == 'desc'
-            sorted_items = sorted(resolved_dict.items(), key=lambda x: str(x[0]).lower(), reverse=reverse)
-            sorted_dict = dict(sorted_items)
-
-            context.set(output_var, sorted_dict)
+            result = result[:n]
 
             return ActionResult(
                 success=True,
-                message=f"字典按键排序完成: {len(sorted_dict)} 个键",
-                data={'sorted': sorted_dict, 'output_var': output_var}
+                message=f"Top {n}: {len(result)} items",
+                data={"result": result, "count": len(result), "n": n}
             )
+
         except Exception as e:
-            return ActionResult(success=False, message=f"字典按键排序失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['dictionary', 'order']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'sorted_dict'}
-
-
-class SortDictByValueAction(BaseAction):
-    """Sort dict by value."""
-    action_type = "sort_dict_by_value"
-    display_name = "字典按值排序"
-    description = "按值排序字典"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sort.
-
-        Args:
-            context: Execution context.
-            params: Dict with dictionary, order, output_var.
-
-        Returns:
-            ActionResult with sorted dict.
-        """
-        dictionary = params.get('dictionary', {})
-        order = params.get('order', 'asc')
-        output_var = params.get('output_var', 'sorted_dict')
-
-        valid, msg = self.validate_type(dictionary, dict, 'dictionary')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_dict = context.resolve_value(dictionary)
-            resolved_order = context.resolve_value(order)
-
-            reverse = resolved_order == 'desc'
-
-            def sort_key(x):
-                v = x[1]
-                if isinstance(v, (int, float)):
-                    return v
-                return str(v).lower()
-
-            sorted_items = sorted(resolved_dict.items(), key=sort_key, reverse=reverse)
-            sorted_dict = dict(sorted_items)
-
-            context.set(output_var, sorted_dict)
-
-            return ActionResult(
-                success=True,
-                message=f"字典按值排序完成: {len(sorted_dict)} 个键",
-                data={'sorted': sorted_dict, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"字典按值排序失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['dictionary', 'order']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'sorted_dict'}
-
-
-class SortReverseAction(BaseAction):
-    """Reverse order."""
-    action_type = "sort_reverse"
-    display_name = "反转顺序"
-    description = "反转列表顺序"
-    version = "1.0"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute reverse.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, output_var.
-
-        Returns:
-            ActionResult with reversed list.
-        """
-        items = params.get('items', [])
-        output_var = params.get('output_var', 'reversed_items')
-
-        valid, msg = self.validate_type(items, list, 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            reversed_items = list(reversed(resolved_items))
-
-            context.set(output_var, reversed_items)
-
-            return ActionResult(
-                success=True,
-                message=f"顺序反转完成: {len(reversed_items)} 个",
-                data={'reversed': reversed_items, 'output_var': output_var}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"反转顺序失败: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'reversed_items'}
+            return ActionResult(success=False, message=f"Sort top N failed: {str(e)}")
