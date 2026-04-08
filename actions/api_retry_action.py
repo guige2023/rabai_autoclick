@@ -1,280 +1,485 @@
-"""API Retry Action Module.
+"""API retry and resilience action module for RabAI AutoClick.
 
-Provides configurable retry logic with exponential backoff,
-circuit breaker pattern, and request deduplication.
+Provides:
+- ApiRetryStrategyAction: Configurable retry strategies
+- ApiBackoffAction: Exponential and linear backoff
+- ApiTimeoutAction: Request timeout management
+- ApiCircuitBreakerAction: Circuit breaker pattern
+- ApiFallbackAction: Fallback mechanisms
 """
-from __future__ import annotations
 
-import asyncio
-import random
 import time
-from dataclasses import dataclass, field
+import random
+import hashlib
+from typing import Any, Dict, List, Optional, Callable
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
-T = TypeVar("T")
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class RetryStrategy(Enum):
-    """Retry strategy type."""
-    EXPONENTIAL = "exponential"
+class RetryStrategy(str, Enum):
+    """Retry strategies."""
+    FIXED = "fixed"
     LINEAR = "linear"
-    CONSTANT = "constant"
+    EXPONENTIAL = "exponential"
+    EXPONENTIAL_WITH_JITTER = "exponential_with_jitter"
     FIBONACCI = "fibonacci"
 
 
-class CircuitState(Enum):
-    """Circuit breaker state."""
+class CircuitState(str, Enum):
+    """Circuit states."""
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
 
 
-@dataclass
-class RetryConfig:
-    """Retry configuration."""
-    max_attempts: int = 3
-    initial_delay: float = 0.5
-    max_delay: float = 30.0
-    strategy: RetryStrategy = RetryStrategy.EXPONENTIAL
-    jitter: bool = True
-    jitter_factor: float = 0.1
-    retry_on: Optional[List[type]] = None
-    retry_on_messages: Optional[List[str]] = None
+class ApiRetryStrategyAction(BaseAction):
+    """Configurable retry strategies for API calls."""
+    action_type = "api_retry_strategy"
+    display_name = "API重试策略"
+    description = "可配置API重试策略"
 
+    def __init__(self):
+        super().__init__()
+        self._retry_stats: Dict[str, Dict] = {}
 
-@dataclass
-class CircuitBreakerConfig:
-    """Circuit breaker configuration."""
-    failure_threshold: int = 5
-    recovery_timeout: float = 60.0
-    half_open_attempts: int = 3
-    success_threshold: int = 2
-
-
-@dataclass
-class RetryStats:
-    """Retry statistics."""
-    total_attempts: int = 0
-    successful_retries: int = 0
-    failed_retries: int = 0
-    circuit_trips: int = 0
-
-
-class CircuitBreaker:
-    """Circuit breaker for API calls.
-
-    Example:
-        cb = CircuitBreaker(CircuitBreakerConfig(failure_threshold=5))
-        await cb.call(api_function, arg1, arg2)
-    """
-
-    def __init__(self, config: CircuitBreakerConfig) -> None:
-        self.config = config
-        self.state = CircuitState.CLOSED
-        self.failure_count = 0
-        self.success_count = 0
-        self.last_failure_time: Optional[float] = None
-        self.half_open_attempts = 0
-
-    async def call(
-        self,
-        func: Callable[..., T],
-        *args: Any,
-        **kwargs: Any,
-    ) -> T:
-        """Execute function with circuit breaker."""
-        if self.state == CircuitState.OPEN:
-            if self._should_attempt_reset():
-                self.state = CircuitState.HALF_OPEN
-                self.half_open_attempts = 0
-            else:
-                raise CircuitOpenError("Circuit breaker is OPEN")
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            if asyncio.iscoroutinefunction(func):
-                result = await func(*args, **kwargs)
-            else:
-                result = func(*args, **kwargs)
+            operation = params.get("operation", "retry")
+            endpoint = params.get("endpoint", "")
 
-            self._on_success()
-            return result
+            if operation == "retry":
+                max_attempts = params.get("max_attempts", 3)
+                strategy = params.get("strategy", RetryStrategy.EXPONENTIAL.value)
+                base_delay = params.get("base_delay", 1.0)
+                max_delay = params.get("max_delay", 60.0)
+                jitter = params.get("jitter", True)
+                retriable_errors = params.get("retriable_errors", [429, 500, 502, 503, 504])
+
+                attempt = 0
+                last_error = None
+
+                while attempt < max_attempts:
+                    attempt += 1
+
+                    attempt_result = params.get("simulate_result", True)
+                    error_code = params.get("simulate_error_code", None)
+
+                    if error_code and error_code in retriable_errors:
+                        last_error = f"HTTP {error_code}"
+                        delay = self._calculate_delay(attempt, strategy, base_delay, max_delay, jitter)
+                        if attempt < max_attempts:
+                            time.sleep(delay)
+                        continue
+
+                    if not attempt_result:
+                        last_error = "Simulated failure"
+                        delay = self._calculate_delay(attempt, strategy, base_delay, max_delay, jitter)
+                        if attempt < max_attempts:
+                            time.sleep(delay)
+                        continue
+
+                    return ActionResult(
+                        success=True,
+                        data={
+                            "endpoint": endpoint,
+                            "attempts": attempt,
+                            "strategy": strategy,
+                            "total_delay": self._sum_delays(attempt - 1, strategy, base_delay, max_delay, jitter)
+                        },
+                        message=f"Success on attempt {attempt}/{max_attempts}"
+                    )
+
+                return ActionResult(
+                    success=False,
+                    data={
+                        "endpoint": endpoint,
+                        "attempts": attempt,
+                        "strategy": strategy,
+                        "error": last_error
+                    },
+                    message=f"Failed after {attempt} attempts"
+                )
+
+            elif operation == "simulate":
+                results = []
+                for delay_type in [RetryStrategy.FIXED, RetryStrategy.LINEAR, RetryStrategy.EXPONENTIAL, RetryStrategy.EXPONENTIAL_WITH_JITTER]:
+                    delays = [self._calculate_delay(i, delay_type.value, 1.0, 60.0, True) for i in range(1, 6)]
+                    results.append({"strategy": delay_type.value, "delays": [round(d, 2) for d in delays]})
+
+                return ActionResult(success=True, data={"strategies": results})
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
         except Exception as e:
-            self._on_failure()
-            raise
+            return ActionResult(success=False, message=f"Retry strategy error: {str(e)}")
 
-    def _should_attempt_reset(self) -> bool:
-        """Check if should attempt reset."""
-        if self.last_failure_time is None:
-            return True
-        return time.time() - self.last_failure_time >= self.config.recovery_timeout
-
-    def _on_success(self) -> None:
-        """Handle successful call."""
-        self.failure_count = 0
-        if self.state == CircuitState.HALF_OPEN:
-            self.success_count += 1
-            if self.success_count >= self.config.success_threshold:
-                self.state = CircuitState.CLOSED
-                self.success_count = 0
-
-    def _on_failure(self) -> None:
-        """Handle failed call."""
-        self.failure_count += 1
-        self.last_failure_time = time.time()
-
-        if self.state == CircuitState.HALF_OPEN:
-            self.state = CircuitState.OPEN
-        elif self.failure_count >= self.config.failure_threshold:
-            self.state = CircuitState.OPEN
-
-
-class CircuitOpenError(Exception):
-    """Raised when circuit is open."""
-    pass
-
-
-class APIRetryAction:
-    """API Retry Handler with circuit breaker.
-
-    Example:
-        retry = APIRetryAction(
-            retry_config=RetryConfig(max_attempts=3),
-            circuit_config=CircuitBreakerConfig(failure_threshold=5)
-        )
-        result = await retry.execute(api_call_function, arg1, arg2)
-    """
-
-    def __init__(
-        self,
-        retry_config: Optional[RetryConfig] = None,
-        circuit_config: Optional[CircuitBreakerConfig] = None,
-    ) -> None:
-        self.retry_config = retry_config or RetryConfig()
-        self.circuit_config = circuit_config or CircuitBreakerConfig()
-        self.circuit_breaker = CircuitBreaker(self.circuit_config)
-        self.stats = RetryStats()
-        self._dedup_cache: Dict[str, float] = {}
-        self._dedup_ttl = 60.0
-
-    async def execute(
-        self,
-        func: Callable[..., T],
-        *args: Any,
-        dedup_key: Optional[str] = None,
-        **kwargs: Any,
-    ) -> T:
-        """Execute function with retry and circuit breaker.
-
-        Args:
-            func: Async or sync function to call
-            *args: Positional arguments for func
-            dedup_key: Optional deduplication key
-            **kwargs: Keyword arguments for func
-
-        Returns:
-            Result from func
-
-        Raises:
-            The last exception if all retries fail
-        """
-        if dedup_key and self._is_duplicate(dedup_key):
-            raise DuplicateRequestError(f"Duplicate request: {dedup_key}")
-
-        last_exception: Optional[Exception] = None
-        delay = self.retry_config.initial_delay
-
-        for attempt in range(1, self.retry_config.max_attempts + 1):
-            self.stats.total_attempts += 1
-
-            try:
-                result = await self.circuit_breaker.call(func, *args, **kwargs)
-                if attempt > 1:
-                    self.stats.successful_retries += 1
-                if dedup_key:
-                    self._mark_deduplicated(dedup_key)
-                return result
-
-            except Exception as e:
-                last_exception = e
-
-                if not self._should_retry(e):
-                    self.stats.failed_retries += 1
-                    raise
-
-                if attempt == self.retry_config.max_attempts:
-                    self.stats.failed_retries += 1
-                    break
-
-                await self._sleep(delay, attempt)
-                delay = self._next_delay(delay)
-
-        raise last_exception
-
-    def _should_retry(self, error: Exception) -> bool:
-        """Check if error is retryable."""
-        if self.retry_config.retry_on:
-            return any(isinstance(error, t) for t in self.retry_config.retry_on)
-
-        if self.retry_config.retry_on_messages:
-            msg = str(error)
-            return any(m in msg for m in self.retry_config.retry_on_messages)
-
-        return True
-
-    def _next_delay(self, current_delay: float) -> float:
-        """Calculate next delay based on strategy."""
-        strategy = self.retry_config.strategy
-        max_delay = self.retry_config.max_delay
-
-        if strategy == RetryStrategy.EXPONENTIAL:
-            delay = current_delay * 2
-        elif strategy == RetryStrategy.LINEAR:
-            delay = current_delay + self.retry_config.initial_delay
-        elif strategy == RetryStrategy.FIBONACCI:
-            delay = current_delay * 1.618
+    def _calculate_delay(self, attempt: int, strategy: str, base_delay: float, max_delay: float, jitter: bool) -> float:
+        if strategy == RetryStrategy.FIXED.value:
+            delay = base_delay
+        elif strategy == RetryStrategy.LINEAR.value:
+            delay = base_delay * attempt
+        elif strategy == RetryStrategy.EXPONENTIAL.value:
+            delay = base_delay * (2 ** (attempt - 1))
+        elif strategy == RetryStrategy.EXPONENTIAL_WITH_JITTER.value:
+            delay = base_delay * (2 ** (attempt - 1))
+        elif strategy == RetryStrategy.FIBONACCI.value:
+            fib = [1, 1, 2, 3, 5, 8]
+            delay = base_delay * (fib[min(attempt - 1, len(fib) - 1)])
         else:
-            delay = self.retry_config.initial_delay
+            delay = base_delay
 
-        if self.retry_config.jitter:
-            jitter_range = current_delay * self.retry_config.jitter_factor
-            delay += random.uniform(-jitter_range, jitter_range)
+        delay = min(delay, max_delay)
 
-        return min(delay, max_delay)
+        if jitter and strategy == RetryStrategy.EXPONENTIAL_WITH_JITTER.value:
+            delay = delay * (0.5 + random.random())
 
-    async def _sleep(self, delay: float, attempt: int) -> None:
-        """Sleep with jitter."""
-        if self.retry_config.jitter:
-            jitter = delay * self.retry_config.jitter_factor
-            delay += random.uniform(-jitter, jitter)
+        return delay
 
-        await asyncio.sleep(max(0.1, delay))
-
-    def _is_duplicate(self, key: str) -> bool:
-        """Check for duplicate request."""
-        if key not in self._dedup_cache:
-            return False
-        if time.time() > self._dedup_cache[key] + self._dedup_ttl:
-            del self._dedup_cache[key]
-            return False
-        return True
-
-    def _mark_deduplicated(self, key: str) -> None:
-        """Mark request as deduplicated."""
-        self._dedup_cache[key] = time.time()
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get retry statistics."""
-        return {
-            "total_attempts": self.stats.total_attempts,
-            "successful_retries": self.stats.successful_retries,
-            "failed_retries": self.stats.failed_retries,
-            "circuit_state": self.circuit_breaker.state.value,
-            "circuit_failures": self.circuit_breaker.failure_count,
-        }
+    def _sum_delays(self, attempts: int, strategy: str, base_delay: float, max_delay: float, jitter: bool) -> float:
+        total = 0
+        for i in range(1, attempts + 1):
+            total += self._calculate_delay(i, strategy, base_delay, max_delay, jitter)
+        return round(total, 2)
 
 
-class DuplicateRequestError(Exception):
-    """Raised for duplicate requests."""
-    pass
+class ApiBackoffAction(BaseAction):
+    """Exponential and linear backoff calculation."""
+    action_type = "api_backoff"
+    display_name = "API退避策略"
+    description = "退避时间计算"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "calculate")
+            attempt = params.get("attempt", 1)
+            base = params.get("base_delay", 1.0)
+            cap = params.get("cap", 60.0)
+
+            if operation == "calculate":
+                method = params.get("method", "exponential")
+                multiplier = params.get("multiplier", 1.0)
+
+                if method == "exponential":
+                    delay = min(cap, base * (2 ** (attempt - 1)) * multiplier)
+                elif method == "linear":
+                    delay = min(cap, base * attempt * multiplier)
+                elif method == "fibonacci":
+                    fib = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
+                    fib_val = fib[min(attempt - 1, len(fib) - 1)]
+                    delay = min(cap, base * fib_val * multiplier)
+                elif method == "constant":
+                    delay = min(cap, base * multiplier)
+                else:
+                    delay = base
+
+                return ActionResult(
+                    success=True,
+                    data={"attempt": attempt, "delay": round(delay, 3), "method": method},
+                    message=f"Backoff for attempt {attempt}: {delay:.2f}s ({method})"
+                )
+
+            elif operation == "sequence":
+                max_attempts = params.get("max_attempts", 10)
+                method = params.get("method", "exponential")
+                sequence = []
+                for i in range(1, max_attempts + 1):
+                    d = min(cap, base * (2 ** (i - 1)))
+                    sequence.append(round(d, 2))
+
+                return ActionResult(
+                    success=True,
+                    data={"sequence": sequence, "method": method, "total": round(sum(sequence), 2)}
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Backoff error: {str(e)}")
+
+
+class ApiTimeoutAction(BaseAction):
+    """Request timeout management."""
+    action_type = "api_timeout"
+    display_name = "API超时管理"
+    description = "请求超时处理"
+
+    def __init__(self):
+        super().__init__()
+        self._timeouts: Dict[str, Dict] = {}
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "manage")
+            endpoint = params.get("endpoint", "")
+
+            if operation == "set":
+                if not endpoint:
+                    return ActionResult(success=False, message="endpoint required")
+
+                connect_timeout = params.get("connect_timeout", 5.0)
+                read_timeout = params.get("read_timeout", 30.0)
+                write_timeout = params.get("write_timeout", 30.0)
+                total_timeout = params.get("total_timeout", 60.0)
+
+                self._timeouts[endpoint] = {
+                    "connect": connect_timeout,
+                    "read": read_timeout,
+                    "write": write_timeout,
+                    "total": total_timeout,
+                    "set_at": time.time()
+                }
+
+                return ActionResult(
+                    success=True,
+                    data={"endpoint": endpoint, "timeouts": self._timeouts[endpoint]},
+                    message=f"Timeouts set for '{endpoint}'"
+                )
+
+            elif operation == "get":
+                if endpoint not in self._timeouts:
+                    default_timeouts = {"connect": 5.0, "read": 30.0, "write": 30.0, "total": 60.0}
+                    return ActionResult(
+                        success=True,
+                        data={"endpoint": endpoint, "timeouts": default_timeouts, "source": "default"}
+                    )
+                return ActionResult(success=True, data={"endpoint": endpoint, "timeouts": self._timeouts[endpoint], "source": "custom"})
+
+            elif operation == "check":
+                timeout_config = self._timeouts.get(endpoint, {"connect": 5.0, "read": 30.0})
+                elapsed = params.get("elapsed", 0)
+
+                would_timeout = (
+                    elapsed > timeout_config.get("connect", 5.0) or
+                    elapsed > timeout_config.get("read", 30.0) or
+                    elapsed > timeout_config.get("total", 60.0)
+                )
+
+                return ActionResult(
+                    success=not would_timeout,
+                    data={"would_timeout": would_timeout, "elapsed": elapsed, "config": timeout_config}
+                )
+
+            elif operation == "list":
+                return ActionResult(success=True, data={"endpoints": list(self._timeouts.keys())})
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Timeout error: {str(e)}")
+
+
+class ApiCircuitBreakerAction(BaseAction):
+    """Circuit breaker pattern for API resilience."""
+    action_type = "api_circuit_breaker"
+    display_name = "API断路器"
+    description = "断路器模式"
+
+    def __init__(self):
+        super().__init__()
+        self._circuits: Dict[str, Dict] = {}
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "call")
+            service = params.get("service", "default")
+
+            if operation == "setup":
+                self._circuits[service] = {
+                    "state": CircuitState.CLOSED,
+                    "failure_count": 0,
+                    "success_count": 0,
+                    "last_failure_time": None,
+                    "failure_threshold": params.get("failure_threshold", 5),
+                    "timeout_seconds": params.get("timeout_seconds", 60),
+                    "half_open_max_calls": params.get("half_open_max_calls", 3),
+                    "half_open_calls": 0,
+                    "total_calls": 0,
+                    "total_failures": 0
+                }
+                return ActionResult(success=True, data={"service": service}, message=f"Circuit '{service}' set up")
+
+            elif operation == "call":
+                if service not in self._circuits:
+                    self._circuits[service] = {
+                        "state": CircuitState.CLOSED,
+                        "failure_count": 0,
+                        "success_count": 0,
+                        "last_failure_time": None,
+                        "failure_threshold": 5,
+                        "timeout_seconds": 60,
+                        "half_open_max_calls": 3,
+                        "half_open_calls": 0,
+                        "total_calls": 0,
+                        "total_failures": 0
+                    }
+
+                circuit = self._circuits[service]
+                circuit["total_calls"] += 1
+
+                if circuit["state"] == CircuitState.OPEN:
+                    if circuit["last_failure_time"]:
+                        elapsed = time.time() - circuit["last_failure_time"]
+                        if elapsed >= circuit["timeout_seconds"]:
+                            circuit["state"] = CircuitState.HALF_OPEN
+                            circuit["half_open_calls"] = 0
+                            return ActionResult(
+                                success=False,
+                                data={"state": CircuitState.HALF_OPEN.value, "reason": "timeout_expired"},
+                                message="Circuit half-open after timeout"
+                            )
+                    return ActionResult(
+                        success=False,
+                        data={"state": CircuitState.OPEN.value, "reason": "circuit_open"},
+                        message="Circuit open - call rejected"
+                    )
+
+                if circuit["state"] == CircuitState.HALF_OPEN:
+                    if circuit["half_open_calls"] >= circuit["half_open_max_calls"]:
+                        return ActionResult(
+                            success=False,
+                            data={"state": CircuitState.HALF_OPEN.value, "reason": "max_calls_reached"},
+                            message="Half-open calls exhausted"
+                        )
+                    circuit["half_open_calls"] += 1
+
+                success = params.get("success", True)
+                if success:
+                    circuit["success_count"] += 1
+                    if circuit["state"] == CircuitState.HALF_OPEN:
+                        circuit["state"] = CircuitState.CLOSED
+                        circuit["failure_count"] = 0
+                    return ActionResult(success=True, data={"state": circuit["state"].value}, message="Call succeeded")
+                else:
+                    circuit["failure_count"] += 1
+                    circuit["total_failures"] += 1
+                    circuit["last_failure_time"] = time.time()
+
+                    if circuit["failure_count"] >= circuit["failure_threshold"]:
+                        circuit["state"] = CircuitState.OPEN
+                    return ActionResult(success=False, data={"state": circuit["state"].value}, message="Call failed")
+
+            elif operation == "status":
+                if service not in self._circuits:
+                    return ActionResult(success=False, message=f"Circuit '{service}' not found")
+
+                circuit = self._circuits[service]
+                success_rate = circuit["total_calls"] - circuit["total_failures"]
+                success_rate = success_rate / circuit["total_calls"] if circuit["total_calls"] > 0 else 1.0
+
+                return ActionResult(
+                    success=True,
+                    data={
+                        "service": service,
+                        "state": circuit["state"].value,
+                        "total_calls": circuit["total_calls"],
+                        "total_failures": circuit["total_failures"],
+                        "success_rate": round(success_rate, 4),
+                        "failure_count": circuit["failure_count"],
+                        "last_failure": circuit["last_failure_time"]
+                    }
+                )
+
+            elif operation == "reset":
+                if service in self._circuits:
+                    self._circuits[service]["state"] = CircuitState.CLOSED
+                    self._circuits[service]["failure_count"] = 0
+                return ActionResult(success=True, message=f"Circuit '{service}' reset")
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Circuit breaker error: {str(e)}")
+
+
+class ApiFallbackAction(BaseAction):
+    """Fallback mechanisms for API failures."""
+    action_type = "api_fallback"
+    display_name = "API降级策略"
+    description = "API降级处理"
+
+    def __init__(self):
+        super().__init__()
+        self._fallback_map: Dict[str, Dict] = {}
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "handle")
+            endpoint = params.get("endpoint", "")
+
+            if operation == "register":
+                if not endpoint:
+                    return ActionResult(success=False, message="endpoint required")
+
+                self._fallback_map[endpoint] = {
+                    "fallback_type": params.get("fallback_type", "static"),
+                    "fallback_value": params.get("fallback_value"),
+                    "fallback_endpoint": params.get("fallback_endpoint"),
+                    "cache_ttl": params.get("cache_ttl", 300),
+                    "last_cached": None,
+                    "cached_value": None,
+                    "created_at": time.time()
+                }
+
+                return ActionResult(success=True, data={"endpoint": endpoint}, message=f"Fallback registered for '{endpoint}'")
+
+            elif operation == "handle":
+                if endpoint not in self._fallback_map:
+                    return ActionResult(success=False, message=f"No fallback for '{endpoint}'")
+
+                fb = self._fallback_map[endpoint]
+                primary_success = params.get("primary_success", False)
+
+                if primary_success:
+                    result = params.get("primary_result")
+                    fb["cached_value"] = result
+                    fb["last_cached"] = time.time()
+                    return ActionResult(
+                        success=True,
+                        data={"source": "primary", "cached": False},
+                        message="Primary succeeded, result cached"
+                    )
+
+                fb_type = fb["fallback_type"]
+                if fb_type == "static":
+                    return ActionResult(
+                        success=True,
+                        data={"source": "fallback", "fallback_type": "static", "value": fb["fallback_value"]},
+                        message="Fallback: returning static value"
+                    )
+                elif fb_type == "cached":
+                    if fb["cached_value"] and fb["last_cached"]:
+                        age = time.time() - fb["last_cached"]
+                        if age < fb["cache_ttl"]:
+                            return ActionResult(
+                                success=True,
+                                data={"source": "fallback", "fallback_type": "cached", "value": fb["cached_value"], "cache_age": round(age, 1)},
+                                message=f"Fallback: returning cached value (age={age:.1f}s)"
+                            )
+                    return ActionResult(success=False, data={"source": "fallback", "fallback_type": "cached", "reason": "cache_expired_or_empty"}, message="Fallback: cache expired")
+                elif fb_type == "alternative":
+                    return ActionResult(
+                        success=True,
+                        data={"source": "fallback", "fallback_type": "alternative", "alt_endpoint": fb["fallback_endpoint"]},
+                        message=f"Fallback: redirect to {fb['fallback_endpoint']}"
+                    )
+
+                return ActionResult(success=False, message="Fallback exhausted")
+
+            elif operation == "list":
+                return ActionResult(success=True, data={"endpoints": list(self._fallback_map.keys())})
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Fallback error: {str(e)}")
