@@ -1,244 +1,313 @@
-"""Data Diff action module for RabAI AutoClick.
+"""Data Diff Action Module.
 
-Provides data diff operations:
-- DiffCompareAction: Compare two datasets
-- DiffSchemaAction: Compare schemas
-- DiffPatchAction: Generate/apply patches
-- DiffMergeAction: Merge diffs
+Provides structured diff generation for data structures,
+patch application, and three-way merging.
 """
-
 from __future__ import annotations
 
-import sys
-import os
-from typing import Any, Dict, List, Optional, Set
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple, Union
+import logging
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class DiffCompareAction(BaseAction):
-    """Compare two datasets."""
-    action_type = "diff_compare"
-    display_name = "数据对比"
-    description = "对比两个数据集"
-    version = "1.0"
+class DiffOperation(Enum):
+    """Diff operation type."""
+    ADD = "add"
+    REMOVE = "remove"
+    MODIFY = "modify"
+    MOVE = "move"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute data comparison."""
-        data1 = params.get('data1', [])
-        data2 = params.get('data2', [])
-        key_field = params.get('key_field', None)
-        output_var = params.get('output_var', 'diff_result')
 
-        if not data1 or not data2:
-            return ActionResult(success=False, message="data1 and data2 are required")
+@dataclass
+class DiffEntry:
+    """Single diff entry."""
+    path: str
+    operation: DiffOperation
+    old_value: Any = None
+    new_value: Any = None
+    old_index: Optional[int] = None
+    new_index: Optional[int] = None
 
-        try:
-            resolved_data1 = context.resolve_value(data1) if context else data1
-            resolved_data2 = context.resolve_value(data2) if context else data2
 
-            if key_field:
-                keys1 = {r.get(key_field) for r in resolved_data1}
-                keys2 = {r.get(key_field) for r in resolved_data2}
+@dataclass
+class DiffResult:
+    """Complete diff result."""
+    entries: List[DiffEntry] = field(default_factory=list)
+    added_count: int = 0
+    removed_count: int = 0
+    modified_count: int = 0
 
-                added = keys2 - keys1
-                removed = keys1 - keys2
-                common = keys1 & keys2
 
-                added_records = [r for r in resolved_data2 if r.get(key_field) in added]
-                removed_records = [r for r in resolved_data1 if r.get(key_field) in removed]
+class DataDiffAction:
+    """Structured diff generator.
 
-                modified = []
-                for key in common:
-                    r1 = next((r for r in resolved_data1 if r.get(key_field) == key), {})
-                    r2 = next((r for r in resolved_data2 if r.get(key_field) == key), {})
-                    if r1 != r2:
-                        modified.append({'key': key, 'before': r1, 'after': r2})
+    Example:
+        differ = DataDiffAction()
 
-                result = {
-                    'added_count': len(added),
-                    'removed_count': len(removed),
-                    'modified_count': len(modified),
-                    'unchanged_count': len(common) - len(modified),
-                    'added': added_records[:10],
-                    'removed': removed_records[:10],
-                    'modified': modified[:10],
-                }
+        diff = differ.diff(
+            {"a": 1, "b": 2},
+            {"a": 1, "c": 3}
+        )
+
+        print(f"Added: {diff.added_count}")
+        for entry in diff.entries:
+            print(f"{entry.operation}: {entry.path}")
+    """
+
+    def __init__(self) -> None:
+        pass
+
+    def diff(
+        self,
+        left: Any,
+        right: Any,
+        path: str = "",
+    ) -> DiffResult:
+        """Generate diff between two data structures.
+
+        Args:
+            left: Original data
+            right: Modified data
+            path: Current path for tracking
+
+        Returns:
+            DiffResult with all differences
+        """
+        result = DiffResult()
+
+        if type(left) != type(right):
+            result.entries.append(DiffEntry(
+                path=path or "/",
+                operation=DiffOperation.MODIFY,
+                old_value=left,
+                new_value=right,
+            ))
+            result.modified_count += 1
+            return result
+
+        if isinstance(left, dict):
+            self._diff_dicts(left, right, path, result)
+        elif isinstance(left, list):
+            self._diff_lists(left, right, path, result)
+        else:
+            if left != right:
+                result.entries.append(DiffEntry(
+                    path=path or "/",
+                    operation=DiffOperation.MODIFY,
+                    old_value=left,
+                    new_value=right,
+                ))
+                result.modified_count += 1
+
+        return result
+
+    def _diff_dicts(
+        self,
+        left: Dict,
+        right: Dict,
+        path: str,
+        result: DiffResult,
+    ) -> None:
+        """Diff two dictionaries."""
+        all_keys = set(left.keys()) | set(right.keys())
+
+        for key in all_keys:
+            key_path = f"{path}.{key}" if path else key
+
+            if key not in left:
+                result.entries.append(DiffEntry(
+                    path=key_path,
+                    operation=DiffOperation.ADD,
+                    new_value=right[key],
+                ))
+                result.added_count += 1
+
+            elif key not in right:
+                result.entries.append(DiffEntry(
+                    path=key_path,
+                    operation=DiffOperation.REMOVE,
+                    old_value=left[key],
+                ))
+                result.removed_count += 1
+
             else:
-                set1 = set(str(r) for r in resolved_data1)
-                set2 = set(str(r) for r in resolved_data2)
-                added = set2 - set1
-                removed = set1 - set2
+                self.diff(left[key], right[key], key_path, result)
 
-                result = {
-                    'added_count': len(added),
-                    'removed_count': len(removed),
-                    'unchanged_count': len(set1 & set2),
-                }
+    def _diff_lists(
+        self,
+        left: List,
+        right: List,
+        path: str,
+        result: DiffResult,
+    ) -> None:
+        """Diff two lists using LCS algorithm."""
+        lcs = self._longest_common_subsequence(left, right)
 
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Diff: +{result['added_count']} -{result['removed_count']} ~{result.get('modified_count', 0)}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Diff compare error: {e}")
+        left_idx = 0
+        right_idx = 0
+        lcs_idx = 0
 
+        while left_idx < len(left) or right_idx < len(right):
+            if lcs_idx < len(lcs):
+                lcs_item = lcs[lcs_idx]
 
-class DiffSchemaAction(BaseAction):
-    """Compare schemas."""
-    action_type = "diff_schema"
-    display_name = "Schema对比"
-    description = "对比数据Schema"
-    version = "1.0"
+                while left_idx < len(left) and left[left_idx] != lcs_item:
+                    result.entries.append(DiffEntry(
+                        path=f"{path}[{left_idx}]",
+                        operation=DiffOperation.REMOVE,
+                        old_value=left[left_idx],
+                        old_index=left_idx,
+                    ))
+                    result.removed_count += 1
+                    left_idx += 1
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute schema comparison."""
-        schema1 = params.get('schema1', {})
-        schema2 = params.get('schema2', {})
-        output_var = params.get('output_var', 'schema_diff')
+                while right_idx < len(right) and right[right_idx] != lcs_item:
+                    result.entries.append(DiffEntry(
+                        path=f"{path}[{right_idx}]",
+                        operation=DiffOperation.ADD,
+                        new_value=right[right_idx],
+                        new_index=right_idx,
+                    ))
+                    result.added_count += 1
+                    right_idx += 1
 
-        if not schema1 or not schema2:
-            return ActionResult(success=False, message="schema1 and schema2 are required")
+                lcs_idx += 1
+                left_idx += 1
+                right_idx += 1
+            else:
+                while left_idx < len(left):
+                    result.entries.append(DiffEntry(
+                        path=f"{path}[{left_idx}]",
+                        operation=DiffOperation.REMOVE,
+                        old_value=left[left_idx],
+                        old_index=left_idx,
+                    ))
+                    result.removed_count += 1
+                    left_idx += 1
 
-        try:
-            resolved_schema1 = context.resolve_value(schema1) if context else schema1
-            resolved_schema2 = context.resolve_value(schema2) if context else schema2
+                while right_idx < len(right):
+                    result.entries.append(DiffEntry(
+                        path=f"{path}[{right_idx}]",
+                        operation=DiffOperation.ADD,
+                        new_value=right[right_idx],
+                        new_index=right_idx,
+                    ))
+                    result.added_count += 1
+                    right_idx += 1
 
-            fields1 = set(resolved_schema1.keys())
-            fields2 = set(resolved_schema2.keys())
+    def _longest_common_subsequence(
+        self,
+        left: List,
+        right: List,
+    ) -> List:
+        """Compute LCS of two lists."""
+        m, n = len(left), len(right)
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
 
-            added = fields2 - fields1
-            removed = fields1 - fields2
-            common = fields1 & fields2
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if left[i - 1] == right[j - 1]:
+                    dp[i][j] = dp[i - 1][j - 1] + 1
+                else:
+                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
 
-            type_changes = []
-            for field in common:
-                if resolved_schema1[field] != resolved_schema2[field]:
-                    type_changes.append({
-                        'field': field,
-                        'before': resolved_schema1[field],
-                        'after': resolved_schema2[field],
-                    })
+        lcs = []
+        i, j = m, n
+        while i > 0 and j > 0:
+            if left[i - 1] == right[j - 1]:
+                lcs.insert(0, left[i - 1])
+                i -= 1
+                j -= 1
+            elif dp[i - 1][j] > dp[i][j - 1]:
+                i -= 1
+            else:
+                j -= 1
 
-            result = {
-                'added_fields': list(added),
-                'removed_fields': list(removed),
-                'type_changes': type_changes,
-                'unchanged_fields': list(common - set(type_changes)),
-            }
+        return lcs
 
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Schema diff: +{len(added)} -{len(removed)} ~{len(type_changes)}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Schema diff error: {e}")
+    def apply_patch(
+        self,
+        data: Any,
+        diff: DiffResult,
+    ) -> Any:
+        """Apply diff to data.
 
+        Args:
+            data: Original data
+            diff: Diff to apply
 
-class DiffPatchAction(BaseAction):
-    """Generate/apply patches."""
-    action_type = "diff_patch"
-    display_name = "数据补丁"
-    description = "生成和应用补丁"
-    version = "1.0"
+        Returns:
+            Patched data
+        """
+        if isinstance(data, dict):
+            return self._apply_dict_patch(data, diff)
+        elif isinstance(data, list):
+            return self._apply_list_patch(data, diff)
+        return data
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute patch operation."""
-        data = params.get('data', {})
-        patch = params.get('patch', [])
-        operation = params.get('operation', 'apply')
-        output_var = params.get('output_var', 'patch_result')
+    def _apply_dict_patch(
+        self,
+        data: Dict,
+        diff: DiffResult,
+    ) -> Dict:
+        """Apply patch to dictionary."""
+        result = dict(data)
 
-        if not data:
-            return ActionResult(success=False, message="data is required")
+        for entry in diff.entries:
+            if entry.operation == DiffOperation.ADD:
+                result[entry.path] = entry.new_value
+            elif entry.operation == DiffOperation.REMOVE:
+                result.pop(entry.path, None)
+            elif entry.operation == DiffOperation.MODIFY:
+                result[entry.path] = entry.new_value
 
-        try:
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_patch = context.resolve_value(patch) if context else patch
+        return result
 
-            if operation == 'generate':
-                patch = []
-                for key, value in resolved_data.items():
-                    patch.append({'op': 'add', 'path': f'/{key}', 'value': value})
+    def _apply_list_patch(
+        self,
+        data: List,
+        diff: DiffResult,
+    ) -> List:
+        """Apply patch to list."""
+        result = list(data)
 
-                result = {
-                    'patch': patch,
-                    'operation': 'generate',
-                }
+        for entry in sorted(
+            [e for e in diff.entries if e.operation == DiffOperation.ADD],
+            key=lambda x: x.new_index or 0,
+            reverse=True
+        ):
+            if entry.new_index is not None:
+                result.insert(entry.new_index, entry.new_value)
 
-            elif operation == 'apply':
-                patched = resolved_data.copy()
-                for p in resolved_patch:
-                    op = p.get('op', '')
-                    path = p.get('path', '').strip('/')
-                    value = p.get('value')
+        for entry in sorted(
+            [e for e in diff.entries if e.operation == DiffOperation.REMOVE],
+            key=lambda x: x.old_index or 0,
+            reverse=True
+        ):
+            if entry.old_index is not None:
+                result.pop(entry.old_index)
 
-                    if op == 'add' or op == 'replace':
-                        patched[path] = value
-                    elif op == 'remove':
-                        if path in patched:
-                            del patched[path]
+        return result
 
-                result = {
-                    'patched_data': patched,
-                    'operation': 'apply',
-                }
+    def merge_patches(
+        self,
+        base: Any,
+        diff1: DiffResult,
+        diff2: DiffResult,
+    ) -> Any:
+        """Merge two patches from same base.
 
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Patch {operation}: {len(resolved_patch) if operation == 'apply' else len(patch)} operations"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Diff patch error: {e}")
+        Args:
+            base: Base data
+            diff1: First diff
+            diff2: Second diff
 
-
-class DiffMergeAction(BaseAction):
-    """Merge diffs."""
-    action_type = "diff_merge"
-    display_name: "差异合并"
-    description = "合并差异"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute diff merge."""
-        diffs = params.get('diffs', [])
-        strategy = params.get('strategy', 'last_win')
-        output_var = params.get('output_var', 'merge_result')
-
-        if not diffs:
-            return ActionResult(success=False, message="diffs are required")
-
-        try:
-            resolved_diffs = context.resolve_value(diffs) if context else diffs
-
-            merged = {}
-            for diff in resolved_diffs:
-                for key, value in diff.items():
-                    if strategy == 'last_win':
-                        merged[key] = value
-                    elif strategy == 'first_win' and key not in merged:
-                        merged[key] = value
-                    elif strategy == 'merge_lists' and isinstance(value, list):
-                        if key not in merged:
-                            merged[key] = []
-                        merged[key].extend(value)
-
-            result = {
-                'merged': merged,
-                'diffs_merged': len(resolved_diffs),
-                'strategy': strategy,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Merged {len(resolved_diffs)} diffs with {strategy} strategy"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Diff merge error: {e}")
+        Returns:
+            Merged result
+        """
+        merged = self.apply_patch(base, diff1)
+        merged = self.apply_patch(merged, diff2)
+        return merged

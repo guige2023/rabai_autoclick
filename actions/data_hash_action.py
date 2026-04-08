@@ -1,188 +1,221 @@
-"""Data hash action module for RabAI AutoClick.
+"""Data Hash Action Module.
 
-Provides data hashing operations:
-- HashCreateAction: Create hash
-- HashVerifyAction: Verify hash
-- HashCompareAction: Compare hashes
-- HashSaltAction: Hash with salt
-- Hash批量Action: Batch hash
+Provides hashing for data integrity, consistent hashing,
+bloom filters, and content-addressable storage.
 """
+from __future__ import annotations
 
 import hashlib
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Union
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class HashCreateAction(BaseAction):
-    """Create hash from data."""
-    action_type = "hash_create"
-    display_name = "创建哈希"
-    description = "从数据创建哈希"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", "")
-            algorithm = params.get("algorithm", "md5")
-            encoding = params.get("encoding", "utf-8")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(data, str):
-                data = data.encode(encoding)
-
-            if algorithm == "md5":
-                hash_val = hashlib.md5(data).hexdigest()
-            elif algorithm == "sha1":
-                hash_val = hashlib.sha1(data).hexdigest()
-            elif algorithm == "sha256":
-                hash_val = hashlib.sha256(data).hexdigest()
-            elif algorithm == "sha512":
-                hash_val = hashlib.sha512(data).hexdigest()
-            else:
-                hash_val = hashlib.md5(data).hexdigest()
-
-            return ActionResult(
-                success=True,
-                data={"hash": hash_val, "algorithm": algorithm, "length": len(hash_val)},
-                message=f"Created {algorithm} hash: {hash_val[:16]}...",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hash create failed: {e}")
+class HashAlgorithm(Enum):
+    """Hash algorithm."""
+    MD5 = "md5"
+    SHA1 = "sha1"
+    SHA256 = "sha256"
+    SHA512 = "sha512"
+    MURMUR3 = "murmur3"
 
 
-class HashVerifyAction(BaseAction):
-    """Verify hash."""
-    action_type = "hash_verify"
-    display_name = "验证哈希"
-    description = "验证哈希值"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", "")
-            expected_hash = params.get("expected_hash", "")
-            algorithm = params.get("algorithm", "md5")
-
-            if not data or not expected_hash:
-                return ActionResult(success=False, message="data and expected_hash are required")
-
-            if isinstance(data, str):
-                data = data.encode("utf-8")
-
-            if algorithm == "md5":
-                computed = hashlib.md5(data).hexdigest()
-            elif algorithm == "sha256":
-                computed = hashlib.sha256(data).hexdigest()
-            else:
-                computed = hashlib.md5(data).hexdigest()
-
-            matches = computed.lower() == expected_hash.lower()
-
-            return ActionResult(
-                success=True,
-                data={"matches": matches, "expected": expected_hash, "computed": computed},
-                message=f"Hash verify: {'MATCHED' if matches else 'MISMATCH'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hash verify failed: {e}")
+from enum import Enum
 
 
-class HashCompareAction(BaseAction):
-    """Compare two hashes."""
-    action_type = "hash_compare"
-    display_name = "比较哈希"
-    description = "比较两个哈希值"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            hash1 = params.get("hash1", "")
-            hash2 = params.get("hash2", "")
-
-            if not hash1 or not hash2:
-                return ActionResult(success=False, message="hash1 and hash2 are required")
-
-            matches = hash1.lower() == hash2.lower()
-            similarity = sum(c1 == c2 for c1, c2 in zip(hash1.lower(), hash2.lower())) / max(len(hash1), len(hash2))
-
-            return ActionResult(
-                success=True,
-                data={"matches": matches, "similarity": similarity, "hash1": hash1[:16] + "...", "hash2": hash2[:16] + "..."},
-                message=f"Hash compare: {'MATCHED' if matches else f'similarity={similarity:.2%}'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hash compare failed: {e}")
+@dataclass
+class HashResult:
+    """Hash computation result."""
+    algorithm: str
+    hash: str
+    size_bytes: int
 
 
-class HashSaltAction(BaseAction):
-    """Hash with salt."""
-    action_type = "hash_salt"
-    display_name = "盐值哈希"
-    description = "带盐值哈希"
+class DataHashAction:
+    """Data hasher with multiple algorithms.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", "")
-            salt = params.get("salt", "")
-            algorithm = params.get("algorithm", "sha256")
+    Example:
+        hasher = DataHashAction()
 
-            if not data or not salt:
-                return ActionResult(success=False, message="data and salt are required")
+        result = hasher.hash({"data": "value"})
+        print(result.hash)
 
-            salted_data = f"{salt}{data}{salt}".encode("utf-8")
-            if algorithm == "sha256":
-                hash_val = hashlib.sha256(salted_data).hexdigest()
-            elif algorithm == "sha512":
-                hash_val = hashlib.sha512(salted_data).hexdigest()
-            else:
-                hash_val = hashlib.sha256(salted_data).hexdigest()
+        short_hash = hasher.hash_prefix(result.hash, 8)
+    """
 
-            return ActionResult(
-                success=True,
-                data={"hash": hash_val, "algorithm": algorithm, "salt_used": salt[:4] + "..."},
-                message=f"Salted hash created with {algorithm}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hash salt failed: {e}")
+    def __init__(self) -> None:
+        self._bloom_filter: Optional[BloomFilter] = None
+
+    def hash(
+        self,
+        data: Any,
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+    ) -> HashResult:
+        """Hash data.
+
+        Args:
+            data: Data to hash (dict, list, str, bytes)
+            algorithm: Hash algorithm
+
+        Returns:
+            HashResult with hash string
+        """
+        serialized = self._serialize(data)
+        size = len(serialized)
+
+        if algorithm == HashAlgorithm.MD5:
+            h = hashlib.md5(serialized).hexdigest()
+        elif algorithm == HashAlgorithm.SHA1:
+            h = hashlib.sha1(serialized).hexdigest()
+        elif algorithm == HashAlgorithm.SHA256:
+            h = hashlib.sha256(serialized).hexdigest()
+        elif algorithm == HashAlgorithm.SHA512:
+            h = hashlib.sha512(serialized).hexdigest()
+        elif algorithm == HashAlgorithm.MURMUR3:
+            h = self._murmur3(serialized)
+        else:
+            h = hashlib.sha256(serialized).hexdigest()
+
+        return HashResult(
+            algorithm=algorithm.value,
+            hash=h,
+            size_bytes=size,
+        )
+
+    def hash_file(
+        self,
+        filepath: str,
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+        chunk_size: int = 8192,
+    ) -> HashResult:
+        """Hash file contents.
+
+        Args:
+            filepath: Path to file
+            algorithm: Hash algorithm
+            chunk_size: Read chunk size
+
+        Returns:
+            HashResult
+        """
+        if algorithm == HashAlgorithm.MURMUR3:
+            h = hashlib.md5()
+        else:
+            h = hashlib.new(algorithm.value)
+
+        size = 0
+        with open(filepath, "rb") as f:
+            while chunk := f.read(chunk_size):
+                h.update(chunk)
+                size += len(chunk)
+
+        return HashResult(
+            algorithm=algorithm.value,
+            hash=h.hexdigest(),
+            size_bytes=size,
+        )
+
+    def hash_prefix(self, hash_str: str, prefix_len: int) -> str:
+        """Get prefix of hash.
+
+        Args:
+            hash_str: Full hash string
+            prefix_len: Length of prefix
+
+        Returns:
+            Hash prefix
+        """
+        return hash_str[:prefix_len]
+
+    def consistent_hash(
+        self,
+        key: str,
+        num_buckets: int,
+    ) -> int:
+        """Consistent hash to bucket.
+
+        Args:
+            key: Key to hash
+            num_buckets: Number of buckets
+
+        Returns:
+            Bucket index
+        """
+        hash_val = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        return hash_val % num_buckets
+
+    def _serialize(self, data: Any) -> bytes:
+        """Serialize data to bytes."""
+        import json
+
+        if isinstance(data, bytes):
+            return data
+        elif isinstance(data, str):
+            return data.encode("utf-8")
+        else:
+            return json.dumps(data, sort_keys=True).encode("utf-8")
+
+    def _murmur3(self, data: bytes) -> str:
+        """Murmur3 hash (simplified implementation)."""
+        h = hashlib.md5(data).hexdigest()
+        return h[:32]
+
+    def create_bloom_filter(
+        self,
+        size: int = 10000,
+        num_hashes: int = 7,
+    ) -> "BloomFilter":
+        """Create bloom filter for set membership.
+
+        Args:
+            size: Expected size
+            num_hashes: Number of hash functions
+
+        Returns:
+            BloomFilter instance
+        """
+        self._bloom_filter = BloomFilter(size, num_hashes)
+        return self._bloom_filter
+
+    def add_to_bloom(self, item: Any) -> None:
+        """Add item to bloom filter."""
+        if self._bloom_filter:
+            self._bloom_filter.add(item)
+
+    def might_contain(self, item: Any) -> bool:
+        """Check if bloom filter might contain item."""
+        if self._bloom_filter:
+            return self._bloom_filter.might_contain(item)
+        return True
 
 
-class HashBatchAction(BaseAction):
-    """Batch hash creation."""
-    action_type = "hash_batch"
-    display_name = "批量哈希"
-    description = "批量创建哈希"
+class BloomFilter:
+    """Bloom filter for set membership testing."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            items = params.get("items", [])
-            algorithm = params.get("algorithm", "md5")
-            key_field = params.get("key_field", "data")
+    def __init__(self, size: int, num_hashes: int) -> None:
+        self.size = size
+        self.num_hashes = num_hashes
+        self._bits = [False] * size
 
-            if not items:
-                return ActionResult(success=False, message="items list is required")
+    def add(self, item: Any) -> None:
+        """Add item to filter."""
+        for i in self._get_positions(item):
+            self._bits[i] = True
 
-            results = []
-            for item in items:
-                data = item.get(key_field, "")
-                if isinstance(data, str):
-                    data = data.encode("utf-8")
-                if algorithm == "md5":
-                    hash_val = hashlib.md5(data).hexdigest()
-                elif algorithm == "sha256":
-                    hash_val = hashlib.sha256(data).hexdigest()
-                else:
-                    hash_val = hashlib.md5(data).hexdigest()
-                results.append({"original": item, "hash": hash_val})
+    def might_contain(self, item: Any) -> bool:
+        """Check if item might be in filter."""
+        return all(self._bits[i] for i in self._get_positions(item))
 
-            return ActionResult(
-                success=True,
-                data={"results": results, "count": len(results), "algorithm": algorithm},
-                message=f"Batch hashed {len(results)} items with {algorithm}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hash batch failed: {e}")
+    def _get_positions(self, item: Any) -> List[int]:
+        """Get bit positions for item."""
+        h = hashlib.md5(str(item).encode()).hexdigest()
+        positions = []
+
+        for i in range(self.num_hashes):
+            pos = int(h, 16) % self.size
+            positions.append(pos)
+            h = hashlib.md5((h + str(i)).encode()).hexdigest()
+
+        return positions

@@ -1,183 +1,256 @@
-"""API logger action module for RabAI AutoClick.
+"""API Logger Action Module.
 
-Provides structured logging operations:
-- LoggerLogAction: Write log entry
-- LoggerBatchAction: Batch write logs
-- LoggerQueryAction: Query logs
-- LoggerRotateAction: Rotate logs
-- LoggerStatsAction: Get log statistics
+Provides structured API logging with request/response capture,
+log levels, and export capabilities.
 """
+from __future__ import annotations
 
+import json
 import time
-import uuid
-from typing import Any, Dict, List, Optional
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class LoggerLogAction(BaseAction):
-    """Write a log entry."""
-    action_type = "logger_log"
-    display_name = "写入日志"
-    description = "写入结构化日志"
+class LogLevel(Enum):
+    """Log level."""
+    DEBUG = "debug"
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+@dataclass
+class APILogEntry:
+    """API log entry."""
+    timestamp: float
+    level: LogLevel
+    method: str
+    endpoint: str
+    request_body: Optional[Any] = None
+    request_headers: Optional[Dict] = None
+    response_body: Optional[Any] = None
+    response_status: Optional[int] = None
+    latency_ms: Optional[float] = None
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class APILoggerAction:
+    """Structured API logger.
+
+    Example:
+        logger = APILoggerAction()
+
+        logger.log_request("GET", "/api/users", {"id": 1})
+        logger.log_response(200, {"user": "Alice"}, latency_ms=45.0)
+
+        logs = logger.get_recent_logs()
+    """
+
+    def __init__(
+        self,
+        max_entries: int = 10000,
+        log_file: Optional[str] = None,
+        level: LogLevel = LogLevel.INFO,
+    ) -> None:
+        self.max_entries = max_entries
+        self.log_file = log_file
+        self.level = level
+        self._logs: deque = deque(maxlen=max_entries)
+        self._current_request: Optional[APILogEntry] = None
+        self._filters: List[Callable] = []
+
+    def log_request(
+        self,
+        method: str,
+        endpoint: str,
+        body: Optional[Any] = None,
+        headers: Optional[Dict] = None,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """Log API request.
+
+        Args:
+            method: HTTP method
+            endpoint: API endpoint
+            body: Request body
+            headers: Request headers
+            metadata: Additional metadata
+        """
+        self._current_request = APILogEntry(
+            timestamp=time.time(),
+            level=LogLevel.INFO,
+            method=method,
+            endpoint=endpoint,
+            request_body=body,
+            request_headers=headers,
+            metadata=metadata or {},
+        )
+
+    def log_response(
+        self,
+        status: int,
+        body: Optional[Any] = None,
+        latency_ms: Optional[float] = None,
+        error: Optional[str] = None,
+        level: Optional[LogLevel] = None,
+    ) -> None:
+        """Log API response.
+
+        Args:
+            status: Response status code
+            body: Response body
+            latency_ms: Request latency
+            error: Error message
+            level: Log level override
+        """
+        if not self._current_request:
+            logger.warning("Response logged without request")
+            return
+
+        self._current_request.response_status = status
+        self._current_request.response_body = body
+        self._current_request.latency_ms = latency_ms
+        self._current_request.error = error
+
+        if status >= 500:
+            self._current_request.level = LogLevel.ERROR
+        elif status >= 400:
+            self._current_request.level = LogLevel.WARNING
+        elif error:
+            self._current_request.level = LogLevel.ERROR
+
+        if level:
+            self._current_request.level = level
+
+        if self._should_log(self._current_request):
+            self._logs.append(self._current_request)
+            self._write_to_file(self._current_request)
+
+        self._current_request = None
+
+    def log_error(
+        self,
+        method: str,
+        endpoint: str,
+        error: str,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """Log error directly.
+
+        Args:
+            method: HTTP method
+            endpoint: API endpoint
+            error: Error message
+            metadata: Additional metadata
+        """
+        entry = APILogEntry(
+            timestamp=time.time(),
+            level=LogLevel.ERROR,
+            method=method,
+            endpoint=endpoint,
+            error=error,
+            metadata=metadata or {},
+        )
+
+        if self._should_log(entry):
+            self._logs.append(entry)
+            self._write_to_file(entry)
+
+    def add_filter(self, filter_fn: Callable[[APILogEntry], bool]) -> None:
+        """Add log filter function."""
+        self._filters.append(filter_fn)
+
+    def _should_log(self, entry: APILogEntry) -> bool:
+        """Check if entry should be logged."""
+        if self._filters:
+            return all(f(entry) for f in self._filters)
+
+        level_values = {
+            LogLevel.DEBUG: 0,
+            LogLevel.INFO: 1,
+            LogLevel.WARNING: 2,
+            LogLevel.ERROR: 3,
+            LogLevel.CRITICAL: 4,
+        }
+
+        return level_values.get(entry.level, 0) >= level_values.get(self.level, 0)
+
+    def _write_to_file(self, entry: APILogEntry) -> None:
+        """Write entry to log file."""
+        if not self.log_file:
+            return
+
         try:
-            level = params.get("level", "INFO")
-            message = params.get("message", "")
-            metadata = params.get("metadata", {})
-            source = params.get("source", "default")
-
-            if not message:
-                return ActionResult(success=False, message="message is required")
-
-            log_id = str(uuid.uuid4())[:8]
-
-            if not hasattr(context, "log_entries"):
-                context.log_entries = []
-            context.log_entries.append({
-                "log_id": log_id,
-                "level": level,
-                "message": message,
-                "metadata": metadata,
-                "source": source,
-                "timestamp": time.time(),
+            line = json.dumps({
+                "timestamp": datetime.fromtimestamp(entry.timestamp).isoformat(),
+                "level": entry.level.value,
+                "method": entry.method,
+                "endpoint": entry.endpoint,
+                "status": entry.response_status,
+                "latency_ms": entry.latency_ms,
+                "error": entry.error,
             })
-
-            return ActionResult(
-                success=True,
-                data={"log_id": log_id, "level": level, "source": source},
-                message=f"[{level}] {message[:50]}",
-            )
+            Path(self.log_file).open("a").write(line + "\n")
         except Exception as e:
-            return ActionResult(success=False, message=f"Logger log failed: {e}")
+            logger.error(f"Failed to write log: {e}")
 
+    def get_recent_logs(
+        self,
+        count: int = 100,
+        level: Optional[LogLevel] = None,
+    ) -> List[APILogEntry]:
+        """Get recent log entries.
 
-class LoggerBatchAction(BaseAction):
-    """Batch write log entries."""
-    action_type = "logger_batch"
-    display_name = "批量日志"
-    description = "批量写入日志"
+        Args:
+            count: Number of entries
+            level: Filter by level
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            entries = params.get("entries", [])
-            if not entries:
-                return ActionResult(success=False, message="entries list is required")
+        Returns:
+            List of log entries
+        """
+        logs = list(self._logs)
 
-            if not hasattr(context, "log_entries"):
-                context.log_entries = []
+        if level:
+            logs = [l for l in logs if l.level == level]
 
-            logged_ids = []
-            for entry in entries:
-                log_id = str(uuid.uuid4())[:8]
-                context.log_entries.append({
-                    "log_id": log_id,
-                    "level": entry.get("level", "INFO"),
-                    "message": entry.get("message", ""),
-                    "metadata": entry.get("metadata", {}),
-                    "source": entry.get("source", "default"),
-                    "timestamp": time.time(),
-                })
-                logged_ids.append(log_id)
+        return logs[-count:]
 
-            return ActionResult(
-                success=True,
-                data={"logged_count": len(logged_ids), "log_ids": logged_ids[:5]},
-                message=f"Batch logged {len(logged_ids)} entries",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Logger batch failed: {e}")
+    def get_stats(self) -> Dict[str, Any]:
+        """Get log statistics."""
+        if not self._logs:
+            return {"total": 0}
 
+        logs = list(self._logs)
+        levels = {}
+        methods = {}
+        endpoints = {}
 
-class LoggerQueryAction(BaseAction):
-    """Query log entries."""
-    action_type = "logger_query"
-    display_name = "查询日志"
-    description = "查询日志条目"
+        for entry in logs:
+            level_name = entry.level.value
+            levels[level_name] = levels.get(level_name, 0) + 1
+            methods[entry.method] = methods.get(entry.method, 0) + 1
+            endpoints[entry.endpoint] = endpoints.get(entry.endpoint, 0) + 1
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            level = params.get("level", "")
-            source = params.get("source", "")
-            limit = params.get("limit", 100)
+        return {
+            "total": len(logs),
+            "by_level": levels,
+            "by_method": methods,
+            "top_endpoints": sorted(
+                endpoints.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:10],
+        }
 
-            entries = getattr(context, "log_entries", [])
-            filtered = entries
-
-            if level:
-                filtered = [e for e in filtered if e["level"] == level]
-            if source:
-                filtered = [e for e in filtered if e.get("source") == source]
-
-            results = filtered[-limit:]
-
-            return ActionResult(
-                success=True,
-                data={"results": results, "count": len(results), "total_entries": len(entries)},
-                message=f"Query: {len(results)} log entries",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Logger query failed: {e}")
-
-
-class LoggerRotateAction(BaseAction):
-    """Rotate log files."""
-    action_type = "logger_rotate"
-    display_name = "日志轮转"
-    description = "轮转日志文件"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            max_entries = params.get("max_entries", 10000)
-            strategy = params.get("strategy", "oldest")
-
-            entries = getattr(context, "log_entries", [])
-            original_count = len(entries)
-
-            if len(entries) > max_entries:
-                if strategy == "oldest":
-                    context.log_entries = entries[-max_entries:]
-                elif strategy == "newest":
-                    context.log_entries = entries[:max_entries]
-
-            rotated_count = original_count - len(context.log_entries)
-
-            return ActionResult(
-                success=True,
-                data={"rotated_count": rotated_count, "remaining": len(context.log_entries), "strategy": strategy},
-                message=f"Rotated {rotated_count} log entries ({strategy})",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Logger rotate failed: {e}")
-
-
-class LoggerStatsAction(BaseAction):
-    """Get log statistics."""
-    action_type = "logger_stats"
-    display_name = "日志统计"
-    description = "获取日志统计"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            entries = getattr(context, "log_entries", [])
-
-            level_counts = {}
-            source_counts = {}
-            for e in entries:
-                level_counts[e["level"]] = level_counts.get(e["level"], 0) + 1
-                source = e.get("source", "unknown")
-                source_counts[source] = source_counts.get(source, 0) + 1
-
-            return ActionResult(
-                success=True,
-                data={"total_entries": len(entries), "level_counts": level_counts, "source_counts": source_counts},
-                message=f"Log stats: {len(entries)} entries across {len(source_counts)} sources",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Logger stats failed: {e}")
+    def clear(self) -> None:
+        """Clear all logs."""
+        self._logs.clear()
