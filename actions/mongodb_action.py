@@ -1,1075 +1,688 @@
 """MongoDB action module for RabAI AutoClick.
 
-Provides MongoDB operations including collection manipulation,
-CRUD operations, indexing, and aggregation pipelines.
+Provides MongoDB document database operations for CRUD,
+aggregation pipelines, indexing, and collection management.
 """
 
-import os
 import sys
-import time
-from typing import Any, Dict, List, Optional, Union, Tuple
+import os
+import json
+from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class MongoDBClient:
-    """MongoDB client wrapper with connection and operation management.
+@dataclass
+class MongoDBConfig:
+    """MongoDB connection configuration."""
+    host: str = "localhost"
+    port: int = 27017
+    username: str = ""
+    password: str = ""
+    database: str = ""
+    auth_source: str = "admin"
+    direct_connection: bool = True
+    timeout: int = 30000
+
+
+class MongoDBConnection:
+    """Manages MongoDB connection lifecycle."""
     
-    Provides methods for common MongoDB operations.
-    """
+    def __init__(self, config: MongoDBConfig):
+        self.config = config
+        self._client = None
+        self._db = None
+        self._connected = False
     
-    def __init__(
-        self,
-        host: str = "localhost",
-        port: int = 27017,
-        database: str = "test",
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        auth_database: str = "admin",
-        replica_set: Optional[str] = None,
-        server_selection_timeout_ms: int = 5000
-    ) -> None:
-        """Initialize MongoDB client.
-        
-        Args:
-            host: MongoDB server hostname.
-            port: MongoDB server port.
-            database: Default database name.
-            username: Optional authentication username.
-            password: Optional authentication password.
-            auth_database: Authentication database.
-            replica_set: Optional replica set name.
-            server_selection_timeout_ms: Server selection timeout.
-        """
-        self.host = host
-        self.port = port
-        self.database_name = database
-        self.username = username
-        self.password = password
-        self.auth_database = auth_database
-        self.replica_set = replica_set
-        self.server_selection_timeout_ms = server_selection_timeout_ms
-        self._client: Optional[Any] = None
-        self._db: Optional[Any] = None
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
     
-    def connect(self) -> bool:
-        """Establish connection to MongoDB server.
-        
-        Returns:
-            True if connection successful, False otherwise.
-        """
+    def connect(self) -> tuple:
+        """Establish MongoDB connection."""
         try:
-            from pymongo import MongoClient
-        except ImportError:
-            raise ImportError(
-                "pymongo is required for MongoDB support. Install with: pip install pymongo"
-            )
-        
-        try:
-            if self.username and self.password:
-                uri = (
-                    f"mongodb://{self.username}:{self.password}@"
-                    f"{self.host}:{self.port}/{self.database_name}"
-                    f"?authSource={self.auth_database}"
+            try:
+                from pymongo import MongoClient
+                from pymongo.errors import ConnectionFailure, OperationFailure
+            except ImportError:
+                return False, "pymongo not installed. Install with: pip install pymongo"
+            
+            try:
+                if self.config.username and self.config.password:
+                    uri = (f"mongodb://{self.config.username}:{self.config.password}"
+                          f"@{self.config.host}:{self.config.port}/"
+                          f"?authSource={self.config.auth_source}")
+                else:
+                    uri = f"mongodb://{self.config.host}:{self.config.port}/"
+                
+                self._client = MongoClient(
+                    uri,
+                    directConnection=self.config.direct_connection,
+                    serverSelectionTimeoutMS=self.config.timeout
                 )
-            else:
-                uri = f"mongodb://{self.host}:{self.port}/{self.database_name}"
-            
-            if self.replica_set:
-                uri += f"?replicaSet={self.replica_set}"
-            
-            self._client = MongoClient(
-                uri,
-                serverSelectionTimeoutMS=self.server_selection_timeout_ms
-            )
-            
-            self._client.admin.command("ping")
-            
-            self._db = self._client[self.database_name]
-            
-            return True
-        
-        except Exception:
-            self._client = None
-            self._db = None
-            return False
+                
+                self._client.admin.command("ping")
+                self._db = self._client[self.config.database] if self.config.database else None
+                self._connected = True
+                return True, "Connected"
+                
+            except ConnectionFailure as e:
+                return False, f"Connection failed: {str(e)}"
+            except OperationFailure as e:
+                return False, f"Authentication failed: {str(e)}"
+                
+        except Exception as e:
+            return False, f"Connection error: {str(e)}"
     
-    def disconnect(self) -> bool:
-        """Close the MongoDB connection.
-        
-        Returns:
-            True if disconnection successful.
-        """
+    def disconnect(self) -> None:
+        """Close MongoDB connection."""
+        self._connected = False
         if self._client:
             try:
                 self._client.close()
             except Exception:
                 pass
             self._client = None
-            self._db = None
-        return True
+        self._db = None
     
-    @property
-    def is_connected(self) -> bool:
-        """Check if currently connected."""
-        if not self._client:
-            return False
+    def find(
+        self,
+        collection: str,
+        query: Dict = None,
+        projection: Dict = None,
+        limit: int = 0,
+        skip: int = 0,
+        sort: List = None
+    ) -> tuple:
+        """Find documents in collection."""
+        if not self._connected:
+            return False, [], "Not connected"
+        
         try:
-            self._client.admin.command("ping")
-            return True
-        except Exception:
-            self._client = None
-            self._db = None
-            return False
-    
-    def _require_db(self) -> Any:
-        """Ensure an active connection and database exist."""
-        if not self._db:
-            raise RuntimeError("Not connected to MongoDB")
-        return self._db
-    
-    def list_databases(self) -> List[str]:
-        """List all databases on the server.
-        
-        Returns:
-            List of database names.
-        """
-        if not self._client:
-            raise RuntimeError("Not connected to MongoDB")
-        
-        return self._client.list_database_names()
-    
-    def list_collections(self, database: Optional[str] = None) -> List[str]:
-        """List all collections in a database.
-        
-        Args:
-            database: Optional database name (uses default if not provided).
+            coll = self._db[collection]
+            cursor = coll.find(query or {}, projection or {})
             
-        Returns:
-            List of collection names.
-        """
-        if database:
-            db = self._client[database]
-        else:
-            db = self._require_db()
-        
-        return db.list_collection_names()
-    
-    def create_collection(
-        self,
-        name: str,
-        capped: bool = False,
-        size: Optional[int] = None,
-        max: Optional[int] = None,
-        database: Optional[str] = None
-    ) -> Any:
-        """Create a new collection.
-        
-        Args:
-            name: Collection name.
-            capped: Whether to create a capped collection.
-            size: Maximum size in bytes for capped collection.
-            max: Maximum number of documents for capped collection.
-            database: Optional database name.
+            if sort:
+                cursor = cursor.sort(sort)
+            if skip:
+                cursor = cursor.skip(skip)
+            if limit:
+                cursor = cursor.limit(limit)
             
-        Returns:
-            Created collection object.
-        """
-        db = self._client[database] if database else self._require_db()
-        
-        kwargs: Dict[str, Any] = {}
-        if capped:
-            kwargs["capped"] = True
-            if size:
-                kwargs["size"] = size
-            if max:
-                kwargs["max"] = max
-        
-        return db.create_collection(name, **kwargs)
-    
-    def drop_collection(
-        self,
-        name: str,
-        database: Optional[str] = None
-    ) -> bool:
-        """Drop a collection.
-        
-        Args:
-            name: Collection name.
-            database: Optional database name.
-            
-        Returns:
-            True if dropped successfully.
-        """
-        db = self._client[database] if database else self._require_db()
-        db[name].drop()
-        return True
-    
-    def insert_one(
-        self,
-        collection: str,
-        document: Dict[str, Any],
-        database: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Insert a single document.
-        
-        Args:
-            collection: Collection name.
-            document: Document to insert.
-            database: Optional database name.
-            
-        Returns:
-            Insert result with inserted_id.
-        """
-        db = self._client[database] if database else self._require_db()
-        result = db[collection].insert_one(document)
-        
-        return {
-            "inserted_id": str(result.inserted_id),
-            "acknowledged": result.acknowledged
-        }
-    
-    def insert_many(
-        self,
-        collection: str,
-        documents: List[Dict[str, Any]],
-        ordered: bool = False,
-        database: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Insert multiple documents.
-        
-        Args:
-            collection: Collection name.
-            documents: List of documents to insert.
-            ordered: Whether to insert in order (stop on error if True).
-            database: Optional database name.
-            
-        Returns:
-            Insert result with inserted_ids.
-        """
-        db = self._client[database] if database else self._require_db()
-        result = db[collection].insert_many(documents, ordered=ordered)
-        
-        return {
-            "inserted_ids": [str(id) for id in result.inserted_ids],
-            "acknowledged": result.acknowledged
-        }
+            results = list(cursor)
+            return True, results, ""
+        except Exception as e:
+            return False, [], str(e)
     
     def find_one(
         self,
         collection: str,
-        query: Dict[str, Any],
-        projection: Optional[Dict[str, Any]] = None,
-        database: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Find a single document.
+        query: Dict = None,
+        projection: Dict = None
+    ) -> tuple:
+        """Find single document."""
+        if not self._connected:
+            return False, None, "Not connected"
         
-        Args:
-            collection: Collection name.
-            query: Query filter.
-            projection: Optional field projection.
-            database: Optional database name.
-            
-        Returns:
-            Found document or None.
-        """
-        db = self._client[database] if database else self._require_db()
-        return db[collection].find_one(query, projection)
+        try:
+            coll = self._db[collection]
+            result = coll.find_one(query or {}, projection or {})
+            return True, result, ""
+        except Exception as e:
+            return False, None, str(e)
     
-    def find_many(
-        self,
-        collection: str,
-        query: Dict[str, Any],
-        projection: Optional[Dict[str, Any]] = None,
-        sort: Optional[List[Tuple[str, int]]] = None,
-        limit: int = 0,
-        skip: int = 0,
-        database: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Find multiple documents.
+    def insert_one(self, collection: str, document: Dict) -> tuple:
+        """Insert single document."""
+        if not self._connected:
+            return False, "Not connected"
         
-        Args:
-            collection: Collection name.
-            query: Query filter.
-            projection: Optional field projection.
-            sort: Optional sort specification.
-            limit: Maximum number of documents to return.
-            skip: Number of documents to skip.
-            database: Optional database name.
-            
-        Returns:
-            List of found documents.
-        """
-        db = self._client[database] if database else self._require_db()
-        cursor = db[collection].find(query, projection)
-        
-        if sort:
-            cursor = cursor.sort(sort)
-        if skip:
-            cursor = cursor.skip(skip)
-        if limit:
-            cursor = cursor.limit(limit)
-        
-        return list(cursor)
+        try:
+            coll = self._db[collection]
+            result = coll.insert_one(document)
+            return True, {
+                "inserted_id": str(result.inserted_id),
+                "acknowledged": result.acknowledged
+            }
+        except Exception as e:
+            return False, str(e)
     
-    def count(
-        self,
-        collection: str,
-        query: Dict[str, Any] = None,
-        database: Optional[str] = None
-    ) -> int:
-        """Count documents matching a query.
+    def insert_many(self, collection: str, documents: List[Dict]) -> tuple:
+        """Insert multiple documents."""
+        if not self._connected:
+            return False, "Not connected"
         
-        Args:
-            collection: Collection name.
-            query: Optional query filter.
-            database: Optional database name.
-            
-        Returns:
-            Count of matching documents.
-        """
-        db = self._client[database] if database else self._require_db()
-        return db[collection].count_documents(query or {})
+        try:
+            coll = self._db[collection]
+            result = coll.insert_many(documents)
+            return True, {
+                "inserted_ids": [str(id) for id in result.inserted_ids],
+                "count": len(result.inserted_ids)
+            }
+        except Exception as e:
+            return False, str(e)
     
     def update_one(
         self,
         collection: str,
-        query: Dict[str, Any],
-        update: Dict[str, Any],
-        upsert: bool = False,
-        database: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Update a single document.
+        query: Dict,
+        update: Dict,
+        upsert: bool = False
+    ) -> tuple:
+        """Update single document."""
+        if not self._connected:
+            return False, "Not connected"
         
-        Args:
-            collection: Collection name.
-            query: Query filter.
-            update: Update operation ($set, $inc, etc.).
-            upsert: Create document if not found.
-            database: Optional database name.
-            
-        Returns:
-            Update result.
-        """
-        db = self._client[database] if database else self._require_db()
-        result = db[collection].update_one(query, update, upsert=upsert)
-        
-        return {
-            "matched": result.matched_count,
-            "modified": result.modified_count,
-            "upserted_id": str(result.upserted_id) if result.upserted_id else None
-        }
+        try:
+            coll = self._db[collection]
+            result = coll.update_one(query, {"$set": update}, upsert=upsert)
+            return True, {
+                "matched": result.matched_count,
+                "modified": result.modified_count,
+                "upserted_id": str(result.upserted_id) if result.upserted_id else None
+            }
+        except Exception as e:
+            return False, str(e)
     
     def update_many(
         self,
         collection: str,
-        query: Dict[str, Any],
-        update: Dict[str, Any],
-        upsert: bool = False,
-        database: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Update multiple documents.
+        query: Dict,
+        update: Dict,
+        upsert: bool = False
+    ) -> tuple:
+        """Update multiple documents."""
+        if not self._connected:
+            return False, "Not connected"
         
-        Args:
-            collection: Collection name.
-            query: Query filter.
-            update: Update operation.
-            upsert: Create document if not found.
-            database: Optional database name.
-            
-        Returns:
-            Update result.
-        """
-        db = self._client[database] if database else self._require_db()
-        result = db[collection].update_many(query, update, upsert=upsert)
-        
-        return {
-            "matched": result.matched_count,
-            "modified": result.modified_count,
-            "upserted_id": str(result.upserted_id) if result.upserted_id else None
-        }
+        try:
+            coll = self._db[collection]
+            result = coll.update_many(query, {"$set": update}, upsert=upsert)
+            return True, {
+                "matched": result.matched_count,
+                "modified": result.modified_count,
+                "upserted_id": str(result.upserted_id) if result.upserted_id else None
+            }
+        except Exception as e:
+            return False, str(e)
     
-    def delete_one(
-        self,
-        collection: str,
-        query: Dict[str, Any],
-        database: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Delete a single document.
+    def delete_one(self, collection: str, query: Dict) -> tuple:
+        """Delete single document."""
+        if not self._connected:
+            return False, "Not connected"
         
-        Args:
-            collection: Collection name.
-            query: Query filter.
-            database: Optional database name.
-            
-        Returns:
-            Delete result.
-        """
-        db = self._client[database] if database else self._require_db()
-        result = db[collection].delete_one(query)
-        
-        return {"deleted": result.deleted_count}
+        try:
+            coll = self._db[collection]
+            result = coll.delete_one(query)
+            return True, {"deleted": result.deleted_count}
+        except Exception as e:
+            return False, str(e)
     
-    def delete_many(
-        self,
-        collection: str,
-        query: Dict[str, Any],
-        database: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Delete multiple documents.
+    def delete_many(self, collection: str, query: Dict) -> tuple:
+        """Delete multiple documents."""
+        if not self._connected:
+            return False, "Not connected"
         
-        Args:
-            collection: Collection name.
-            query: Query filter.
-            database: Optional database name.
-            
-        Returns:
-            Delete result.
-        """
-        db = self._client[database] if database else self._require_db()
-        result = db[collection].delete_many(query)
-        
-        return {"deleted": result.deleted_count}
+        try:
+            coll = self._db[collection]
+            result = coll.delete_many(query)
+            return True, {"deleted": result.deleted_count}
+        except Exception as e:
+            return False, str(e)
     
-    def aggregate(
-        self,
-        collection: str,
-        pipeline: List[Dict[str, Any]],
-        database: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Execute an aggregation pipeline.
+    def aggregate(self, collection: str, pipeline: List[Dict]) -> tuple:
+        """Run aggregation pipeline."""
+        if not self._connected:
+            return False, [], "Not connected"
         
-        Args:
-            collection: Collection name.
-            pipeline: Aggregation pipeline.
-            database: Optional database name.
-            
-        Returns:
-            List of aggregated documents.
-        """
-        db = self._client[database] if database else self._require_db()
-        cursor = db[collection].aggregate(pipeline)
-        return list(cursor)
+        try:
+            coll = self._db[collection]
+            cursor = coll.aggregate(pipeline)
+            results = list(cursor)
+            return True, results, ""
+        except Exception as e:
+            return False, [], str(e)
     
-    def create_index(
-        self,
-        collection: str,
-        keys: List[Tuple[str, int]],
-        unique: bool = False,
-        name: Optional[str] = None,
-        database: Optional[str] = None
-    ) -> str:
-        """Create an index on a collection.
+    def count(self, collection: str, query: Dict = None) -> tuple:
+        """Count documents in collection."""
+        if not self._connected:
+            return False, 0, "Not connected"
         
-        Args:
-            collection: Collection name.
-            keys: List of (field, direction) tuples.
-            unique: Whether to create a unique index.
-            name: Optional index name.
-            database: Optional database name.
-            
-        Returns:
-            Name of created index.
-        """
-        db = self._client[database] if database else self._require_db()
-        return db[collection].create_index(keys, unique=unique, name=name)
+        try:
+            coll = self._db[collection]
+            count = coll.count_documents(query or {})
+            return True, count, ""
+        except Exception as e:
+            return False, 0, str(e)
     
-    def list_indexes(
-        self,
-        collection: str,
-        database: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """List all indexes on a collection.
+    def create_index(self, collection: str, keys: List, unique: bool = False) -> tuple:
+        """Create index on collection."""
+        if not self._connected:
+            return False, "Not connected"
         
-        Args:
-            collection: Collection name.
-            database: Optional database name.
-            
-        Returns:
-            List of index specifications.
-        """
-        db = self._client[database] if database else self._require_db()
-        return list(db[collection].list_indexes())
+        try:
+            coll = self._db[collection]
+            result = coll.create_index(keys, unique=unique)
+            return True, result
+        except Exception as e:
+            return False, str(e)
     
-    def drop_index(
-        self,
-        collection: str,
-        index_name: str,
-        database: Optional[str] = None
-    ) -> bool:
-        """Drop an index from a collection.
+    def list_collections(self) -> tuple:
+        """List all collections in database."""
+        if not self._connected:
+            return False, [], "Not connected"
         
-        Args:
-            collection: Collection name.
-            index_name: Name of the index to drop.
-            database: Optional database name.
-            
-        Returns:
-            True if dropped successfully.
-        """
-        db = self._client[database] if database else self._require_db()
-        db[collection].drop_index(index_name)
-        return True
+        try:
+            collections = self._db.list_collection_names()
+            return True, collections, ""
+        except Exception as e:
+            return False, [], str(e)
 
 
 class MongoDBAction(BaseAction):
-    """MongoDB action for document database operations.
+    """Action for MongoDB operations.
     
-    Supports CRUD operations, aggregation, and indexing.
+    Features:
+        - Connect to MongoDB servers
+        - CRUD operations (Create, Read, Update, Delete)
+        - Aggregation pipelines
+        - Index management
+        - Collection operations
+        - Bulk operations
+    
+    Note: Requires pymongo library.
+    Install with: pip install pymongo
     """
-    action_type: str = "mongodb"
-    display_name: str = "MongoDB动作"
-    description: str = "MongoDB文档数据库操作，支持CRUD、聚合和索引"
     
-    def __init__(self) -> None:
+    def __init__(self, config: Optional[MongoDBConfig] = None):
+        """Initialize MongoDB action.
+        
+        Args:
+            config: MongoDB configuration.
+        """
         super().__init__()
-        self._client: Optional[MongoDBClient] = None
+        self.config = config or MongoDBConfig()
+        self._connection: Optional[MongoDBConnection] = None
     
-    def get_required_params(self) -> List[str]:
-        """Return required parameters for this action."""
-        return ["operation"]
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+    def execute(self, params: Dict[str, Any]) -> ActionResult:
         """Execute MongoDB operation.
         
         Args:
-            context: Execution context.
-            params: Operation and parameters.
-            
-        Returns:
-            ActionResult with operation outcome.
-        """
-        start_time = time.time()
+            params: Dictionary containing:
+                - operation: Operation to perform (connect, disconnect, find, find_one,
+                           insert, insert_many, update, update_many, delete, delete_many,
+                           aggregate, count, create_index, list_collections)
+                - collection: Collection name
+                - query: Query filter
+                - document: Document data
+                - pipeline: Aggregation pipeline
         
+        Returns:
+            ActionResult with operation result
+        """
         try:
-            operation = params.get("operation", "connect")
+            operation = params.get("operation", "")
             
             if operation == "connect":
-                return self._connect(params, start_time)
+                return self._connect(params)
             elif operation == "disconnect":
-                return self._disconnect(start_time)
-            elif operation == "list_databases":
-                return self._list_databases(start_time)
-            elif operation == "list_collections":
-                return self._list_collections(params, start_time)
-            elif operation == "insert_one":
-                return self._insert_one(params, start_time)
-            elif operation == "insert_many":
-                return self._insert_many(params, start_time)
+                return self._disconnect(params)
+            elif operation == "find":
+                return self._find(params)
             elif operation == "find_one":
-                return self._find_one(params, start_time)
-            elif operation == "find_many":
-                return self._find_many(params, start_time)
-            elif operation == "count":
-                return self._count(params, start_time)
-            elif operation == "update_one":
-                return self._update_one(params, start_time)
+                return self._find_one(params)
+            elif operation == "insert":
+                return self._insert_one(params)
+            elif operation == "insert_many":
+                return self._insert_many(params)
+            elif operation == "update":
+                return self._update_one(params)
             elif operation == "update_many":
-                return self._update_many(params, start_time)
-            elif operation == "delete_one":
-                return self._delete_one(params, start_time)
+                return self._update_many(params)
+            elif operation == "delete":
+                return self._delete_one(params)
             elif operation == "delete_many":
-                return self._delete_many(params, start_time)
+                return self._delete_many(params)
             elif operation == "aggregate":
-                return self._aggregate(params, start_time)
+                return self._aggregate(params)
+            elif operation == "count":
+                return self._count(params)
             elif operation == "create_index":
-                return self._create_index(params, start_time)
+                return self._create_index(params)
+            elif operation == "list_collections":
+                return self._list_collections(params)
             else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}",
-                    duration=time.time() - start_time
-                )
-        
-        except ImportError as e:
-            return ActionResult(
-                success=False,
-                message=f"Import error: {str(e)}",
-                duration=time.time() - start_time
-            )
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+                
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"MongoDB operation failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+            return ActionResult(success=False, message=f"MongoDB operation failed: {str(e)}")
     
-    def _connect(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Connect to MongoDB server."""
-        host = params.get("host", "localhost")
-        port = params.get("port", 27017)
-        database = params.get("database", "test")
-        username = params.get("username")
-        password = params.get("password")
-        
-        self._client = MongoDBClient(
-            host=host,
-            port=port,
-            database=database,
-            username=username,
-            password=password
+    def _connect(self, params: Dict[str, Any]) -> ActionResult:
+        """Establish MongoDB connection."""
+        config = MongoDBConfig(
+            host=params.get("host", self.config.host),
+            port=params.get("port", self.config.port),
+            username=params.get("username", self.config.username),
+            password=params.get("password", self.config.password),
+            database=params.get("database", self.config.database),
+            auth_source=params.get("auth_source", self.config.auth_source),
+            timeout=params.get("timeout", self.config.timeout)
         )
         
-        success = self._client.connect()
+        self._connection = MongoDBConnection(config)
+        success, message = self._connection.connect()
         
         if success:
             return ActionResult(
                 success=True,
-                message=f"Connected to MongoDB: {database}",
-                data={"host": host, "port": port, "database": database},
-                duration=time.time() - start_time
+                message=f"Connected to MongoDB at {config.host}:{config.port}",
+                data={
+                    "host": config.host,
+                    "port": config.port,
+                    "database": config.database,
+                    "connected": True
+                }
             )
         else:
-            self._client = None
-            return ActionResult(
-                success=False,
-                message=f"Failed to connect to MongoDB at {host}:{port}",
-                duration=time.time() - start_time
-            )
+            self._connection = None
+            return ActionResult(success=False, message=message)
     
-    def _disconnect(self, start_time: float) -> ActionResult:
-        """Disconnect from MongoDB server."""
-        if self._client:
-            self._client.disconnect()
-            self._client = None
+    def _disconnect(self, params: Dict[str, Any]) -> ActionResult:
+        """Close MongoDB connection."""
+        if not self._connection:
+            return ActionResult(success=True, message="No active connection")
         
-        return ActionResult(
-            success=True,
-            message="Disconnected from MongoDB",
-            duration=time.time() - start_time
+        self._connection.disconnect()
+        self._connection = None
+        
+        return ActionResult(success=True, message="Disconnected")
+    
+    def _find(self, params: Dict[str, Any]) -> ActionResult:
+        """Find documents in collection."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
+        collection = params.get("collection", "")
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
+        
+        query = params.get("query")
+        projection = params.get("projection")
+        limit = params.get("limit", 0)
+        skip = params.get("skip", 0)
+        sort = params.get("sort")
+        
+        success, results, error = self._connection.find(
+            collection, query, projection, limit, skip, sort
         )
-    
-    def _require_client(self) -> MongoDBClient:
-        """Ensure a MongoDB client exists."""
-        if not self._client:
-            raise RuntimeError("Not connected to MongoDB. Use 'connect' operation first.")
-        return self._client
-    
-    def _list_databases(self, start_time: float) -> ActionResult:
-        """List all databases."""
-        client = self._require_client()
         
-        try:
-            databases = client.list_databases()
-            
+        if success:
             return ActionResult(
                 success=True,
-                message=f"Found {len(databases)} databases",
-                data={"databases": databases, "count": len(databases)},
-                duration=time.time() - start_time
+                message=f"Found {len(results)} documents",
+                data={"documents": results, "count": len(results)}
             )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Failed to list databases: {str(e)}",
-                duration=time.time() - start_time
-            )
+        else:
+            return ActionResult(success=False, message=f"Find error: {error}")
     
-    def _list_collections(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """List all collections."""
-        client = self._require_client()
-        database = params.get("database")
+    def _find_one(self, params: Dict[str, Any]) -> ActionResult:
+        """Find single document."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
         
-        try:
-            collections = client.list_collections(database=database)
-            
-            return ActionResult(
-                success=True,
-                message=f"Found {len(collections)} collections",
-                data={"collections": collections, "count": len(collections)},
-                duration=time.time() - start_time
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Failed to list collections: {str(e)}",
-                duration=time.time() - start_time
-            )
+        collection = params.get("collection", "")
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
+        
+        query = params.get("query")
+        projection = params.get("projection")
+        
+        success, result, error = self._connection.find_one(collection, query, projection)
+        
+        if success:
+            if result:
+                return ActionResult(
+                    success=True,
+                    message="Document found",
+                    data={"document": result}
+                )
+            else:
+                return ActionResult(
+                    success=True,
+                    message="No document found",
+                    data={"document": None}
+                )
+        else:
+            return ActionResult(success=False, message=f"Find one error: {error}")
     
-    def _insert_one(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Insert a single document."""
-        client = self._require_client()
+    def _insert_one(self, params: Dict[str, Any]) -> ActionResult:
+        """Insert single document."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
         collection = params.get("collection", "")
         document = params.get("document", {})
         
-        if not collection or not document:
-            return ActionResult(
-                success=False,
-                message="collection and document are required",
-                duration=time.time() - start_time
-            )
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
+        if not document:
+            return ActionResult(success=False, message="document is required")
         
-        try:
-            result = client.insert_one(
-                collection=collection,
-                document=document,
-                database=params.get("database")
-            )
-            
+        success, result = self._connection.insert_one(collection, document)
+        
+        if success:
             return ActionResult(
                 success=True,
-                message=f"Inserted document: {result['inserted_id']}",
-                data=result,
-                duration=time.time() - start_time
+                message=f"Inserted document: {result.get('inserted_id')}",
+                data=result
             )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Insert failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+        else:
+            return ActionResult(success=False, message=f"Insert error: {result}")
     
-    def _insert_many(self, params: Dict[str, Any], start_time: float) -> ActionResult:
+    def _insert_many(self, params: Dict[str, Any]) -> ActionResult:
         """Insert multiple documents."""
-        client = self._require_client()
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
         collection = params.get("collection", "")
         documents = params.get("documents", [])
-        ordered = params.get("ordered", False)
-        
-        if not collection or not documents:
-            return ActionResult(
-                success=False,
-                message="collection and documents are required",
-                duration=time.time() - start_time
-            )
-        
-        try:
-            result = client.insert_many(
-                collection=collection,
-                documents=documents,
-                ordered=ordered,
-                database=params.get("database")
-            )
-            
-            return ActionResult(
-                success=True,
-                message=f"Inserted {len(result['inserted_ids'])} documents",
-                data=result,
-                duration=time.time() - start_time
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Insert many failed: {str(e)}",
-                duration=time.time() - start_time
-            )
-    
-    def _find_one(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Find a single document."""
-        client = self._require_client()
-        collection = params.get("collection", "")
-        query = params.get("query", {})
-        projection = params.get("projection")
         
         if not collection:
-            return ActionResult(
-                success=False,
-                message="collection is required",
-                duration=time.time() - start_time
-            )
+            return ActionResult(success=False, message="collection is required")
+        if not documents:
+            return ActionResult(success=False, message="documents list is required")
         
-        try:
-            document = client.find_one(
-                collection=collection,
-                query=query,
-                projection=projection,
-                database=params.get("database")
-            )
-            
+        success, result = self._connection.insert_many(collection, documents)
+        
+        if success:
             return ActionResult(
                 success=True,
-                message="Document found" if document else "Document not found",
-                data={"document": document, "found": document is not None},
-                duration=time.time() - start_time
+                message=f"Inserted {result.get('count', 0)} documents",
+                data=result
             )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Find failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+        else:
+            return ActionResult(success=False, message=f"Insert many error: {result}")
     
-    def _find_many(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Find multiple documents."""
-        client = self._require_client()
-        collection = params.get("collection", "")
-        query = params.get("query", {})
-        projection = params.get("projection")
-        sort = params.get("sort")
-        limit = params.get("limit", 0)
-        skip = params.get("skip", 0)
+    def _update_one(self, params: Dict[str, Any]) -> ActionResult:
+        """Update single document."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
         
-        if not collection:
-            return ActionResult(
-                success=False,
-                message="collection is required",
-                duration=time.time() - start_time
-            )
-        
-        try:
-            documents = client.find_many(
-                collection=collection,
-                query=query,
-                projection=projection,
-                sort=sort,
-                limit=limit,
-                skip=skip,
-                database=params.get("database")
-            )
-            
-            return ActionResult(
-                success=True,
-                message=f"Found {len(documents)} documents",
-                data={"documents": documents, "count": len(documents)},
-                duration=time.time() - start_time
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Find many failed: {str(e)}",
-                duration=time.time() - start_time
-            )
-    
-    def _count(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Count documents."""
-        client = self._require_client()
-        collection = params.get("collection", "")
-        query = params.get("query", {})
-        
-        if not collection:
-            return ActionResult(
-                success=False,
-                message="collection is required",
-                duration=time.time() - start_time
-            )
-        
-        try:
-            count = client.count(
-                collection=collection,
-                query=query,
-                database=params.get("database")
-            )
-            
-            return ActionResult(
-                success=True,
-                message=f"Count: {count}",
-                data={"count": count},
-                duration=time.time() - start_time
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Count failed: {str(e)}",
-                duration=time.time() - start_time
-            )
-    
-    def _update_one(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Update a single document."""
-        client = self._require_client()
         collection = params.get("collection", "")
         query = params.get("query", {})
         update = params.get("update", {})
         upsert = params.get("upsert", False)
         
-        if not collection or not query or not update:
-            return ActionResult(
-                success=False,
-                message="collection, query, and update are required",
-                duration=time.time() - start_time
-            )
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
+        if not update:
+            return ActionResult(success=False, message="update data is required")
         
-        try:
-            result = client.update_one(
-                collection=collection,
-                query=query,
-                update=update,
-                upsert=upsert,
-                database=params.get("database")
-            )
-            
+        success, result = self._connection.update_one(collection, query, update, upsert)
+        
+        if success:
             return ActionResult(
                 success=True,
-                message=f"Matched {result['matched']}, modified {result['modified']}",
-                data=result,
-                duration=time.time() - start_time
+                message=f"Updated {result.get('modified', 0)} document(s)",
+                data=result
             )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Update failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+        else:
+            return ActionResult(success=False, message=f"Update error: {result}")
     
-    def _update_many(self, params: Dict[str, Any], start_time: float) -> ActionResult:
+    def _update_many(self, params: Dict[str, Any]) -> ActionResult:
         """Update multiple documents."""
-        client = self._require_client()
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
         collection = params.get("collection", "")
         query = params.get("query", {})
         update = params.get("update", {})
         upsert = params.get("upsert", False)
         
-        if not collection or not query or not update:
-            return ActionResult(
-                success=False,
-                message="collection, query, and update are required",
-                duration=time.time() - start_time
-            )
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
+        if not update:
+            return ActionResult(success=False, message="update data is required")
         
-        try:
-            result = client.update_many(
-                collection=collection,
-                query=query,
-                update=update,
-                upsert=upsert,
-                database=params.get("database")
-            )
-            
+        success, result = self._connection.update_many(collection, query, update, upsert)
+        
+        if success:
             return ActionResult(
                 success=True,
-                message=f"Matched {result['matched']}, modified {result['modified']}",
-                data=result,
-                duration=time.time() - start_time
+                message=f"Updated {result.get('modified', 0)} document(s)",
+                data=result
             )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Update many failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+        else:
+            return ActionResult(success=False, message=f"Update many error: {result}")
     
-    def _delete_one(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Delete a single document."""
-        client = self._require_client()
+    def _delete_one(self, params: Dict[str, Any]) -> ActionResult:
+        """Delete single document."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
         collection = params.get("collection", "")
         query = params.get("query", {})
         
-        if not collection or not query:
-            return ActionResult(
-                success=False,
-                message="collection and query are required",
-                duration=time.time() - start_time
-            )
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
         
-        try:
-            result = client.delete_one(
-                collection=collection,
-                query=query,
-                database=params.get("database")
-            )
-            
+        success, result = self._connection.delete_one(collection, query)
+        
+        if success:
             return ActionResult(
                 success=True,
-                message=f"Deleted {result['deleted']} document(s)",
-                data=result,
-                duration=time.time() - start_time
+                message=f"Deleted {result.get('deleted', 0)} document(s)",
+                data=result
             )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Delete failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+        else:
+            return ActionResult(success=False, message=f"Delete error: {result}")
     
-    def _delete_many(self, params: Dict[str, Any], start_time: float) -> ActionResult:
+    def _delete_many(self, params: Dict[str, Any]) -> ActionResult:
         """Delete multiple documents."""
-        client = self._require_client()
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
         collection = params.get("collection", "")
         query = params.get("query", {})
         
-        if not collection or not query:
-            return ActionResult(
-                success=False,
-                message="collection and query are required",
-                duration=time.time() - start_time
-            )
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
         
-        try:
-            result = client.delete_many(
-                collection=collection,
-                query=query,
-                database=params.get("database")
-            )
-            
+        success, result = self._connection.delete_many(collection, query)
+        
+        if success:
             return ActionResult(
                 success=True,
-                message=f"Deleted {result['deleted']} document(s)",
-                data=result,
-                duration=time.time() - start_time
+                message=f"Deleted {result.get('deleted', 0)} document(s)",
+                data=result
             )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Delete many failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+        else:
+            return ActionResult(success=False, message=f"Delete many error: {result}")
     
-    def _aggregate(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Execute aggregation pipeline."""
-        client = self._require_client()
+    def _aggregate(self, params: Dict[str, Any]) -> ActionResult:
+        """Run aggregation pipeline."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
         collection = params.get("collection", "")
         pipeline = params.get("pipeline", [])
         
-        if not collection or not pipeline:
-            return ActionResult(
-                success=False,
-                message="collection and pipeline are required",
-                duration=time.time() - start_time
-            )
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
+        if not pipeline:
+            return ActionResult(success=False, message="pipeline is required")
         
-        try:
-            results = client.aggregate(
-                collection=collection,
-                pipeline=pipeline,
-                database=params.get("database")
-            )
-            
+        success, results, error = self._connection.aggregate(collection, pipeline)
+        
+        if success:
             return ActionResult(
                 success=True,
                 message=f"Aggregation returned {len(results)} results",
-                data={"results": results, "count": len(results)},
-                duration=time.time() - start_time
+                data={"results": results, "count": len(results)}
             )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Aggregation failed: {str(e)}",
-                duration=time.time() - start_time
-            )
+        else:
+            return ActionResult(success=False, message=f"Aggregation error: {error}")
     
-    def _create_index(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Create an index."""
-        client = self._require_client()
+    def _count(self, params: Dict[str, Any]) -> ActionResult:
+        """Count documents."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
+        collection = params.get("collection", "")
+        query = params.get("query")
+        
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
+        
+        success, count, error = self._connection.count(collection, query)
+        
+        if success:
+            return ActionResult(
+                success=True,
+                message=f"Count: {count} documents",
+                data={"count": count}
+            )
+        else:
+            return ActionResult(success=False, message=f"Count error: {error}")
+    
+    def _create_index(self, params: Dict[str, Any]) -> ActionResult:
+        """Create index."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
         collection = params.get("collection", "")
         keys = params.get("keys", [])
         unique = params.get("unique", False)
-        name = params.get("name")
         
-        if not collection or not keys:
-            return ActionResult(
-                success=False,
-                message="collection and keys are required",
-                duration=time.time() - start_time
-            )
+        if not collection:
+            return ActionResult(success=False, message="collection is required")
+        if not keys:
+            return ActionResult(success=False, message="keys is required")
         
-        try:
-            index_name = client.create_index(
-                collection=collection,
-                keys=keys,
-                unique=unique,
-                name=name,
-                database=params.get("database")
-            )
-            
+        success, result = self._connection.create_index(collection, keys, unique)
+        
+        if success:
             return ActionResult(
                 success=True,
-                message=f"Created index: {index_name}",
-                data={"index_name": index_name},
-                duration=time.time() - start_time
+                message=f"Index created: {result}",
+                data={"index": result}
             )
-        except Exception as e:
+        else:
+            return ActionResult(success=False, message=f"Create index error: {result}")
+    
+    def _list_collections(self, params: Dict[str, Any]) -> ActionResult:
+        """List collections."""
+        if not self._connection:
+            return ActionResult(success=False, message="Not connected")
+        
+        success, collections, error = self._connection.list_collections()
+        
+        if success:
             return ActionResult(
-                success=False,
-                message=f"Create index failed: {str(e)}",
-                duration=time.time() - start_time
+                success=True,
+                message=f"Found {len(collections)} collections",
+                data={"collections": collections, "count": len(collections)}
             )
+        else:
+            return ActionResult(success=False, message=f"List collections error: {error}")
