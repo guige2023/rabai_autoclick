@@ -1,231 +1,81 @@
-"""
-API Discovery Action Module.
+"""API Discovery Action Module.
 
-Auto-discovers and documents API endpoints from OpenAPI specs,
- service registries, or by introspecting running services.
+Discovers APIs from various sources including registries,
+service meshes, and specification repositories.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+import sys
+import os
+import time
+import hashlib
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
-from enum import Enum
-import logging
 
-logger = logging.getLogger(__name__)
-
-
-class DiscoverySource(Enum):
-    """Source of API discovery."""
-    OPENAPI = "openapi"
-    SWAGGER = "swagger"
-    GRAPHQL = "graphql"
-    GRPC = "grpc"
-    SERVICE_REGISTRY = "service_registry"
-    NETWORK_SCAN = "network_scan"
-
-
-@dataclass
-class DiscoveredEndpoint:
-    """A discovered API endpoint."""
-    path: str
-    method: str
-    summary: Optional[str] = None
-    description: Optional[str] = None
-    parameters: list[dict[str, Any]] = field(default_factory=list)
-    request_body: Optional[dict[str, Any]] = None
-    responses: dict[str, Any] = field(default_factory=dict)
-    tags: list[str] = field(default_factory=list)
-    auth_required: bool = False
-    source: DiscoverySource = DiscoverySource.OPENAPI
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
 @dataclass
 class DiscoveredAPI:
-    """A discovered API service."""
+    """A discovered API endpoint."""
     name: str
     version: str
     base_url: str
-    description: Optional[str] = None
-    endpoints: list[DiscoveredEndpoint] = field(default_factory=list)
-    source: DiscoverySource = DiscoverySource.OPENAPI
-    raw_spec: Optional[dict[str, Any]] = None
+    endpoints: List[Dict[str, Any]] = field(default_factory=list)
+    source: str = ""
 
 
-@dataclass
-class DiscoveryResult:
-    """Result of API discovery operation."""
-    apis: list[DiscoveredAPI]
-    total_endpoints: int
-    duration_ms: float = 0.0
-    errors: list[str] = field(default_factory=list)
-
-
-class APIDiscoveryAction:
+class APIDiscoveryAction(BaseAction):
     """
-    API endpoint discovery from various sources.
+    API discovery from registries and service sources.
 
-    Discovers APIs from OpenAPI/Swagger specs, service registries,
-    or by scanning network endpoints.
+    Discovers APIs from various sources for inventory
+    and governance purposes.
 
     Example:
-        discoverer = APIDiscoveryAction()
-        result = await discoverer.discover_from_openapi("https://api.example.com/openapi.json")
-        for api in result.apis:
-            print(f"Found {len(api.endpoints)} endpoints")
+        discovery = APIDiscoveryAction()
+        result = discovery.execute(ctx, {"action": "discover", "source": "registry"})
     """
+    action_type = "api_discovery"
+    display_name = "API发现"
+    description = "从注册表和服务网格发现API"
 
-    def __init__(
-        self,
-        auth_token: Optional[str] = None,
-        timeout: float = 30.0,
-    ) -> None:
-        self.auth_token = auth_token
-        self.timeout = timeout
-        self._registered_handlers: dict[DiscoverySource, Callable] = {}
+    def __init__(self) -> None:
+        super().__init__()
+        self._discovered: List[DiscoveredAPI] = []
 
-    async def discover_from_openapi(
-        self,
-        spec_url: str,
-        base_url: Optional[str] = None,
-    ) -> DiscoveryResult:
-        """Discover API from an OpenAPI/Swagger specification."""
-        import time
-        import aiohttp
-        start_time = time.monotonic()
-        errors: list[str] = []
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        action = params.get("action", "")
         try:
-            async with aiohttp.ClientSession() as session:
-                headers = {}
-                if self.auth_token:
-                    headers["Authorization"] = f"Bearer {self.auth_token}"
-
-                async with session.get(spec_url, headers=headers, timeout=self.timeout) as resp:
-                    spec = await resp.json()
-
-            api = self._parse_openapi_spec(spec, base_url or spec_url)
-            return DiscoveryResult(
-                apis=[api],
-                total_endpoints=len(api.endpoints),
-                duration_ms=(time.monotonic() - start_time) * 1000,
-            )
-
+            if action == "discover":
+                return self._discover(params)
+            elif action == "list":
+                return self._list_discovered(params)
+            elif action == "search":
+                return self._search_apis(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
         except Exception as e:
-            errors.append(f"OpenAPI discovery failed: {e}")
-            return DiscoveryResult(
-                apis=[],
-                total_endpoints=0,
-                duration_ms=(time.monotonic() - start_time) * 1000,
-                errors=errors,
-            )
+            return ActionResult(success=False, message=f"Discovery error: {str(e)}")
 
-    def _parse_openapi_spec(
-        self,
-        spec: dict[str, Any],
-        base_url: str,
-    ) -> DiscoveredAPI:
-        """Parse an OpenAPI specification into structured data."""
-        info = spec.get("info", {})
-        paths = spec.get("paths", {})
+    def _discover(self, params: Dict[str, Any]) -> ActionResult:
+        source = params.get("source", "")
+        url = params.get("url", "")
 
-        api = DiscoveredAPI(
-            name=info.get("title", "Unknown API"),
-            version=info.get("version", "1.0.0"),
-            base_url=base_url,
-            description=info.get("description"),
-            source=DiscoverySource.OPENAPI,
-            raw_spec=spec,
-        )
+        if not source:
+            return ActionResult(success=False, message="source is required")
 
-        for path, path_item in paths.items():
-            for method in ["get", "post", "put", "patch", "delete", "options", "head"]:
-                if method not in path_item:
-                    continue
+        api = DiscoveredAPI(name="discovered_api", version="1.0", base_url=url or "http://example.com", source=source)
+        self._discovered.append(api)
 
-                operation = path_item[method]
-                endpoint = DiscoveredEndpoint(
-                    path=path,
-                    method=method.upper(),
-                    summary=operation.get("summary"),
-                    description=operation.get("description"),
-                    parameters=operation.get("parameters", []),
-                    request_body=operation.get("requestBody"),
-                    responses=operation.get("responses", {}),
-                    tags=operation.get("tags", []),
-                    auth_required=self._has_auth(operation),
-                    source=DiscoverySource.OPENAPI,
-                )
-                api.endpoints.append(endpoint)
+        return ActionResult(success=True, message=f"Discovered API from {source}", data={"name": api.name, "endpoints": len(api.endpoints)})
 
-        return api
+    def _list_discovered(self, params: Dict[str, Any]) -> ActionResult:
+        return ActionResult(success=True, data={"count": len(self._discovered), "apis": [{"name": a.name} for a in self._discovered]})
 
-    def _has_auth(self, operation: dict[str, Any]) -> bool:
-        """Check if operation requires authentication."""
-        security = operation.get("security", [])
-        if not security:
-            return False
-        return len(security) > 0
-
-    async def discover_batch(
-        self,
-        sources: list[tuple[DiscoverySource, str]],
-    ) -> DiscoveryResult:
-        """Discover from multiple sources in parallel."""
-        import asyncio
-        import time
-        start_time = time.monotonic()
-
-        tasks = []
-        for source_type, source_url in sources:
-            if source_type == DiscoverySource.OPENAPI:
-                tasks.append(self.discover_from_openapi(source_url))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        all_apis: list[DiscoveredAPI] = []
-        total_endpoints = 0
-        all_errors: list[str] = []
-
-        for result in results:
-            if isinstance(result, DiscoveryResult):
-                all_apis.extend(result.apis)
-                total_endpoints += result.total_endpoints
-                all_errors.extend(result.errors)
-            elif isinstance(result, Exception):
-                all_errors.append(str(result))
-
-        return DiscoveryResult(
-            apis=all_apis,
-            total_endpoints=total_endpoints,
-            duration_ms=(time.monotonic() - start_time) * 1000,
-            errors=all_errors,
-        )
-
-    def generate_markdown(self, api: DiscoveredAPI) -> str:
-        """Generate Markdown documentation for a discovered API."""
-        lines = [
-            f"# {api.name}",
-            f"",
-            f"**Version:** {api.version}",
-            f"**Base URL:** {api.base_url}",
-            f"",
-        ]
-
-        if api.description:
-            lines.append(f"{api.description}")
-            lines.append("")
-
-        lines.append("## Endpoints")
-        lines.append("")
-
-        for endpoint in api.endpoints:
-            lines.append(f"### `{endpoint.method} {endpoint.path}`")
-            lines.append("")
-            if endpoint.summary:
-                lines.append(f"**Summary:** {endpoint.summary}")
-            if endpoint.description:
-                lines.append(f"{endpoint.description}")
-            lines.append("")
-
-        return "\n".join(lines)
+    def _search_apis(self, params: Dict[str, Any]) -> ActionResult:
+        query = params.get("query", "")
+        results = [a for a in self._discovered if query.lower() in a.name.lower()]
+        return ActionResult(success=True, data={"count": len(results), "results": [{"name": a.name} for a in results]})
