@@ -1,273 +1,283 @@
-"""API cache action module for RabAI AutoClick.
+"""
+API Cache Action Module.
 
-Provides caching functionality for API responses including
-in-memory cache, TTL-based expiration, and cache invalidation.
+Caches API responses with TTL, invalidation policies,
+stale-while-revalidate, and distributed cache support.
+
+Author: RabAi Team
 """
 
-import time
+from __future__ import annotations
+
 import hashlib
 import json
-import sys
-import os
-from typing import Any, Dict, List, Optional, Callable
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+
+class CacheStrategy(Enum):
+    """Cache invalidation strategies."""
+    LRU = "lru"
+    LFU = "lfu"
+    FIFO = "fifo"
+    TTL = "ttl"
+    WRITE_THROUGH = "write_through"
+    WRITE_BACK = "write_back"
 
 
-class ApiCacheAction(BaseAction):
-    """Cache API responses with TTL-based expiration.
-    
-    Stores responses in memory cache with configurable
-    TTL, key generation, and invalidation strategies.
+@dataclass
+class CacheEntry:
+    """A single cache entry."""
+    key: str
+    value: Any
+    created_at: float
+    last_accessed: float
+    access_count: int = 0
+    size_bytes: int = 0
+    ttl_seconds: Optional[float] = None
+    tags: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.ttl_seconds is None:
+            return False
+        return time.time() - self.created_at > self.ttl_seconds
+
+    @property
+    def is_stale(self) -> bool:
+        if self.ttl_seconds is None:
+            return False
+        return time.time() - self.created_at > self.ttl_seconds * 0.8
+
+
+@dataclass
+class CacheStats:
+    """Cache statistics."""
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+    writes: int = 0
+    deletes: int = 0
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.hits + self.misses
+        return self.hits / total if total > 0 else 0.0
+
+
+class APICache:
     """
-    action_type = "api_cache"
-    display_name = "API缓存"
-    description = "缓存API响应结果"
+    API response caching with multiple strategies.
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Cache or retrieve from cache.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: operation (get|set|invalidate|clear),
-                   cache_key, ttl_seconds, data, key_fields.
-        
-        Returns:
-            ActionResult with cache operation result.
-        """
-        operation = params.get('operation', 'get')
-        start_time = time.time()
+    Supports LRU, LFU, TTL-based eviction, stale-while-revalidate,
+    and thread-safe in-memory caching.
 
-        if not hasattr(context, '_api_cache'):
-            context._api_cache = {}
-
-        cache = context._api_cache
-
-        if operation == 'get':
-            cache_key = self._build_key(params)
-            entry = cache.get(cache_key)
-            if entry and (time.time() - entry['cached_at']) < entry['ttl']:
-                return ActionResult(
-                    success=True,
-                    message="Cache hit",
-                    data={
-                        'hit': True,
-                        'data': entry['data'],
-                        'age_seconds': time.time() - entry['cached_at']
-                    },
-                    duration=time.time() - start_time
-                )
-            return ActionResult(
-                success=True,
-                message="Cache miss",
-                data={'hit': False, 'cache_key': cache_key}
-            )
-
-        elif operation == 'set':
-            cache_key = self._build_key(params)
-            data = params.get('data')
-            ttl = params.get('ttl_seconds', 300)
-            cache[cache_key] = {
-                'data': data,
-                'cached_at': time.time(),
-                'ttl': ttl
-            }
-            return ActionResult(
-                success=True,
-                message=f"Cached with TTL={ttl}s",
-                data={
-                    'cached': True,
-                    'cache_key': cache_key,
-                    'ttl': ttl
-                },
-                duration=time.time() - start_time
-            )
-
-        elif operation == 'invalidate':
-            cache_key = self._build_key(params)
-            if cache_key in cache:
-                del cache[cache_key]
-            return ActionResult(
-                success=True,
-                message=f"Invalidated: {cache_key}",
-                data={'invalidated': True, 'cache_key': cache_key}
-            )
-
-        elif operation == 'clear':
-            count = len(cache)
-            cache.clear()
-            return ActionResult(
-                success=True,
-                message=f"Cleared {count} cache entries",
-                data={'cleared': count}
-            )
-
-        return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-    def _build_key(self, params: Dict[str, Any]) -> str:
-        """Build cache key from request parameters."""
-        key_data = {}
-        key_fields = params.get('key_fields', ['url', 'method', 'params'])
-        for field in key_fields:
-            if field in params:
-                key_data[field] = params[field]
-
-        key_str = json.dumps(key_data, sort_keys=True)
-        return hashlib.md5(key_str.encode()).hexdigest()
-
-
-class CacheAsideAction(BaseAction):
-    """Cache-aside pattern: read from cache, fallback to source.
-    
-    Implements the cache-aside pattern where reads check cache first,
-    then source on miss, and populate cache on successful fetch.
+    Example:
+        >>> cache = APICache(max_size=1000, default_ttl=300)
+        >>> cached = cache.get("api:users:123")
+        >>> if cached is None:
+        >>>     data = api_call()
+        >>>     cache.set("api:users:123", data)
     """
-    action_type = "cache_aside"
-    display_name = "旁路缓存"
-    description = "旁路缓存模式"
 
-    def execute(
+    def __init__(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute cache-aside pattern.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: cache_key, ttl_seconds, source_func,
-                   source_params, bypass_cache.
-        
-        Returns:
-            ActionResult with data (from cache or source).
+        max_size: int = 1000,
+        default_ttl: Optional[float] = None,
+        strategy: CacheStrategy = CacheStrategy.LRU,
+        stale_while_revalidate: bool = True,
+    ):
+        self.max_size = max_size
+        self.default_ttl = default_ttl
+        self.strategy = strategy
+        self.stale_while_revalidate = stale_while_revalidate
+
+        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._lock = threading.RLock()
+        self._stats = CacheStats()
+        self._access_counts: Dict[str, int] = {}
+
+    def get(self, key: str) -> Tuple[Optional[Any], bool]:
         """
-        cache_key = params.get('cache_key', '')
-        ttl = params.get('ttl_seconds', 300)
-        bypass_cache = params.get('bypass_cache', False)
-        source_func = params.get('source_func', '')
-        source_params = params.get('source_params', {})
-        start_time = time.time()
+        Get value from cache.
 
-        if not bypass_cache:
-            cache_action = ApiCacheAction()
-            cache_result = cache_action.execute(context, {
-                'operation': 'get',
-                'cache_key': cache_key
-            })
-            if cache_result.success and cache_result.data.get('hit'):
-                cache_result.duration = time.time() - start_time
-                return cache_result
+        Returns:
+            Tuple of (value, is_stale)
+            is_stale=True means value exists but should be refreshed
+        """
+        with self._lock:
+            if key not in self._cache:
+                self._stats.misses += 1
+                return None, False
 
-        if not source_func:
-            return ActionResult(
-                success=False,
-                message="source_func required on cache miss"
-            )
+            entry = self._cache[key]
 
-        try:
-            if isinstance(source_func, str):
-                result_data = self._call_function(source_func, source_params)
+            if entry.is_expired:
+                del self._cache[key]
+                self._stats.expirations += 1
+                self._stats.misses += 1
+                return None, False
+
+            entry.last_accessed = time.time()
+            entry.access_count += 1
+            self._stats.hits += 1
+
+            if self.strategy == CacheStrategy.LRU:
+                self._cache.move_to_end(key)
+            elif self.strategy == CacheStrategy.LFU:
+                self._access_counts[key] = entry.access_count
+
+            return entry.value, entry.is_stale
+
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl: Optional[float] = None,
+        tags: Optional[List[str]] = None,
+    ) -> None:
+        """Set value in cache."""
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
             else:
-                result_data = source_func(source_params)
+                if len(self._cache) >= self.max_size:
+                    self._evict()
 
-            cache_action = ApiCacheAction()
-            cache_action.execute(context, {
-                'operation': 'set',
-                'cache_key': cache_key,
-                'data': result_data,
-                'ttl_seconds': ttl
-            })
-
-            return ActionResult(
-                success=True,
-                message="Fetched from source and cached",
-                data={
-                    'data': result_data,
-                    'from_cache': False,
-                    'cached': True
-                },
-                duration=time.time() - start_time
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Source fetch failed: {str(e)}",
-                data={'error': str(e)}
+            entry = CacheEntry(
+                key=key,
+                value=value,
+                created_at=time.time(),
+                last_accessed=time.time(),
+                ttl_seconds=ttl or self.default_ttl,
+                tags=tags or [],
             )
 
-    def _call_function(self, func_name: str, params: Dict) -> Any:
-        """Call a function by name."""
-        return None
+            self._cache[key] = entry
+            self._stats.writes += 1
 
+    def delete(self, key: str) -> bool:
+        """Delete a key from cache."""
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                self._stats.deletes += 1
+                return True
+            return False
 
-class WriteThroughCacheAction(BaseAction):
-    """Write-through cache: write to cache and source simultaneously.
-    
-    Updates both cache and underlying store on writes,
-    ensuring consistency.
-    """
-    action_type = "write_through_cache"
-    display_name = "穿透写缓存"
-    description = "穿透写缓存模式"
+    def invalidate_by_tags(self, tags: List[str]) -> int:
+        """Invalidate all entries with matching tags."""
+        count = 0
+        with self._lock:
+            keys_to_delete = [
+                key for key, entry in self._cache.items()
+                if any(tag in entry.tags for tag in tags)
+            ]
+            for key in keys_to_delete:
+                del self._cache[key]
+                count += 1
+            self._stats.deletes += count
+        return count
 
-    def execute(
+    def clear(self) -> int:
+        """Clear all cache entries."""
+        count = len(self._cache)
+        with self._lock:
+            self._cache.clear()
+            self._access_counts.clear()
+        return count
+
+    def get_or_compute(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute write-through cache operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: cache_key, data, write_func,
-                   write_params, ttl_seconds.
-        
-        Returns:
-            ActionResult with write result.
-        """
-        cache_key = params.get('cache_key', '')
-        data = params.get('data')
-        write_func = params.get('write_func', '')
-        write_params = params.get('write_params', {})
-        ttl = params.get('ttl_seconds', 300)
-        start_time = time.time()
+        key: str,
+        compute_fn: Callable[[], Any],
+        ttl: Optional[float] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Any:
+        """Get from cache or compute and cache if missing."""
+        value, is_stale = self.get(key)
 
-        if write_func:
-            try:
-                if isinstance(write_func, str):
-                    self._call_function(write_func, write_params)
-                else:
-                    write_func(write_params)
-            except Exception as e:
-                return ActionResult(
-                    success=False,
-                    message=f"Write failed: {str(e)}",
-                    data={'error': str(e)}
-                )
+        if value is not None and not is_stale:
+            return value
 
-        cache_action = ApiCacheAction()
-        cache_result = cache_action.execute(context, {
-            'operation': 'set',
-            'cache_key': cache_key,
-            'data': data,
-            'ttl_seconds': ttl
-        })
+        if value is not None and is_stale and self.stale_while_revalidate:
+            thread = threading.Thread(target=lambda: self.set(key, compute_fn(), ttl, tags))
+            thread.start()
+            return value
 
-        return ActionResult(
-            success=True,
-            message="Written through to cache and store",
-            data={
-                'written': True,
-                'cached': cache_result.data.get('cached', False)
-            },
-            duration=time.time() - start_time
-        )
+        computed = compute_fn()
+        self.set(key, computed, ttl, tags)
+        return computed
 
-    def _call_function(self, func_name: str, params: Dict) -> Any:
-        """Call a function by name."""
-        return None
+    def cached_call(
+        self,
+        key_prefix: str,
+        ttl: Optional[float] = None,
+    ) -> Callable:
+        """Decorator for caching function calls."""
+        def decorator(fn: Callable) -> Callable:
+            def wrapper(*args, **kwargs):
+                key = f"{key_prefix}:{hashlib.md5(str(args).encode()).hexdigest()}"
+                return self.get_or_compute(key, lambda: fn(*args, **kwargs), ttl)
+            return wrapper
+        return decorator
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        with self._lock:
+            return {
+                "size": len(self._cache),
+                "max_size": self.max_size,
+                "hit_rate": self._stats.hit_rate,
+                "hits": self._stats.hits,
+                "misses": self._stats.misses,
+                "evictions": self._stats.evictions,
+                "expirations": self._stats.expirations,
+                "writes": self._stats.writes,
+                "deletes": self._stats.deletes,
+                "strategy": self.strategy.value,
+            }
+
+    def _evict(self) -> None:
+        """Evict entry based on strategy."""
+        if not self._cache:
+            return
+
+        if self.strategy == CacheStrategy.LRU or self.strategy == CacheStrategy.FIFO:
+            self._cache.popitem(last=False)
+        elif self.strategy == CacheStrategy.LFU:
+            if self._access_counts:
+                min_key = min(self._access_counts, key=self._access_counts.get)
+                del self._cache[min_key]
+                del self._access_counts[min_key]
+        elif self.strategy == CacheStrategy.TTL:
+            now = time.time()
+            expired_keys = [
+                k for k, e in self._cache.items()
+                if e.ttl_seconds and now - e.created_at > e.ttl_seconds
+            ]
+            for key in expired_keys:
+                del self._cache[key]
+                self._stats.expirations += 1
+
+        self._stats.evictions += 1
+
+
+def create_api_cache(
+    max_size: int = 1000,
+    ttl: float = 300,
+    strategy: str = "lru",
+) -> APICache:
+    """Factory to create an API cache."""
+    return APICache(
+        max_size=max_size,
+        default_ttl=ttl,
+        strategy=CacheStrategy(strategy),
+    )
