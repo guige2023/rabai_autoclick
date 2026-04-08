@@ -1,291 +1,266 @@
-"""version_action module for rabai_autoclick.
+"""Version action module for RabAI AutoClick.
 
-Provides version handling utilities: semantic versioning,
-version comparison, requirements parsing, and compatibility checks.
+Provides version comparison utilities:
+- Version: Semantic version
+- VersionComparator: Compare versions
+- VersionBumper: Bump version numbers
 """
 
-from __future__ import annotations
-
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import re
-from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple, Union
+import uuid
 
-__all__ = [
-    "Version",
-    "VersionRange",
-    "Requirement",
-    "parse_version",
-    "compare_versions",
-    "is_compatible",
-    "VersionError",
-    "VersionRangeError",
-]
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class VersionError(Exception):
-    """Raised when version parsing fails."""
-    pass
-
-
-class VersionRangeError(Exception):
-    """Raised when version range parsing fails."""
-    pass
-
-
-@dataclass
 class Version:
-    """Semantic version representation."""
-    major: int = 0
-    minor: int = 0
-    patch: int = 0
-    prerelease: str = ""
-    build: str = ""
+    """Semantic version."""
+
+    def __init__(self, version_str: str):
+        self.original = version_str
+        self.major, self.minor, self.patch, self.prerelease, self.build = self._parse(version_str)
+
+    def _parse(self, version_str: str) -> Tuple[int, int, int, str, str]:
+        """Parse version string."""
+        pattern = r"^(\d+)\.(\d+)\.(\d+)(?:-([a-zA-Z0-9.-]+))?(?:\+([a-zA-Z0-9.-]+))?$"
+        match = re.match(pattern, version_str)
+
+        if not match:
+            raise ValueError(f"Invalid version: {version_str}")
+
+        major, minor, patch = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        prerelease = match.group(4) or ""
+        build = match.group(5) or ""
+
+        return major, minor, patch, prerelease, build
 
     def __str__(self) -> str:
-        v = f"{self.major}.{self.minor}.{self.patch}"
+        """String representation."""
+        version = f"{self.major}.{self.minor}.{self.patch}"
         if self.prerelease:
-            v += f"-{self.prerelease}"
+            version += f"-{self.prerelease}"
         if self.build:
-            v += f"+{self.build}"
-        return v
+            version += f"+{self.build}"
+        return version
 
     def __repr__(self) -> str:
-        return f"Version({self.major}, {self.minor}, {self.patch}, '{self.prerelease}', '{self.build}')"
-
-    def __lt__(self, other: "Version") -> bool:
-        return self._compare(other) < 0
-
-    def __le__(self, other: "Version") -> bool:
-        return self._compare(other) <= 0
-
-    def __gt__(self, other: "Version") -> bool:
-        return self._compare(other) > 0
-
-    def __ge__(self, other: "Version") -> bool:
-        return self._compare(other) >= 0
+        """Debug representation."""
+        return f"Version('{str(self)}')"
 
     def __eq__(self, other: object) -> bool:
+        """Equality comparison."""
         if not isinstance(other, Version):
             return False
-        return self._compare(other) == 0
+        return self._tuple() == other._tuple()
 
-    def __hash__(self) -> int:
-        return hash((self.major, self.minor, self.patch, self.prerelease, self.build))
+    def __lt__(self, other: "Version") -> bool:
+        """Less than comparison."""
+        return self._tuple() < other._tuple()
 
-    def _compare(self, other: "Version") -> int:
-        """Compare versions: returns -1, 0, or 1."""
-        self_tuple = (self.major, self.minor, self.patch)
-        other_tuple = (other.major, other.minor, other.patch)
-        if self_tuple < other_tuple:
+    def __le__(self, other: "Version") -> bool:
+        """Less than or equal."""
+        return self == other or self < other
+
+    def __gt__(self, other: "Version") -> bool:
+        """Greater than comparison."""
+        return self._tuple() > other._tuple()
+
+    def __ge__(self, other: "Version") -> bool:
+        """Greater than or equal."""
+        return self == other or self > other
+
+    def _tuple(self) -> Tuple:
+        """Get comparison tuple."""
+        return (self.major, self.minor, self.patch, self.prerelease, self.build)
+
+
+class VersionComparator:
+    """Compare versions."""
+
+    @staticmethod
+    def compare(v1: str, v2: str) -> int:
+        """Compare two versions. Returns -1, 0, or 1."""
+        ver1 = Version(v1)
+        ver2 = Version(v2)
+
+        if ver1 < ver2:
             return -1
-        if self_tuple > other_tuple:
+        elif ver1 > ver2:
             return 1
-        if self.prerelease and not other.prerelease:
-            return -1
-        if not self.prerelease and other.prerelease:
-            return 1
-        if self.prerelease < other.prerelease:
-            return -1
-        if self.prerelease > other.prerelease:
-            return 1
-        return 0
+        else:
+            return 0
 
-    def is_prerelease(self) -> bool:
-        """Check if version is a prerelease."""
-        return bool(self.prerelease)
+    @staticmethod
+    def is_compatible(current: str, required: str) -> bool:
+        """Check if versions are compatible (same major version)."""
+        cur = Version(current)
+        req = Version(required)
+        return cur.major == req.major
 
-    def is_stable(self) -> bool:
-        """Check if version is stable (no prerelease)."""
-        return not self.prerelease
+    @staticmethod
+    def is_newer(new: str, old: str) -> bool:
+        """Check if new is newer than old."""
+        return Version(new) > Version(old)
 
 
-def parse_version(version_str: str) -> Version:
-    """Parse version string into Version object.
+class VersionBumper:
+    """Bump version numbers."""
 
-    Supports:
-        - MAJOR.MINOR.PATCH (1.2.3)
-        - MAJOR.MINOR.PATCH-prerelease (1.2.3-beta)
-        - MAJOR.MINOR.PATCH+build (1.2.3+build)
-        - MAJOR.MINOR.PATCH-prerelease+build (1.2.3-beta+build)
+    @staticmethod
+    def bump_major(version: str) -> str:
+        """Bump major version."""
+        ver = Version(version)
+        return f"{ver.major + 1}.0.0"
 
-    Args:
-        version_str: Version string.
+    @staticmethod
+    def bump_minor(version: str) -> str:
+        """Bump minor version."""
+        ver = Version(version)
+        return f"{ver.major}.{ver.minor + 1}.0"
 
-    Returns:
-        Version object.
+    @staticmethod
+    def bump_patch(version: str) -> str:
+        """Bump patch version."""
+        ver = Version(version)
+        return f"{ver.major}.{ver.minor}.{ver.patch + 1}"
 
-    Raises:
-        VersionError: If version string is invalid.
-    """
-    version_str = version_str.strip()
+    @staticmethod
+    def set_prerelease(version: str, prerelease: str) -> str:
+        """Set prerelease."""
+        ver = Version(version)
+        return f"{ver.major}.{ver.minor}.{ver.patch}-{prerelease}"
 
-    pattern = r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+](\w[\w\.-]*))?(?:\+(\w[\w\.-]*))?$"
-    match = re.match(pattern, version_str)
-
-    if not match:
-        raise VersionError(f"Invalid version string: {version_str}")
-
-    major = int(match.group(1))
-    minor = int(match.group(2)) if match.group(2) else 0
-    patch = int(match.group(3)) if match.group(3) else 0
-    prerelease = match.group(4) or ""
-    build = match.group(5) or ""
-
-    return Version(major=major, minor=minor, patch=patch, prerelease=prerelease, build=build)
-
-
-def compare_versions(v1: str, v2: str) -> int:
-    """Compare two version strings.
-
-    Args:
-        v1: First version string.
-        v2: Second version string.
-
-    Returns:
-        -1 if v1 < v2, 0 if equal, 1 if v1 > v2.
-    """
-    ver1 = parse_version(v1)
-    ver2 = parse_version(v2)
-    return ver1._compare(ver2)
+    @staticmethod
+    def remove_prerelease(version: str) -> str:
+        """Remove prerelease."""
+        ver = Version(version)
+        return f"{ver.major}.{ver.minor}.{ver.patch}"
 
 
-class VersionRange:
-    """Version range specification (e.g., >=1.0,<2.0)."""
+class VersionAction(BaseAction):
+    """Version management action."""
+    action_type = "version"
+    display_name = "版本管理"
+    description = "语义版本"
 
-    def __init__(self, spec: str) -> None:
-        self.spec = spec
-        self._constraints: List[Tuple[str, Version]] = []
-        self._parse(spec)
+    def __init__(self):
+        super().__init__()
 
-    def _parse(self, spec: str) -> None:
-        """Parse version range specification."""
-        spec = spec.strip()
-        parts = spec.split(",")
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            match = re.match(r"^([><=!]+)\s*([\d.]+)", part)
-            if not match:
-                raise VersionRangeError(f"Invalid constraint: {part}")
-            op = match.group(1)
-            ver_str = match.group(2)
-            version = parse_version(ver_str)
-            self._constraints.append((op, version))
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "compare")
 
-    def contains(self, version: Union[str, Version]) -> bool:
-        """Check if version satisfies the range."""
-        if isinstance(version, str):
-            version = parse_version(version)
-        for op, constraint in self._constraints:
-            if not self._check_op(version, op, constraint):
-                return False
-        return True
+            if operation == "compare":
+                return self._compare(params)
+            elif operation == "bump":
+                return self._bump(params)
+            elif operation == "is_compatible":
+                return self._is_compatible(params)
+            elif operation == "is_newer":
+                return self._is_newer(params)
+            elif operation == "parse":
+                return self._parse(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-    def _check_op(self, version: Version, op: str, constraint: Version) -> bool:
-        """Check single operator."""
-        if op == ">":
-            return version > constraint
-        if op == ">=":
-            return version >= constraint
-        if op == "<":
-            return version < constraint
-        if op == "<=":
-            return version <= constraint
-        if op == "==":
-            return version == constraint
-        if op == "!=":
-            return version != constraint
-        return False
+        except Exception as e:
+            return ActionResult(success=False, message=f"Version error: {str(e)}")
 
-    def __str__(self) -> str:
-        return self.spec
+    def _compare(self, params: Dict[str, Any]) -> ActionResult:
+        """Compare two versions."""
+        v1 = params.get("v1")
+        v2 = params.get("v2")
 
+        if not v1 or not v2:
+            return ActionResult(success=False, message="v1 and v2 are required")
 
-@dataclass
-class Requirement:
-    """Package requirement specification."""
-    name: str
-    version_spec: Optional[str] = None
-    extras: List[str] = None
-    url: Optional[str] = None
-    markers: Optional[str] = None
+        try:
+            result = VersionComparator.compare(v1, v2)
+            comparison = {-1: "less than", 0: "equal to", 1: "greater than"}[result]
+            return ActionResult(success=True, message=f"{v1} is {comparison} {v2}", data={"result": result})
+        except ValueError as e:
+            return ActionResult(success=False, message=str(e))
 
-    def __post_init__(self) -> None:
-        if self.extras is None:
-            self.extras = []
+    def _bump(self, params: Dict[str, Any]) -> ActionResult:
+        """Bump version."""
+        version = params.get("version")
+        bump_type = params.get("type", "patch")
+        prerelease = params.get("prerelease")
 
-    def __str__(self) -> str:
-        result = self.name
-        if self.extras:
-            result += f"[{','.join(self.extras)}]"
-        if self.version_spec:
-            result += f" {self.version_spec}"
-        if self.url:
-            result += f"; {self.url}"
-        if self.markers:
-            result += f" ; {self.markers}"
-        return result
+        if not version:
+            return ActionResult(success=False, message="version is required")
 
-    def is_satisfied_by(self, version: Union[str, Version]) -> bool:
-        """Check if requirement is satisfied by version."""
-        if isinstance(version, str):
-            version = parse_version(version)
-        if self.version_spec:
-            r = VersionRange(self.version_spec)
-            return r.contains(version)
-        return True
+        try:
+            if bump_type == "major":
+                new_version = VersionBumper.bump_major(version)
+            elif bump_type == "minor":
+                new_version = VersionBumper.bump_minor(version)
+            elif bump_type == "patch":
+                new_version = VersionBumper.bump_patch(version)
+            elif bump_type == "prerelease":
+                if prerelease:
+                    new_version = VersionBumper.set_prerelease(version, prerelease)
+                else:
+                    new_version = VersionBumper.remove_prerelease(version)
+            else:
+                return ActionResult(success=False, message=f"Unknown bump type: {bump_type}")
 
+            return ActionResult(success=True, message=f"{version} -> {new_version}", data={"version": new_version})
+        except ValueError as e:
+            return ActionResult(success=False, message=str(e))
 
-def parse_requirement(req_str: str) -> Requirement:
-    """Parse requirement string.
+    def _is_compatible(self, params: Dict[str, Any]) -> ActionResult:
+        """Check compatibility."""
+        current = params.get("current")
+        required = params.get("required")
 
-    Args:
-        req_str: Requirement string (e.g., "package>=1.0,<2.0").
+        if not current or not required:
+            return ActionResult(success=False, message="current and required are required")
 
-    Returns:
-        Requirement object.
-    """
-    req_str = req_str.strip()
+        try:
+            compatible = VersionComparator.is_compatible(current, required)
+            return ActionResult(success=True, message="Compatible" if compatible else "Not compatible", data={"compatible": compatible})
+        except ValueError as e:
+            return ActionResult(success=False, message=str(e))
 
-    extras_match = re.match(r"^([a-zA-Z0-9_-]+)\[([^\]]+)\]", req_str)
-    extras: List[str] = []
-    name_part = req_str
-    if extras_match:
-        name_part = extras_match.group(1)
-        extras = extras_match.group(2).split(",")
+    def _is_newer(self, params: Dict[str, Any]) -> ActionResult:
+        """Check if newer."""
+        new = params.get("new")
+        old = params.get("old")
 
-    parts = name_part.split()
-    name = parts[0]
-    version_spec = parts[1] if len(parts) > 1 else None
+        if not new or not old:
+            return ActionResult(success=False, message="new and old are required")
 
-    url_match = re.search(r";\s*url\s*==\s*['\"]([^'\"]+)['\"]", req_str)
-    url = url_match.group(1) if url_match else None
+        try:
+            newer = VersionComparator.is_newer(new, old)
+            return ActionResult(success=True, message=f"{new} is {'newer' if newer else 'not newer'} than {old}", data={"newer": newer})
+        except ValueError as e:
+            return ActionResult(success=False, message=str(e))
 
-    markers_match = re.search(r";\s*(.+?)(?:\s*;|$)", req_str)
-    markers = markers_match.group(1).strip() if markers_match else None
+    def _parse(self, params: Dict[str, Any]) -> ActionResult:
+        """Parse version."""
+        version = params.get("version")
 
-    return Requirement(
-        name=name,
-        version_spec=version_spec,
-        extras=extras,
-        url=url,
-        markers=markers,
-    )
+        if not version:
+            return ActionResult(success=False, message="version is required")
 
-
-def is_compatible(
-    version: str,
-    requirement: str,
-) -> bool:
-    """Check if version satisfies requirement.
-
-    Args:
-        version: Version string.
-        requirement: Requirement string.
-
-    Returns:
-        True if compatible.
-    """
-    req = parse_requirement(requirement)
-    return req.is_satisfied_by(version)
+        try:
+            ver = Version(version)
+            return ActionResult(
+                success=True,
+                message=f"Parsed: {version}",
+                data={
+                    "major": ver.major,
+                    "minor": ver.minor,
+                    "patch": ver.patch,
+                    "prerelease": ver.prerelease,
+                    "build": ver.build,
+                },
+            )
+        except ValueError as e:
+            return ActionResult(success=False, message=str(e))
