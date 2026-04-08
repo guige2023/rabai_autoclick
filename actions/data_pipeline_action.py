@@ -1,174 +1,233 @@
 """
 Data Pipeline Action Module.
 
-Provides streaming data pipeline processing with stage transformations,
- branching, and parallel execution support.
+Pipeline execution engine for chained data transformations,
+supports parallel branches, error handling, and stage skipping.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, TypeVar, Generic
+from typing import Any, Callable, Optional, Union
 from dataclasses import dataclass, field
 from enum import Enum
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
-U = TypeVar("U")
 
-
-class PipelineMode(Enum):
-    """Pipeline execution mode."""
-    SEQUENTIAL = "sequential"
-    PARALLEL = "parallel"
-    FANOUT = "fanout"
+class StageStatus(Enum):
+    """Stage execution status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 @dataclass
 class PipelineStage:
-    """A single stage in the data pipeline."""
+    """Single stage in the pipeline."""
     name: str
-    transform: Callable[[Any], Any]
-    filter_func: Optional[Callable[[Any], bool]] = None
-    error_handler: Optional[Callable[[Exception, Any], Any]] = None
-    continue_on_error: bool = True
+    func: Callable[[Any], Any]
+    condition: Optional[Callable[[Any], bool]] = None
+    on_error: Optional[Callable[[Exception, Any], Any]] = None
+    timeout: Optional[float] = None
 
 
 @dataclass
-class PipelineStats:
-    """Statistics from pipeline execution."""
-    total_input: int = 0
-    total_output: int = 0
-    filtered: int = 0
-    errors: int = 0
-    duration_ms: float = 0.0
+class PipelineResult:
+    """Result of pipeline execution."""
+    success: bool
+    output: Any
+    stages_executed: list[str]
+    stages_skipped: list[str]
+    stages_failed: list[str]
+    execution_time_ms: float
+    errors: dict[str, str] = field(default_factory=dict)
 
 
-class DataPipelineAction(Generic[T]):
+class DataPipelineAction:
     """
-    Streaming data pipeline processor.
+    Chained data transformation pipeline.
 
-    Processes data through configurable stages with support for
-    filtering, error handling, and parallel execution.
+    Executes stages sequentially with conditional execution,
+    error handling, and parallel branching support.
 
     Example:
-        pipeline = DataPipelineAction[T]()
-        pipeline.add_stage("normalize", normalize_data)
-        pipeline.add_stage("validate", validate_data, filter_func=is_valid)
-        results = pipeline.process(input_data)
+        pipeline = DataPipelineAction()
+        pipeline.stage("validate", validate_func)
+        pipeline.stage("transform", transform_func)
+        pipeline.stage("load", load_func)
+        result = pipeline.execute(input_data)
     """
 
     def __init__(
         self,
-        mode: PipelineMode = PipelineMode.SEQUENTIAL,
-        max_workers: int = 4,
+        name: str = "pipeline",
+        stop_on_error: bool = True,
     ) -> None:
-        self.mode = mode
-        self.max_workers = max_workers
+        self.name = name
+        self.stop_on_error = stop_on_error
         self._stages: list[PipelineStage] = []
-        self._stats = PipelineStats()
+        self._parallel_branches: dict[str, list[PipelineStage]] = {}
+        self._results: dict[str, Any] = {}
 
-    def add_stage(
+    def stage(
         self,
         name: str,
-        transform: Callable[[T], U],
-        filter_func: Optional[Callable[[T], bool]] = None,
-        error_handler: Optional[Callable[[Exception, T], T]] = None,
-        continue_on_error: bool = True,
-    ) -> "DataPipelineAction[T]":
-        """Add a processing stage to the pipeline."""
-        stage = PipelineStage(
+        func: Callable[[Any], Any],
+        condition: Optional[Callable[[Any], bool]] = None,
+        on_error: Optional[Callable[[Exception, Any], Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> "DataPipelineAction":
+        """Add a sequential stage to the pipeline."""
+        self._stages.append(PipelineStage(
             name=name,
-            transform=transform,
-            filter_func=filter_func,
-            error_handler=error_handler,
-            continue_on_error=continue_on_error,
-        )
-        self._stages.append(stage)
+            func=func,
+            condition=condition,
+            on_error=on_error,
+            timeout=timeout,
+        ))
         return self
 
-    def process(
+    def parallel_branch(
         self,
-        data: list[T],
-    ) -> tuple[list[T], PipelineStats]:
-        """Process data through all pipeline stages."""
-        import time
-        start_time = time.monotonic()
+        branch_name: str,
+        stages: list[tuple[str, Callable[[Any], Any]]],
+    ) -> "DataPipelineAction":
+        """Add a parallel branch to execute concurrently."""
+        branch = [
+            PipelineStage(name=name, func=func)
+            for name, func in stages
+        ]
+        self._parallel_branches[branch_name] = branch
+        return self
 
-        self._stats = PipelineStats(total_input=len(data))
-        current_data: list[Any] = list(data)
+    def execute(
+        self,
+        input_data: Any,
+    ) -> PipelineResult:
+        """Execute pipeline on input data."""
+        start_time = time.perf_counter()
+        stages_executed = []
+        stages_skipped = []
+        stages_failed = []
+        errors = {}
+
+        current_data = input_data
+        self._results["input"] = input_data
 
         for stage in self._stages:
-            current_data = self._process_stage(stage, current_data)
+            if stage.condition and not stage.condition(current_data):
+                stages_skipped.append(stage.name)
+                logger.debug("Stage '%s' skipped (condition not met)", stage.name)
+                continue
 
-        self._stats.total_output = len(current_data)
-        self._stats.duration_ms = (time.monotonic() - start_time) * 1000
-
-        return current_data, self._stats
-
-    def _process_stage(
-        self,
-        stage: PipelineStage,
-        data: list[T],
-    ) -> list[T]:
-        """Process data through a single stage."""
-        results: list[T] = []
-
-        for item in data:
             try:
-                if stage.filter_func and not stage.filter_func(item):
-                    self._stats.filtered += 1
-                    continue
+                logger.debug("Executing stage '%s'", stage.name)
+                stage_start = time.time()
 
-                transformed = stage.transform(item)
-                if transformed is not None:
-                    results.append(transformed)
+                if stage.timeout:
+                    import threading
+                    result_container = [None]
+                    exception_container = [None]
+
+                    def target():
+                        try:
+                            result_container[0] = stage.func(current_data)
+                        except Exception as e:
+                            exception_container[0] = e
+
+                    thread = threading.Thread(target=target)
+                    thread.start()
+                    thread.join(timeout=stage.timeout)
+
+                    if thread.is_alive():
+                        raise TimeoutError(f"Stage '{stage.name}' timed out after {stage.timeout}s")
+
+                    if exception_container[0]:
+                        raise exception_container[0]
+
+                    current_data = result_container[0]
+                else:
+                    current_data = stage.func(current_data)
+
+                stage_time = (time.time() - stage_start) * 1000
+                self._results[stage.name] = current_data
+
+                stages_executed.append(stage.name)
+                logger.debug("Stage '%s' completed in %.2fms", stage.name, stage_time)
 
             except Exception as e:
-                self._stats.errors += 1
-                if stage.error_handler:
-                    try:
-                        recovered = stage.error_handler(e, item)
-                        if recovered is not None:
-                            results.append(recovered)
-                    except Exception:
-                        pass
+                error_msg = str(e)
+                errors[stage.name] = error_msg
+                stages_failed.append(stage.name)
+                logger.error("Stage '%s' failed: %s", stage.name, error_msg)
 
-                if not stage.continue_on_error:
+                if stage.on_error:
+                    try:
+                        current_data = stage.on_error(e, current_data)
+                    except Exception as te:
+                        logger.error("Stage '%s' on_error handler failed: %s", stage.name, te)
+
+                if self.stop_on_error:
                     break
+
+        execution_time_ms = (time.perf_counter() - start_time) * 1000
+
+        return PipelineResult(
+            success=len(stages_failed) == 0,
+            output=current_data,
+            stages_executed=stages_executed,
+            stages_skipped=stages_skipped,
+            stages_failed=stages_failed,
+            execution_time_ms=execution_time_ms,
+            errors=errors,
+        )
+
+    def execute_parallel(
+        self,
+        input_data: Any,
+        max_workers: int = 4,
+    ) -> dict[str, Any]:
+        """Execute all parallel branches concurrently."""
+        results = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+
+            for branch_name, stages in self._parallel_branches.items():
+                future = executor.submit(self._execute_branch, stages, input_data)
+                futures[branch_name] = future
+
+            for branch_name, future in as_completed(futures):
+                try:
+                    results[branch_name] = future.result()
+                except Exception as e:
+                    logger.error("Branch '%s' failed: %s", branch_name, e)
+                    results[branch_name] = None
 
         return results
 
-    def process_streaming(
+    def _execute_branch(
         self,
-        data_iterator: Any,
-    ) -> tuple[list[T], PipelineStats]:
-        """Process data from a streaming iterator."""
-        import time
-        start_time = time.monotonic()
+        stages: list[PipelineStage],
+        input_data: Any,
+    ) -> Any:
+        """Execute a single branch."""
+        current = input_data
+        for stage in stages:
+            current = stage.func(current)
+        return current
 
-        self._stats = PipelineStats()
-        all_results: list[T] = []
-        current_data: list[T] = []
+    def clear(self) -> None:
+        """Clear all stages."""
+        self._stages.clear()
+        self._parallel_branches.clear()
+        self._results.clear()
 
-        for item in data_iterator:
-            self._stats.total_input += 1
-            current_data.append(item)
-
-        for stage in self._stages:
-            current_data = self._process_stage(stage, current_data)
-
-        all_results.extend(current_data)
-        self._stats.total_output = len(all_results)
-        self._stats.duration_ms = (time.monotonic() - start_time) * 1000
-
-        return all_results, self._stats
-
-    def get_stats(self) -> PipelineStats:
-        """Get current pipeline statistics."""
-        return self._stats
-
-    def reset_stats(self) -> None:
-        """Reset pipeline statistics."""
-        self._stats = PipelineStats()
+    def get_stage_names(self) -> list[str]:
+        """Get names of all stages in order."""
+        return [s.name for s in self._stages]

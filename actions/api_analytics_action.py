@@ -1,527 +1,253 @@
-"""API Analytics Action Module.
+"""
+API Analytics Action Module.
 
-Provides API analytics and reporting capabilities including
-usage tracking, performance metrics, and trend analysis.
+Tracks and analyzes API usage patterns, generates
+performance reports and usage dashboards.
 """
 
-import sys
-import os
+from __future__ import annotations
+
+from typing import Any, Optional
+from dataclasses import dataclass, field
+import logging
 import time
-from typing import Any, Dict, List, Optional
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import datetime, timedelta
-import json
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class APIUsageTrackerAction(BaseAction):
-    """Track API usage statistics.
-    
-    Supports request counting, error tracking, and per-endpoint analytics.
+@dataclass
+class APIcallRecord:
+    """Single API call record."""
+    endpoint: str
+    method: str
+    status_code: int
+    latency_ms: float
+    timestamp: float
+    error: Optional[str] = None
+
+
+@dataclass
+class EndpointStats:
+    """Statistics for a specific endpoint."""
+    endpoint: str
+    method: str
+    total_calls: int
+    success_count: int
+    error_count: int
+    avg_latency_ms: float
+    p50_latency_ms: float
+    p95_latency_ms: float
+    p99_latency_ms: float
+    min_latency_ms: float
+    max_latency_ms: float
+
+
+@dataclass
+class AnalyticsReport:
+    """Complete API analytics report."""
+    period_start: float
+    period_end: float
+    total_calls: int
+    total_errors: int
+    overall_success_rate: float
+    avg_latency_ms: float
+    top_endpoints: list[EndpointStats]
+    error_breakdown: dict[str, int]
+
+
+class APIAnalyticsAction:
     """
-    action_type = "api_usage_tracker"
-    display_name = "API使用追踪"
-    description = "追踪API使用统计"
+    API usage analytics and reporting.
 
-    def __init__(self):
-        super().__init__()
-        self._request_counts: Dict[str, int] = defaultdict(int)
-        self._error_counts: Dict[str, int] = defaultdict(int)
-        self._response_times: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
-        self._timestamps: Dict[str, deque] = defaultdict(lambda: deque(maxlen=10000))
+    Tracks call volume, latency distributions,
+    error rates, and generates analytics reports.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Track API usage.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: 'track_request', 'track_error', 'track_response_time', 'get_stats'.
-                - endpoint: API endpoint path.
-                - method: HTTP method.
-                - response_time: Response time in ms.
-                - status_code: HTTP status code.
-                - output_var: Variable name to store result.
-        
-        Returns:
-            ActionResult with tracking result or error.
-        """
-        operation = params.get('operation', 'track_request')
-        endpoint = params.get('endpoint', '/')
-        method = params.get('method', 'GET')
-        response_time = params.get('response_time', 0)
-        status_code = params.get('status_code', 200)
-        output_var = params.get('output_var', 'usage_result')
-
-        try:
-            if operation == 'track_request':
-                return self._track_request(endpoint, method, output_var)
-            elif operation == 'track_error':
-                return self._track_error(endpoint, method, output_var)
-            elif operation == 'track_response_time':
-                return self._track_response_time(endpoint, response_time, output_var)
-            elif operation == 'get_stats':
-                return self._get_stats(endpoint, output_var)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}"
-                )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"API usage tracker failed: {str(e)}"
-            )
-
-    def _track_request(self, endpoint: str, method: str, output_var: str) -> ActionResult:
-        """Track an API request."""
-        key = f"{method} {endpoint}"
-        self._request_counts[key] += 1
-        self._timestamps[key].append(time.time())
-
-        result = {
-            'key': key,
-            'count': self._request_counts[key],
-            'tracked': True
-        }
-
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Tracked request: {key} (total: {result['count']})"
-        )
-
-    def _track_error(self, endpoint: str, method: str, output_var: str) -> ActionResult:
-        """Track an API error."""
-        key = f"{method} {endpoint}"
-        self._error_counts[key] += 1
-
-        result = {
-            'key': key,
-            'error_count': self._error_counts[key],
-            'tracked': True
-        }
-
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Tracked error: {key} (errors: {result['error_count']})"
-        )
-
-    def _track_response_time(
-        self, endpoint: str, response_time: float, output_var: str
-    ) -> ActionResult:
-        """Track API response time."""
-        key = f"GET {endpoint}"  # Simplified
-        self._response_times[key].append(response_time)
-
-        avg_time = sum(self._response_times[key]) / len(self._response_times[key])
-
-        result = {
-            'endpoint': endpoint,
-            'response_time': response_time,
-            'avg_response_time': avg_time,
-            'sample_count': len(self._response_times[key])
-        }
-
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Tracked response time for {endpoint}: {response_time}ms (avg: {avg_time:.2f}ms)"
-        )
-
-    def _get_stats(self, endpoint: str, output_var: str) -> ActionResult:
-        """Get usage statistics."""
-        stats = {}
-        for key, count in self._request_counts.items():
-            if endpoint in key:
-                error_count = self._error_counts.get(key, 0)
-                response_times = list(self._response_times.get(key, []))
-
-                stat = {
-                    'requests': count,
-                    'errors': error_count,
-                    'error_rate': error_count / count if count > 0 else 0
-                }
-
-                if response_times:
-                    stat['avg_response_time'] = sum(response_times) / len(response_times)
-                    stat['min_response_time'] = min(response_times)
-                    stat['max_response_time'] = max(response_times)
-
-                stats[key] = stat
-
-        total_requests = sum(self._request_counts.values())
-        total_errors = sum(self._error_counts.values())
-
-        result = {
-            'endpoint': endpoint,
-            'endpoints': stats,
-            'total_requests': total_requests,
-            'total_errors': total_errors,
-            'overall_error_rate': total_errors / total_requests if total_requests > 0 else 0
-        }
-
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Retrieved stats for endpoint '{endpoint}': {total_requests} requests"
-        )
-
-
-class APIPerformanceAnalyzerAction(BaseAction):
-    """Analyze API performance metrics.
-    
-    Supports latency analysis, throughput calculation, and bottleneck detection.
+    Example:
+        analytics = APIAnalyticsAction()
+        analytics.record(endpoint="/api/users", method="GET", status_code=200, latency_ms=45)
+        report = analytics.generate_report()
     """
-    action_type = "api_performance_analyzer"
-    display_name = "API性能分析"
-    description = "分析API性能指标"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Analyze API performance.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: 'analyze', 'latency_percentiles', 'throughput'.
-                - data: Response time data points.
-                - time_window: Analysis time window in seconds.
-                - output_var: Variable name to store result.
-        
-        Returns:
-            ActionResult with analysis result or error.
-        """
-        operation = params.get('operation', 'analyze')
-        data = params.get('data', [])
-        time_window = params.get('time_window', 3600)
-        endpoint = params.get('endpoint', 'all')
-        output_var = params.get('output_var', 'perf_result')
+    def __init__(
+        self,
+        retention_period: timedelta = timedelta(days=7),
+        sample_rate: float = 1.0,
+    ) -> None:
+        self.retention_period = retention_period
+        self.sample_rate = sample_rate
+        self._records: list[APIcallRecord] = []
+        self._endpoint_stats: dict[str, list[float]] = defaultdict(list)
+        self._error_counts: dict[str, int] = defaultdict(int)
 
-        try:
-            if operation == 'analyze':
-                return self._analyze_performance(data, time_window, output_var)
-            elif operation == 'latency_percentiles':
-                return self._latency_percentiles(data, output_var)
-            elif operation == 'throughput':
-                return self._calculate_throughput(data, time_window, output_var)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}"
-                )
+    def record(
+        self,
+        endpoint: str,
+        method: str,
+        status_code: int,
+        latency_ms: float,
+        error: Optional[str] = None,
+    ) -> None:
+        """Record an API call."""
+        import random
+        if random.random() > self.sample_rate:
+            return
 
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"API performance analyzer failed: {str(e)}"
-            )
-
-    def _analyze_performance(
-        self, data: List, time_window: int, output_var: str
-    ) -> ActionResult:
-        """Analyze performance data."""
-        if not data:
-            return ActionResult(
-                success=False,
-                message="No data to analyze"
-            )
-
-        # Calculate statistics
-        response_times = [d.get('response_time', 0) for d in data if 'response_time' in d]
-        if not response_times:
-            return ActionResult(
-                success=False,
-                message="No response time data found"
-            )
-
-        response_times.sort()
-
-        n = len(response_times)
-        analysis = {
-            'count': n,
-            'min': response_times[0],
-            'max': response_times[-1],
-            'mean': sum(response_times) / n,
-            'median': response_times[n // 2],
-            'p95': response_times[int(n * 0.95)] if n > 0 else 0,
-            'p99': response_times[int(n * 0.99)] if n > 0 else 0,
-            'std_dev': self._calculate_std_dev(response_times)
-        }
-
-        # Detect anomalies (values > 2 std dev from mean)
-        mean = analysis['mean']
-        std = analysis['std_dev']
-        anomalies = [d for d in data if d.get('response_time', 0) > mean + 2 * std]
-        analysis['anomaly_count'] = len(anomalies)
-        analysis['anomalies'] = anomalies[:10]  # Top 10
-
-        context.variables[output_var] = analysis
-        return ActionResult(
-            success=True,
-            data=analysis,
-            message=f"Performance analysis: mean={analysis['mean']:.2f}ms, p99={analysis['p99']:.2f}ms"
+        record = APIcallRecord(
+            endpoint=endpoint,
+            method=method,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            timestamp=time.time(),
+            error=error,
         )
 
-    def _latency_percentiles(self, data: List, output_var: str) -> ActionResult:
-        """Calculate latency percentiles."""
-        response_times = sorted([d.get('response_time', 0) for d in data if 'response_time' in d])
-        n = len(response_times)
+        self._records.append(record)
 
-        if n == 0:
-            return ActionResult(
-                success=False,
-                message="No response time data"
-            )
+        key = f"{method}:{endpoint}"
+        self._endpoint_stats[key].append(latency_ms)
 
-        percentiles = [50, 75, 90, 95, 99, 99.9]
-        result = {}
+        if status_code >= 400 or error:
+            error_key = error or f"HTTP_{status_code}"
+            self._error_counts[error_key] += 1
 
-        for p in percentiles:
-            idx = int(n * p / 100)
-            if idx >= n:
-                idx = n - 1
-            result[f'p{p}'] = response_times[idx]
+        self._prune_old_records()
 
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Latency percentiles calculated: p99={result.get('p99', 0):.2f}ms"
+    def get_endpoint_stats(
+        self,
+        endpoint: str,
+        method: str,
+    ) -> Optional[EndpointStats]:
+        """Get statistics for a specific endpoint."""
+        key = f"{method}:{endpoint}"
+        latencies = self._endpoint_stats.get(key, [])
+
+        if not latencies:
+            return None
+
+        success_count = sum(1 for r in self._records
+                          if f"{r.method}:{r.endpoint}" == key and r.status_code < 400)
+        error_count = sum(1 for r in self._records
+                         if f"{r.method}:{r.endpoint}" == key and r.status_code >= 400)
+
+        sorted_latencies = sorted(latencies)
+
+        return EndpointStats(
+            endpoint=endpoint,
+            method=method,
+            total_calls=len(latencies),
+            success_count=success_count,
+            error_count=error_count,
+            avg_latency_ms=sum(latencies) / len(latencies),
+            p50_latency_ms=self._percentile(sorted_latencies, 50),
+            p95_latency_ms=self._percentile(sorted_latencies, 95),
+            p99_latency_ms=self._percentile(sorted_latencies, 99),
+            min_latency_ms=min(latencies),
+            max_latency_ms=max(latencies),
         )
 
-    def _calculate_throughput(
-        self, data: List, time_window: int, output_var: str
-    ) -> ActionResult:
-        """Calculate throughput metrics."""
-        if not data:
-            return ActionResult(
-                success=False,
-                message="No data for throughput calculation"
+    def generate_report(
+        self,
+        since: Optional[float] = None,
+    ) -> AnalyticsReport:
+        """Generate comprehensive analytics report."""
+        records = self._records
+        if since:
+            records = [r for r in records if r.timestamp >= since]
+
+        if not records:
+            now = time.time()
+            return AnalyticsReport(
+                period_start=now - 3600,
+                period_end=now,
+                total_calls=0,
+                total_errors=0,
+                overall_success_rate=100.0,
+                avg_latency_ms=0.0,
+                top_endpoints=[],
+                error_breakdown={},
             )
 
-        timestamps = [d.get('timestamp', time.time()) for d in data]
-        if len(timestamps) < 2:
-            return ActionResult(
-                success=False,
-                message="Need at least 2 data points for throughput"
-            )
+        total_calls = len(records)
+        total_errors = sum(1 for r in records if r.status_code >= 400)
+        all_latencies = [r.latency_ms for r in records]
 
-        time_span = max(timestamps) - min(timestamps)
-        request_count = len(data)
+        top_endpoints_dict: dict[str, list[float]] = defaultdict(list)
+        for r in records:
+            key = f"{r.method}:{r.endpoint}"
+            top_endpoints_dict[key].append(r.latency_ms)
 
-        throughput = {
-            'requests_per_second': request_count / time_span if time_span > 0 else 0,
-            'requests_per_minute': (request_count / time_span * 60) if time_span > 0 else 0,
-            'requests_per_hour': (request_count / time_span * 3600) if time_span > 0 else 0,
-            'total_requests': request_count,
-            'time_span_seconds': time_span
-        }
+        top_stats = []
+        for key, latencies in top_endpoints_dict.items():
+            method, endpoint = key.split(":", 1)
+            top_stats.append(EndpointStats(
+                endpoint=endpoint,
+                method=method,
+                total_calls=len(latencies),
+                success_count=0,
+                error_count=0,
+                avg_latency_ms=sum(latencies) / len(latencies),
+                p50_latency_ms=self._percentile(sorted(latencies), 50),
+                p95_latency_ms=self._percentile(sorted(latencies), 95),
+                p99_latency_ms=self._percentile(sorted(latencies), 99),
+                min_latency_ms=min(latencies),
+                max_latency_ms=max(latencies),
+            ))
 
-        context.variables[output_var] = throughput
-        return ActionResult(
-            success=True,
-            data=throughput,
-            message=f"Throughput: {throughput['requests_per_second']:.2f} req/s"
+        top_stats.sort(key=lambda x: x.total_calls, reverse=True)
+        top_stats = top_stats[:10]
+
+        return AnalyticsReport(
+            period_start=min(r.timestamp for r in records),
+            period_end=max(r.timestamp for r in records),
+            total_calls=total_calls,
+            total_errors=total_errors,
+            overall_success_rate=((total_calls - total_errors) / total_calls * 100) if total_calls > 0 else 100.0,
+            avg_latency_ms=sum(all_latencies) / len(all_latencies) if all_latencies else 0.0,
+            top_endpoints=top_stats,
+            error_breakdown=dict(self._error_counts),
         )
 
-    def _calculate_std_dev(self, values: List) -> float:
-        """Calculate standard deviation."""
-        if not values:
-            return 0
-        mean = sum(values) / len(values)
-        variance = sum((v - mean) ** 2 for v in values) / len(values)
-        return variance ** 0.5
+    def get_top_endpoints(
+        self,
+        limit: int = 10,
+        by: str = "calls",
+    ) -> list[EndpointStats]:
+        """Get top endpoints by calls or latency."""
+        endpoint_keys = set()
+        for r in self._records:
+            endpoint_keys.add(f"{r.method}:{r.endpoint}")
 
+        stats = []
+        for key in endpoint_keys:
+            method, endpoint = key.split(":", 1)
+            stat = self.get_endpoint_stats(endpoint, method)
+            if stat:
+                stats.append(stat)
 
-class APITrendAnalyzerAction(BaseAction):
-    """Analyze trends in API usage and performance.
-    
-    Supports time-series trend detection and forecasting.
-    """
-    action_type = "api_trend_analyzer"
-    display_name = "API趋势分析"
-    description = "分析API使用和性能趋势"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Analyze API trends.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: 'detect_trend', 'forecast', 'compare_periods'.
-                - data: Historical data points.
-                - metric: Metric to analyze.
-                - period: Time period for analysis.
-                - output_var: Variable name to store result.
-        
-        Returns:
-            ActionResult with trend analysis or error.
-        """
-        operation = params.get('operation', 'detect_trend')
-        data = params.get('data', [])
-        metric = params.get('metric', 'requests')
-        period = params.get('period', 'hourly')
-        output_var = params.get('output_var', 'trend_result')
-
-        try:
-            if operation == 'detect_trend':
-                return self._detect_trend(data, metric, output_var)
-            elif operation == 'forecast':
-                return self._forecast(data, metric, params.get('horizon', 5), output_var)
-            elif operation == 'compare_periods':
-                return self._compare_periods(data, metric, period, output_var)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}"
-                )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"API trend analyzer failed: {str(e)}"
-            )
-
-    def _detect_trend(self, data: List, metric: str, output_var: str) -> ActionResult:
-        """Detect trend in data."""
-        values = [d.get(metric, 0) for d in data]
-
-        if len(values) < 2:
-            return ActionResult(
-                success=False,
-                message="Need at least 2 data points"
-            )
-
-        # Simple linear trend detection
-        n = len(values)
-        x = list(range(n))
-        x_mean = sum(x) / n
-        y_mean = sum(values) / n
-
-        numerator = sum((x[i] - x_mean) * (values[i] - y_mean) for i in range(n))
-        denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
-
-        slope = numerator / denominator if denominator != 0 else 0
-
-        # Determine trend direction
-        if abs(slope) < 0.1:
-            direction = 'stable'
-        elif slope > 0:
-            direction = 'increasing'
+        if by == "latency":
+            stats.sort(key=lambda x: x.avg_latency_ms, reverse=True)
         else:
-            direction = 'decreasing'
+            stats.sort(key=lambda x: x.total_calls, reverse=True)
 
-        # Calculate R-squared
-        ss_res = sum((values[i] - (y_mean + slope * (x[i] - x_mean))) ** 2 for i in range(n))
-        ss_tot = sum((values[i] - y_mean) ** 2 for i in range(n))
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+        return stats[:limit]
 
-        result = {
-            'metric': metric,
-            'direction': direction,
-            'slope': slope,
-            'r_squared': r_squared,
-            'trend_strength': 'strong' if r_squared > 0.7 else ('moderate' if r_squared > 0.4 else 'weak')
-        }
+    def _prune_old_records(self) -> None:
+        """Remove records older than retention period."""
+        cutoff = time.time() - self.retention_period.total_seconds()
+        self._records = [r for r in self._records if r.timestamp >= cutoff]
 
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Trend detected: {direction} (slope={slope:.4f}, R²={r_squared:.3f})"
-        )
+    @staticmethod
+    def _percentile(sorted_data: list[float], percentile: int) -> float:
+        """Calculate percentile from sorted data."""
+        if not sorted_data:
+            return 0.0
+        idx = int(len(sorted_data) * percentile / 100)
+        idx = min(idx, len(sorted_data) - 1)
+        return sorted_data[idx]
 
-    def _forecast(
-        self, data: List, metric: str, horizon: int, output_var: str
-    ) -> ActionResult:
-        """Forecast future values."""
-        values = [d.get(metric, 0) for d in data]
-
-        if len(values) < 2:
-            return ActionResult(
-                success=False,
-                message="Need at least 2 data points for forecasting"
-            )
-
-        # Simple linear regression forecast
-        n = len(values)
-        x = list(range(n))
-        x_mean = sum(x) / n
-        y_mean = sum(values) / n
-
-        numerator = sum((x[i] - x_mean) * (values[i] - y_mean) for i in range(n))
-        denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
-
-        slope = numerator / denominator if denominator != 0 else 0
-        intercept = y_mean - slope * x_mean
-
-        # Forecast future values
-        forecast = []
-        for i in range(n, n + horizon):
-            forecasted_value = slope * i + intercept
-            forecast.append({
-                'period': i,
-                'forecasted_value': max(0, forecasted_value)
-            })
-
-        result = {
-            'metric': metric,
-            'forecast': forecast,
-            'slope': slope,
-            'intercept': intercept
-        }
-
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Forecast generated: {horizon} periods ahead"
-        )
-
-    def _compare_periods(
-        self, data: List, metric: str, period: str, output_var: str
-    ) -> ActionResult:
-        """Compare metrics between time periods."""
-        if len(data) < 2:
-            return ActionResult(
-                success=False,
-                message="Need at least 2 data points"
-            )
-
-        # Split data into two halves
-        mid = len(data) // 2
-        first_half = data[:mid]
-        second_half = data[mid:]
-
-        first_values = [d.get(metric, 0) for d in first_half]
-        second_values = [d.get(metric, 0) for d in second_half]
-
-        first_avg = sum(first_values) / len(first_values) if first_values else 0
-        second_avg = sum(second_values) / len(second_values) if second_values else 0
-
-        change = second_avg - first_avg
-        change_pct = (change / first_avg * 100) if first_avg != 0 else 0
-
-        result = {
-            'metric': metric,
-            'first_period_avg': first_avg,
-            'second_period_avg': second_avg,
-            'change': change,
-            'change_percent': change_pct,
-            'trend': 'up' if change > 0 else ('down' if change < 0 else 'unchanged')
-        }
-
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Period comparison: {first_avg:.2f} -> {second_avg:.2f} ({change_pct:+.1f}%)"
-        )
+    @property
+    def total_records(self) -> int:
+        """Total number of recorded calls."""
+        return len(self._records)
