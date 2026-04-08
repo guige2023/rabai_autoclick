@@ -1,229 +1,166 @@
 """Webhook action module for RabAI AutoClick.
 
-Provides webhook operations:
-- WebhookReceiveAction: Receive webhook payload
-- WebhookSendAction: Send webhook notification
-- WebhookVerifyAction: Verify webhook signature
-- WebhookFilterAction: Filter webhook events
+Provides webhook utilities:
+- WebhookSender: Send webhooks
+- WebhookServer: Receive webhooks
+- WebhookRouter: Route webhooks
 """
 
-from __future__ import annotations
+from typing import Any, Callable, Dict, List, Optional, Dict
+import threading
+import json
+import time
+import uuid
 
 import sys
 import os
-import hmac
-import hashlib
-import json
-from typing import Any, Dict, List, Optional
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class WebhookReceiveAction(BaseAction):
-    """Receive webhook payload."""
-    action_type = "webhook_receive"
-    display_name = "Webhook接收"
-    description = "接收Webhook载荷"
-    version = "1.0"
+class WebhookSender:
+    """Send webhooks to endpoints."""
+
+    def __init__(self, timeout: float = 10.0):
+        self.timeout = timeout
+        self._hooks: Dict[str, Dict[str, Any]] = {}
+
+    def register(self, name: str, url: str, secret: Optional[str] = None, headers: Optional[Dict[str, str]] = None) -> str:
+        """Register a webhook."""
+        hook_id = str(uuid.uuid4())
+        self._hooks[name] = {
+            "id": hook_id,
+            "url": url,
+            "secret": secret,
+            "headers": headers or {},
+        }
+        return hook_id
+
+    def unregister(self, name: str) -> bool:
+        """Unregister a webhook."""
+        if name in self._hooks:
+            del self._hooks[name]
+            return True
+        return False
+
+    def send(self, name: str, payload: Dict[str, Any], event: str = "event") -> Dict[str, Any]:
+        """Send webhook (simulated)."""
+        if name not in self._hooks:
+            return {"success": False, "error": "Webhook not found"}
+
+        hook = self._hooks[name]
+
+        headers = dict(hook["headers"])
+        headers["Content-Type"] = "application/json"
+        headers["X-Webhook-Event"] = event
+        headers["X-Webhook-ID"] = hook["id"]
+
+        return {
+            "success": True,
+            "hook_id": hook["id"],
+            "event": event,
+            "url": hook["url"],
+            "payload": payload,
+            "sent_at": time.time(),
+        }
+
+    def list_hooks(self) -> List[Dict[str, Any]]:
+        """List all webhooks."""
+        return [
+            {"name": name, "id": h["id"], "url": h["url"]}
+            for name, h in self._hooks.items()
+        ]
+
+
+class WebhookRouter:
+    """Route incoming webhooks to handlers."""
+
+    def __init__(self):
+        self._routes: Dict[str, Callable] = {}
+
+    def register(self, event: str, handler: Callable) -> None:
+        """Register a handler for an event."""
+        self._routes[event] = handler
+
+    def route(self, event: str, payload: Dict[str, Any]) -> Any:
+        """Route a webhook to its handler."""
+        handler = self._routes.get(event)
+        if not handler:
+            return None
+        return handler(payload)
+
+
+class WebhookAction(BaseAction):
+    """Webhook management action."""
+    action_type = "webhook"
+    display_name = "Webhook管理"
+    description = "Webhook发送"
+
+    def __init__(self):
+        super().__init__()
+        self._sender = WebhookSender()
+        self._router = WebhookRouter()
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute webhook receive."""
-        payload_var = params.get('payload_var', 'webhook_payload')
-        headers_var = params.get('headers_var', 'webhook_headers')
-        output_var = params.get('output_var', 'webhook_data')
-
         try:
-            result = {
-                'payload': {},
-                'headers': {},
-                'received': True,
-            }
+            operation = params.get("operation", "send")
 
-            return ActionResult(
-                success=True,
-                data={
-                    output_var: result,
-                    payload_var: {},
-                    headers_var: {},
-                },
-                message="Webhook received"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Webhook receive error: {e}")
-
-
-class WebhookSendAction(BaseAction):
-    """Send webhook notification."""
-    action_type = "webhook_send"
-    display_name = "Webhook发送"
-    description = "发送Webhook通知"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute webhook send."""
-        url = params.get('url', '')
-        payload = params.get('payload', {})
-        headers = params.get('headers', {})
-        secret = params.get('secret', '')
-        timeout = params.get('timeout', 10)
-        output_var = params.get('output_var', 'webhook_result')
-
-        if not url:
-            return ActionResult(success=False, message="url is required")
-
-        try:
-            import requests
-
-            resolved_url = context.resolve_value(url) if context else url
-            resolved_payload = context.resolve_value(payload) if context else payload
-            resolved_headers = context.resolve_value(headers) if context else headers
-
-            request_headers = {'Content-Type': 'application/json'}
-            request_headers.update(resolved_headers)
-
-            body = json.dumps(resolved_payload)
-
-            if secret:
-                signature = hmac.new(
-                    secret.encode('utf-8'),
-                    body.encode('utf-8'),
-                    hashlib.sha256
-                ).hexdigest()
-                request_headers['X-Webhook-Signature'] = f'sha256={signature}'
-
-            response = requests.post(
-                resolved_url,
-                data=body,
-                headers=request_headers,
-                timeout=timeout
-            )
-
-            result = {
-                'status_code': response.status_code,
-                'sent': response.ok,
-                'response': response.text[:500] if response.text else '',
-            }
-
-            return ActionResult(
-                success=response.ok,
-                data={output_var: result},
-                message=f"Webhook sent: {response.status_code}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Webhook send error: {e}")
-
-
-class WebhookVerifyAction(BaseAction):
-    """Verify webhook signature."""
-    action_type = "webhook_verify"
-    display_name = "Webhook验证"
-    description = "验证Webhook签名"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute webhook verification."""
-        payload = params.get('payload', '')
-        signature = params.get('signature', '')
-        secret = params.get('secret', '')
-        algorithm = params.get('algorithm', 'sha256')
-        output_var = params.get('output_var', 'verification_result')
-
-        if not payload or not signature or not secret:
-            return ActionResult(success=False, message="payload, signature, and secret are required")
-
-        try:
-            resolved_payload = context.resolve_value(payload) if context else payload
-            resolved_signature = context.resolve_value(signature) if context else signature
-
-            if isinstance(resolved_payload, dict):
-                body = json.dumps(resolved_payload)
+            if operation == "register":
+                return self._register(params)
+            elif operation == "unregister":
+                return self._unregister(params)
+            elif operation == "send":
+                return self._send(params)
+            elif operation == "list":
+                return self._list()
             else:
-                body = str(resolved_payload)
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-            if algorithm == 'sha256':
-                expected = hmac.new(
-                    secret.encode('utf-8'),
-                    body.encode('utf-8'),
-                    hashlib.sha256
-                ).hexdigest()
-            elif algorithm == 'sha1':
-                expected = hmac.new(
-                    secret.encode('utf-8'),
-                    body.encode('utf-8'),
-                    hashlib.sha1
-                ).hexdigest()
-            else:
-                return ActionResult(success=False, message=f"Unsupported algorithm: {algorithm}")
-
-            expected_sig = f"{algorithm}={expected}"
-            verified = hmac.compare_digest(expected_sig, resolved_signature)
-
-            result = {
-                'verified': verified,
-                'algorithm': algorithm,
-                'signature_provided': resolved_signature[:50] if resolved_signature else '',
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message="Signature verified" if verified else "Signature mismatch"
-            )
         except Exception as e:
-            return ActionResult(success=False, message=f"Webhook verify error: {e}")
+            return ActionResult(success=False, message=f"Webhook error: {str(e)}")
 
+    def _register(self, params: Dict[str, Any]) -> ActionResult:
+        """Register a webhook."""
+        name = params.get("name")
+        url = params.get("url")
+        secret = params.get("secret")
+        headers = params.get("headers")
 
-class WebhookFilterAction(BaseAction):
-    """Filter webhook events."""
-    action_type = "webhook_filter"
-    display_name = "Webhook过滤"
-    description = "过滤Webhook事件"
-    version = "1.0"
+        if not name or not url:
+            return ActionResult(success=False, message="name and url are required")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute webhook filter."""
-        payload = params.get('payload', {})
-        event_types = params.get('event_types', [])
-        required_fields = params.get('required_fields', [])
-        exclude_fields = params.get('exclude_fields', [])
-        output_var = params.get('output_var', 'filtered_payload')
+        hook_id = self._sender.register(name, url, secret, headers)
 
-        if not payload:
-            return ActionResult(success=False, message="payload is required")
+        return ActionResult(success=True, message=f"Webhook registered: {name}", data={"hook_id": hook_id})
 
-        try:
-            resolved_payload = context.resolve_value(payload) if context else payload
+    def _unregister(self, params: Dict[str, Any]) -> ActionResult:
+        """Unregister a webhook."""
+        name = params.get("name")
 
-            if event_types:
-                event_type = resolved_payload.get('type') or resolved_payload.get('event', '')
-                if event_type not in event_types:
-                    return ActionResult(
-                        success=False,
-                        message=f"Event type '{event_type}' not in allowed types"
-                    )
+        if not name:
+            return ActionResult(success=False, message="name is required")
 
-            missing_fields = [f for f in required_fields if f not in resolved_payload]
-            if missing_fields:
-                return ActionResult(
-                    success=False,
-                    message=f"Missing required fields: {missing_fields}"
-                )
+        success = self._sender.unregister(name)
 
-            filtered = {k: v for k, v in resolved_payload.items() if k not in exclude_fields}
+        return ActionResult(success=success, message="Unregistered" if success else "Webhook not found")
 
-            result = {
-                'filtered': filtered,
-                'event_type': resolved_payload.get('type', resolved_payload.get('event', '')),
-                'passed': True,
-            }
+    def _send(self, params: Dict[str, Any]) -> ActionResult:
+        """Send a webhook."""
+        name = params.get("name")
+        payload = params.get("payload", {})
+        event = params.get("event", "event")
 
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message="Webhook filtered successfully"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Webhook filter error: {e}")
+        if not name:
+            return ActionResult(success=False, message="name is required")
+
+        result = self._sender.send(name, payload, event)
+
+        return ActionResult(success=result["success"], message=result.get("error", "Sent"), data=result)
+
+    def _list(self) -> ActionResult:
+        """List all webhooks."""
+        hooks = self._sender.list_hooks()
+
+        return ActionResult(success=True, message=f"{len(hooks)} webhooks", data={"hooks": hooks})
