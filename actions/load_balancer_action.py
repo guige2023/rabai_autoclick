@@ -1,339 +1,467 @@
-"""Load balancer action module for RabAI AutoClick.
+"""
+Load balancer action for distributing requests across multiple backends.
 
-Provides load balancing:
-- LoadBalancer: Generic load balancer
-- RoundRobin: Round-robin strategy
-- LeastConnections: Least connections strategy
-- WeightedBalancer: Weighted load balancing
-- HealthAwareBalancer: Health-aware load balancing
+This module provides actions for load balancing strategies including
+round-robin, least connections, IP hash, and weighted distribution.
+
+Author: rabai_autoclick team
+Version: 1.0.0
 """
 
-import time
-import random
+from __future__ import annotations
+
+import hashlib
 import threading
-from typing import Any, Callable, Dict, List, Optional
+import time
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 
-class BalanceStrategy(Enum):
-    """Load balancing strategies."""
+class LoadBalancingStrategy(Enum):
+    """Load balancing algorithm strategies."""
     ROUND_ROBIN = "round_robin"
     LEAST_CONNECTIONS = "least_connections"
+    IP_HASH = "ip_hash"
     WEIGHTED = "weighted"
     RANDOM = "random"
-    IP_HASH = "ip_hash"
-    LATENCY = "latency"
+    LEAST_RESPONSE_TIME = "least_response_time"
+    CONSISTENT_HASH = "consistent_hash"
+
+
+class BackendStatus(Enum):
+    """Status of a backend server."""
+    HEALTHY = "healthy"
+    UNHEALTHY = "unhealthy"
+    DRAINING = "draining"
+    MAINTENANCE = "maintenance"
 
 
 @dataclass
 class Backend:
-    """Backend server."""
+    """Represents a backend server."""
     id: str
     host: str
     port: int
-    weight: float = 1.0
-    max_connections: int = 100
+    weight: int = 1
+    max_connections: Optional[int] = None
+    status: BackendStatus = BackendStatus.HEALTHY
     current_connections: int = 0
-    latency: float = 0.0
-    is_healthy: bool = True
-    last_health_check: float = 0.0
-    metadata: Dict = field(default_factory=dict)
+    total_requests: int = 0
+    failed_requests: int = 0
+    total_response_time_ms: float = 0.0
+    last_health_check: Optional[datetime] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def avg_response_time_ms(self) -> float:
+        """Calculate average response time."""
+        if self.total_requests == 0:
+            return 0.0
+        return self.total_response_time_ms / self.total_requests
+
+    @property
+    def health_score(self) -> float:
+        """Calculate health score (0.0 to 1.0)."""
+        if self.total_requests == 0:
+            return 1.0
+        success_rate = 1.0 - (self.failed_requests / self.total_requests)
+        return max(0.0, success_rate)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert backend to dictionary."""
+        return {
+            "id": self.id,
+            "host": self.host,
+            "port": self.port,
+            "weight": self.weight,
+            "status": self.status.value,
+            "current_connections": self.current_connections,
+            "total_requests": self.total_requests,
+            "avg_response_time_ms": self.avg_response_time_ms,
+            "health_score": self.health_score,
+            "last_health_check": (
+                self.last_health_check.isoformat()
+                if self.last_health_check else None
+            ),
+        }
 
 
 @dataclass
-class BalanceResult:
-    """Load balance result."""
-    selected_backend: Optional[Backend]
-    strategy: BalanceStrategy
-    total_backends: int
-    healthy_backends: int
+class Request:
+    """Represents a request to be load balanced."""
+    client_ip: str
+    path: str
+    method: str = "GET"
+    headers: Dict[str, str] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LoadBalancerConfig:
+    """Configuration for the load balancer."""
+    strategy: LoadBalancingStrategy = LoadBalancingStrategy.ROUND_ROBIN
+    health_check_interval: int = 30
+    health_check_timeout: int = 5
+    max_retries: int = 3
+    retry_on_failure: bool = True
+    connection_timeout: int = 10
+    read_timeout: int = 60
+    enable_metrics: bool = True
 
 
 class LoadBalancer:
-    """Generic load balancer."""
+    """
+    Load balancer with multiple distribution strategies.
 
-    def __init__(self, strategy: BalanceStrategy = BalanceStrategy.ROUND_ROBIN):
-        self.strategy = strategy
+    Supports round-robin, least connections, IP hash, and weighted
+    distribution with health checking and metrics.
+    """
+
+    def __init__(self, config: Optional[LoadBalancerConfig] = None):
+        """
+        Initialize the load balancer.
+
+        Args:
+            config: Load balancer configuration.
+        """
+        self.config = config or LoadBalancerConfig()
         self._backends: Dict[str, Backend] = {}
-        self._round_robin_index: Dict[str, int] = {}
         self._lock = threading.RLock()
+        self._round_robin_index = 0
+        self._request_counts: Dict[str, int] = defaultdict(int)
+        self._active_requests: Dict[str, Dict[str, Any]] = {}
 
-    def add_backend(self, backend: Backend) -> bool:
-        """Add backend."""
+    def add_backend(
+        self,
+        backend_id: str,
+        host: str,
+        port: int,
+        weight: int = 1,
+        max_connections: Optional[int] = None,
+    ) -> Backend:
+        """
+        Add a backend server.
+
+        Args:
+            backend_id: Unique identifier.
+            host: Backend host.
+            port: Backend port.
+            weight: Weight for weighted strategies.
+            max_connections: Maximum concurrent connections.
+
+        Returns:
+            The created Backend.
+        """
         with self._lock:
-            self._backends[backend.id] = backend
-            if backend.id not in self._round_robin_index:
-                self._round_robin_index[backend.id] = 0
-            return True
+            backend = Backend(
+                id=backend_id,
+                host=host,
+                port=port,
+                weight=weight,
+                max_connections=max_connections,
+            )
+            self._backends[backend_id] = backend
+            return backend
 
     def remove_backend(self, backend_id: str) -> bool:
-        """Remove backend."""
+        """Remove a backend server."""
         with self._lock:
             if backend_id in self._backends:
                 del self._backends[backend_id]
                 return True
             return False
 
+    def update_backend(
+        self,
+        backend_id: str,
+        weight: Optional[int] = None,
+        status: Optional[BackendStatus] = None,
+        max_connections: Optional[int] = None,
+    ) -> Optional[Backend]:
+        """Update a backend's configuration."""
+        with self._lock:
+            backend = self._backends.get(backend_id)
+            if not backend:
+                return None
+
+            if weight is not None:
+                backend.weight = weight
+            if status is not None:
+                backend.status = status
+            if max_connections is not None:
+                backend.max_connections = max_connections
+
+            return backend
+
     def get_backend(self, backend_id: str) -> Optional[Backend]:
-        """Get backend by ID."""
+        """Get a backend by ID."""
         with self._lock:
             return self._backends.get(backend_id)
 
-    def select(self, client_ip: Optional[str] = None) -> BalanceResult:
-        """Select backend."""
+    def list_backends(
+        self,
+        status: Optional[BackendStatus] = None,
+    ) -> List[Backend]:
+        """List backends, optionally filtered by status."""
         with self._lock:
-            healthy = [b for b in self._backends.values() if b.is_healthy]
+            backends = list(self._backends.values())
+            if status:
+                backends = [b for b in backends if b.status == status]
+            return backends
+
+    def select_backend(self, request: Optional[Request] = None) -> Optional[Backend]:
+        """
+        Select a backend using the configured strategy.
+
+        Args:
+            request: Optional request for context (IP hash, etc.).
+
+        Returns:
+            Selected Backend or None if no healthy backends.
+        """
+        with self._lock:
+            healthy = [
+                b for b in self._backends.values()
+                if b.status == BackendStatus.HEALTHY
+            ]
 
             if not healthy:
-                return BalanceResult(
-                    selected_backend=None,
-                    strategy=self.strategy,
-                    total_backends=len(self._backends),
-                    healthy_backends=0,
-                )
+                return None
 
-            selected = None
+            if self.config.strategy == LoadBalancingStrategy.ROUND_ROBIN:
+                return self._select_round_robin(healthy)
+            elif self.config.strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
+                return self._select_least_connections(healthy)
+            elif self.config.strategy == LoadBalancingStrategy.IP_HASH:
+                return self._select_ip_hash(healthy, request)
+            elif self.config.strategy == LoadBalancingStrategy.WEIGHTED:
+                return self._select_weighted(healthy)
+            elif self.config.strategy == LoadBalancingStrategy.RANDOM:
+                return self._select_random(healthy)
+            elif self.config.strategy == LoadBalancingStrategy.LEAST_RESPONSE_TIME:
+                return self._select_least_response_time(healthy)
+            else:
+                return self._select_round_robin(healthy)
 
-            if self.strategy == BalanceStrategy.ROUND_ROBIN:
-                selected = self._round_robin_select(healthy)
-            elif self.strategy == BalanceStrategy.LEAST_CONNECTIONS:
-                selected = self._least_connections_select(healthy)
-            elif self.strategy == BalanceStrategy.WEIGHTED:
-                selected = self._weighted_select(healthy)
-            elif self.strategy == BalanceStrategy.RANDOM:
-                selected = random.choice(healthy)
-            elif self.strategy == BalanceStrategy.IP_HASH:
-                selected = self._ip_hash_select(healthy, client_ip or "")
-            elif self.strategy == BalanceStrategy.LATENCY:
-                selected = self._latency_select(healthy)
+    def _select_round_robin(self, backends: List[Backend]) -> Backend:
+        """Round-robin selection."""
+        if not backends:
+            return None
+        index = self._round_robin_index % len(backends)
+        self._round_robin_index += 1
+        return backends[index]
 
-            if selected:
-                selected.current_connections += 1
+    def _select_least_connections(self, backends: List[Backend]) -> Backend:
+        """Select backend with fewest active connections."""
+        if not backends:
+            return None
+        return min(backends, key=lambda b: b.current_connections)
 
-            return BalanceResult(
-                selected_backend=selected,
-                strategy=self.strategy,
-                total_backends=len(self._backends),
-                healthy_backends=len(healthy),
-            )
+    def _select_ip_hash(self, backends: List[Backend], request: Optional[Request]) -> Backend:
+        """IP hash-based selection for session affinity."""
+        if not backends:
+            return None
+        if not request:
+            return backends[0]
 
-    def release(self, backend_id: str):
-        """Release backend connection."""
+        ip = request.client_ip
+        hash_val = int(hashlib.md5(ip.encode()).hexdigest(), 16)
+        index = hash_val % len(backends)
+        return backends[index]
+
+    def _select_weighted(self, backends: List[Backend]) -> Backend:
+        """Weighted selection based on backend weights."""
+        if not backends:
+            return None
+
+        total_weight = sum(b.weight for b in backends)
+        if total_weight == 0:
+            return backends[0]
+
+        import random
+        rand_val = random.randint(1, total_weight)
+
+        cumulative = 0
+        for backend in backends:
+            cumulative += backend.weight
+            if rand_val <= cumulative:
+                return backend
+
+        return backends[-1]
+
+    def _select_random(self, backends: List[Backend]) -> Backend:
+        """Random selection."""
+        if not backends:
+            return None
+        import random
+        return random.choice(backends)
+
+    def _select_least_response_time(self, backends: List[Backend]) -> Backend:
+        """Select backend with lowest average response time."""
+        if not backends:
+            return None
+        return min(backends, key=lambda b: b.avg_response_time_ms)
+
+    def record_request(
+        self,
+        backend_id: str,
+        response_time_ms: float,
+        success: bool = True,
+    ) -> None:
+        """
+        Record a request for a backend.
+
+        Args:
+            backend_id: Backend that handled the request.
+            response_time_ms: Response time in milliseconds.
+            success: Whether the request was successful.
+        """
+        with self._lock:
+            backend = self._backends.get(backend_id)
+            if not backend:
+                return
+
+            backend.total_requests += 1
+            backend.total_response_time_ms += response_time_ms
+            if not success:
+                backend.failed_requests += 1
+
+    def increment_connections(self, backend_id: str) -> bool:
+        """Increment connection count for a backend."""
+        with self._lock:
+            backend = self._backends.get(backend_id)
+            if not backend:
+                return False
+            if backend.max_connections and backend.current_connections >= backend.max_connections:
+                return False
+            backend.current_connections += 1
+            return True
+
+    def decrement_connections(self, backend_id: str) -> None:
+        """Decrement connection count for a backend."""
         with self._lock:
             backend = self._backends.get(backend_id)
             if backend and backend.current_connections > 0:
                 backend.current_connections -= 1
 
-    def _round_robin_select(self, backends: List[Backend]) -> Backend:
-        """Round-robin selection."""
-        if not backends:
-            return None
+    def health_check(self, backend_id: str) -> bool:
+        """
+        Perform health check on a backend.
 
-        idx = 0
-        for backend in backends:
-            if self._round_robin_index.get(backend.id, 0) <= idx:
-                self._round_robin_index[backend.id] = idx + 1
-                return backend
-            idx += 1
+        Args:
+            backend_id: Backend to check.
 
-        self._round_robin_index[backends[0].id] = 1
-        return backends[0]
+        Returns:
+            True if backend is healthy.
+        """
+        import socket
 
-    def _least_connections_select(self, backends: List[Backend]) -> Backend:
-        """Select backend with least connections."""
-        if not backends:
-            return None
-        return min(backends, key=lambda b: b.current_connections)
+        backend = self._backends.get(backend_id)
+        if not backend:
+            return False
 
-    def _weighted_select(self, backends: List[Backend]) -> Backend:
-        """Weighted selection."""
-        if not backends:
-            return None
-        total_weight = sum(b.weight for b in backends)
-        r = random.uniform(0, total_weight)
-        cumsum = 0
-        for backend in backends:
-            cumsum += backend.weight
-            if r <= cumsum:
-                return backend
-        return backends[-1]
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.config.health_check_timeout)
+            result = sock.connect_ex((backend.host, backend.port))
+            sock.close()
 
-    def _ip_hash_select(self, backends: List[Backend], client_ip: str) -> Backend:
-        """IP hash selection."""
-        if not backends:
-            return None
-        hash_val = sum(ord(c) for c in client_ip)
-        idx = hash_val % len(backends)
-        return backends[idx]
+            is_healthy = result == 0
+            backend.last_health_check = datetime.now()
 
-    def _latency_select(self, backends: List[Backend]) -> Backend:
-        """Select by latency."""
-        if not backends:
-            return None
-        available = [b for b in backends if b.latency > 0]
-        if not available:
-            return backends[0]
-        return min(available, key=lambda b: b.latency)
+            if backend.status != BackendStatus.DRAINING:
+                backend.status = (
+                    BackendStatus.HEALTHY if is_healthy else BackendStatus.UNHEALTHY
+                )
 
-    def list_backends(self) -> List[Dict]:
-        """List all backends."""
+            return is_healthy
+
+        except Exception:
+            backend.status = BackendStatus.UNHEALTHY
+            backend.last_health_check = datetime.now()
+            return False
+
+    def health_check_all(self) -> Dict[str, bool]:
+        """Perform health checks on all backends."""
+        results = {}
+        for backend_id in self._backends:
+            results[backend_id] = self.health_check(backend_id)
+        return results
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get load balancer metrics."""
         with self._lock:
-            return [
-                {
-                    "id": b.id,
-                    "host": b.host,
-                    "port": b.port,
-                    "weight": b.weight,
-                    "connections": b.current_connections,
-                    "latency": b.latency,
-                    "healthy": b.is_healthy,
-                }
-                for b in self._backends.values()
-            ]
+            backends = list(self._backends.values())
+            total_requests = sum(b.total_requests for b in backends)
+            total_failed = sum(b.failed_requests for b in backends)
+
+            avg_response_time = 0.0
+            if backends:
+                avg_response_time = sum(b.avg_response_time_ms for b in backends) / len(backends)
+
+            return {
+                "total_backends": len(backends),
+                "healthy_backends": sum(1 for b in backends if b.status == BackendStatus.HEALTHY),
+                "unhealthy_backends": sum(1 for b in backends if b.status == BackendStatus.UNHEALTHY),
+                "total_requests": total_requests,
+                "failed_requests": total_failed,
+                "success_rate": (
+                    (total_requests - total_failed) / total_requests * 100
+                    if total_requests > 0 else 100.0
+                ),
+                "avg_response_time_ms": avg_response_time,
+                "strategy": self.config.strategy.value,
+                "backends": [b.to_dict() for b in backends],
+            }
 
 
-class LoadBalancerAction(BaseAction):
-    """Load balancer action."""
-    action_type = "load_balancer"
-    display_name = "负载均衡"
-    description = "服务负载均衡调度"
+def load_balancer_add_backend_action(
+    backend_id: str,
+    host: str,
+    port: int,
+    weight: int = 1,
+) -> Dict[str, Any]:
+    """Add a backend to the load balancer."""
+    lb = LoadBalancer()
+    backend = lb.add_backend(backend_id, host, port, weight)
+    return backend.to_dict()
 
-    def __init__(self):
-        super().__init__()
-        self._balancers: Dict[str, LoadBalancer] = {}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "balance")
+def load_balancer_select_action(
+    client_ip: Optional[str] = None,
+    strategy: str = "round_robin",
+) -> Optional[Dict[str, Any]]:
+    """Select a backend using the specified strategy."""
+    strategy_map = {
+        "round_robin": LoadBalancingStrategy.ROUND_ROBIN,
+        "least_connections": LoadBalancingStrategy.LEAST_CONNECTIONS,
+        "ip_hash": LoadBalancingStrategy.IP_HASH,
+        "weighted": LoadBalancingStrategy.WEIGHTED,
+        "random": LoadBalancingStrategy.RANDOM,
+        "least_response_time": LoadBalancingStrategy.LEAST_RESPONSE_TIME,
+    }
 
-            if operation == "create":
-                return self._create_balancer(params)
-            elif operation == "add":
-                return self._add_backend(params)
-            elif operation == "remove":
-                return self._remove_backend(params)
-            elif operation == "balance":
-                return self._balance(params)
-            elif operation == "release":
-                return self._release(params)
-            elif operation == "list":
-                return self._list_backends(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+    if strategy.lower() not in strategy_map:
+        raise ValueError(f"Unknown strategy: {strategy}")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Load balancer error: {str(e)}")
+    config = LoadBalancerConfig(strategy=strategy_map[strategy.lower()])
+    lb = LoadBalancer(config)
 
-    def _create_balancer(self, params: Dict) -> ActionResult:
-        """Create load balancer."""
-        name = params.get("name", "default")
-        strategy_str = params.get("strategy", "round_robin").upper()
+    request = None
+    if client_ip:
+        request = Request(client_ip=client_ip, path="/", method="GET")
 
-        try:
-            strategy = BalanceStrategy[strategy_str]
-        except KeyError:
-            return ActionResult(success=False, message=f"Unknown strategy: {strategy_str}")
+    backend = lb.select_backend(request)
+    if backend:
+        return backend.to_dict()
+    return None
 
-        balancer = LoadBalancer(strategy=strategy)
-        self._balancers[name] = balancer
 
-        return ActionResult(success=True, message=f"Load balancer '{name}' created with {strategy.value} strategy")
-
-    def _add_backend(self, params: Dict) -> ActionResult:
-        """Add backend to balancer."""
-        name = params.get("name", "default")
-        backend_id = params.get("backend_id")
-        host = params.get("host")
-        port = params.get("port", 80)
-
-        if not backend_id or not host:
-            return ActionResult(success=False, message="backend_id and host are required")
-
-        balancer = self._balancers.get(name)
-        if not balancer:
-            balancer = LoadBalancer()
-            self._balancers[name] = balancer
-
-        backend = Backend(
-            id=backend_id,
-            host=host,
-            port=port,
-            weight=params.get("weight", 1.0),
-            max_connections=params.get("max_connections", 100),
-        )
-
-        balancer.add_backend(backend)
-        return ActionResult(success=True, message=f"Backend '{backend_id}' added to '{name}'")
-
-    def _remove_backend(self, params: Dict) -> ActionResult:
-        """Remove backend from balancer."""
-        name = params.get("name", "default")
-        backend_id = params.get("backend_id")
-
-        if not backend_id:
-            return ActionResult(success=False, message="backend_id is required")
-
-        balancer = self._balancers.get(name)
-        if not balancer:
-            return ActionResult(success=False, message=f"Balancer '{name}' not found")
-
-        success = balancer.remove_backend(backend_id)
-        return ActionResult(success=success, message="Backend removed" if success else "Backend not found")
-
-    def _balance(self, params: Dict) -> ActionResult:
-        """Select backend."""
-        name = params.get("name", "default")
-        client_ip = params.get("client_ip")
-
-        balancer = self._balancers.get(name)
-        if not balancer:
-            balancer = LoadBalancer()
-            self._balancers[name] = balancer
-
-        result = balancer.select(client_ip)
-
-        if result.selected_backend:
-            return ActionResult(
-                success=True,
-                message=f"Selected backend: {result.selected_backend.id}",
-                data={
-                    "backend_id": result.selected_backend.id,
-                    "host": result.selected_backend.host,
-                    "port": result.selected_backend.port,
-                    "strategy": result.strategy.value,
-                    "healthy_backends": result.healthy_backends,
-                },
-            )
-        else:
-            return ActionResult(success=False, message="No healthy backends available")
-
-    def _release(self, params: Dict) -> ActionResult:
-        """Release backend connection."""
-        name = params.get("name", "default")
-        backend_id = params.get("backend_id")
-
-        balancer = self._balancers.get(name)
-        if not balancer:
-            return ActionResult(success=False, message=f"Balancer '{name}' not found")
-
-        balancer.release(backend_id)
-        return ActionResult(success=True, message=f"Released backend '{backend_id}'")
-
-    def _list_backends(self, params: Dict) -> ActionResult:
-        """List backends."""
-        name = params.get("name", "default")
-
-        balancer = self._balancers.get(name)
-        if not balancer:
-            return ActionResult(success=True, message="No backends", data={"backends": []})
-
-        backends = balancer.list_backends()
-        return ActionResult(success=True, message=f"{len(backends)} backends", data={"backends": backends})
+def load_balancer_metrics_action() -> Dict[str, Any]:
+    """Get load balancer metrics."""
+    lb = LoadBalancer()
+    return lb.get_metrics()
