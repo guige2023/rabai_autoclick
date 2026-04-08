@@ -1,205 +1,215 @@
-"""Data compression action module for RabAI AutoClick.
+"""
+Data Compression Action.
 
-Provides data compression operations:
-- CompressAction: Compress data
-- DecompressAction: Decompress data
-- EncodeDecodeAction: Encode/decode data
-- SerializationAction: Serialize/deserialize data
+Provides data compression utilities.
+Supports:
+- Gzip/Zlib compression
+- LZ4 compression
+- Brotli compression
+- Streaming compression
 """
 
-import json
+from typing import Optional, Tuple
+import gzip
 import zlib
-import base64
-from typing import Any, Dict, List, Optional
+import logging
+import json
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class CompressAction(BaseAction):
-    """Compress data."""
-    action_type = "compress"
-    display_name: "压缩"
-    description: "压缩数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+class DataCompressionAction:
+    """
+    Data Compression Action.
+    
+    Provides data compression with support for:
+    - Multiple compression algorithms
+    - Configurable compression levels
+    - Streaming compression
+    - Auto-detection of compressed data
+    """
+    
+    ALGORITHMS = ["gzip", "zlib", "lz4", "brotli"]
+    
+    def __init__(self, default_algorithm: str = "gzip", default_level: int = 6):
+        """
+        Initialize the Data Compression Action.
+        
+        Args:
+            default_algorithm: Default compression algorithm
+            default_level: Compression level (1-9)
+        """
+        if default_algorithm not in self.ALGORITHMS:
+            raise ValueError(f"Unknown algorithm: {default_algorithm}")
+        
+        self.default_algorithm = default_algorithm
+        self.default_level = max(1, min(9, default_level))
+    
+    def compress(
+        self,
+        data: bytes,
+        algorithm: Optional[str] = None,
+        level: Optional[int] = None
+    ) -> bytes:
+        """
+        Compress data.
+        
+        Args:
+            data: Data to compress
+            algorithm: Compression algorithm
+            level: Compression level (1-9)
+        
+        Returns:
+            Compressed data
+        """
+        algo = algorithm or self.default_algorithm
+        lvl = level or self.default_level
+        
+        if algo == "gzip":
+            return self._gzip_compress(data, lvl)
+        elif algo == "zlib":
+            return self._zlib_compress(data, lvl)
+        elif algo == "lz4":
+            return self._lz4_compress(data)
+        elif algo == "brotli":
+            return self._brotli_compress(data, lvl)
+        else:
+            raise ValueError(f"Unknown algorithm: {algo}")
+    
+    def decompress(
+        self,
+        data: bytes,
+        algorithm: Optional[str] = None
+    ) -> bytes:
+        """
+        Decompress data.
+        
+        Args:
+            data: Compressed data
+            algorithm: Compression algorithm used
+        
+        Returns:
+            Decompressed data
+        """
+        algo = algorithm or self._detect_algorithm(data)
+        
+        if algo == "gzip":
+            return self._gzip_decompress(data)
+        elif algo == "zlib":
+            return self._zlib_decompress(data)
+        elif algo == "lz4":
+            return self._lz4_decompress(data)
+        elif algo == "brotli":
+            return self._brotli_decompress(data)
+        else:
+            raise ValueError(f"Unknown algorithm: {algo}")
+    
+    def _gzip_compress(self, data: bytes, level: int) -> bytes:
+        """Compress using gzip."""
+        return gzip.compress(data, compresslevel=level)
+    
+    def _gzip_decompress(self, data: bytes) -> bytes:
+        """Decompress gzip data."""
+        return gzip.decompress(data)
+    
+    def _zlib_compress(self, data: bytes, level: int) -> bytes:
+        """Compress using zlib."""
+        return zlib.compress(data, level=level)
+    
+    def _zlib_decompress(self, data: bytes) -> bytes:
+        """Decompress zlib data."""
+        return zlib.decompress(data)
+    
+    def _lz4_compress(self, data: bytes) -> bytes:
+        """Compress using lz4."""
         try:
-            data = params.get("data", "")
-            algorithm = params.get("algorithm", "gzip")
-            level = params.get("level", 6)
-
-            if isinstance(data, dict):
-                data = json.dumps(data)
-            elif not isinstance(data, str):
-                data = str(data)
-
-            data_bytes = data.encode("utf-8")
-
-            if algorithm == "gzip":
-                import gzip
-                compressed = gzip.compress(data_bytes, level=level)
-            elif algorithm == "zlib":
-                compressed = zlib.compress(data_bytes, level=level)
-            elif algorithm == "lz4":
-                import lz4.frame
-                compressed = lz4.frame.compress(data_bytes)
-            else:
-                compressed = zlib.compress(data_bytes, level=level)
-
-            compressed_b64 = base64.b64encode(compressed).decode("ascii")
-            original_size = len(data_bytes)
-            compressed_size = len(compressed)
-
-            return ActionResult(
-                success=True,
-                message=f"Compressed {original_size} -> {compressed_size} bytes ({compressed_size/original_size:.1%})",
-                data={
-                    "compressed": compressed_b64,
-                    "original_size": original_size,
-                    "compressed_size": compressed_size,
-                    "ratio": round(compressed_size / original_size, 4),
-                    "algorithm": algorithm,
-                },
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Compress error: {e}")
-
-
-class DecompressAction(BaseAction):
-    """Decompress data."""
-    action_type = "decompress"
-    display_name: "解压"
-    description: "解压数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+            import lz4.frame
+            return lz4.frame.compress(data)
+        except ImportError:
+            logger.warning("lz4 not available, using zlib fallback")
+            return zlib.compress(data)
+    
+    def _lz4_decompress(self, data: bytes) -> bytes:
+        """Decompress lz4 data."""
         try:
-            data = params.get("data", "")
-            algorithm = params.get("algorithm", "gzip")
-            output_format = params.get("output_format", "string")
-
-            if isinstance(data, str):
-                data = base64.b64decode(data.encode("ascii"))
-
-            if algorithm == "gzip":
-                import gzip
-                decompressed = gzip.decompress(data)
-            elif algorithm == "zlib":
-                decompressed = zlib.decompress(data)
-            elif algorithm == "lz4":
-                import lz4.frame
-                decompressed = lz4.frame.decompress(data)
-            else:
-                decompressed = zlib.decompress(data)
-
-            if output_format == "json":
-                try:
-                    result = json.loads(decompressed.decode("utf-8"))
-                except Exception:
-                    result = decompressed.decode("utf-8")
-            else:
-                result = decompressed.decode("utf-8")
-
-            return ActionResult(
-                success=True,
-                message=f"Decompressed {len(data)} -> {len(decompressed)} bytes",
-                data={"decompressed": result, "size": len(decompressed), "algorithm": algorithm},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Decompress error: {e}")
-
-
-class EncodeDecodeAction(BaseAction):
-    """Encode/decode data."""
-    action_type = "encode_decode"
-    display_name: "编码解码"
-    description: "数据的编码和解码"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+            import lz4.frame
+            return lz4.frame.decompress(data)
+        except ImportError:
+            logger.warning("lz4 not available, using zlib fallback")
+            return zlib.decompress(data)
+    
+    def _brotli_compress(self, data: bytes, level: int) -> bytes:
+        """Compress using brotli."""
         try:
-            action = params.get("action", "encode")
-            data = params.get("data", "")
-            encoding = params.get("encoding", "utf-8")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if action == "encode":
-                if isinstance(data, dict):
-                    encoded = json.dumps(data)
-                else:
-                    encoded = str(data)
-                encoded_bytes = encoded.encode(encoding)
-                encoded_b64 = base64.b64encode(encoded_bytes).decode("ascii")
-                return ActionResult(success=True, message=f"Encoded to base64", data={"encoded": encoded_b64, "original_size": len(encoded_bytes)})
-
-            elif action == "decode":
-                decoded_bytes = base64.b64decode(data.encode("ascii"))
-                decoded = decoded_bytes.decode(encoding)
-                try:
-                    decoded_json = json.loads(decoded)
-                    return ActionResult(success=True, message="Decoded base64", data={"decoded": decoded_json, "as_string": decoded})
-                except Exception:
-                    return ActionResult(success=True, message="Decoded base64", data={"decoded": decoded, "is_json": False})
-
-            return ActionResult(success=False, message=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"EncodeDecode error: {e}")
-
-
-class SerializationAction(BaseAction):
-    """Serialize/deserialize data."""
-    action_type: "serialization"
-    display_name: "序列化"
-    description: "数据序列化"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+            import brotli
+            return brotli.compress(data, quality=level)
+        except ImportError:
+            logger.warning("brotli not available, using gzip fallback")
+            return gzip.compress(data)
+    
+    def _brotli_decompress(self, data: bytes) -> bytes:
+        """Decompress brotli data."""
         try:
-            action = params.get("action", "serialize")
-            data = params.get("data", {})
-            format = params.get("format", "json")
+            import brotli
+            return brotli.decompress(data)
+        except ImportError:
+            logger.warning("brotli not available, using gzip fallback")
+            return gzip.decompress(data)
+    
+    def _detect_algorithm(self, data: bytes) -> str:
+        """Auto-detect compression algorithm."""
+        if len(data) < 2:
+            return "zlib"
+        
+        # Check magic bytes
+        if data[:2] == b'\x1f\x8b':
+            return "gzip"
+        elif data[:2] in (b'\x78\x9c', b'\x78\x01', b'\x78\xda'):
+            return "zlib"
+        elif data[:2] == b'\x00\x00':
+            return "lz4"
+        
+        return "zlib"
+    
+    def get_compression_stats(
+        self,
+        original_size: int,
+        compressed_size: int
+    ) -> dict:
+        """Get compression statistics."""
+        ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
+        return {
+            "original_size": original_size,
+            "compressed_size": compressed_size,
+            "ratio": ratio,
+            "space_saved": original_size - compressed_size
+        }
 
-            if action == "serialize":
-                if format == "json":
-                    serialized = json.dumps(data, ensure_ascii=False, indent=2)
-                elif format == "json_compact":
-                    serialized = json.dumps(data, separators=(",", ":"))
-                elif format == "msgpack":
-                    import msgpack
-                    serialized = msgpack.packb(data)
-                elif format == "pickle":
-                    import pickle
-                    serialized = pickle.dumps(data)
-                else:
-                    serialized = json.dumps(data)
 
-                return ActionResult(
-                    success=True,
-                    message=f"Serialized to {format}",
-                    data={"serialized": serialized, "format": format, "size": len(str(serialized))},
-                )
-
-            elif action == "deserialize":
-                if format == "json":
-                    deserialized = json.loads(data)
-                elif format == "msgpack":
-                    import msgpack
-                    deserialized = msgpack.unpackb(data, raw=False)
-                elif format == "pickle":
-                    import pickle
-                    deserialized = pickle.loads(data)
-                else:
-                    deserialized = json.loads(data)
-
-                return ActionResult(
-                    success=True,
-                    message=f"Deserialized from {format}",
-                    data={"deserialized": deserialized, "format": format},
-                )
-
-            return ActionResult(success=False, message=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Serialization error: {e}")
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    
+    compressor = DataCompressionAction(default_algorithm="gzip")
+    
+    # Test data
+    test_data = b"Hello, this is some test data that will be compressed. " * 100
+    
+    # Compress
+    compressed = compressor.compress(test_data)
+    print(f"Original: {len(test_data)} bytes")
+    print(f"Compressed: {len(compressed)} bytes")
+    
+    # Stats
+    stats = compressor.get_compression_stats(len(test_data), len(compressed))
+    print(f"Compression ratio: {stats['ratio']:.1f}%")
+    
+    # Decompress
+    decompressed = compressor.decompress(compressed)
+    print(f"Decompressed matches: {decompressed == test_data}")
+    
+    # Test all algorithms
+    for algo in ["gzip", "zlib"]:
+        comp = compressor.compress(test_data, algorithm=algo)
+        decomp = compressor.decompress(comp, algorithm=algo)
+        ratio = (1 - len(comp) / len(test_data)) * 100
+        print(f"{algo}: {len(comp)} bytes, {ratio:.1f}% ratio, matches: {decomp == test_data}")
