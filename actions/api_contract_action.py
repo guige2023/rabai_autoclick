@@ -1,109 +1,117 @@
 """
-API Contract Action Module.
+API Contract Action - Contract testing for APIs.
 
-Validates API responses against OpenAPI contracts, checks schema compliance,
-and generates contract test reports.
+This module provides contract testing capabilities for
+validating API contracts.
 """
-from typing import Any, Optional
+
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from actions.base_action import BaseAction
+from typing import Any
 
 
 @dataclass
-class ContractViolation:
-    """A contract violation found."""
-    path: str
+class ContractRule:
+    """A contract rule for validation."""
     field: str
     expected_type: str
-    actual_value: Any
-    severity: str  # error, warning
+    required: bool = False
 
 
 @dataclass
-class ContractTestResult:
-    """Result of contract testing."""
+class ContractSpec:
+    """API contract specification."""
+    name: str
+    status_code: int
+    rules: list[ContractRule] = field(default_factory=list)
+
+
+@dataclass
+class ContractResult:
+    """Result of contract validation."""
     passed: bool
-    violations: list[ContractViolation]
-    warnings: list[str]
+    contract_name: str
+    errors: list[str] = field(default_factory=list)
 
 
-class APIContractAction(BaseAction):
-    """Validate API responses against OpenAPI contracts."""
-
+class ContractValidator:
+    """Validates API contracts."""
+    
     def __init__(self) -> None:
-        super().__init__("api_contract")
-
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Validate API response against contract.
-
-        Args:
-            context: Execution context
-            params: Parameters:
-                - response: API response to validate
-                - contract: OpenAPI contract dict or path
-                - strict: Enable strict type checking
-
-        Returns:
-            ContractTestResult with violations
-        """
-        response = params.get("response")
-        contract = params.get("contract", {})
-        strict = params.get("strict", False)
-
-        if not response:
-            return ContractTestResult(False, [], ["No response provided"]).__dict__
-
-        violations: list[ContractViolation] = []
-        warnings: list[str] = []
-
-        if isinstance(response, dict) and "data" in contract:
-            schema = contract.get("data", {})
-            violations.extend(self._validate_schema(response, schema, "", strict))
-
-        if isinstance(response, dict):
-            for key, value in response.items():
-                if value is None:
-                    violations.append(ContractViolation(
-                        path=key,
-                        field=key,
-                        expected_type="non-null",
-                        actual_value=None,
-                        severity="error"
-                    ))
-                elif isinstance(value, str) and not value.strip():
-                    warnings.append(f"Empty string at {key}")
-
-        return ContractTestResult(
-            passed=len(violations) == 0,
-            violations=violations,
-            warnings=warnings
-        ).__dict__
-
-    def _validate_schema(self, data: Any, schema: dict, path: str, strict: bool) -> list[ContractViolation]:
-        """Validate data against JSON schema."""
-        violations = []
-        expected_type = schema.get("type", "object")
-
-        if expected_type == "object":
-            if not isinstance(data, dict):
-                violations.append(ContractViolation(path=path, field=path, expected_type="object", actual_value=type(data).__name__, severity="error"))
+        self._contracts: dict[str, ContractSpec] = {}
+    
+    def register_contract(self, contract: ContractSpec) -> None:
+        """Register a contract."""
+        self._contracts[contract.name] = contract
+    
+    def validate(self, name: str, status_code: int, data: Any) -> ContractResult:
+        """Validate response against contract."""
+        if name not in self._contracts:
+            return ContractResult(passed=False, contract_name=name, errors=[f"Contract {name} not found"])
+        
+        contract = self._contracts[name]
+        errors = []
+        
+        if status_code != contract.status_code:
+            errors.append(f"Expected status {contract.status_code}, got {status_code}")
+        
+        for rule in contract.rules:
+            value = self._get_nested(data, rule.field)
+            if rule.required and value is None:
+                errors.append(f"Required field missing: {rule.field}")
+            elif value is not None and not self._check_type(value, rule.expected_type):
+                errors.append(f"Field {rule.field} expected type {rule.expected_type}")
+        
+        return ContractResult(passed=len(errors) == 0, contract_name=name, errors=errors)
+    
+    def _get_nested(self, data: Any, path: str) -> Any:
+        """Get nested value."""
+        if not path:
+            return data
+        keys = path.split(".")
+        current = data
+        for key in keys:
+            if isinstance(current, dict):
+                current = current.get(key)
             else:
-                required = schema.get("required", [])
-                for req_field in required:
-                    if req_field not in data:
-                        violations.append(ContractViolation(path=f"{path}.{req_field}", field=req_field, expected_type="required", actual_value=None, severity="error"))
+                return None
+        return current
+    
+    def _check_type(self, value: Any, expected: str) -> bool:
+        """Check if value matches expected type."""
+        type_map = {
+            "string": str,
+            "integer": int,
+            "number": (int, float),
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+        }
+        expected_type = type_map.get(expected)
+        if expected_type:
+            return isinstance(value, expected_type)
+        return True
 
-        elif expected_type == "string":
-            if not isinstance(data, str):
-                violations.append(ContractViolation(path=path, field=path, expected_type="string", actual_value=type(data).__name__, severity="error"))
 
-        elif expected_type == "number":
-            if not isinstance(data, (int, float)):
-                violations.append(ContractViolation(path=path, field=path, expected_type="number", actual_value=type(data).__name__, severity="error"))
+class APIContractAction:
+    """API contract action for automation workflows."""
+    
+    def __init__(self) -> None:
+        self.validator = ContractValidator()
+    
+    def add_contract(self, name: str, status_code: int, rules: list[dict]) -> None:
+        """Add a contract."""
+        contract = ContractSpec(
+            name=name,
+            status_code=status_code,
+            rules=[ContractRule(**r) for r in rules],
+        )
+        self.validator.register_contract(contract)
+    
+    async def validate(self, name: str, status_code: int, data: Any) -> ContractResult:
+        """Validate response against contract."""
+        return self.validator.validate(name, status_code, data)
 
-        elif expected_type == "array":
-            if not isinstance(data, list):
-                violations.append(ContractViolation(path=path, field=path, expected_type="array", actual_value=type(data).__name__, severity="error"))
 
-        return violations
+__all__ = ["ContractRule", "ContractSpec", "ContractResult", "ContractValidator", "APIContractAction"]
