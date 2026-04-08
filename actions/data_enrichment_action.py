@@ -1,267 +1,241 @@
-"""Data enrichment action module for RabAI AutoClick.
+"""Data Enrichment action module for RabAI AutoClick.
 
 Provides data enrichment operations:
-- LookupEnrichAction: Enrich data with lookup tables
-- GeoEnrichAction: Add geographic metadata
-- TemporalEnrichAction: Add time-based features
-- CrossReferenceEnrichAction: Cross-reference with external data
+- EnrichLookupAction: Lookup enrichment
+- EnrichMergeAction: Merge enrichment
+- EnrichComputeAction: Computed enrichment
+- EnrichExternalAction: External API enrichment
 """
 
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Callable
+from __future__ import annotations
 
 import sys
 import os
+from typing import Any, Dict, List, Optional
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class LookupEnrichAction(BaseAction):
-    """Enrich data with lookup tables."""
-    action_type = "lookup_enrich"
-    display_name = "查表数据丰富"
-    description = "通过查找表丰富数据"
+class EnrichLookupAction(BaseAction):
+    """Lookup enrichment."""
+    action_type = "enrich_lookup"
+    display_name = "查找富化"
+    description = "查找数据富化"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute lookup enrichment."""
+        data = params.get('data', {})
+        lookup_table = params.get('lookup_table', {})
+        key_field = params.get('key_field', '')
+        enrich_fields = params.get('enrich_fields', [])
+        output_var = params.get('output_var', 'enriched_data')
+
+        if not data or not lookup_table or not key_field:
+            return ActionResult(success=False, message="data, lookup_table, and key_field are required")
+
         try:
-            data = params.get("data", [])
-            lookup_table = params.get("lookup_table", {})
-            lookup_key = params.get("lookup_key", "id")
-            enrich_fields = params.get("enrich_fields", [])
-            default_value = params.get("default_value", None)
-            strategy = params.get("strategy", "left")
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_lookup = context.resolve_value(lookup_table) if context else lookup_table
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+            key = resolved_data.get(key_field, '')
+            lookup_row = resolved_lookup.get(key, {})
 
-            if not isinstance(data, list):
-                data = [data]
+            enriched = resolved_data.copy()
+            for field in enrich_fields:
+                enriched[field] = lookup_row.get(field)
 
-            if not isinstance(lookup_table, dict):
-                return ActionResult(success=False, message="lookup_table must be a dict")
+            result = {
+                'enriched': enriched,
+                'key': key,
+                'found': bool(lookup_row),
+            }
+
+            return ActionResult(
+                success=True,
+                data={output_var: result},
+                message=f"Enriched with lookup: {'found' if lookup_row else 'not found'}"
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Enrich lookup error: {e}")
+
+
+class EnrichMergeAction(BaseAction):
+    """Merge enrichment."""
+    action_type = "enrich_merge"
+    display_name = "合并富化"
+    description = "合并数据富化"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute merge enrichment."""
+        data = params.get('data', [])
+        enrich_data = params.get('enrich_data', [])
+        join_key = params.get('join_key', '')
+        output_var = params.get('output_var', 'enriched_data')
+
+        if not data or not enrich_data:
+            return ActionResult(success=False, message="data and enrich_data are required")
+
+        try:
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_enrich = context.resolve_value(enrich_data) if context else enrich_data
+
+            enrich_index = {r.get(join_key): r for r in resolved_enrich}
 
             enriched = []
-            match_count = 0
-
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                key_value = item.get(lookup_key)
-                lookup_row = lookup_table.get(key_value) if key_value is not None else None
-
-                if lookup_row and isinstance(lookup_row, dict):
-                    match_count += 1
-                    enriched_item = {**item}
-                    for field in enrich_fields:
-                        if field in lookup_row:
-                            enriched_item[field] = lookup_row[field]
-                        else:
-                            enriched_item[field] = default_value
-                    enriched.append(enriched_item)
-                elif strategy == "left":
-                    enriched.append({**item})
+            for record in resolved_data:
+                key = record.get(join_key, '')
+                if key in enrich_index:
+                    merged = {**record, **enrich_index[key]}
+                    enriched.append(merged)
                 else:
-                    enriched.append({**item, **{f: default_value for f in enrich_fields}})
+                    enriched.append(record)
+
+            result = {
+                'enriched': enriched,
+                'matched_count': sum(1 for r in resolved_data if r.get(join_key) in enrich_index),
+                'total_count': len(resolved_data),
+            }
 
             return ActionResult(
                 success=True,
-                message=f"Enriched {match_count}/{len(data)} records",
-                data={"enriched": enriched, "match_count": match_count, "total": len(data)},
+                data={output_var: result},
+                message=f"Merged enrichment: {result['matched_count']}/{result['total_count']} matched"
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"LookupEnrich error: {e}")
+            return ActionResult(success=False, message=f"Enrich merge error: {e}")
 
 
-class GeoEnrichAction(BaseAction):
-    """Add geographic metadata to data."""
-    action_type = "geo_enrich"
-    display_name = "地理数据丰富"
-    description = "为数据添加地理位置元信息"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            location_field = params.get("location_field", "location")
-            geo_data = params.get("geo_data", {})
-            enrich_fields = params.get("enrich_fields", ["country", "region", "timezone"])
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if not isinstance(data, list):
-                data = [data]
-
-            enriched = []
-            matched = 0
-
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                location = item.get(location_field, "")
-                geo_info = geo_data.get(location, {})
-
-                enriched_item = {**item}
-                if geo_info:
-                    matched += 1
-                    for field in enrich_fields:
-                        enriched_item[field] = geo_info.get(field, "")
-                enriched.append(enriched_item)
-
-            return ActionResult(
-                success=True,
-                message=f"Geo-enriched {matched}/{len(data)} records",
-                data={"enriched": enriched, "matched": matched},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"GeoEnrich error: {e}")
-
-
-class TemporalEnrichAction(BaseAction):
-    """Add time-based features to data."""
-    action_type = "temporal_enrich"
-    display_name = "时间数据丰富"
-    description = "为数据添加时间特征"
+class EnrichComputeAction(BaseAction):
+    """Computed enrichment."""
+    action_type = "enrich_compute"
+    display_name = "计算富化"
+    description = "计算数据富化"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute computed enrichment."""
+        data = params.get('data', {})
+        computations = params.get('computations', [])
+        output_var = params.get('output_var', 'enriched_data')
+
+        if not data:
+            return ActionResult(success=False, message="data is required")
+
         try:
-            data = params.get("data", [])
-            timestamp_field = params.get("timestamp_field", "timestamp")
-            features = params.get("features", ["year", "month", "day", "hour", "weekday", "quarter"])
-            timezone_str = params.get("timezone", "UTC")
-            input_format = params.get("input_format", None)
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_computations = context.resolve_value(computations) if context else computations
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+            enriched = resolved_data.copy()
 
-            if not isinstance(data, list):
-                data = [data]
+            for comp in resolved_computations:
+                field = comp.get('field', '')
+                expression = comp.get('expression', '')
+                func = comp.get('function', '')
 
-            enriched = []
-
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                ts_value = item.get(timestamp_field)
-                dt = None
-
-                if isinstance(ts_value, datetime):
-                    dt = ts_value
-                elif isinstance(ts_value, (int, float)):
-                    dt = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-                elif isinstance(ts_value, str):
-                    if input_format:
-                        dt = datetime.strptime(ts_value, input_format)
-                    else:
-                        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"]:
-                            try:
-                                dt = datetime.strptime(ts_value, fmt)
-                                break
-                            except ValueError:
-                                continue
-
-                enriched_item = {**item}
-                if dt:
+                if func == 'concat':
+                    separator = comp.get('separator', '')
+                    fields = comp.get('fields', [])
+                    values = [str(enriched.get(f, '')) for f in fields]
+                    enriched[field] = separator.join(values)
+                elif func == 'upper':
+                    src_field = comp.get('source_field', '')
+                    enriched[field] = str(enriched.get(src_field, '')).upper()
+                elif func == 'lower':
+                    src_field = comp.get('source_field', '')
+                    enriched[field] = str(enriched.get(src_field, '')).lower()
+                elif func == 'length':
+                    src_field = comp.get('source_field', '')
+                    enriched[field] = len(str(enriched.get(src_field, '')))
+                elif func == 'round':
+                    src_field = comp.get('source_field', '')
+                    decimals = comp.get('decimals', 2)
+                    enriched[field] = round(float(enriched.get(src_field, 0)), decimals)
+                elif expression:
                     try:
-                        if timezone_str != "UTC":
-                            import zoneinfo
-                            tz = zoneinfo.ZoneInfo(timezone_str)
-                            dt = dt.astimezone(tz)
+                        enriched[field] = eval(expression, {'record': enriched})
                     except Exception:
-                        pass
+                        enriched[field] = None
 
-                    if "year" in features:
-                        enriched_item["year"] = dt.year
-                    if "month" in features:
-                        enriched_item["month"] = dt.month
-                    if "day" in features:
-                        enriched_item["day"] = dt.day
-                    if "hour" in features:
-                        enriched_item["hour"] = dt.hour
-                    if "weekday" in features:
-                        enriched_item["weekday"] = dt.strftime("%A")
-                    if "quarter" in features:
-                        enriched_item["quarter"] = (dt.month - 1) // 3 + 1
-                    if "is_weekend" in features:
-                        enriched_item["is_weekend"] = dt.weekday() >= 5
-                    if "day_of_year" in features:
-                        enriched_item["day_of_year"] = dt.timetuple().tm_yday
-                enriched.append(enriched_item)
+            result = {
+                'enriched': enriched,
+                'computations_applied': len(resolved_computations),
+            }
 
             return ActionResult(
                 success=True,
-                message=f"Temporal-enriched {len(enriched)} records",
-                data={"enriched": enriched, "count": len(enriched)},
+                data={output_var: result},
+                message=f"Applied {len(resolved_computations)} computations"
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"TemporalEnrich error: {e}")
+            return ActionResult(success=False, message=f"Enrich compute error: {e}")
 
 
-class CrossReferenceEnrichAction(BaseAction):
-    """Cross-reference data with external data sources."""
-    action_type = "crossref_enrich"
-    display_name = "交叉引用数据丰富"
-    description = "与外部数据进行交叉引用"
+class EnrichExternalAction(BaseAction):
+    """External API enrichment."""
+    action_type = "enrich_external"
+    display_name = "外部API富化"
+    description = "外部API数据富化"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute external enrichment."""
+        data = params.get('data', {})
+        api_url = params.get('api_url', '')
+        api_key = params.get('api_key', '')
+        request_field = params.get('request_field', '')
+        response_path = params.get('response_path', '')
+        output_var = params.get('output_var', 'enriched_data')
+
+        if not data or not api_url:
+            return ActionResult(success=False, message="data and api_url are required")
+
         try:
-            data = params.get("data", [])
-            ref_datasets = params.get("ref_datasets", [])
-            match_fields = params.get("match_fields", [])
-            enrich_mode = params.get("enrich_mode", "merge")
-            conflict_resolution = params.get("conflict_resolution", "source")
+            import requests
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+            resolved_data = context.resolve_value(data) if context else data
+            resolved_url = context.resolve_value(api_url) if context else api_url
 
-            if not isinstance(data, list):
-                data = [data]
+            request_value = resolved_data.get(request_field, '')
+            url = resolved_url.format(**{request_field: request_value})
 
-            if not match_fields:
-                return ActionResult(success=False, message="match_fields is required")
+            headers = {}
+            if api_key:
+                resolved_key = context.resolve_value(api_key) if context else api_key
+                headers['Authorization'] = f'Bearer {resolved_key}'
 
-            ref_index: Dict[str, Dict] = {}
-            for dataset in ref_datasets:
-                dataset_name = dataset.get("name", "unknown")
-                dataset_data = dataset.get("data", [])
-                if not isinstance(dataset_data, list):
-                    continue
-                for row in dataset_data:
-                    if not isinstance(row, dict):
-                        continue
-                    key_values = tuple(row.get(f, "") for f in match_fields)
-                    key = "|".join(str(v) for v in key_values)
-                    ref_index[f"{dataset_name}:{key}"] = row
+            response = requests.get(url, headers=headers, timeout=30)
 
-            enriched = []
-            match_count = 0
+            enriched = resolved_data.copy()
 
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                key_values = tuple(item.get(f, "") for f in match_fields)
-                key = "|".join(str(v) for v in key_values)
+            if response.ok:
+                resp_data = response.json()
+                if response_path:
+                    parts = response_path.split('.')
+                    for part in parts:
+                        if part in resp_data:
+                            resp_data = resp_data[part]
+                        else:
+                            resp_data = None
+                            break
+                    enriched[response_path.replace('.', '_')] = resp_data
+                else:
+                    enriched['api_response'] = resp_data
 
-                enriched_item = {**item}
-
-                for dataset_name, ref_key in [(name, f"{name}:{key}") for name in [ds.get("name", "unknown") for ds in ref_datasets]]:
-                    if ref_key in ref_index:
-                        match_count += 1
-                        ref_row = ref_index[ref_key]
-                        if enrich_mode == "merge":
-                            for k, v in ref_row.items():
-                                if k not in enriched_item or conflict_resolution == "ref":
-                                    enriched_item[k] = v
-                        elif enrich_mode == "overwrite":
-                            enriched_item.update(ref_row)
-
-                enriched.append(enriched_item)
+            result = {
+                'enriched': enriched,
+                'api_success': response.ok,
+                'status_code': response.status_code,
+            }
 
             return ActionResult(
                 success=True,
-                message=f"Cross-referenced {match_count} matches",
-                data={"enriched": enriched, "match_count": match_count, "total": len(data)},
+                data={output_var: result},
+                message=f"External API enrichment: {'success' if response.ok else 'failed'}"
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"CrossReferenceEnrich error: {e}")
+            return ActionResult(success=False, message=f"Enrich external error: {e}")
