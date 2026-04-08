@@ -1,272 +1,134 @@
-"""Sharding action module for RabAI AutoClick.
+"""Sharding Action Module.
 
-Provides data sharding strategies for distributed databases
-and caches with range, hash, and directory-based sharding.
+Provides horizontal sharding for
+data distribution.
 """
 
+import hashlib
+from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass, field
 import sys
 import os
-import json
-from typing import Any, Dict, List, Optional, Callable
-from dataclasses import dataclass, field
-from enum import Enum
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class ShardKeyType(Enum):
-    """Shard key types."""
-    HASH = "hash"
-    RANGE = "range"
-    DIRECTORY = "directory"
-
-
 @dataclass
 class Shard:
-    """Represents a data shard."""
+    """Shard definition."""
     shard_id: str
     name: str
-    shard_key_start: Any = None
-    shard_key_end: Any = None
-    nodes: List[str] = field(default_factory=list)
-    weight: int = 1
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ShardConfig:
-    """Configuration for sharding strategy."""
-    strategy: ShardKeyType = ShardKeyType.HASH
-    num_shards: int = 4
-    shard_function: Optional[str] = None  # Custom function name
+    handler: Optional[Callable] = None
 
 
 class ShardingManager:
-    """Manages data sharding across multiple shards."""
-    
+    """Manages sharding."""
+
     def __init__(self):
-        self._shards: Dict[str, Shard] = {}
-        self._directory: Dict[str, str] = {}  # key -> shard_id
-        self._config: Optional[ShardConfig] = None
-        self._shard_functions: Dict[str, Callable] = {}
-    
-    def configure(self, config: ShardConfig) -> None:
-        """Configure sharding strategy."""
-        self._config = config
-    
-    def add_shard(self, shard: Shard) -> None:
+        self._shards: List[Shard] = []
+        self._data: Dict[str, Any] = {}
+
+    def add_shard(
+        self,
+        name: str,
+        handler: Optional[Callable] = None
+    ) -> str:
         """Add a shard."""
-        self._shards[shard.shard_id] = shard
-    
-    def remove_shard(self, shard_id: str) -> bool:
-        """Remove a shard."""
-        if shard_id in self._shards:
-            del self._shards[shard_id]
-            # Remove from directory
-            self._directory = {k: v for k, v in self._directory.items() if v != shard_id}
-            return True
-        return False
-    
-    def register_shard_function(self, name: str, func: Callable) -> None:
-        """Register a custom shard function."""
-        self._shard_functions[name] = func
-    
-    def _compute_hash_shard(self, key: Any) -> str:
-        """Compute shard using hash."""
-        if not self._config:
-            raise ValueError("Sharding not configured")
-        
-        key_str = str(key)
-        hash_val = hash(key_str)
-        shard_index = hash_val % self._config.num_shards
-        return f"shard_{shard_index}"
-    
-    def _compute_range_shard(self, key: Any) -> Optional[str]:
-        """Compute shard using range."""
-        for shard_id, shard in self._shards.items():
-            if shard.shard_key_start is not None and shard.shard_key_end is not None:
-                if shard.shard_key_start <= key < shard.shard_key_end:
-                    return shard_id
-            elif shard.shard_key_end is not None:
-                if key < shard.shard_key_end:
-                    return shard_id
-            elif shard.shard_key_start is not None:
-                if key >= shard.shard_key_start:
-                    return shard_id
-        return None
-    
-    def _compute_directory_shard(self, key: Any) -> Optional[str]:
-        """Look up shard from directory."""
-        return self._directory.get(str(key))
-    
-    def compute_shard(self, key: Any) -> Optional[str]:
-        """Compute shard for a given key."""
-        if not self._config:
+        shard_id = f"shard_{len(self._shards)}"
+        self._shards.append(Shard(
+            shard_id=shard_id,
+            name=name,
+            handler=handler
+        ))
+        return shard_id
+
+    def get_shard_for_key(self, key: str) -> int:
+        """Get shard index for key."""
+        if not self._shards:
+            return 0
+
+        hash_val = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        return hash_val % len(self._shards)
+
+    def put(self, key: str, value: Any) -> int:
+        """Put value with sharding."""
+        shard_idx = self.get_shard_for_key(key)
+
+        if not hasattr(self, '_shard_data'):
+            self._shard_data: List[Dict[str, Any]] = [{} for _ in self._shards]
+
+        self._shard_data[shard_idx][key] = value
+        return shard_idx
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get value by key."""
+        shard_idx = self.get_shard_for_key(key)
+
+        if not hasattr(self, '_shard_data'):
             return None
-        
-        if self._config.strategy == ShardKeyType.HASH:
-            return self._compute_hash_shard(key)
-        elif self._config.strategy == ShardKeyType.RANGE:
-            return self._compute_range_shard(key)
-        elif self._config.strategy == ShardKeyType.DIRECTORY:
-            return self._compute_directory_shard(key)
-        
-        return None
-    
-    def get_shard(self, shard_id: str) -> Optional[Shard]:
-        """Get shard by ID."""
-        return self._shards.get(shard_id)
-    
-    def map_to_shard(self, key: Any, shard_id: str) -> None:
-        """Explicitly map a key to a shard."""
-        self._directory[str(key)] = shard_id
-    
-    def get_shard_for_key(self, key: Any) -> Optional[Shard]:
-        """Get shard object for a key."""
-        shard_id = self.compute_shard(key)
-        return self._shards.get(shard_id)
-    
-    def get_keys_for_shard(self, shard_id: str) -> List[str]:
-        """Get all keys mapped to a shard."""
-        return [k for k, sid in self._directory.items() if sid == shard_id]
-    
-    def rebalance_shards(self, target_num_shards: int) -> Dict[str, str]:
-        """Rebalance keys across new shard count.
-        
-        Returns mapping of old_shard -> new_shard for each key.
-        """
-        old_config = self._config
-        self._config = ShardConfig(
-            strategy=ShardKeyType.HASH,
-            num_shards=target_num_shards
-        )
-        
-        # Rebuild directory with new shard count
-        new_directory: Dict[str, str] = {}
-        for key, old_shard_id in self._directory.items():
-            new_shard_id = self._compute_hash_shard(key)
-            new_directory[key] = new_shard_id
-        
-        self._directory = new_directory
-        self._config = old_config
-        
-        return self._directory
-    
-    def list_shards(self) -> List[Shard]:
-        """List all shards."""
-        return list(self._shards.values())
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get sharding statistics."""
-        keys_per_shard = {}
-        for shard_id in self._shards:
-            keys_per_shard[shard_id] = len(self.get_keys_for_shard(shard_id))
-        
-        return {
-            "strategy": self._config.strategy.value if self._config else None,
-            "total_shards": len(self._shards),
-            "total_keys": len(self._directory),
-            "keys_per_shard": keys_per_shard
-        }
+
+        return self._shard_data[shard_idx].get(key)
+
+    def get_shard_stats(self) -> List[Dict]:
+        """Get shard statistics."""
+        if not hasattr(self, '_shard_data'):
+            return [{"shard_id": s.shard_id, "size": 0} for s in self._shards]
+
+        return [
+            {
+                "shard_id": self._shards[i].shard_id,
+                "name": self._shards[i].name,
+                "size": len(self._shard_data[i]) if i < len(self._shards) else 0
+            }
+            for i in range(len(self._shards))
+        ]
 
 
 class ShardingAction(BaseAction):
-    """Data sharding for distributed storage.
-    
-    Supports hash, range, and directory-based sharding strategies.
-    """
-    action_type = "sharding"
-    display_name = "数据分片"
-    description = "数据分片策略，支持哈希、范围和目录分片"
-    
+    """Action for sharding operations."""
+
     def __init__(self):
-        super().__init__()
+        super().__init__("sharding")
         self._manager = ShardingManager()
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute sharding operation."""
-        operation = params.get("operation", "")
-        
+
+    def execute(self, params: Dict) -> ActionResult:
+        """Execute sharding action."""
         try:
-            if operation == "configure":
-                return self._configure(params)
-            elif operation == "add_shard":
+            operation = params.get("operation", "add_shard")
+
+            if operation == "add_shard":
                 return self._add_shard(params)
-            elif operation == "remove_shard":
-                return self._remove_shard(params)
-            elif operation == "get_shard":
-                return self._get_shard(params)
-            elif operation == "map_key":
-                return self._map_key(params)
-            elif operation == "rebalance":
-                return self._rebalance(params)
-            elif operation == "list_shards":
-                return self._list_shards(params)
-            elif operation == "get_stats":
-                return self._get_stats(params)
+            elif operation == "put":
+                return self._put(params)
+            elif operation == "get":
+                return self._get(params)
+            elif operation == "stats":
+                return self._stats(params)
             else:
                 return ActionResult(success=False, message=f"Unknown: {operation}")
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _configure(self, params: Dict[str, Any]) -> ActionResult:
-        """Configure sharding."""
-        config = ShardConfig(
-            strategy=ShardKeyType(params.get("strategy", "hash")),
-            num_shards=params.get("num_shards", 4)
+            return ActionResult(success=False, message=str(e))
+
+    def _add_shard(self, params: Dict) -> ActionResult:
+        """Add shard."""
+        shard_id = self._manager.add_shard(params.get("name", ""))
+        return ActionResult(success=True, data={"shard_id": shard_id})
+
+    def _put(self, params: Dict) -> ActionResult:
+        """Put value."""
+        shard_idx = self._manager.put(
+            params.get("key", ""),
+            params.get("value")
         )
-        self._manager.configure(config)
-        return ActionResult(success=True, message="Configured")
-    
-    def _add_shard(self, params: Dict[str, Any]) -> ActionResult:
-        """Add a shard."""
-        shard = Shard(
-            shard_id=params.get("shard_id", ""),
-            name=params.get("name", ""),
-            shard_key_start=params.get("shard_key_start"),
-            shard_key_end=params.get("shard_key_end"),
-            weight=params.get("weight", 1)
-        )
-        self._manager.add_shard(shard)
-        return ActionResult(success=True, message=f"Shard '{shard.shard_id}' added")
-    
-    def _remove_shard(self, params: Dict[str, Any]) -> ActionResult:
-        """Remove a shard."""
-        shard_id = params.get("shard_id", "")
-        removed = self._manager.remove_shard(shard_id)
-        return ActionResult(success=removed, message="Removed" if removed else "Not found")
-    
-    def _get_shard(self, params: Dict[str, Any]) -> ActionResult:
-        """Get shard for a key."""
-        key = params.get("key", "")
-        shard = self._manager.get_shard_for_key(key)
-        if not shard:
-            return ActionResult(success=False, message="No shard found")
-        return ActionResult(success=True, message=f"Shard: {shard.shard_id}",
-                         data={"shard_id": shard.shard_id, "name": shard.name})
-    
-    def _map_key(self, params: Dict[str, Any]) -> ActionResult:
-        """Map a key to a shard."""
-        key = params.get("key", "")
-        shard_id = params.get("shard_id", "")
-        self._manager.map_to_shard(key, shard_id)
-        return ActionResult(success=True, message=f"Key mapped to '{shard_id}'")
-    
-    def _rebalance(self, params: Dict[str, Any]) -> ActionResult:
-        """Rebalance shards."""
-        target = params.get("target_shards", 4)
-        mapping = self._manager.rebalance_shards(target)
-        return ActionResult(success=True, message=f"Rebalanced to {target} shards",
-                         data={"keys_mapped": len(mapping)})
-    
-    def _list_shards(self, params: Dict[str, Any]) -> ActionResult:
-        """List all shards."""
-        shards = self._manager.list_shards()
-        return ActionResult(success=True, message=f"{len(shards)} shards",
-                         data={"shards": [{"shard_id": s.shard_id, "name": s.name} for s in shards]})
-    
-    def _get_stats(self, params: Dict[str, Any]) -> ActionResult:
-        """Get sharding stats."""
-        stats = self._manager.get_stats()
-        return ActionResult(success=True, message="Stats retrieved", data=stats)
+        return ActionResult(success=True, data={"shard_index": shard_idx})
+
+    def _get(self, params: Dict) -> ActionResult:
+        """Get value."""
+        value = self._manager.get(params.get("key", ""))
+        return ActionResult(success=value is not None, data={"value": value})
+
+    def _stats(self, params: Dict) -> ActionResult:
+        """Get stats."""
+        return ActionResult(success=True, data={"shards": self._manager.get_shard_stats()})
