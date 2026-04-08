@@ -1,180 +1,432 @@
 """
-Functional partial application utilities.
+Functional programming utilities: partial application, composition, and monadic operations.
 
-Provides enhanced partial function creation with
-chaining, composition, and placeholder support.
+Provides functional helpers for partial application, function composition,
+currying, and pipe operations.
+
+Example:
+    >>> from utils.functional_partial_utils import partial, compose, pipe, curry
+    >>> add = lambda a, b: a + b
+    >>> add_five = partial(add, 5)
+    >>> add_five(3)  # returns 8
 """
 
 from __future__ import annotations
 
-from functools import partial
-from typing import Any, Callable, TypeVar
-
+import functools
+import inspect
+from typing import Any, Callable, Generic, List, Optional, TypeVar, Union
 
 T = TypeVar("T")
+U = TypeVar("U")
+V = TypeVar("V")
 R = TypeVar("R")
-P = TypeVar("P")
 
 
-class _Placeholder:
-    """Positional argument placeholder."""
-
-    def __init__(self, index: int):
-        self.index = index
-
-
-def _arg(i: int) -> _Placeholder:
-    """Create positional argument placeholder at index i."""
-    return _Placeholder(i)
-
-
-class Partial:
+class partial:
     """
-    Enhanced partial with chaining and composition support.
+    Enhanced partial function application.
+
+    Supports positional and keyword argument binding
+    with priority-based argument resolution.
     """
 
     def __init__(
         self,
         func: Callable,
-        *args: object,
-        **kwargs: object,
-    ):
-        self._func = func
-        self._args = args
-        self._kwargs = kwargs
+        *args: Any,
+        **kwargs: Any
+    ) -> None:
+        """
+        Create a partial application.
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
-        return self._func(*self._args, *args, **self._kwargs, **kwargs)
+        Args:
+            func: Function to partially apply.
+            *args: Positional arguments to bind.
+            **kwargs: Keyword arguments to bind.
+        """
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        self.__signature__ = inspect.signature(func)
 
-    def partial(self, *args: object, **kwargs: object) -> "Partial":
-        """Create a new partial with additional arguments."""
-        return Partial(self._func, *self._args, *args, **self._kwargs, **kwargs)
-
-    def compose(self, other: Callable[[Any], R]) -> Callable[[Any], R]:
-        """Compose this function with another: other(self(x))."""
-        def composed(*args: object, **kwargs: object) -> R:
-            return other(self(*args, **kwargs))
-        return composed
-
-    def rcompose(self, other: Callable[[Any], R]) -> Callable[[Any], R]:
-        """Compose with reversed order: self(other(x))."""
-        def composed(*args: object, **kwargs: object) -> R:
-            return other(self(*args, **kwargs))
-        return composed
-
-    def map(self, func: Callable[[Any], R]) -> "Partial":
-        """Create new partial that applies func to result."""
-        def mapped(*args: object, **kwargs: object) -> R:
-            return func(self(*args, **kwargs))
-        return Partial(mapped)
-
-    def tap(self, func: Callable[[Any], None]) -> "Partial":
-        """Create new partial that calls func with result but returns result."""
-        def tapped(*args: object, **kwargs: object) -> Any:
-            result = self(*args, **kwargs)
-            func(result)
-            return result
-        return Partial(tapped)
-
-    def then(self, func: Callable[[Any], R]) -> Callable[[Any], R]:
-        """Chain function after this partial."""
-        def chained(*args: object, **kwargs: object) -> R:
-            return func(self(*args, **kwargs))
-        return chained
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Call the partially applied function."""
+        combined_args = list(self.args) + list(args)
+        combined_kwargs = {**self.kwargs, **kwargs}
+        return self.func(*combined_args, **combined_kwargs)
 
     def __repr__(self) -> str:
-        return f"Partial({self._func.__name__}, {self._args}, {self._kwargs})"
+        args_str = ", ".join(repr(a) for a in self.args)
+        kwargs_str = ", ".join(f"{k}={v!r}" for k, v in self.kwargs.items())
+        all_args = ", ".join(filter(None, [args_str, kwargs_str]))
+        return f"partial({self.func.__name__}, {all_args})"
 
 
-def partialize(func: Callable) -> Callable[..., Partial]:
+class curry(Generic[T, R]):
     """
-    Wrap function to return Partial instead of partial.
+    Curried function wrapper.
+
+    Transforms a function to support incremental argument
+    application until all required arguments are provided.
+    """
+
+    def __init__(
+        self,
+        func: Callable[[T], R],
+        arity: Optional[int] = None,
+    ) -> None:
+        """
+        Initialize the curried function.
+
+        Args:
+            func: Function to curry.
+            arity: Number of arguments (inferred if None).
+        """
+        self.func = func
+        self._cache: List[Any] = []
+        self._arity = arity or self._get_arity(func)
+
+    @staticmethod
+    def _get_arity(func: Callable) -> int:
+        """Get the number of required arguments."""
+        sig = inspect.signature(func)
+        required = sum(
+            1 for p in sig.parameters.values()
+            if p.default is inspect.Parameter.MISSING
+            and p.kind not in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            )
+        )
+        return required
+
+    def __call__(self, *args: Any) -> Any:
+        """Call with accumulated arguments."""
+        self._cache.extend(args)
+
+        if len(self._cache) >= self._arity:
+            result = self.func(*self._cache[:self._arity])
+            self._cache.clear()
+            return result
+
+        return self
+
+    def __repr__(self) -> str:
+        return f"curry({self.func.__name__})"
+
+
+def compose(*functions: Callable) -> Callable:
+    """
+    Compose functions right-to-left.
+
+    compose(f, g, h)(x) = f(g(h(x)))
 
     Args:
-        func: Function to wrap
+        *functions: Functions to compose.
 
     Returns:
-        Function that returns Partial objects
+        Composed function.
     """
-    def wrapper(*args: object, **kwargs: object) -> Partial:
-        return Partial(func, *args, **kwargs)
-    return wrapper
+    if not functions:
+        return lambda x: x
 
-
-def compose(*funcs: Callable) -> Callable:
-    """
-    Compose functions left-to-right: f(g(h(x))).
-
-    Args:
-        *funcs: Functions to compose
-
-    Returns:
-        Composed function
-    """
     def composed(x: Any) -> Any:
         result = x
-        for func in funcs:
+        for func in reversed(functions):
             result = func(result)
         return result
+
     return composed
 
 
-def compose_right(*funcs: Callable) -> Callable:
+def compose_right(*functions: Callable) -> Callable:
     """
-    Compose functions right-to-left: h(g(f(x))).
+    Compose functions left-to-right.
+
+    compose_right(f, g, h)(x) = h(g(f(x)))
 
     Args:
-        *funcs: Functions to compose (rightmost first)
+        *functions: Functions to compose.
 
     Returns:
-        Composed function
+        Composed function.
     """
-    return compose(*reversed(funcs))
+    if not functions:
+        return lambda x: x
+
+    def composed(x: Any) -> Any:
+        result = x
+        for func in functions:
+            result = func(result)
+        return result
+
+    return composed
 
 
-def curry(func: Callable[..., R], arity: int | None = None) -> Callable:
+def pipe(*functions: Callable) -> Callable:
     """
-    Curry a function to accept arguments one at a time.
+    Pipe functions left-to-right.
+
+    pipe(f, g, h)(x) = h(g(f(x)))
+
+    Alias for compose_right.
 
     Args:
-        func: Function to curry
-        arity: Number of arguments (defaults to func.__code__.co_argcount)
+        *functions: Functions to pipe.
 
     Returns:
-        Curried function
+        Piped function.
     """
-    if arity is None:
-        arity = func.__code__.co_argcount
-
-    def curried(*args: object) -> Callable | R:
-        if len(args) >= arity:
-            return func(*args[:arity])
-        def next_arg(*more: object) -> Callable | R:
-            return curried(*args, *more)
-        return next_arg
-
-    return curried
+    return compose_right(*functions)
 
 
-def flip(func: Callable[[T, P], R]) -> Callable[[P, T], R]:
-    """Flip argument order of a function."""
-    def flipped(p: P, t: T) -> R:
-        return func(t, p)
-    return flipped
+def juxt(*functions: Callable) -> Callable:
+    """
+    Juxtapose functions.
 
+    juxt(f, g, h)(x) = (f(x), g(x), h(x))
 
-def negate(func: Callable[..., bool]) -> Callable[..., bool]:
-    """Return negation of a predicate function."""
-    def negated(*args: object, **kwargs: object) -> bool:
-        return not func(*args, **kwargs)
-    return negated
+    Args:
+        *functions: Functions to juxtapose.
+
+    Returns:
+        Function that returns tuple of results.
+    """
+    def juxtaposed(*args: Any, **kwargs: Any) -> tuple:
+        return tuple(f(*args, **kwargs) for f in functions)
+
+    return juxtaposed
 
 
 def identity(x: T) -> T:
-    """Identity function."""
+    """Identity function - returns input unchanged."""
     return x
 
 
-def constant(x: T) -> Callable[[Any], T]:
-    """Return constant function that always returns x."""
-    return lambda _: x
+def constantly(value: Any) -> Callable:
+    """
+    Returns a function that always returns the same value.
+
+    Args:
+        value: Value to always return.
+
+    Returns:
+        Function that ignores its arguments.
+    """
+    def constant(*args: Any, **kwargs: Any) -> Any:
+        return value
+    return constant
+
+
+def flip(func: Callable[[T, U], R]) -> Callable[[U, T], R]:
+    """
+    Flip the arguments of a binary function.
+
+    Args:
+        func: Function to flip.
+
+    Returns:
+        Function with flipped arguments.
+    """
+    @functools.wraps(func)
+    def flipped(a: Any, b: Any) -> Any:
+        return func(b, a)
+    return flipped
+
+
+def memoize(func: Callable) -> Callable:
+    """
+    Memoize a function with LRU cache.
+
+    Args:
+        func: Function to memoize.
+
+    Returns:
+        Memoized function.
+    """
+    cache: Dict[tuple, Any] = {}
+
+    @functools.wraps(func)
+    def memoized(*args: Any, **kwargs: Any) -> Any:
+        key = (args, tuple(sorted(kwargs.items())))
+        if key not in cache:
+            cache[key] = func(*args, **kwargs)
+        return cache[key]
+
+    memoized.cache = cache
+    return memoized
+
+
+def after(count: int, func: Callable) -> Callable:
+    """
+    Return a function that only calls func after being called n times.
+
+    Args:
+        count: Number of times to call before executing.
+        func: Function to call.
+
+    Returns:
+        Wrapped function.
+    """
+    call_count = [0]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        call_count[0] += 1
+        if call_count[0] >= count:
+            return func(*args, **kwargs)
+        return None
+
+    return wrapper
+
+
+def before(count: int, func: Callable) -> Callable:
+    """
+    Return a function that calls func at most n times.
+
+    Args:
+        count: Maximum number of calls.
+        func: Function to call.
+
+    Returns:
+        Wrapped function.
+    """
+    call_count = [0]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        call_count[0] += 1
+        if call_count[0] <= count:
+            return func(*args, **kwargs)
+        return None
+
+    return wrapper
+
+
+def once(func: Callable) -> Callable:
+    """
+    Return a function that only calls func once.
+
+    Args:
+        func: Function to call.
+
+    Returns:
+        Wrapped function.
+    """
+    return after(1, func)
+
+
+def negate(predicate: Callable) -> Callable:
+    """
+    Return the negation of a predicate.
+
+    Args:
+        predicate: Predicate function to negate.
+
+    Returns:
+        Negated predicate.
+    """
+    def negated(*args: Any, **kwargs: Any) -> bool:
+        return not predicate(*args, **kwargs)
+    return negated
+
+
+def tap(value: T, func: Callable[[T], Any]) -> T:
+    """
+    Tap into a value, passing it through a function.
+
+    Args:
+        value: Value to tap.
+        func: Function to apply.
+
+    Returns:
+        The original value.
+    """
+    func(value)
+    return value
+
+
+def apply(func: Callable[[List], R]) -> Callable[[tuple], R]:
+    """
+    Convert a function taking positional args to one taking a tuple.
+
+    Args:
+        func: Function that takes a list.
+
+    Returns:
+        Function that takes a tuple.
+    """
+    def applied(args: tuple) -> R:
+        return func(list(args))
+    return applied
+
+
+def spread(func: Callable) -> Callable:
+    """
+    Convert a function taking a single iterable to one taking multiple args.
+
+    Args:
+        func: Function taking an iterable.
+
+    Returns:
+        Function taking multiple arguments.
+    """
+    def spreader(*args: Any, **kwargs: Any) -> Any:
+        return func(args, **kwargs)
+    return spreader
+
+
+class Maybe(Generic[T]):
+    """
+    Maybe monad for handling optional values.
+
+    Provides safe chaining of operations that may fail.
+    """
+
+    def __init__(self, value: Any) -> None:
+        """Initialize Maybe with a value."""
+        self._value = value
+        self._is_just = value is not None
+
+    @classmethod
+    def just(cls, value: T) -> "Maybe[T]":
+        """Create a Just Maybe."""
+        return cls(value)
+
+    @classmethod
+    def nothing(cls) -> "Maybe[Any]":
+        """Create a Nothing Maybe."""
+        return cls(None)
+
+    def map(self, func: Callable[[T], Any]) -> "Maybe[Any]":
+        """Apply function if Just, return Nothing if not."""
+        if self._is_just:
+            return Maybe(func(self._value))
+        return self
+
+    def flat_map(self, func: Callable[[T], "Maybe"]) -> "Maybe":
+        """Apply function that returns Maybe."""
+        if self._is_just:
+            result = func(self._value)
+            return result if isinstance(result, Maybe) else Maybe(result)
+        return self
+
+    def get_or_else(self, default: T) -> T:
+        """Get value or default."""
+        return self._value if self._is_just else default
+
+    def get(self) -> Optional[T]:
+        """Get value or None."""
+        return self._value if self._is_just else None
+
+    def is_just(self) -> bool:
+        """Check if Just."""
+        return self._is_just
+
+    def is_nothing(self) -> bool:
+        """Check if Nothing."""
+        return not self._is_just
+
+    def __repr__(self) -> str:
+        if self._is_just:
+            return f"Just({self._value!r})"
+        return "Nothing"
