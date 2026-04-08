@@ -1,194 +1,169 @@
-"""API versioning action module for RabAI AutoClick.
+"""API Version Action Module.
 
-Provides API versioning operations:
-- VersionCreateAction: Create API version
-- VersionSwitchAction: Switch API version
-- VersionDeprecateAction: Deprecate version
-- VersionCompareAction: Compare versions
-- VersionListAction: List versions
+Provides API versioning with version negotiation,
+deprecation handling, and migration support.
 """
+from __future__ import annotations
 
-import time
-import uuid
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class VersionCreateAction(BaseAction):
-    """Create an API version."""
-    action_type = "version_create"
-    display_name = "创建版本"
-    description = "创建API版本"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            api_name = params.get("api_name", "")
-            version = params.get("version", "1.0.0")
-            changelog = params.get("changelog", "")
-            is_stable = params.get("is_stable", True)
-
-            if not api_name or not version:
-                return ActionResult(success=False, message="api_name and version are required")
-
-            version_id = f"{api_name}:{version}"
-
-            if not hasattr(context, "api_versions"):
-                context.api_versions = {}
-            context.api_versions[version_id] = {
-                "version_id": version_id,
-                "api_name": api_name,
-                "version": version,
-                "changelog": changelog,
-                "is_stable": is_stable,
-                "status": "active",
-                "created_at": time.time(),
-            }
-
-            return ActionResult(
-                success=True,
-                data={"version_id": version_id, "api_name": api_name, "version": version},
-                message=f"Version {version} created for {api_name}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Version create failed: {e}")
+class VersionStrategy(Enum):
+    """Version strategy."""
+    PATH = "path"
+    HEADER = "header"
+    QUERY = "query"
 
 
-class VersionSwitchAction(BaseAction):
-    """Switch to a different API version."""
-    action_type = "version_switch"
-    display_name = "切换版本"
-    description = "切换API版本"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            api_name = params.get("api_name", "")
-            target_version = params.get("target_version", "")
-            graceful = params.get("graceful", True)
-
-            if not api_name or not target_version:
-                return ActionResult(success=False, message="api_name and target_version are required")
-
-            version_id = f"{api_name}:{target_version}"
-            versions = getattr(context, "api_versions", {})
-
-            if version_id not in versions:
-                return ActionResult(success=False, message=f"Version {version_id} not found")
-
-            if not hasattr(context, "active_api_version"):
-                context.active_api_version = {}
-            context.active_api_version[api_name] = target_version
-
-            return ActionResult(
-                success=True,
-                data={"api_name": api_name, "target_version": target_version, "graceful": graceful},
-                message=f"Switched {api_name} to version {target_version}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Version switch failed: {e}")
+@dataclass
+class APIVersion:
+    """API version definition."""
+    version: str
+    handler: Callable
+    deprecated: bool = False
+    sunset_date: Optional[str] = None
+    migrations: Optional[List[Callable]] = None
 
 
-class VersionDeprecateAction(BaseAction):
-    """Deprecate an API version."""
-    action_type = "version_deprecate"
-    display_name = "废弃版本"
-    description = "废弃API版本"
+class APIVersionAction:
+    """API version manager.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            version_id = params.get("version_id", "")
-            sunset_date = params.get("sunset_date", "")
-            migration_guide = params.get("migration_guide", "")
+    Example:
+        versions = APIVersionAction(
+            strategy=VersionStrategy.PATH,
+            default_version="v1"
+        )
 
-            if not version_id:
-                return ActionResult(success=False, message="version_id is required")
+        versions.register("v1", handler_v1)
+        versions.register("v2", handler_v2)
 
-            versions = getattr(context, "api_versions", {})
-            if version_id not in versions:
-                return ActionResult(success=False, message=f"Version {version_id} not found")
+        handler = versions.resolve("/api/v2/users", headers)
+    """
 
-            versions[version_id]["status"] = "deprecated"
-            versions[version_id]["sunset_date"] = sunset_date
-            versions[version_id]["migration_guide"] = migration_guide
-            versions[version_id]["deprecated_at"] = time.time()
+    def __init__(
+        self,
+        strategy: VersionStrategy = VersionStrategy.PATH,
+        default_version: Optional[str] = None,
+    ) -> None:
+        self.strategy = strategy
+        self.default_version = default_version
+        self._versions: Dict[str, APIVersion] = {}
+        self._deprecated_handlers: List[str] = []
 
-            return ActionResult(
-                success=True,
-                data={"version_id": version_id, "sunset_date": sunset_date},
-                message=f"Version {version_id} deprecated. Sunset: {sunset_date}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Version deprecate failed: {e}")
+    def register(
+        self,
+        version: str,
+        handler: Callable,
+        deprecated: bool = False,
+        sunset_date: Optional[str] = None,
+    ) -> "APIVersionAction":
+        """Register API version.
 
+        Returns self for chaining.
+        """
+        self._versions[version] = APIVersion(
+            version=version,
+            handler=handler,
+            deprecated=deprecated,
+            sunset_date=sunset_date,
+        )
 
-class VersionCompareAction(BaseAction):
-    """Compare two API versions."""
-    action_type = "version_compare"
-    display_name = "版本对比"
-    description = "对比两个API版本"
+        if deprecated:
+            self._deprecated_handlers.append(version)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            version_a = params.get("version_a", "")
-            version_b = params.get("version_b", "")
+        return self
 
-            if not version_a or not version_b:
-                return ActionResult(success=False, message="version_a and version_b are required")
+    def resolve(
+        self,
+        path: str,
+        headers: Optional[Dict] = None,
+        query_params: Optional[Dict] = None,
+    ) -> Tuple[Callable, str]:
+        """Resolve version and get handler.
 
-            def parse_version(v):
-                return [int(x) for x in v.lstrip("v").split(".")]
+        Returns:
+            Tuple of (handler, version)
+        """
+        version = self._extract_version(path, headers, query_params)
 
-            v_a = parse_version(version_a)
-            v_b = parse_version(version_b)
-            max_len = max(len(v_a), len(v_b))
-            v_a.extend([0] * (max_len - len(v_a)))
-            v_b.extend([0] * (max_len - len(v_b)))
+        if version in self._versions:
+            return self._versions[version].handler, version
 
-            if v_a > v_b:
-                relation = "greater"
-            elif v_a < v_b:
-                relation = "lesser"
-            else:
-                relation = "equal"
+        if self.default_version and self.default_version in self._versions:
+            return self._versions[self.default_version].handler, self.default_version
 
-            return ActionResult(
-                success=True,
-                data={"version_a": version_a, "version_b": version_b, "relation": relation},
-                message=f"{version_a} is {relation} than {version_b}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Version compare failed: {e}")
+        raise ValueError(f"No handler for version: {version}")
 
+    def _extract_version(
+        self,
+        path: str,
+        headers: Optional[Dict],
+        query_params: Optional[Dict],
+    ) -> Optional[str]:
+        """Extract version from request."""
+        if self.strategy == VersionStrategy.PATH:
+            parts = path.split("/")
+            for part in parts:
+                if part.startswith("v") and part[1:].replace(".", "").isdigit():
+                    return part
+            return None
 
-class VersionListAction(BaseAction):
-    """List all versions for an API."""
-    action_type = "version_list"
-    display_name = "版本列表"
-    description = "列出API版本"
+        elif self.strategy == VersionStrategy.HEADER:
+            if headers:
+                accept = headers.get("Accept", "")
+                if "version=" in accept:
+                    for part in accept.split(","):
+                        if "version=" in part:
+                            return part.split("version=")[1].strip()
+            return None
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            api_name = params.get("api_name", "")
-            include_deprecated = params.get("include_deprecated", True)
+        elif self.strategy == VersionStrategy.QUERY:
+            if query_params:
+                return query_params.get("version")
 
-            versions = getattr(context, "api_versions", {})
-            if api_name:
-                filtered = {k: v for k, v in versions.items() if v["api_name"] == api_name}
-            else:
-                filtered = versions
+        return None
 
-            if not include_deprecated:
-                filtered = {k: v for k, v in filtered.items() if v.get("status") != "deprecated"}
+    def get_deprecated_versions(self) -> List[str]:
+        """Get list of deprecated versions."""
+        return self._deprecated_handlers.copy()
 
-            return ActionResult(
-                success=True,
-                data={"versions": list(filtered.values()), "count": len(filtered)},
-                message=f"Found {len(filtered)} versions",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Version list failed: {e}")
+    def is_version_deprecated(self, version: str) -> bool:
+        """Check if version is deprecated."""
+        if version not in self._versions:
+            return False
+        return self._versions[version].deprecated
+
+    def get_supported_versions(self) -> List[str]:
+        """Get list of supported versions."""
+        return list(self._versions.keys())
+
+    def migrate(
+        self,
+        from_version: str,
+        to_version: str,
+        data: Any,
+    ) -> Any:
+        """Migrate data between versions.
+
+        Args:
+            from_version: Source version
+            to_version: Target version
+            data: Data to migrate
+
+        Returns:
+            Migrated data
+        """
+        api_version = self._versions.get(to_version)
+        if not api_version or not api_version.migrations:
+            return data
+
+        result = data
+        for migration in api_version.migrations:
+            result = migration(result)
+
+        return result
