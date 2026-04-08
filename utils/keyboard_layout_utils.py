@@ -1,142 +1,164 @@
-"""Keyboard layout utilities.
+"""Keyboard layout handling utilities."""
 
-This module provides utilities for working with different
-keyboard layouts and mapping keys across layouts.
-"""
-
-from __future__ import annotations
-
-from typing import Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass
-from enum import Enum, auto
-
-
-class KeyModifier(Enum):
-    """Keyboard modifier keys."""
-    SHIFT = auto()
-    CTRL = auto()
-    ALT = auto()
-    META = auto()
-    CAPS_LOCK = auto()
-
-
-@dataclass
-class KeyEvent:
-    """A keyboard event."""
-    key_code: int
-    key_name: str
-    modifiers: Set[KeyModifier]
-    is_pressed: bool
-    scan_code: int = 0
-
-
-@dataclass
-class KeyMapping:
-    """A key mapping between virtual key and character."""
-    vk_code: int
-    scan_code: int
-    char_lower: str
-    char_upper: str
-    key_name: str
+from typing import Dict, List, Optional, Tuple, Set
+import sys
 
 
 class KeyboardLayout:
-    """Represents a keyboard layout."""
+    """Cross-platform keyboard layout helper."""
 
-    def __init__(
-        self,
-        name: str,
-        mappings: Optional[List[KeyMapping]] = None,
-    ) -> None:
-        self.name = name
-        self._vk_to_mapping: Dict[int, KeyMapping] = {}
-        self._char_to_lower: Dict[str, KeyMapping] = {}
-        self._char_to_upper: Dict[str, KeyMapping] = {}
-        if mappings:
-            for m in mappings:
-                self.add_mapping(m)
+    QWERTY_ROWS = [
+        ["`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="],
+        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "\\"],
+        ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'"],
+        ["z", "x", "c", "v", "b", "n", "m", ",", ".", "/"],
+    ]
 
-    def add_mapping(self, mapping: KeyMapping) -> None:
-        self._vk_to_mapping[mapping.vk_code] = mapping
-        self._char_to_lower[mapping.char_lower.lower()] = mapping
-        if mapping.char_upper:
-            self._char_to_upper[mapping.char_upper] = mapping
+    def __init__(self, layout: str = "qwerty"):
+        """Initialize keyboard layout.
+        
+        Args:
+            layout: Layout name (currently only qwerty supported).
+        """
+        self.layout = layout
+        self._row_map: Dict[str, Tuple[int, int]] = {}
+        self._build_row_map()
 
-    def get_mapping_by_vk(self, vk_code: int) -> Optional[KeyMapping]:
-        return self._vk_to_mapping.get(vk_code)
+    def _build_row_map(self) -> None:
+        """Build position map for keys."""
+        for row_idx, row in enumerate(self.QWERTY_ROWS):
+            for col_idx, key in enumerate(row):
+                self._row_map[key] = (row_idx, col_idx)
 
-    def get_mapping_by_char(self, char: str) -> Optional[KeyMapping]:
-        return self._char_to_lower.get(char.lower())
+    def key_position(self, key: str) -> Optional[Tuple[int, int]]:
+        """Get position of key in layout.
+        
+        Args:
+            key: Key character.
+        
+        Returns:
+            (row, col) or None if not found.
+        """
+        return self._row_map.get(key.lower())
 
-    def char_for_vk(self, vk_code: int, shift: bool = False) -> Optional[str]:
-        mapping = self.get_mapping_by_vk(vk_code)
-        if not mapping:
-            return None
-        return mapping.char_upper if shift else mapping.char_lower
+    def distance(self, key1: str, key2: str) -> float:
+        """Calculate keyboard distance between two keys.
+        
+        Args:
+            key1: First key.
+            key2: Second key.
+        
+        Returns:
+            Euclidean distance in key units.
+        """
+        p1 = self.key_position(key1)
+        p2 = self.key_position(key2)
+        if p1 is None or p2 is None:
+            return float("inf")
+        import math
+        return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+    def closest_key(self, key: str, candidates: Set[str]) -> Optional[str]:
+        """Find closest key from candidates.
+        
+        Args:
+            key: Reference key.
+            candidates: Set of candidate keys.
+        
+        Returns:
+            Closest key or None.
+        """
+        best = None
+        best_dist = float("inf")
+        for c in candidates:
+            d = self.distance(key, c)
+            if d < best_dist:
+                best_dist = d
+                best = c
+        return best
+
+    def home_row_keys(self) -> List[str]:
+        """Get home row keys."""
+        return list(self.QWERTY_ROWS[2])
+
+    def numeric_row(self) -> List[str]:
+        """Get numeric row keys."""
+        return list(self.QWERTY_ROWS[0])
 
 
-QWERTY_MAPPING = [
-    KeyMapping(0x30, 0x10, "0", ")", "0"),
-    KeyMapping(0x31, 0x11, "1", "!", "1"),
-    KeyMapping(0x32, 0x12, "2", "@", "2"),
-    KeyMapping(0x33, 0x13, "3", "#", "3"),
-    KeyMapping(0x34, 0x14, "4", "$", "4"),
-    KeyMapping(0x35, 0x15, "5", "%", "5"),
-    KeyMapping(0x36, 0x16, "6", "^", "6"),
-    KeyMapping(0x37, 0x17, "7", "&", "7"),
-    KeyMapping(0x38, 0x18, "8", "*", "8"),
-    KeyMapping(0x39, 0x19, "9", "(", "9"),
-    KeyMapping(0x41, 0x1E, "a", "A", "A"),
-    KeyMapping(0x42, 0x1F, "b", "B", "B"),
-    KeyMapping(0x43, 0x20, "c", "C", "C"),
-    KeyMapping(0x44, 0x21, "d", "D", "D"),
-    KeyMapping(0x45, 0x22, "e", "E", "E"),
-    KeyMapping(0x46, 0x23, "f", "F", "F"),
-    KeyMapping(0x47, 0x24, "g", "G", "G"),
-    KeyMapping(0x48, 0x25, "h", "H", "H"),
-    KeyMapping(0x49, 0x26, "i", "I", "I"),
-    KeyMapping(0x4A, 0x27, "j", "J", "J"),
-    KeyMapping(0x4B, 0x28, "k", "K", "K"),
-    KeyMapping(0x4C, 0x29, "l", "L", "L"),
-    KeyMapping(0x4D, 0x2A, "m", "M", "M"),
-    KeyMapping(0x4E, 0x2B, "n", "N", "N"),
-    KeyMapping(0x4F, 0x2C, "o", "O", "O"),
-    KeyMapping(0x50, 0x2D, "p", "P", "P"),
-    KeyMapping(0x51, 0x2E, "q", "Q", "Q"),
-    KeyMapping(0x52, 0x2F, "r", "R", "R"),
-    KeyMapping(0x53, 0x30, "s", "S", "S"),
-    KeyMapping(0x54, 0x31, "t", "T", "T"),
-    KeyMapping(0x55, 0x32, "u", "U", "U"),
-    KeyMapping(0x56, 0x33, "v", "V", "V"),
-    KeyMapping(0x57, 0x34, "w", "W", "W"),
-    KeyMapping(0x58, 0x35, "x", "X", "X"),
-    KeyMapping(0x59, 0x36, "y", "Y", "Y"),
-    KeyMapping(0x5A, 0x37, "z", "Z", "Z"),
-]
-
-QWERTY_US = KeyboardLayout("QWERTY-US", QWERTY_MAPPING)
-
-
-def apply_modifiers(char: str, modifiers: Set[KeyModifier]) -> str:
-    """Apply modifiers to a character.
-
+def normalize_key_name(key: str) -> str:
+    """Normalize key name to standard format.
+    
     Args:
-        char: Input character.
-        modifiers: Active modifiers.
-
+        key: Key name (various formats accepted).
+    
     Returns:
-        Modified character.
+        Normalized key name.
     """
-    if KeyModifier.SHIFT in modifiers:
-        return char.upper()
-    return char
+    key = key.lower().strip()
+    aliases = {
+        "space": "space",
+        "spacebar": "space",
+        "return": "enter",
+        "esc": "escape",
+        "escape": "escape",
+        "tab": "tab",
+        "backspace": "backspace",
+        "delete": "delete",
+        "up": "up",
+        "down": "down",
+        "left": "left",
+        "right": "right",
+        "cmd": "meta",
+        "command": "meta",
+        "option": "alt",
+        "control": "ctrl",
+        "ctrl": "ctrl",
+    }
+    if key in aliases:
+        return aliases[key]
+    return key
 
 
-__all__ = [
-    "KeyModifier",
-    "KeyEvent",
-    "KeyMapping",
-    "KeyboardLayout",
-    "QWERTY_US",
-    "apply_modifiers",
-]
+def is_modifier_key(key: str) -> bool:
+    """Check if key is a modifier.
+    
+    Args:
+        key: Key name.
+    
+    Returns:
+        True if modifier key.
+    """
+    modifiers = {"ctrl", "alt", "shift", "meta", "cmd", "command", "option"}
+    return normalize_key_name(key) in modifiers
+
+
+def parse_hotkey(hotkey: str) -> List[str]:
+    """Parse hotkey string into modifiers and key.
+    
+    Args:
+        hotkey: Hotkey string like "ctrl+shift+p" or "Cmd+Opt+K".
+    
+    Returns:
+        List of key names.
+    """
+    return [normalize_key_name(k) for k in hotkey.replace(" ", "+").split("+")]
+
+
+def format_hotkey(keys: List[str]) -> str:
+    """Format keys into hotkey string.
+    
+    Args:
+        keys: List of key names.
+    
+    Returns:
+        Hotkey string like "ctrl+shift+p".
+    """
+    return "+".join(k.lower() for k in keys)
+
+
+def get_os_modifier() -> str:
+    """Get the OS-specific modifier key name."""
+    if sys.platform == "darwin":
+        return "meta"
+    return "ctrl"

@@ -1,259 +1,137 @@
-"""Gesture recognition utilities.
+"""Gesture recognition from touch/click sequences."""
 
-This module provides utilities for recognizing gestures from
-input sequences such as mouse drags and touch patterns.
-"""
-
-from __future__ import annotations
-
-from typing import List, NamedTuple, Optional, Tuple
-from dataclasses import dataclass
-from enum import Enum, auto
+from typing import List, Tuple, Optional, Dict, Any
+from enum import Enum
 import math
+
+
+Point = Tuple[float, float]
 
 
 class GestureType(Enum):
     """Recognized gesture types."""
-    TAP = auto()
-    DOUBLE_TAP = auto()
-    LONG_PRESS = auto()
-    SWIPE_LEFT = auto()
-    SWIPE_RIGHT = auto()
-    SWIPE_UP = auto()
-    SWIPE_DOWN = auto()
-    PINCH = auto()
-    ZOOM = auto()
-    DRAG = auto()
-    ROTATE = auto()
-    UNKNOWN = auto()
+    TAP = "tap"
+    DOUBLE_TAP = "double_tap"
+    LONG_PRESS = "long_press"
+    SWIPE_LEFT = "swipe_left"
+    SWIPE_RIGHT = "swipe_right"
+    SWIPE_UP = "swipe_up"
+    SWIPE_DOWN = "swipe_down"
+    PINCH = "pinch"
+    ZOOM = "zoom"
+    ROTATE = "rotate"
+    UNKNOWN = "unknown"
 
 
-class Point(NamedTuple):
-    """A 2D point."""
-    x: float
-    y: float
+class GestureRecognizer:
+    """Recognize gestures from point sequences."""
 
-    def distance_to(self, other: "Point") -> float:
-        """Calculate Euclidean distance to another point."""
-        dx = self.x - other.x
-        dy = self.y - other.y
-        return math.sqrt(dx * dx + dy * dy)
+    def __init__(
+        self,
+        tap_threshold: float = 20.0,
+        swipe_threshold: float = 50.0,
+        long_press_duration: float = 0.5,
+        double_tap_interval: float = 0.3
+    ):
+        """Initialize recognizer.
+        
+        Args:
+            tap_threshold: Max distance for tap detection.
+            swipe_threshold: Min distance for swipe detection.
+            long_press_duration: Min duration for long press.
+            double_tap_interval: Max interval between taps.
+        """
+        self.tap_threshold = tap_threshold
+        self.swipe_threshold = swipe_threshold
+        self.long_press_duration = long_press_duration
+        self.double_tap_interval = double_tap_interval
 
-    def angle_to(self, other: "Point") -> float:
-        """Calculate angle in degrees to another point."""
-        return math.degrees(math.atan2(other.y - self.y, other.x - self.x))
+    def recognize(
+        self,
+        points: List[Point],
+        timestamps: List[float]
+    ) -> Tuple[GestureType, Dict[str, Any]]:
+        """Recognize gesture from points and timestamps.
+        
+        Args:
+            points: Sequence of touch/click points.
+            timestamps: Corresponding timestamps.
+        
+        Returns:
+            Tuple of (gesture type, metadata dict).
+        """
+        if not points or len(points) < 1:
+            return GestureType.UNKNOWN, {}
+        if len(points) == 1:
+            return self._recognize_single_tap(points[0], timestamps[0])
+        if len(points) == 2:
+            return self._recognize_two_point_gesture(points, timestamps)
+        return self._recognize_multi_point_gesture(points, timestamps)
 
+    def _recognize_single_tap(
+        self,
+        point: Point,
+        timestamp: float
+    ) -> Tuple[GestureType, Dict[str, Any]]:
+        """Recognize single point gesture."""
+        return GestureType.TAP, {"point": point, "timestamp": timestamp}
 
-@dataclass
-class Gesture:
-    """A recognized gesture."""
-    gesture_type: GestureType
-    points: List[Point]
-    duration: float
-    metadata: dict
+    def _recognize_two_point_gesture(
+        self,
+        points: List[Point],
+        timestamps: List[float]
+    ) -> Tuple[GestureType, Dict[str, Any]]:
+        """Recognize two-point gesture like pinch/zoom."""
+        p1, p2 = points[0], points[1]
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        dist = math.sqrt(dx * dx + dy * dy)
+        return GestureType.PINCH, {
+            "distance": dist,
+            "direction": "in" if dist < self.swipe_threshold else "out",
+            "points": points
+        }
 
-    @property
-    def start_point(self) -> Optional[Point]:
-        """Get the starting point."""
-        return self.points[0] if self.points else None
-
-    @property
-    def end_point(self) -> Optional[Point]:
-        """Get the ending point."""
-        return self.points[-1] if self.points else None
-
-    @property
-    def total_distance(self) -> float:
-        """Calculate total distance traveled."""
-        if len(self.points) < 2:
-            return 0.0
-        return sum(
-            self.points[i].distance_to(self.points[i + 1])
-            for i in range(len(self.points) - 1)
-        )
-
-
-@dataclass
-class GestureConfig:
-    """Configuration for gesture recognition."""
-    swipe_min_distance: float = 50.0
-    swipe_max_duration: float = 1.0
-    tap_max_distance: float = 10.0
-    tap_max_duration: float = 0.5
-    long_press_min_duration: float = 0.5
-    double_tap_max_interval: float = 0.3
-
-
-def recognize_swipe(
-    points: List[Point],
-    duration: float,
-    config: Optional[GestureConfig] = None,
-) -> Optional[GestureType]:
-    """Recognize swipe direction from points.
-
-    Args:
-        points: List of points in the gesture.
-        duration: Total duration in seconds.
-        config: Gesture configuration.
-
-    Returns:
-        GestureType or None if not a swipe.
-    """
-    cfg = config or GestureConfig()
-    if len(points) < 2:
-        return None
-
-    start = points[0]
-    end = points[-1]
-    distance = start.distance_to(end)
-
-    if distance < cfg.swipe_min_distance:
-        return None
-    if duration > cfg.swipe_max_duration:
-        return None
-
-    angle = start.angle_to(end)
-
-    if -45 <= angle < 45:
-        return GestureType.SWIPE_RIGHT
-    elif 45 <= angle < 135:
-        return GestureType.SWIPE_DOWN
-    elif -135 <= angle < -45:
-        return GestureType.SWIPE_UP
-    else:
-        return GestureType.SWIPE_LEFT
-
-
-def recognize_tap(
-    points: List[Point],
-    duration: float,
-    config: Optional[GestureConfig] = None,
-) -> Optional[GestureType]:
-    """Recognize tap from points.
-
-    Args:
-        points: List of points in the gesture.
-        duration: Total duration in seconds.
-        config: Gesture configuration.
-
-    Returns:
-        GestureType.TAP or None if not a tap.
-    """
-    cfg = config or GestureConfig()
-    if len(points) < 2:
-        return None
-
-    start = points[0]
-    end = points[-1]
-    distance = start.distance_to(end)
-
-    if distance < cfg.tap_max_distance and duration < cfg.tap_max_duration:
-        return GestureType.TAP
-    return None
-
-
-def recognize_long_press(
-    points: List[Point],
-    duration: float,
-    config: Optional[GestureConfig] = None,
-) -> Optional[GestureType]:
-    """Recognize long press from points.
-
-    Args:
-        points: List of points in the gesture.
-        duration: Total duration in seconds.
-        config: Gesture configuration.
-
-    Returns:
-        GestureType.LONG_PRESS or None.
-    """
-    cfg = config or GestureConfig()
-    if len(points) == 1 and duration >= cfg.long_press_min_duration:
-        return GestureType.LONG_PRESS
-    return None
-
-
-def recognize_gesture(
-    points: List[Point],
-    duration: float,
-    config: Optional[GestureConfig] = None,
-) -> Gesture:
-    """Recognize a gesture from points and duration.
-
-    Args:
-        points: List of points in the gesture.
-        duration: Total duration in seconds.
-        config: Gesture configuration.
-
-    Returns:
-        Gesture with recognized type.
-    """
-    cfg = config or GestureConfig()
-
-    for recognizer in [recognize_long_press, recognize_tap, recognize_swipe]:
-        result = recognizer(points, duration, cfg)
-        if result is not None:
-            return Gesture(
-                gesture_type=result,
-                points=points,
-                duration=duration,
-                metadata={},
-            )
-
-    return Gesture(
-        gesture_type=GestureType.UNKNOWN,
-        points=points,
-        duration=duration,
-        metadata={},
-    )
-
-
-def resample_points(points: List[Point], num_points: int) -> List[Point]:
-    """Resample gesture points to a fixed count.
-
-    Args:
-        points: Original points.
-        num_points: Target number of points.
-
-    Returns:
-        Resampled points list.
-    """
-    if len(points) <= 1:
-        return points[:]
-    if len(points) == num_points:
-        return points[:]
-
-    total_dist = sum(
-        points[i].distance_to(points[i + 1])
-        for i in range(len(points) - 1)
-    )
-    step = total_dist / (num_points - 1)
-
-    result = [points[0]]
-    accumulated = 0.0
-    j = 1
-
-    for i in range(num_points - 1):
-        target = step * (i + 1)
-        while j < len(points) and accumulated + points[j - 1].distance_to(points[j]) < target:
-            accumulated += points[j - 1].distance_to(points[j])
-            j += 1
-        if j < len(points):
-            result.append(points[j])
+    def _recognize_multi_point_gesture(
+        self,
+        points: List[Point],
+        timestamps: List[float]
+    ) -> Tuple[GestureType, Dict[str, Any]]:
+        """Recognize multi-point gesture from path."""
+        start = points[0]
+        end = points[-1]
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        dist = math.sqrt(dx * dx + dy * dy)
+        duration = timestamps[-1] - timestamps[0] if len(timestamps) > 1 else 0
+        if dist < self.swipe_threshold:
+            if duration > self.long_press_duration:
+                return GestureType.LONG_PRESS, {"point": start, "duration": duration}
+            return GestureType.TAP, {"point": start, "duration": duration}
+        angle = math.degrees(math.atan2(dy, dx))
+        if abs(dx) > abs(dy):
+            if dx > 0:
+                return GestureType.SWIPE_RIGHT, {"angle": angle, "distance": dist}
+            return GestureType.SWIPE_LEFT, {"angle": angle, "distance": dist}
         else:
-            result.append(points[-1])
+            if dy > 0:
+                return GestureType.SWIPE_DOWN, {"angle": angle, "distance": dist}
+            return GestureType.SWIPE_UP, {"angle": angle, "distance": dist}
 
-    return result
-
-
-__all__ = [
-    "GestureType",
-    "Point",
-    "Gesture",
-    "GestureConfig",
-    "recognize_swipe",
-    "recognize_tap",
-    "recognize_long_press",
-    "recognize_gesture",
-    "resample_points",
-]
+    def recognize_from_events(
+        self,
+        events: List[Dict[str, Any]]
+    ) -> Tuple[GestureType, Dict[str, Any]]:
+        """Recognize gesture from event list.
+        
+        Args:
+            events: List of dicts with keys: x, y, event_type, timestamp.
+        
+        Returns:
+            Tuple of (gesture type, metadata dict).
+        """
+        down_points = [(e["x"], e["y"]) for e in events if e.get("event_type") in ("down", "touchstart")]
+        down_times = [e["timestamp"] for e in events if e.get("event_type") in ("down", "touchstart")]
+        if not down_points:
+            return GestureType.UNKNOWN, {}
+        return self.recognize(down_points, down_times)
