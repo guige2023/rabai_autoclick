@@ -1,24 +1,17 @@
-"""API authentication action module for RabAI AutoClick.
+"""API auth token action module for RabAI AutoClick.
 
-Provides API authentication operations:
-- ApiKeyAuthAction: API key authentication
-- BearerTokenAuthAction: Bearer token authentication
-- BasicAuthAction: Basic authentication
-- DigestAuthAction: Digest authentication
-- OAuth1AuthAction: OAuth 1.0 authentication
-- JWTAuthAction: JWT token authentication
-- HmacAuthAction: HMAC signature authentication
-- CustomHeaderAuthAction: Custom header authentication
+Provides API token/auth operations:
+- TokenGenerateAction: Generate auth token
+- TokenValidateAction: Validate token
+- TokenRefreshAction: Refresh token
+- TokenRevokeAction: Revoke token
+- TokenInfoAction: Get token info
 """
 
 import hashlib
-import hmac
-import base64
 import time
-import secrets
-import urllib.parse
+import uuid
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
 
 import sys
 import os
@@ -28,323 +21,164 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class ApiKeyAuthAction(BaseAction):
-    """API key authentication."""
-    action_type = "api_key_auth"
-    display_name = "API密钥认证"
-    description = "使用API密钥进行认证"
+class TokenGenerateAction(BaseAction):
+    """Generate an authentication token."""
+    action_type = "token_generate"
+    display_name = "生成Token"
+    description = "生成认证令牌"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            api_key = params.get("api_key", "")
-            key_name = params.get("key_name", "X-API-Key")
-            location = params.get("location", "header").lower()
+            user_id = params.get("user_id", "")
+            token_type = params.get("type", "bearer")
+            expires_in = params.get("expires_in", 3600)
+            scopes = params.get("scopes", [])
 
-            if not api_key:
-                return ActionResult(success=False, message="api_key is required")
+            if not user_id:
+                return ActionResult(success=False, message="user_id is required")
 
-            if location == "header":
-                auth_data = {key_name: api_key}
-            elif location == "query":
-                auth_data = {key_name: api_key}
-                auth_type = "query_param"
-            else:
-                return ActionResult(success=False, message=f"Invalid location: {location}")
+            token_value = hashlib.sha256(f"{user_id}:{time.time()}:{uuid.uuid4()}".encode()).hexdigest()
+            token_id = str(uuid.uuid4())[:8]
 
-            return ActionResult(
-                success=True,
-                data={
-                    "auth_type": "api_key",
-                    "location": location,
-                    "key_name": key_name,
-                    "api_key": api_key[:8] + "..." if len(api_key) > 8 else api_key
-                },
-                message="API key authentication configured"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"API key auth error: {str(e)}")
-
-
-class BearerTokenAuthAction(BaseAction):
-    """Bearer token authentication."""
-    action_type = "bearer_token_auth"
-    display_name = "Bearer令牌认证"
-    description = "使用Bearer令牌进行认证"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            token = params.get("token", "")
-            scheme = params.get("scheme", "Bearer")
-
-            if not token:
-                return ActionResult(success=False, message="token is required")
-
-            header_value = f"{scheme} {token}"
-            return ActionResult(
-                success=True,
-                data={
-                    "auth_type": "bearer",
-                    "scheme": scheme,
-                    "token_prefix": scheme + " ",
-                    "token_preview": token[:8] + "..." if len(token) > 8 else token
-                },
-                message="Bearer token authentication configured"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Bearer token auth error: {str(e)}")
-
-
-class BasicAuthAction(BaseAction):
-    """Basic authentication."""
-    action_type = "basic_auth"
-    display_name = "Basic认证"
-    description = "使用用户名密码进行Basic认证"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            username = params.get("username", "")
-            password = params.get("password", "")
-
-            if not username or not password:
-                return ActionResult(success=False, message="username and password are required")
-
-            credentials = f"{username}:{password}"
-            encoded = base64.b64encode(credentials.encode()).decode()
-
-            return ActionResult(
-                success=True,
-                data={
-                    "auth_type": "basic",
-                    "username": username,
-                    "header_value": f"Basic {encoded}",
-                    "encoded_length": len(encoded)
-                },
-                message="Basic authentication configured"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Basic auth error: {str(e)}")
-
-
-class DigestAuthAction(BaseAction):
-    """Digest authentication."""
-    action_type = "digest_auth"
-    display_name = "Digest认证"
-    description = "使用Digest认证协议"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            username = params.get("username", "")
-            password = params.get("password", "")
-            realm = params.get("realm", "")
-            nonce = params.get("nonce", "")
-            qop = params.get("qop", "auth")
-            opaque = params.get("opaque", "")
-
-            if not username or not password:
-                return ActionResult(success=False, message="username and password are required")
-
-            return ActionResult(
-                success=True,
-                data={
-                    "auth_type": "digest",
-                    "username": username,
-                    "realm": realm,
-                    "nonce": nonce[:16] + "..." if len(nonce) > 16 else nonce,
-                    "qop": qop
-                },
-                message="Digest authentication configured"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Digest auth error: {str(e)}")
-
-
-class OAuth1AuthAction(BaseAction):
-    """OAuth 1.0 authentication."""
-    action_type = "oauth1_auth"
-    display_name = "OAuth1认证"
-    description = "OAuth 1.0认证流程"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            consumer_key = params.get("consumer_key", "")
-            consumer_secret = params.get("consumer_secret", "")
-            access_token = params.get("access_token", "")
-            access_secret = params.get("access_secret", "")
-            signature_method = params.get("signature_method", "HMAC-SHA1")
-
-            if not consumer_key or not consumer_secret:
-                return ActionResult(success=False, message="consumer_key and consumer_secret are required")
-
-            oauth_params = {
-                "oauth_consumer_key": consumer_key,
-                "oauth_signature_method": signature_method,
-                "oauth_timestamp": str(int(time.time())),
-                "oauth_nonce": secrets.token_hex(16),
-                "oauth_version": "1.0"
+            if not hasattr(context, "auth_tokens"):
+                context.auth_tokens = {}
+            context.auth_tokens[token_id] = {
+                "token_id": token_id,
+                "user_id": user_id,
+                "token": token_value,
+                "type": token_type,
+                "scopes": scopes,
+                "created_at": time.time(),
+                "expires_at": time.time() + expires_in,
+                "revoked": False,
             }
 
-            if access_token:
-                oauth_params["oauth_token"] = access_token
-
             return ActionResult(
                 success=True,
-                data={
-                    "auth_type": "oauth1",
-                    "consumer_key": consumer_key[:8] + "...",
-                    "signature_method": signature_method,
-                    "oauth_params_count": len(oauth_params)
-                },
-                message="OAuth 1.0 authentication configured"
+                data={"token_id": token_id, "user_id": user_id, "expires_in": expires_in, "scopes": scopes},
+                message=f"Token {token_id} generated for user {user_id}",
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"OAuth1 auth error: {str(e)}")
+            return ActionResult(success=False, message=f"Token generate failed: {e}")
 
 
-class JWTAuthAction(BaseAction):
-    """JWT token authentication."""
-    action_type = "jwt_auth"
-    display_name = "JWT认证"
-    description = "JWT令牌认证"
+class TokenValidateAction(BaseAction):
+    """Validate an auth token."""
+    action_type = "token_validate"
+    display_name = "验证Token"
+    description = "验证认证令牌"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            secret = params.get("secret", "")
-            algorithm = params.get("algorithm", "HS256")
-            payload = params.get("payload", {})
-            subject = params.get("subject", "")
-            issuer = params.get("issuer", "")
-            expiry_hours = params.get("expiry_hours", 24)
+            token_id = params.get("token_id", "")
+            if not token_id:
+                return ActionResult(success=False, message="token_id is required")
 
-            if not secret:
-                return ActionResult(success=False, message="secret is required")
+            tokens = getattr(context, "auth_tokens", {})
+            if token_id not in tokens:
+                return ActionResult(success=True, data={"valid": False, "reason": "not_found"}, message="Token not found")
 
-            import jwt
+            token = tokens[token_id]
+            if token.get("revoked"):
+                return ActionResult(success=True, data={"valid": False, "reason": "revoked"}, message="Token revoked")
 
-            now = datetime.utcnow()
-            exp = now + timedelta(hours=expiry_hours)
-
-            jwt_payload = {
-                "iat": now,
-                "exp": exp,
-                "nbf": now,
-                **payload
-            }
-
-            if subject:
-                jwt_payload["sub"] = subject
-            if issuer:
-                jwt_payload["iss"] = issuer
-
-            token = jwt.encode(jwt_payload, secret, algorithm=algorithm)
+            if token.get("expires_at", 0) < time.time():
+                return ActionResult(success=True, data={"valid": False, "reason": "expired"}, message="Token expired")
 
             return ActionResult(
                 success=True,
-                data={
-                    "auth_type": "jwt",
-                    "algorithm": algorithm,
-                    "subject": subject,
-                    "expiry_hours": expiry_hours,
-                    "token_preview": token[:20] + "..." if len(token) > 20 else token
-                },
-                message="JWT authentication configured"
+                data={"valid": True, "user_id": token["user_id"], "scopes": token.get("scopes", [])},
+                message="Token is valid",
             )
-        except ImportError:
-            return ActionResult(success=False, message="PyJWT not installed. Install with: pip install PyJWT")
         except Exception as e:
-            return ActionResult(success=False, message=f"JWT auth error: {str(e)}")
+            return ActionResult(success=False, message=f"Token validate failed: {e}")
 
 
-class HmacAuthAction(BaseAction):
-    """HMAC signature authentication."""
-    action_type = "hmac_auth"
-    display_name = "HMAC签名认证"
-    description = "HMAC签名认证"
+class TokenRefreshAction(BaseAction):
+    """Refresh an auth token."""
+    action_type = "token_refresh"
+    display_name = "刷新Token"
+    description = "刷新认证令牌"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            secret = params.get("secret", "")
-            algorithm = params.get("algorithm", "sha256")
-            include_timestamp = params.get("include_timestamp", True)
-            include_nonce = params.get("include_nonce", True)
+            token_id = params.get("token_id", "")
+            expires_in = params.get("expires_in", 3600)
 
-            if not secret:
-                return ActionResult(success=False, message="secret is required")
+            if not token_id:
+                return ActionResult(success=False, message="token_id is required")
 
-            timestamp = str(int(time.time())) if include_timestamp else ""
-            nonce = secrets.token_hex(16) if include_nonce else ""
+            tokens = getattr(context, "auth_tokens", {})
+            if token_id not in tokens:
+                return ActionResult(success=False, message=f"Token {token_id} not found")
+
+            token = tokens[token_id]
+            new_token = hashlib.sha256(f"{token['user_id']}:{time.time()}:{uuid.uuid4()}".encode()).hexdigest()
+            token["token"] = new_token
+            token["expires_at"] = time.time() + expires_in
 
             return ActionResult(
                 success=True,
-                data={
-                    "auth_type": "hmac",
-                    "algorithm": algorithm,
-                    "secret_length": len(secret),
-                    "include_timestamp": include_timestamp,
-                    "include_nonce": include_nonce
-                },
-                message="HMAC authentication configured"
+                data={"token_id": token_id, "new_token": new_token[:16] + "...", "expires_in": expires_in},
+                message=f"Token {token_id} refreshed",
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"HMAC auth error: {str(e)}")
+            return ActionResult(success=False, message=f"Token refresh failed: {e}")
 
 
-class CustomHeaderAuthAction(BaseAction):
-    """Custom header authentication."""
-    action_type = "custom_header_auth"
-    display_name = "自定义头认证"
-    description = "使用自定义请求头进行认证"
+class TokenRevokeAction(BaseAction):
+    """Revoke an auth token."""
+    action_type = "token_revoke"
+    display_name = "撤销Token"
+    description = "撤销认证令牌"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            headers = params.get("headers", {})
+            token_id = params.get("token_id", "")
+            if not token_id:
+                return ActionResult(success=False, message="token_id is required")
 
-            if not headers:
-                return ActionResult(success=False, message="headers are required")
+            tokens = getattr(context, "auth_tokens", {})
+            if token_id not in tokens:
+                return ActionResult(success=False, message=f"Token {token_id} not found")
 
-            if not isinstance(headers, dict):
-                return ActionResult(success=False, message="headers must be a dictionary")
+            tokens[token_id]["revoked"] = True
+            tokens[token_id]["revoked_at"] = time.time()
 
-            return ActionResult(
-                success=True,
-                data={
-                    "auth_type": "custom_header",
-                    "header_count": len(headers),
-                    "header_names": list(headers.keys())
-                },
-                message="Custom header authentication configured"
-            )
+            return ActionResult(success=True, data={"token_id": token_id}, message=f"Token {token_id} revoked")
         except Exception as e:
-            return ActionResult(success=False, message=f"Custom header auth error: {str(e)}")
+            return ActionResult(success=False, message=f"Token revoke failed: {e}")
 
 
-class AuthProviderAction(BaseAction):
-    """Authentication provider managing multiple auth methods."""
-    action_type = "auth_provider"
-    display_name = "认证提供者"
-    description = "管理多种认证方式"
+class TokenInfoAction(BaseAction):
+    """Get token information."""
+    action_type = "token_info"
+    display_name = "Token信息"
+    description = "获取令牌信息"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            auth_configs = params.get("auth_configs", [])
-            default_auth = params.get("default_auth", "")
+            token_id = params.get("token_id", "")
+            if not token_id:
+                return ActionResult(success=False, message="token_id is required")
 
-            if not auth_configs:
-                return ActionResult(success=False, message="auth_configs is required")
+            tokens = getattr(context, "auth_tokens", {})
+            if token_id not in tokens:
+                return ActionResult(success=False, message=f"Token {token_id} not found")
 
-            providers = {}
-            for config in auth_configs:
-                auth_type = config.get("type", "unknown")
-                providers[auth_type] = config
-
+            token = tokens[token_id]
             return ActionResult(
                 success=True,
                 data={
-                    "auth_type": "provider",
-                    "available_auths": list(providers.keys()),
-                    "default_auth": default_auth,
-                    "auth_count": len(providers)
+                    "token_id": token_id,
+                    "user_id": token["user_id"],
+                    "type": token["type"],
+                    "scopes": token.get("scopes", []),
+                    "created_at": token["created_at"],
+                    "expires_at": token["expires_at"],
+                    "revoked": token["revoked"],
                 },
-                message=f"Auth provider configured with {len(providers)} auth methods"
+                message=f"Token info: user={token['user_id']}, revoked={token['revoked']}",
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Auth provider error: {str(e)}")
+            return ActionResult(success=False, message=f"Token info failed: {e}")
