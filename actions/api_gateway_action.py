@@ -1,374 +1,379 @@
 """
-API Gateway Action Module.
+API Gateway Action Module
 
-Provides unified API gateway functionality with routing, rate limiting,
-authentication, and request/response transformation.
+Provides API gateway functionality, routing, load balancing, and request handling.
 """
-
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Optional, Callable, Literal
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
+from collections import defaultdict
 import asyncio
 import hashlib
-import hmac
-import json
-import time
-import logging
-from collections import defaultdict
-
-logger = logging.getLogger(__name__)
 
 
-class RateLimitType(Enum):
-    """Rate limiting algorithm types."""
-    FIXED_WINDOW = "fixed_window"
-    SLIDING_WINDOW = "sliding_window"
-    TOKEN_BUCKET = "token_bucket"
-    LEAKY_BUCKET = "leaky_bucket"
+class LoadBalancingStrategy(Enum):
+    """Load balancing strategies."""
+    ROUND_ROBIN = "round_robin"
+    LEAST_CONNECTIONS = "least_connections"
+    IP_HASH = "ip_hash"
+    RANDOM = "random"
+    WEIGHTED = "weighted"
 
 
 @dataclass
-class RateLimitConfig:
-    """Configuration for rate limiting."""
-    requests_per_second: float = 100.0
-    burst_size: int = 200
-    limit_type: RateLimitType = RateLimitType.TOKEN_BUCKET
+class UpstreamServer:
+    """An upstream server in the gateway."""
+    server_id: str
+    url: str
+    weight: int = 1
+    healthy: bool = True
+    active_connections: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class RouteConfig:
-    """Configuration for a single route."""
-    path: str
+class Route:
+    """A gateway route definition."""
+    route_id: str
+    path_prefix: str
+    upstream: str
+    methods: list[str] = field(default_factory=lambda: ["GET"])
+    timeout_seconds: float = 30.0
+    retry_attempts: int = 1
+    strip_path: bool = False
+    plugins: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GatewayConfig:
+    """Gateway configuration."""
+    name: str
+    port: int = 8080
+    host: str = "0.0.0.0"
+    upstream_timeout: float = 60.0
+    max_connections: int = 10000
+    keepalive_timeout: float = 60.0
+
+
+@dataclass
+class GatewayRequest:
+    """An incoming gateway request."""
+    request_id: str
     method: str
-    handler: Callable
-    auth_required: bool = False
-    rate_limit: Optional[RateLimitConfig] = None
-    timeout: float = 30.0
-    retry_count: int = 0
-    circuit_breaker: bool = False
+    path: str
+    headers: dict[str, str]
+    query_params: dict[str, str]
+    body: Optional[bytes] = None
+    client_ip: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
-class CircuitBreakerState:
-    """State for circuit breaker pattern."""
-    failure_count: int = 0
-    success_count: int = 0
-    last_failure_time: Optional[datetime] = None
-    state: str = "closed"  # closed, open, half_open
-    next_retry_time: Optional[datetime] = None
+class GatewayResponse:
+    """Gateway response."""
+    status_code: int
+    headers: dict[str, str]
+    body: Any
+    upstream: str
+    duration_ms: float
 
 
-class TokenBucket:
-    """Token bucket algorithm implementation."""
-
-    def __init__(self, rate: float, capacity: int):
-        self.rate = rate
-        self.capacity = capacity
-        self.tokens = capacity
-        self.last_update = time.monotonic()
-
-    def consume(self, tokens: int = 1) -> bool:
-        """Attempt to consume tokens from the bucket."""
-        now = time.monotonic()
-        elapsed = now - self.last_update
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-        self.last_update = now
-
-        if self.tokens >= tokens:
-            self.tokens -= tokens
-            return True
-        return False
-
-
-class CircuitBreaker:
-    """Circuit breaker for fault tolerance."""
-
-    def __init__(
-        self,
-        failure_threshold: int = 5,
-        success_threshold: int = 2,
-        timeout: float = 60.0
-    ):
-        self.failure_threshold = failure_threshold
-        self.success_threshold = success_threshold
-        self.timeout = timeout
-        self.state = CircuitBreakerState()
-
-    def call(self, func: Callable, *args, **kwargs) -> Any:
-        """Execute function with circuit breaker protection."""
-        if self.state.state == "open":
-            if self.state.next_retry_time and datetime.now() >= self.state.next_retry_time:
-                self.state.state = "half_open"
-                self.state.success_count = 0
-            else:
-                raise CircuitBreakerOpenError("Circuit breaker is open")
-
-        try:
-            result = func(*args, **kwargs)
-            self._on_success()
-            return result
-        except Exception as e:
-            self._on_failure()
-            raise
-
-    def _on_success(self):
-        """Handle successful call."""
-        self.state.success_count += 1
-        if self.state.state == "half_open":
-            if self.state.success_count >= self.success_threshold:
-                self.state.state = "closed"
-                self.state.failure_count = 0
-        elif self.state.state == "closed":
-            self.state.failure_count = max(0, self.state.failure_count - 1)
-
-    def _on_failure(self):
-        """Handle failed call."""
-        self.state.failure_count += 1
-        self.state.last_failure_time = datetime.now()
-        if self.state.failure_count >= self.failure_threshold:
-            self.state.state = "open"
-            self.state.next_retry_time = datetime.now() + timedelta(seconds=self.timeout)
-
-
-class CircuitBreakerOpenError(Exception):
-    """Raised when circuit breaker is open."""
-    pass
-
-
-@dataclass
-class AuthToken:
-    """Authentication token."""
-    token: str
-    user_id: str
-    scopes: List[str]
-    expires_at: datetime
-
-
-class JWTAuthenticator:
-    """JWT-based authentication."""
-
-    def __init__(self, secret_key: str, algorithm: str = "HS256"):
-        self.secret_key = secret_key
-        self.algorithm = algorithm
-
-    def create_token(
-        self,
-        user_id: str,
-        scopes: List[str],
-        expires_in: int = 3600
-    ) -> AuthToken:
-        """Create a new authentication token."""
-        expiry = datetime.now() + timedelta(seconds=expires_in)
-        token_data = f"{user_id}:{','.join(scopes)}:{expiry.isoformat()}"
-        signature = hmac.new(
-            self.secret_key.encode(),
-            token_data.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        token = f"{token_data}:{signature}"
-        return AuthToken(token=token, user_id=user_id, scopes=scopes, expires_at=expiry)
-
-    def verify_token(self, token: str) -> Optional[AuthToken]:
-        """Verify and decode a token."""
-        try:
-            parts = token.split(":")
-            if len(parts) != 4:
-                return None
-            user_id, scopes_str, expiry_str, signature = parts
-            expected_sig = hmac.new(
-                self.secret_key.encode(),
-                f"{user_id}:{scopes_str}:{expiry_str}".encode(),
-                hashlib.sha256
-            ).hexdigest()
-            if not hmac.compare_digest(signature, expected_sig):
-                return None
-            expiry = datetime.fromisoformat(expiry_str)
-            if expiry < datetime.now():
-                return None
-            return AuthToken(
-                token=token,
-                user_id=user_id,
-                scopes=scopes_str.split(","),
-                expires_at=expiry
-            )
-        except Exception:
+class LoadBalancer:
+    """Load balancer implementation."""
+    
+    def __init__(self, strategy: LoadBalancingStrategy):
+        self.strategy = strategy
+        self._servers: dict[str, UpstreamServer] = {}
+        self._current_index: dict[str, int] = defaultdict(int)
+        self._connection_counts: dict[str, int] = defaultdict(int)
+    
+    def add_server(self, server: UpstreamServer):
+        """Add a server to the pool."""
+        self._servers[server.server_id] = server
+    
+    def remove_server(self, server_id: str):
+        """Remove a server from the pool."""
+        if server_id in self._servers:
+            del self._servers[server_id]
+    
+    def select_server(self, request: GatewayRequest) -> Optional[UpstreamServer]:
+        """Select a server based on load balancing strategy."""
+        healthy_servers = [s for s in self._servers.values() if s.healthy]
+        
+        if not healthy_servers:
             return None
-
-
-class RequestTransformer:
-    """Transform request/response data."""
-
-    def transform_request(
-        self,
-        data: Dict[str, Any],
-        transformers: List[Callable]
-    ) -> Dict[str, Any]:
-        """Apply a series of transformations to request data."""
-        result = data.copy()
-        for transformer in transformers:
-            result = transformer(result)
-        return result
-
-    def transform_response(
-        self,
-        data: Any,
-        formatters: List[Callable]
-    ) -> Any:
-        """Apply a series of formatters to response data."""
-        result = data
-        for formatter in formatters:
-            result = formatter(result)
-        return result
-
-
-class APIRouter:
-    """Main API Gateway Router."""
-
-    def __init__(self):
-        self.routes: Dict[str, RouteConfig] = {}
-        self.middlewares: List[Callable] = []
-        self.rate_limiters: Dict[str, TokenBucket] = defaultdict(
-            lambda: TokenBucket(100.0, 200)
-        )
-        self.circuit_breakers: Dict[str, CircuitBreaker] = {}
-        self.authenticator: Optional[JWTAuthenticator] = None
-        self.transformer = RequestTransformer()
-
-    def add_route(self, config: RouteConfig):
-        """Add a new route configuration."""
-        key = f"{config.method}:{config.path}"
-        self.routes[key] = config
-        if config.rate_limit:
-            self.rate_limiters[key] = TokenBucket(
-                config.rate_limit.requests_per_second,
-                config.rate_limit.burst_size
+        
+        if self.strategy == LoadBalancingStrategy.ROUND_ROBIN:
+            return self._round_robin_select(healthy_servers)
+        elif self.strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
+            return self._least_connections_select(healthy_servers)
+        elif self.strategy == LoadBalancingStrategy.IP_HASH:
+            return self._ip_hash_select(healthy_servers, request)
+        elif self.strategy == LoadBalancingStrategy.WEIGHTED:
+            return self._weighted_select(healthy_servers)
+        else:
+            return self._random_select(healthy_servers)
+    
+    def _round_robin_select(self, servers: list[UpstreamServer]) -> UpstreamServer:
+        """Round-robin selection."""
+        idx = self._current_index["round_robin"] % len(servers)
+        self._current_index["round_robin"] += 1
+        return servers[idx]
+    
+    def _least_connections_select(self, servers: list[UpstreamServer]) -> UpstreamServer:
+        """Select server with least connections."""
+        return min(servers, key=lambda s: s.active_connections)
+    
+    def _ip_hash_select(self, servers: list[UpstreamServer], request: GatewayRequest) -> UpstreamServer:
+        """IP hash-based selection."""
+        client_ip = request.client_ip or "unknown"
+        hash_val = int(hashlib.md5(client_ip.encode()).hexdigest(), 16)
+        idx = hash_val % len(servers)
+        return servers[idx]
+    
+    def _weighted_select(self, servers: list[UpstreamServer]) -> UpstreamServer:
+        """Weighted selection."""
+        total_weight = sum(s.weight for s in servers)
+        import random
+        rand_val = random.randint(1, total_weight)
+        
+        cumulative = 0
+        for server in servers:
+            cumulative += server.weight
+            if rand_val <= cumulative:
+                return server
+        
+        return servers[-1]
+    
+    def _random_select(self, servers: list[UpstreamServer]) -> UpstreamServer:
+        """Random selection."""
+        import random
+        return random.choice(servers)
+    
+    def increment_connections(self, server_id: str):
+        """Increment active connections for a server."""
+        if server_id in self._servers:
+            self._servers[server_id].active_connections += 1
+    
+    def decrement_connections(self, server_id: str):
+        """Decrement active connections for a server."""
+        if server_id in self._servers:
+            self._servers[server_id].active_connections = max(
+                0, self._servers[server_id].active_connections - 1
             )
-        if config.circuit_breaker:
-            self.circuit_breakers[key] = CircuitBreaker()
 
-    def set_authenticator(self, secret_key: str):
-        """Set JWT authenticator."""
-        self.authenticator = JWTAuthenticator(secret_key)
 
-    def add_middleware(self, middleware: Callable):
-        """Add middleware function."""
-        self.middlewares.append(middleware)
-
+class ApiGatewayAction:
+    """Main API gateway action handler."""
+    
+    def __init__(self, config: Optional[GatewayConfig] = None):
+        self.config = config or GatewayConfig(name="default")
+        self._routes: dict[str, Route] = {}
+        self._upstreams: dict[str, list[UpstreamServer]] = defaultdict(list)
+        self._load_balancers: dict[str, LoadBalancer] = {}
+        self._plugins: dict[str, Callable] = {}
+        self._stats: dict[str, Any] = defaultdict(int)
+        self._request_handlers: dict[str, Callable] = {}
+    
+    def add_route(self, route: Route) -> "ApiGatewayAction":
+        """Add a route to the gateway."""
+        self._routes[route.route_id] = route
+        
+        # Initialize load balancer for upstream
+        if route.upstream not in self._load_balancers:
+            self._load_balancers[route.upstream] = LoadBalancer(LoadBalancingStrategy.ROUND_ROBIN)
+        
+        return self
+    
+    def add_upstream_server(
+        self,
+        upstream_name: str,
+        server: UpstreamServer
+    ) -> "ApiGatewayAction":
+        """Add a server to an upstream pool."""
+        self._upstreams[upstream_name].append(server)
+        
+        if upstream_name not in self._load_balancers:
+            self._load_balancers[upstream_name] = LoadBalancer(LoadBalancingStrategy.ROUND_ROBIN)
+        
+        self._load_balancers[upstream_name].add_server(server)
+        return self
+    
+    def register_plugin(
+        self,
+        name: str,
+        plugin: Callable[[GatewayRequest, GatewayResponse], Awaitable[GatewayResponse]]
+    ) -> "ApiGatewayAction":
+        """Register a gateway plugin."""
+        self._plugins[name] = plugin
+        return self
+    
     async def handle_request(
         self,
-        method: str,
-        path: str,
-        headers: Dict[str, str],
-        body: Optional[bytes] = None
-    ) -> Dict[str, Any]:
-        """Handle incoming API request."""
-        route_key = f"{method}:{path}"
-        route = self.routes.get(route_key)
-
+        request: GatewayRequest
+    ) -> GatewayResponse:
+        """
+        Handle an incoming request through the gateway.
+        
+        Args:
+            request: GatewayRequest to process
+            
+        Returns:
+            GatewayResponse from upstream
+        """
+        start_time = datetime.now()
+        self._stats["total_requests"] += 1
+        
+        # Find matching route
+        route = self._match_route(request)
+        
         if not route:
-            return {"status": 404, "error": "Route not found"}
-
-        for middleware in self.middlewares:
-            result = middleware(method, path, headers, body)
-            if result is not None:
-                return result
-
-        if route.auth_required:
-            token = headers.get("Authorization", "").replace("Bearer ", "")
-            if self.authenticator:
-                auth_token = self.authenticator.verify_token(token)
-                if not auth_token:
-                    return {"status": 401, "error": "Unauthorized"}
-            else:
-                return {"status": 401, "error": "Authentication not configured"}
-
-        rate_limiter = self.rate_limiters.get(route_key)
-        if rate_limiter and not rate_limiter.consume():
-            return {"status": 429, "error": "Rate limit exceeded"}
-
+            self._stats["not_found"] += 1
+            return GatewayResponse(
+                status_code=404,
+                headers={"Content-Type": "application/json"},
+                body={"error": "Route not found"},
+                upstream="",
+                duration_ms=0
+            )
+        
+        # Get load balancer for upstream
+        lb = self._load_balancers.get(route.upstream)
+        if not lb:
+            self._stats["upstream_errors"] += 1
+            return GatewayResponse(
+                status_code=502,
+                headers={"Content-Type": "application/json"},
+                body={"error": "Upstream not configured"},
+                upstream=route.upstream,
+                duration_ms=0
+            )
+        
+        # Select server
+        server = lb.select_server(request)
+        if not server:
+            self._stats["no_healthy_servers"] += 1
+            return GatewayResponse(
+                status_code=503,
+                headers={"Content-Type": "application/json"},
+                body={"error": "No healthy servers available"},
+                upstream=route.upstream,
+                duration_ms=0
+            )
+        
+        # Increment connection count
+        lb.increment_connections(server.server_id)
+        
         try:
-            request_data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            return {"status": 400, "error": "Invalid JSON"}
-
-        if route.circuit_breaker and route_key in self.circuit_breakers:
-            cb = self.circuit_breakers[route_key]
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(cb.call, route.handler, request_data),
-                    timeout=route.timeout
-                )
-            except CircuitBreakerOpenError:
-                return {"status": 503, "error": "Service unavailable"}
-        else:
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(route.handler, request_data),
-                    timeout=route.timeout
-                )
-            except asyncio.TimeoutError:
-                return {"status": 504, "error": "Gateway timeout"}
-
-        return {"status": 200, "data": result}
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get gateway statistics."""
+            # Run request plugins
+            for plugin_name in route.plugins:
+                if plugin_name in self._plugins:
+                    # Plugin processing (simplified)
+                    pass
+            
+            # Forward request to upstream (simulated)
+            response = await self._forward_request(request, server, route)
+            
+            self._stats["successful_requests"] += 1
+            
+            return response
+            
+        except Exception as e:
+            self._stats["upstream_errors"] += 1
+            return GatewayResponse(
+                status_code=502,
+                headers={"Content-Type": "application/json"},
+                body={"error": str(e)},
+                upstream=server.url,
+                duration_ms=0
+            )
+        
+        finally:
+            lb.decrement_connections(server.server_id)
+    
+    def _match_route(self, request: GatewayRequest) -> Optional[Route]:
+        """Match request to a route."""
+        for route in self._routes.values():
+            if request.path.startswith(route.path_prefix):
+                if request.method in route.methods:
+                    return route
+        return None
+    
+    async def _forward_request(
+        self,
+        request: GatewayRequest,
+        server: UpstreamServer,
+        route: Route
+    ) -> GatewayResponse:
+        """Forward request to upstream server."""
+        # Simulate upstream request
+        await asyncio.sleep(0.01)
+        
+        return GatewayResponse(
+            status_code=200,
+            headers={
+                "Content-Type": "application/json",
+                "X-Upstream": server.server_id,
+                "X-Request-Id": request.request_id
+            },
+            body={"message": "OK", "upstream": server.url},
+            upstream=server.server_id,
+            duration_ms=10.0
+        )
+    
+    async def set_load_balancing_strategy(
+        self,
+        upstream_name: str,
+        strategy: LoadBalancingStrategy
+    ):
+        """Change load balancing strategy for an upstream."""
+        if upstream_name in self._load_balancers:
+            self._load_balancers[upstream_name].strategy = strategy
+    
+    async def mark_server_healthy(self, server_id: str, healthy: bool):
+        """Mark a server as healthy/unhealthy."""
+        for servers in self._upstreams.values():
+            for server in servers:
+                if server.server_id == server_id:
+                    server.healthy = healthy
+                    self._stats["health_checks"] += 1
+    
+    async def get_upstream_stats(self, upstream_name: str) -> dict[str, Any]:
+        """Get statistics for an upstream."""
+        servers = self._upstreams.get(upstream_name, [])
+        lb = self._load_balancers.get(upstream_name)
+        
         return {
-            "total_routes": len(self.routes),
-            "middleware_count": len(self.middlewares),
-            "rate_limiter_count": len(self.rate_limiters),
-            "circuit_breaker_count": len(self.circuit_breakers),
-            "authenticator_configured": self.authenticator is not None
+            "upstream": upstream_name,
+            "strategy": lb.strategy.value if lb else "unknown",
+            "total_servers": len(servers),
+            "healthy_servers": len([s for s in servers if s.healthy]),
+            "servers": [
+                {
+                    "id": s.server_id,
+                    "url": s.url,
+                    "healthy": s.healthy,
+                    "active_connections": s.active_connections,
+                    "weight": s.weight
+                }
+                for s in servers
+            ]
         }
-
-
-async def demo_handler(request: Dict[str, Any]) -> Dict[str, Any]:
-    """Demo request handler."""
-    await asyncio.sleep(0.01)
-    return {"message": "Hello from API Gateway", "received": request}
-
-
-async def main():
-    """Demonstrate API Gateway functionality."""
-    router = APIRouter()
-
-    router.add_route(RouteConfig(
-        path="/api/v1/hello",
-        method="GET",
-        handler=lambda r: {"message": "Hello"},
-        rate_limit=RateLimitConfig(requests_per_second=10.0, burst_size=20)
-    ))
-
-    router.add_route(RouteConfig(
-        path="/api/v1/echo",
-        method="POST",
-        handler=demo_handler,
-        auth_required=True,
-        circuit_breaker=True
-    ))
-
-    router.set_authenticator("super_secret_key_123")
-    router.add_middleware(
-        lambda m, p, h, b: None  # Allow all requests
-    )
-
-    response = await router.handle_request(
-        "GET",
-        "/api/v1/hello",
-        {}
-    )
-    print(f"Response: {response}")
-
-    response = await router.handle_request(
-        "POST",
-        "/api/v1/echo",
-        {"Authorization": "Bearer user1:read,write:2026-12-31T23:59:59:signature"}
-    )
-    print(f"Response: {response}")
-
-    print(f"Stats: {router.get_stats()}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    
+    def get_stats(self) -> dict[str, Any]:
+        """Get gateway statistics."""
+        return dict(self._stats)
+    
+    def list_routes(self) -> list[dict[str, Any]]:
+        """List all configured routes."""
+        return [
+            {
+                "route_id": r.route_id,
+                "path_prefix": r.path_prefix,
+                "methods": r.methods,
+                "upstream": r.upstream,
+                "plugins": r.plugins
+            }
+            for r in self._routes.values()
+        ]

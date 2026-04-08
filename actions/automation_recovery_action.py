@@ -1,331 +1,411 @@
 """
-Automation Recovery Action Module.
+Automation Recovery Action Module
 
-Provides automated recovery mechanisms for failed operations
-including checkpoint/resume, state rollback, and compensation logic.
+Provides recovery mechanisms, checkpoints, and state restoration for automation.
 """
-
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Optional, Callable, Awaitable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
+from collections import deque
 import asyncio
 import json
-import logging
-import uuid
-from collections import deque
-
-logger = logging.getLogger(__name__)
 
 
 class RecoveryStrategy(Enum):
     """Recovery strategies."""
     RETRY = "retry"
-    ROLLBACK = "rollback"
-    COMPENSATE = "compensate"
     CHECKPOINT = "checkpoint"
-    FAILOVER = "failover"
-
-
-class OperationState(Enum):
-    """Operation execution state."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    ROLLED_BACK = "rolled_back"
-    COMPENSATED = "compensated"
+    FALLBACK = "fallback"
+    ROLLBACK = "rollback"
+    CIRCUIT_BREAKER = "circuit_breaker"
 
 
 @dataclass
 class Checkpoint:
-    """Checkpoint for recovery."""
+    """A recovery checkpoint."""
     checkpoint_id: str
-    operation_id: str
-    step: int
-    state: Dict[str, Any]
-    created_at: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    operation_name: str
+    state: dict[str, Any]
+    timestamp: datetime
+    ttl_seconds: Optional[float] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class CompensationAction:
-    """Compensation action for rollback."""
+class RecoveryAction:
+    """A recovery action to execute."""
     action_id: str
-    name: str
-    action_type: str
-    forward_func: Callable
-    backward_func: Callable
-    state: Dict[str, Any] = field(default_factory=dict)
+    action_type: RecoveryStrategy
+    target_operation: str
+    executor: Callable[[], Awaitable[Any]]
+    max_attempts: int = 3
+    backoff_seconds: float = 1.0
+    fallback_value: Any = None
 
 
 @dataclass
-class OperationResult:
-    """Result of an operation."""
-    operation_id: str
+class RecoveryResult:
+    """Result of recovery operation."""
     success: bool
-    state: OperationState
-    result: Any = None
+    recovered: bool
+    attempts: int
+    final_value: Any = None
     error: Optional[str] = None
-    checkpoint_id: Optional[str] = None
-    compensationApplied: bool = False
-    start_time: datetime = field(default_factory=datetime.now)
-    end_time: Optional[datetime] = None
+    recovery_steps: list[str] = field(default_factory=list)
+    duration_ms: float = 0
+
+
+@dataclass
+class OperationContext:
+    """Context for an operation that can be checkpointed."""
+    operation_id: str
+    operation_name: str
+    state: dict[str, Any]
+    checkpoints: list[Checkpoint] = field(default_factory=list)
+    started_at: datetime = field(default_factory=datetime.now)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class CheckpointManager:
-    """Manages operation checkpoints."""
-
+    """Manages checkpoints for recovery."""
+    
     def __init__(self, max_checkpoints: int = 100):
         self.max_checkpoints = max_checkpoints
-        self.checkpoints: Dict[str, List[Checkpoint]] = {}
+        self._checkpoints: dict[str, deque[Checkpoint]] = {}
+        self._lock = asyncio.Lock()
+    
+    async def save_checkpoint(
+        self,
+        context: OperationContext,
+        ttl_seconds: Optional[float] = None
+    ) -> Checkpoint:
+        """Save a checkpoint for the operation."""
+        async with self._lock:
+            checkpoint = Checkpoint(
+                checkpoint_id=f"{context.operation_id}:{len(context.checkpoints)}",
+                operation_name=context.operation_name,
+                state=context.state.copy(),
+                timestamp=datetime.now(),
+                ttl_seconds=ttl_seconds
+            )
+            
+            if context.operation_id not in self._checkpoints:
+                self._checkpoints[context.operation_id] = deque(maxlen=self.max_checkpoints)
+            
+            self._checkpoints[context.operation_id].append(checkpoint)
+            
+            return checkpoint
+    
+    async def get_latest_checkpoint(
+        self,
+        operation_id: str
+    ) -> Optional[Checkpoint]:
+        """Get the latest checkpoint for an operation."""
+        if operation_id not in self._checkpoints:
+            return None
+        
+        checkpoints = self._checkpoints[operation_id]
+        if not checkpoints:
+            return None
+        
+        latest = checkpoints[-1]
+        
+        # Check TTL
+        if latest.ttl_seconds:
+            age = (datetime.now() - latest.timestamp).total_seconds()
+            if age > latest.ttl_seconds:
+                return None
+        
+        return latest
+    
+    async def get_checkpoint_by_id(
+        self,
+        checkpoint_id: str
+    ) -> Optional[Checkpoint]:
+        """Get a specific checkpoint by ID."""
+        op_id = checkpoint_id.rsplit(":", 1)[0]
+        
+        if op_id not in self._checkpoints:
+            return None
+        
+        for checkpoint in self._checkpoints[op_id]:
+            if checkpoint.checkpoint_id == checkpoint_id:
+                return checkpoint
+        
+        return None
+    
+    async def list_checkpoints(
+        self,
+        operation_id: str
+    ) -> list[Checkpoint]:
+        """List all checkpoints for an operation."""
+        if operation_id not in self._checkpoints:
+            return []
+        
+        return list(self._checkpoints[operation_id])
+    
+    async def clear_checkpoints(self, operation_id: str):
+        """Clear all checkpoints for an operation."""
+        if operation_id in self._checkpoints:
+            del self._checkpoints[operation_id]
 
-    def save(self, operation_id: str, step: int, state: Dict[str, Any]) -> Checkpoint:
-        """Save a checkpoint."""
-        checkpoint = Checkpoint(
-            checkpoint_id=str(uuid.uuid4()),
-            operation_id=operation_id,
-            step=step,
-            state=state.copy()
+
+class AutomationRecoveryAction:
+    """Main recovery automation action handler."""
+    
+    def __init__(self):
+        self._checkpoint_manager = CheckpointManager()
+        self._recovery_handlers: dict[str, Callable] = {}
+        self._fallback_handlers: dict[str, Callable] = {}
+        self._circuit_breakers: dict[str, dict] = {}
+        self._stats: dict[str, Any] = defaultdict(int)
+    
+    def register_recovery_handler(
+        self,
+        operation_name: str,
+        handler: Callable[[Exception, OperationContext], Awaitable[Any]]
+    ) -> "AutomationRecoveryAction":
+        """Register a recovery handler for an operation."""
+        self._recovery_handlers[operation_name] = handler
+        return self
+    
+    def register_fallback(
+        self,
+        operation_name: str,
+        fallback: Callable[[], Awaitable[Any]]
+    ) -> "AutomationRecoveryAction":
+        """Register a fallback handler for an operation."""
+        self._fallback_handlers[operation_name] = fallback
+        return self
+    
+    async def execute_with_recovery(
+        self,
+        context: OperationContext,
+        operation: Callable[[OperationContext], Awaitable[Any]],
+        recovery_config: Optional[dict[str, Any]] = None
+    ) -> RecoveryResult:
+        """
+        Execute an operation with recovery support.
+        
+        Args:
+            context: Operation context
+            operation: Operation to execute
+            recovery_config: Recovery configuration
+            
+        Returns:
+            RecoveryResult with outcome
+        """
+        start_time = datetime.now()
+        attempts = 0
+        recovery_steps = []
+        max_attempts = recovery_config.get("max_attempts", 3) if recovery_config else 3
+        backoff = recovery_config.get("backoff_seconds", 1.0) if recovery_config else 1.0
+        
+        config = recovery_config or {}
+        
+        while attempts < max_attempts:
+            attempts += 1
+            
+            try:
+                # Save checkpoint before execution
+                await self._checkpoint_manager.save_checkpoint(context)
+                
+                # Execute operation
+                result = await operation(context)
+                
+                self._stats["successful_operations"] += 1
+                
+                return RecoveryResult(
+                    success=True,
+                    recovered=False,
+                    attempts=attempts,
+                    final_value=result,
+                    recovery_steps=recovery_steps,
+                    duration_ms=(datetime.now() - start_time).total_seconds() * 1000
+                )
+                
+            except Exception as e:
+                self._stats["operation_errors"] += 1
+                last_error = e
+                
+                # Save checkpoint on failure
+                await self._checkpoint_manager.save_checkpoint(context)
+                
+                # Try to recover
+                if context.operation_name in self._recovery_handlers:
+                    try:
+                        recovered_value = await self._recovery_handlers[context.operation_name](
+                            e, context
+                        )
+                        recovery_steps.append(f"Recovery handler succeeded: {context.operation_name}")
+                        
+                        return RecoveryResult(
+                            success=True,
+                            recovered=True,
+                            attempts=attempts,
+                            final_value=recovered_value,
+                            recovery_steps=recovery_steps,
+                            duration_ms=(datetime.now() - start_time).total_seconds() * 1000
+                        )
+                    except Exception as recovery_error:
+                        recovery_steps.append(f"Recovery failed: {recovery_error}")
+                
+                # Apply backoff before retry
+                if attempts < max_attempts:
+                    await asyncio.sleep(backoff * (2 ** (attempts - 1)))
+        
+        # All retries exhausted - try fallback
+        if context.operation_name in self._fallback_handlers:
+            try:
+                fallback_value = await self._fallback_handlers[context.operation_name]()
+                recovery_steps.append("Fallback executed")
+                
+                self._stats["fallback_success"] += 1
+                
+                return RecoveryResult(
+                    success=True,
+                    recovered=True,
+                    attempts=attempts,
+                    final_value=fallback_value,
+                    recovery_steps=recovery_steps,
+                    duration_ms=(datetime.now() - start_time).total_seconds() * 1000
+                )
+            except Exception as fallback_error:
+                recovery_steps.append(f"Fallback failed: {fallback_error}")
+                self._stats["fallback_errors"] += 1
+        
+        self._stats["total_failures"] += 1
+        
+        return RecoveryResult(
+            success=False,
+            recovered=False,
+            attempts=attempts,
+            error=str(last_error),
+            recovery_steps=recovery_steps,
+            duration_ms=(datetime.now() - start_time).total_seconds() * 1000
         )
-
-        if operation_id not in self.checkpoints:
-            self.checkpoints[operation_id] = []
-
-        self.checkpoints[operation_id].append(checkpoint)
-
-        if len(self.checkpoints[operation_id]) > self.max_checkpoints:
-            self.checkpoints[operation_id] = self.checkpoints[operation_id][-self.max_checkpoints:]
-
-        return checkpoint
-
-    def get_latest(self, operation_id: str) -> Optional[Checkpoint]:
-        """Get latest checkpoint."""
-        checkpoints = self.checkpoints.get(operation_id, [])
-        return checkpoints[-1] if checkpoints else None
-
-    def restore(self, operation_id: str, checkpoint_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Restore from checkpoint."""
+    
+    async def rollback_to_checkpoint(
+        self,
+        operation_id: str,
+        checkpoint_id: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """
+        Rollback operation to a checkpoint.
+        
+        Args:
+            operation_id: ID of the operation
+            checkpoint_id: Specific checkpoint ID, or None for latest
+            
+        Returns:
+            Restored state if found
+        """
         if checkpoint_id:
-            for cp in self.checkpoints.get(operation_id, []):
-                if cp.checkpoint_id == checkpoint_id:
-                    return cp.state.copy()
+            checkpoint = await self._checkpoint_manager.get_checkpoint_by_id(checkpoint_id)
         else:
-            latest = self.get_latest(operation_id)
-            return latest.state.copy() if latest else None
+            checkpoint = await self._checkpoint_manager.get_latest_checkpoint(operation_id)
+        
+        if checkpoint:
+            self._stats["checkpoints_restored"] += 1
+            return checkpoint.state
+        
         return None
-
-    def clear(self, operation_id: str):
-        """Clear checkpoints for operation."""
-        if operation_id in self.checkpoints:
-            del self.checkpoints[operation_id]
-
-
-class CompensationLog:
-    """Log of compensation actions."""
-
-    def __init__(self):
-        self.logs: Dict[str, List[CompensationAction]] = {}
-
-    def record(self, operation_id: str, action: CompensationAction):
-        """Record a compensation action."""
-        if operation_id not in self.logs:
-            self.logs[operation_id] = []
-        self.logs[operation_id].append(action)
-
-    def get_log(self, operation_id: str) -> List[CompensationAction]:
-        """Get compensation log."""
-        return self.logs.get(operation_id, [])
-
-    def clear(self, operation_id: str):
-        """Clear compensation log."""
-        if operation_id in self.logs:
-            del self.logs[operation_id]
-
-
-class RecoveryManager:
-    """Manages recovery operations."""
-
-    def __init__(self):
-        self.checkpoint_manager = CheckpointManager()
-        self.compensation_log = CompensationLog()
-        self._recovery_handlers: Dict[RecoveryStrategy, List[Callable]] = {}
-
-    def register_handler(self, strategy: RecoveryStrategy, handler: Callable):
-        """Register recovery handler."""
-        if strategy not in self._recovery_handlers:
-            self._recovery_handlers[strategy] = []
-        self._recovery_handlers[strategy].append(handler)
-
-    async def recover_with_checkpoint(
+    
+    async def execute_with_circuit_breaker(
         self,
-        operation_id: str,
-        operation_func: Callable,
-        state: Dict[str, Any]
-    ) -> OperationResult:
-        """Recover operation from checkpoint."""
-        saved_state = self.checkpoint_manager.restore(operation_id)
-
-        if saved_state:
-            state.update(saved_state)
-
-        try:
-            if asyncio.iscoroutinefunction(operation_func):
-                result = await operation_func(state)
+        operation_name: str,
+        operation: Callable[[], Awaitable[Any]],
+        threshold: int = 5,
+        timeout_seconds: float = 60.0
+    ) -> RecoveryResult:
+        """
+        Execute operation with circuit breaker pattern.
+        
+        Circuit opens after threshold consecutive failures.
+        """
+        start_time = datetime.now()
+        
+        # Get or create circuit breaker state
+        if operation_name not in self._circuit_breakers:
+            self._circuit_breakers[operation_name] = {
+                "failures": 0,
+                "successes": 0,
+                "state": "closed",  # closed, open, half_open
+                "last_failure": None,
+                "opened_at": None
+            }
+        
+        cb = self._circuit_breakers[operation_name]
+        
+        # Check if circuit is open
+        if cb["state"] == "open":
+            elapsed = (datetime.now() - cb["opened_at"]).total_seconds() if cb["opened_at"] else 0
+            
+            if elapsed > timeout_seconds:
+                cb["state"] = "half_open"
             else:
-                result = await asyncio.to_thread(operation_func, state)
-
-            return OperationResult(
-                operation_id=operation_id,
-                success=True,
-                state=OperationState.COMPLETED,
-                result=result
-            )
-
-        except Exception as e:
-            logger.error(f"Operation {operation_id} failed: {e}")
-            return OperationResult(
-                operation_id=operation_id,
-                success=False,
-                state=OperationState.FAILED,
-                error=str(e)
-            )
-
-    async def rollback(
-        self,
-        operation_id: str,
-        steps: List[CompensationAction]
-    ) -> bool:
-        """Rollback using compensation actions."""
-        for step in reversed(steps):
-            try:
-                if asyncio.iscoroutinefunction(step.backward_func):
-                    await step.backward_func(step.state)
-                else:
-                    await asyncio.to_thread(step.backward_func, step.state)
-                logger.info(f"Rolled back: {step.name}")
-            except Exception as e:
-                logger.error(f"Rollback failed for {step.name}: {e}")
-                return False
-
-        self.compensation_log.clear(operation_id)
-        return True
-
-
-class SagaOrchestrator:
-    """Orchestrates saga pattern for distributed transactions."""
-
-    def __init__(self, recovery_manager: RecoveryManager):
-        self.recovery_manager = recovery_manager
-        self.sagas: Dict[str, Dict[str, Any]] = {}
-
-    async def execute_saga(
-        self,
-        saga_id: str,
-        steps: List[CompensationAction]
-    ) -> OperationResult:
-        """Execute saga with compensation."""
-        completed_steps = []
-
-        for step in steps:
-            try:
-                if asyncio.iscoroutinefunction(step.forward_func):
-                    result = await step.forward_func(step.state)
-                else:
-                    result = await asyncio.to_thread(step.forward_func, step.state)
-
-                step.state["result"] = result
-                completed_steps.append(step)
-                self.recovery_manager.compensation_log.record(saga_id, step)
-
-            except Exception as e:
-                logger.error(f"Saga step {step.name} failed: {e}")
-
-                rollback_success = await self.recovery_manager.rollback(
-                    saga_id,
-                    completed_steps
-                )
-
-                return OperationResult(
-                    operation_id=saga_id,
+                self._stats["circuit_breaker_rejected"] += 1
+                return RecoveryResult(
                     success=False,
-                    state=OperationState.COMPENSATED if rollback_success else OperationState.FAILED,
-                    error=str(e)
+                    recovered=False,
+                    attempts=1,
+                    error="Circuit breaker is open",
+                    recovery_steps=["Circuit breaker rejection"]
                 )
-
-        return OperationResult(
-            operation_id=saga_id,
-            success=True,
-            state=OperationState.COMPLETED
-        )
-
-
-class StateRollback:
-    """Manages state rollback."""
-
-    def __init__(self):
-        self.state_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
-
-    def save_state(self, operation_id: str, state: Dict[str, Any]):
-        """Save state for rollback."""
-        self.state_history[operation_id].append(state.copy())
-
-    def rollback_to_previous(self, operation_id: str) -> Optional[Dict[str, Any]]:
-        """Rollback to previous state."""
-        if operation_id in self.state_history:
-            if len(self.state_history[operation_id]) > 1:
-                self.state_history[operation_id].pop()
-                return self.state_history[operation_id][-1]
-        return None
-
-    def get_current_state(self, operation_id: str) -> Optional[Dict[str, Any]]:
-        """Get current state without rollback."""
-        if operation_id in self.state_history:
-            if self.state_history[operation_id]:
-                return self.state_history[operation_id][-1]
-        return None
-
-
-async def forward_step(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Forward step for demo."""
-    await asyncio.sleep(0.1)
-    state["step_completed"] = state.get("step", 0)
-    return state
-
-
-async def backward_step(state: Dict[str, Any]) -> None:
-    """Backward step for demo."""
-    await asyncio.sleep(0.05)
-    logger.info(f"Rolling back step {state.get('step', 0)}")
-
-
-async def main():
-    """Demonstrate recovery mechanisms."""
-    recovery = RecoveryManager()
-    saga = SagaOrchestrator(recovery)
-
-    steps = [
-        CompensationAction(
-            action_id=str(uuid.uuid4()),
-            name="step1",
-            action_type="create",
-            forward_func=forward_step,
-            backward_func=backward_step,
-            state={"step": 1}
-        ),
-        CompensationAction(
-            action_id=str(uuid.uuid4()),
-            name="step2",
-            action_type="update",
-            forward_func=forward_step,
-            backward_func=backward_step,
-            state={"step": 2}
-        )
-    ]
-
-    result = await saga.execute_saga("saga-1", steps)
-    print(f"Saga result: {result.success}, state: {result.state.value}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        
+        try:
+            result = await operation()
+            
+            # Record success
+            cb["successes"] += 1
+            cb["failures"] = 0
+            
+            if cb["state"] == "half_open":
+                cb["state"] = "closed"
+            
+            self._stats["circuit_breaker_success"] += 1
+            
+            return RecoveryResult(
+                success=True,
+                recovered=False,
+                attempts=1,
+                final_value=result,
+                duration_ms=(datetime.now() - start_time).total_seconds() * 1000
+            )
+            
+        except Exception as e:
+            cb["failures"] += 1
+            cb["last_failure"] = datetime.now()
+            
+            if cb["failures"] >= threshold:
+                cb["state"] = "open"
+                cb["opened_at"] = datetime.now()
+            
+            self._stats["circuit_breaker_errors"] += 1
+            
+            return RecoveryResult(
+                success=False,
+                recovered=False,
+                attempts=1,
+                error=str(e),
+                duration_ms=(datetime.now() - start_time).total_seconds() * 1000
+            )
+    
+    def get_stats(self) -> dict[str, Any]:
+        """Get recovery statistics."""
+        return dict(self._stats)
+    
+    async def get_circuit_breaker_status(self, operation_name: str) -> Optional[dict[str, Any]]:
+        """Get circuit breaker status for an operation."""
+        if operation_name not in self._circuit_breakers:
+            return None
+        
+        cb = self._circuit_breakers[operation_name]
+        return {
+            "operation": operation_name,
+            "state": cb["state"],
+            "failures": cb["failures"],
+            "successes": cb["successes"],
+            "last_failure": cb["last_failure"].isoformat() if cb["last_failure"] else None
+        }
