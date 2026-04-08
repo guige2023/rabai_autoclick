@@ -1,176 +1,218 @@
-"""Loop control action for iteration management.
+"""Loop control action module for RabAI AutoClick.
 
-This module provides loop operations including
-iteration, batching, and chunking of data.
-
-Example:
-    >>> action = LoopAction()
-    >>> result = action.execute(operation="range", start=0, end=10)
+Provides loop control operations:
+- LoopRepeatAction: Repeat execution N times
+- LoopWhileAction: While loop
+- LoopForAction: For each loop
+- LoopBreakAction: Break/continue loop control
 """
 
-from __future__ import annotations
-
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
-class LoopAction:
-    """Loop control and iteration action.
+import sys
+import os
 
-    Provides iteration operations including
-    range generation, batching, and iteration control.
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
-    Example:
-        >>> action = LoopAction()
-        >>> result = action.execute(
-        ...     operation="repeat",
-        ...     value="x",
-        ...     times=5
-        ... )
-    """
 
-    def __init__(self) -> None:
-        """Initialize loop action."""
-        pass
+class LoopRepeatAction(BaseAction):
+    """Repeat execution N times."""
+    action_type = "loop_repeat"
+    display_name = "重复循环"
+    description = "重复执行N次"
 
-    def execute(
-        self,
-        operation: str,
-        start: int = 0,
-        end: int = 0,
-        value: Any = None,
-        times: int = 1,
-        data: Optional[list] = None,
-        chunk_size: int = 1,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Execute loop operation.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            count = params.get("count", 1)
+            body_ref = params.get("body_ref", None)
+            collect_results = params.get("collect_results", False)
+            break_on_error = params.get("break_on_error", False)
 
-        Args:
-            operation: Operation (range, repeat, batch, etc.).
-            start: Start value.
-            end: End value.
-            value: Value to repeat.
-            times: Number of times.
-            data: List to process.
-            chunk_size: Size of chunks.
-            **kwargs: Additional parameters.
+            if count <= 0:
+                return ActionResult(success=True, message="Count <= 0, no iterations", data={"iterations": 0})
 
-        Returns:
-            Operation result dictionary.
-
-        Raises:
-            ValueError: If operation is invalid.
-        """
-        op = operation.lower()
-        result: dict[str, Any] = {"operation": op, "success": True}
-
-        if op == "range":
-            step = kwargs.get("step", 1)
-            result["items"] = list(range(start, end + 1, step))
-            result["count"] = len(result["items"])
-
-        elif op == "range_exclusive":
-            step = kwargs.get("step", 1)
-            result["items"] = list(range(start, end, step))
-            result["count"] = len(result["items"])
-
-        elif op == "repeat":
-            result["items"] = [value] * times
-            result["count"] = times
-
-        elif op == "cycle":
-            if not data:
-                raise ValueError("data required for 'cycle'")
-            result["items"] = []
-            for _ in range(times):
-                result["items"].extend(data)
-            result["count"] = len(result["items"])
-
-        elif op == "batch":
-            if not data:
-                raise ValueError("data required for 'batch'")
-            result["batches"] = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
-            result["count"] = len(result["batches"])
-
-        elif op == "chunk":
-            if not data:
-                raise ValueError("data required for 'chunk'")
-            result["chunks"] = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
-            result["count"] = len(result["chunks"])
-
-        elif op == "enumerate":
-            if not data:
-                raise ValueError("data required for 'enumerate'")
-            result["items"] = list(enumerate(data))
-            result["count"] = len(result["items"])
-
-        elif op == "zip":
-            other = kwargs.get("other", [])
-            if not data:
-                raise ValueError("data required for 'zip'")
-            result["items"] = list(zip(data, other))
-            result["count"] = len(result["items"])
-
-        elif op == "product":
-            other = kwargs.get("other", [])
-            if not data:
-                raise ValueError("data required for 'product'")
-            import itertools
-            result["items"] = list(itertools.product(data, other))
-            result["count"] = len(result["items"])
-
-        elif op == "combinations":
-            if not data:
-                raise ValueError("data required for 'combinations'")
-            r = kwargs.get("r", 2)
-            import itertools
-            result["items"] = list(itertools.combinations(data, r))
-            result["count"] = len(result["items"])
-
-        elif op == "permutations":
-            if not data:
-                raise ValueError("data required for 'permutations'")
-            r = kwargs.get("r", None)
-            import itertools
-            result["items"] = list(itertools.permutations(data, r))
-            result["count"] = len(result["items"])
-
-        elif op == "while":
-            condition = kwargs.get("condition")
-            max_iter = kwargs.get("max_iter", 1000)
-            if not condition:
-                raise ValueError("condition required for 'while'")
-            items = []
-            i = 0
-            current = start
-            while condition(current) and i < max_iter:
-                items.append(current)
-                current += 1
-                i += 1
-            result["items"] = items
-            result["count"] = len(result["items"])
-
-        elif op == "times":
-            func = kwargs.get("func")
-            if not func:
-                raise ValueError("func required for 'times'")
             results = []
-            for i in range(times):
-                results.append(func(i))
-            result["results"] = results
-            result["count"] = len(results)
+            errors = []
+            for i in range(count):
+                try:
+                    if body_ref:
+                        result = body_ref(i, context)
+                        if collect_results:
+                            results.append(result)
+                except Exception as e:
+                    errors.append({"iteration": i, "error": str(e)})
+                    if break_on_error:
+                        break
 
-        elif op == "each":
-            if not data:
-                raise ValueError("data required for 'each'")
-            func = kwargs.get("func")
-            if func:
-                result["results"] = [func(item) for item in data]
-            else:
-                result["results"] = data
-            result["count"] = len(result["results"])
+            return ActionResult(
+                success=len(errors) == 0,
+                message=f"Completed {len(results)} iterations, {len(errors)} errors",
+                data={
+                    "iterations": len(results),
+                    "errors": len(errors),
+                    "results": results if collect_results else None
+                }
+            )
 
+        except Exception as e:
+            return ActionResult(success=False, message=f"Loop repeat failed: {str(e)}")
+
+
+class LoopWhileAction(BaseAction):
+    """While loop."""
+    action_type = "loop_while"
+    display_name = "条件循环"
+    description = "条件为真时循环"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            condition_ref = params.get("condition_ref", None)
+            condition_expr = params.get("condition_expr", {})
+            max_iterations = params.get("max_iterations", 1000)
+            body_ref = params.get("body_ref", None)
+            collect_results = params.get("collect_results", False)
+
+            if not condition_ref and not condition_expr:
+                return ActionResult(success=False, message="condition_ref or condition_expr is required")
+
+            results = []
+            iteration = 0
+            while iteration < max_iterations:
+                try:
+                    if condition_ref:
+                        cond_result = condition_ref(context, iteration)
+                    else:
+                        cond_result = self._evaluate_condition(condition_expr, context)
+
+                    if not cond_result:
+                        break
+                except Exception:
+                    break
+
+                try:
+                    if body_ref:
+                        result = body_ref(context, iteration)
+                        if collect_results:
+                            results.append(result)
+                except Exception:
+                    pass
+
+                iteration += 1
+
+            return ActionResult(
+                success=True,
+                message=f"While loop completed: {iteration} iterations",
+                data={"iterations": iteration, "results": results if collect_results else None}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Loop while failed: {str(e)}")
+
+    def _evaluate_condition(self, condition: Dict[str, Any], context: Any) -> bool:
+        field = condition.get("field", "")
+        operator = condition.get("operator", "==")
+        value = condition.get("value", None)
+
+        if isinstance(context, dict):
+            current = context.get(field)
         else:
-            raise ValueError(f"Unknown operation: {operation}")
+            current = getattr(context, field, None)
 
-        return result
+        if operator == "==":
+            return current == value
+        elif operator == "!=":
+            return current != value
+        elif operator == ">":
+            return current is not None and current > value
+        elif operator == "<":
+            return current is not None and current < value
+        elif operator == ">=":
+            return current is not None and current >= value
+        elif operator == "<=":
+            return current is not None and current <= value
+        return False
+
+
+class LoopForAction(BaseAction):
+    """For each loop."""
+    action_type = "loop_for"
+    display_name = "遍历循环"
+    description = "遍历集合"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            items = params.get("items", [])
+            body_ref = params.get("body_ref", None)
+            index_var = params.get("index_var", "index")
+            item_var = params.get("item_var", "item")
+            collect_results = params.get("collect_results", False)
+            break_on_error = params.get("break_on_error", False)
+
+            if not items:
+                return ActionResult(success=True, message="No items to iterate", data={"iterations": 0})
+
+            results = []
+            errors = []
+            for i, item in enumerate(items):
+                try:
+                    if body_ref:
+                        result = body_ref(item, i, context)
+                        if collect_results:
+                            results.append(result)
+                except Exception as e:
+                    errors.append({"iteration": i, "item": str(item)[:50], "error": str(e)})
+                    if break_on_error:
+                        break
+
+            return ActionResult(
+                success=len(errors) == 0,
+                message=f"For loop completed: {len(results)} iterations, {len(errors)} errors",
+                data={
+                    "iterations": len(results),
+                    "errors": len(errors),
+                    "results": results if collect_results else None
+                }
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Loop for failed: {str(e)}")
+
+
+class LoopBreakAction(BaseAction):
+    """Loop break/continue control."""
+    action_type = "loop_break"
+    display_name = "循环控制"
+    description = "循环中断控制"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            action = params.get("action", "break")
+            condition = params.get("condition", None)
+            value = params.get("value", None)
+
+            if action == "break":
+                return ActionResult(
+                    success=True,
+                    message="Break signal",
+                    data={"action": "break", "should_break": True}
+                )
+            elif action == "continue":
+                return ActionResult(
+                    success=True,
+                    message="Continue signal",
+                    data={"action": "continue", "should_continue": True}
+                )
+            elif action == "return":
+                return ActionResult(
+                    success=True,
+                    message="Return signal",
+                    data={"action": "return", "return_value": value}
+                )
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Loop break failed: {str(e)}")
