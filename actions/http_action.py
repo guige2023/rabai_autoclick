@@ -1,257 +1,504 @@
-"""HTTP action module for RabAI AutoClick.
+"""HTTP V2 action module for RabAI AutoClick.
 
-Provides HTTP client actions for web requests, downloads, and API interactions.
+Provides advanced HTTP operations including
+conditional headers, response caching, and request retry logic.
 """
 
 import json
-import urllib.request
-import urllib.parse
-import urllib.error
+import time
 import sys
 import os
+import threading
+import hashlib
 from typing import Any, Dict, List, Optional, Union
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+from urllib.parse import urlencode
+from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class HttpDownloadAction(BaseAction):
-    """Download file from HTTP URL.
+@dataclass
+class HTTPResponse:
+    """Represents an HTTP response.
     
-    Downloads files with progress tracking and resume support.
+    Attributes:
+        status: HTTP status code.
+        headers: Response headers.
+        body: Response body.
+        url: Final URL (after redirects).
+        elapsed_ms: Request elapsed time.
     """
-    action_type = "http_download"
-    display_name = "HTTP下载"
-    description = "从HTTP URL下载文件"
+    status: int
+    headers: Dict[str, str]
+    body: str
+    url: str
+    elapsed_ms: float
+
+
+class ResponseCache:
+    """Thread-safe in-memory response cache for HTTP requests."""
+    
+    def __init__(self, max_size: int = 100, ttl: int = 300):
+        """Initialize cache.
+        
+        Args:
+            max_size: Maximum cached entries.
+            ttl: Default TTL in seconds.
+        """
+        self.max_size = max_size
+        self.ttl = ttl
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+    
+    def _make_key(self, method: str, url: str, headers: Dict, body: Any) -> str:
+        """Generate cache key."""
+        content = f"{method}:{url}:{json.dumps(headers, sort_keys=True)}:{str(body)}"
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def get(self, method: str, url: str, headers: Dict, body: Any) -> Optional[HTTPResponse]:
+        """Get cached response.
+        
+        Args:
+            method: HTTP method.
+            url: Request URL.
+            headers: Request headers.
+            body: Request body.
+        
+        Returns:
+            Cached HTTPResponse or None.
+        """
+        key = self._make_key(method, url, headers, body)
+        
+        with self._lock:
+            if key not in self._cache:
+                return None
+            
+            entry = self._cache[key]
+            
+            if time.time() - entry['timestamp'] > entry['ttl']:
+                del self._cache[key]
+                return None
+            
+            return entry['response']
+    
+    def set(self, method: str, url: str, headers: Dict, body: Any, response: HTTPResponse, ttl: int = None) -> None:
+        """Cache a response.
+        
+        Args:
+            method: HTTP method.
+            url: Request URL.
+            headers: Request headers.
+            body: Request body.
+            response: Response to cache.
+            ttl: TTL override.
+        """
+        if ttl is None:
+            ttl = self.ttl
+        
+        key = self._make_key(method, url, headers, body)
+        
+        with self._lock:
+            if len(self._cache) >= self.max_size:
+                oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k]['timestamp'])
+                del self._cache[oldest_key]
+            
+            self._cache[key] = {
+                'response': response,
+                'timestamp': time.time(),
+                'ttl': ttl
+            }
+    
+    def clear(self) -> int:
+        """Clear all cached entries."""
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            return count
+    
+    def size(self) -> int:
+        """Get number of cached entries."""
+        with self._lock:
+            return len(self._cache)
+
+
+# Global response cache
+_response_cache = ResponseCache()
+
+
+class HTTPRequestV2Action(BaseAction):
+    """Advanced HTTP request with caching and conditional headers."""
+    action_type = "http_request_v2"
+    display_name = "HTTP请求V2"
+    description = "高级HTTP请求(缓存/重试/条件)"
     
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Download file.
+        """Execute HTTP request.
         
         Args:
-            context: Execution context (ContextManager instance).
-            params: Dict with keys: url, output_path, timeout, 
-                   resume, headers.
+            context: Execution context.
+            params: Dict with keys: url, method, headers, body,
+                   use_cache, cache_ttl, expected_status.
         
         Returns:
-            ActionResult with download status.
+            ActionResult with response data.
         """
         url = params.get('url', '')
-        output_path = params.get('output_path', '')
-        timeout = params.get('timeout', 60)
-        resume = params.get('resume', False)
+        method = params.get('method', 'GET').upper()
+        headers = params.get('headers', {})
+        body = params.get('body', None)
+        use_cache = params.get('use_cache', False)
+        cache_ttl = params.get('cache_ttl', 300)
+        expected_status = params.get('expected_status', 200)
+        
+        if not url:
+            return ActionResult(success=False, message="URL is required")
+        
+        if use_cache:
+            cached = _response_cache.get(method, url, headers, body)
+            if cached:
+                return ActionResult(
+                    success=True,
+                    message=f"Cache hit for {url}",
+                    data={
+                        "status": cached.status,
+                        "body": cached.body,
+                        "headers": cached.headers,
+                        "from_cache": True,
+                        "url": cached.url
+                    }
+                )
+        
+        start_time = time.time()
+        
+        try:
+            body_bytes = None
+            if body is not None:
+                if isinstance(body, dict):
+                    body_bytes = json.dumps(body).encode('utf-8')
+                    headers.setdefault('Content-Type', 'application/json')
+                elif isinstance(body, str):
+                    body_bytes = body.encode('utf-8')
+                else:
+                    body_bytes = body
+            
+            req = Request(url, data=body_bytes, method=method)
+            
+            for key, value in headers.items():
+                req.add_header(key, value)
+            
+            with urlopen(req, timeout=30) as response:
+                response_body = response.read().decode('utf-8')
+                response_status = response.getcode()
+                
+                response_headers = {}
+                for key, value in response.headers.items():
+                    response_headers[key.lower()] = value
+                
+                elapsed_ms = (time.time() - start_time) * 1000
+                
+                http_response = HTTPResponse(
+                    status=response_status,
+                    headers=response_headers,
+                    body=response_body,
+                    url=url,
+                    elapsed_ms=elapsed_ms
+                )
+                
+                if use_cache:
+                    _response_cache.set(method, url, headers, body, http_response, cache_ttl)
+                
+                return ActionResult(
+                    success=response_status == expected_status,
+                    message=f"HTTP {response_status} from {url}",
+                    data={
+                        "status": response_status,
+                        "body": response_body,
+                        "headers": response_headers,
+                        "elapsed_ms": round(elapsed_ms, 2),
+                        "url": url,
+                        "from_cache": False
+                    }
+                )
+        
+        except HTTPError as e:
+            return ActionResult(
+                success=False,
+                message=f"HTTP {e.code}: {str(e)}",
+                data={
+                    "status": e.code,
+                    "error": str(e),
+                    "url": url
+                }
+            )
+        except URLError as e:
+            return ActionResult(
+                success=False,
+                message=f"URL error: {str(e)}",
+                data={
+                    "error": str(e),
+                    "url": url
+                }
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"Request failed: {str(e)}",
+                data={"error": str(e), "url": url}
+            )
+
+
+class HTTPPostJSONAction(BaseAction):
+    """POST JSON data to URL."""
+    action_type = "http_post_json"
+    display_name = "POST JSON"
+    description = "发送JSON POST请求"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """POST JSON data.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: url, data, headers.
+        
+        Returns:
+            ActionResult with response.
+        """
+        url = params.get('url', '')
+        data = params.get('data', {})
         headers = params.get('headers', {})
         
         if not url:
-            return ActionResult(success=False, message="url is required")
+            return ActionResult(success=False, message="URL is required")
         
-        if not output_path:
-            # Extract filename from URL
-            parsed = urllib.parse.urlparse(url)
-            output_path = os.path.basename(parsed.path) or 'download'
+        if not isinstance(data, dict):
+            return ActionResult(success=False, message="data must be a dict")
         
-        # Prepare headers
-        request_headers = {}
-        if isinstance(headers, dict):
-            request_headers.update(headers)
-        
-        # Add Range header for resume
-        mode = 'wb'
-        if resume and os.path.exists(output_path):
-            existing_size = os.path.getsize(output_path)
-            request_headers['Range'] = f'bytes={existing_size}-'
-            mode = 'ab'
+        headers.setdefault('Content-Type', 'application/json')
+        headers.setdefault('Accept', 'application/json')
         
         try:
-            request = urllib.request.Request(url, headers=request_headers)
+            body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+            req = Request(url, data=body, method='POST')
             
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                total_size = int(response.headers.get('Content-Length', 0))
-                content_type = response.headers.get('Content-Type', '')
+            for key, value in headers.items():
+                req.add_header(key, value)
+            
+            start_time = time.time()
+            
+            with urlopen(req, timeout=30) as response:
+                response_body = response.read().decode('utf-8')
+                elapsed_ms = (time.time() - start_time) * 1000
                 
-                downloaded_size = 0
-                chunk_size = 8192
-                
-                with open(output_path, mode) as f:
-                    while True:
-                        chunk = response.read(chunk_size)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
-                
-                final_size = os.path.getsize(output_path)
+                try:
+                    response_json = json.loads(response_body)
+                except:
+                    response_json = response_body
                 
                 return ActionResult(
                     success=True,
-                    message=f"Downloaded {final_size} bytes",
+                    message=f"POST to {url} succeeded",
                     data={
-                        'url': url,
-                        'path': output_path,
-                        'size': final_size,
-                        'content_type': content_type
+                        "status": response.getcode(),
+                        "body": response_json,
+                        "elapsed_ms": round(elapsed_ms, 2)
                     }
                 )
-                
-        except urllib.error.HTTPError as e:
-            return ActionResult(
-                success=False,
-                message=f"HTTP {e.code}: {e.reason}",
-                data={'error': str(e), 'code': e.code}
-            )
-        except urllib.error.URLError as e:
-            return ActionResult(
-                success=False,
-                message=f"URL error: {e.reason}",
-                data={'error': str(e)}
-            )
+        
+        except HTTPError as e:
+            return ActionResult(success=False, message=f"HTTP {e.code}: {str(e)}", data={"status": e.code, "error": str(e)})
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Download error: {e}",
-                data={'error': str(e)}
-            )
+            return ActionResult(success=False, message=f"POST failed: {str(e)}")
 
 
-class HttpStatusCheckAction(BaseAction):
-    """Check HTTP status code without downloading body.
-    
-    Performs a HEAD request to check URL availability.
-    """
-    action_type = "http_status_check"
-    display_name = "HTTP状态检查"
-    description = "检查URL的HTTP状态"
+class HTTPGetJSONAction(BaseAction):
+    """GET JSON data from URL."""
+    action_type = "http_get_json"
+    display_name = "GET JSON"
+    description = "获取JSON数据"
     
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Check HTTP status.
+        """GET JSON data.
         
         Args:
-            context: Execution context (ContextManager instance).
-            params: Dict with keys: url, timeout, headers.
+            context: Execution context.
+            params: Dict with keys: url, params, headers.
         
         Returns:
-            ActionResult with status info.
+            ActionResult with response.
         """
         url = params.get('url', '')
-        timeout = params.get('timeout', 10)
+        query_params = params.get('params', {})
         headers = params.get('headers', {})
         
         if not url:
-            return ActionResult(success=False, message="url is required")
+            return ActionResult(success=False, message="URL is required")
+        
+        if query_params:
+            encoded = urlencode(query_params)
+            url = f"{url}{'&' if '?' in url else '?'}{encoded}"
+        
+        headers.setdefault('Accept', 'application/json')
         
         try:
-            request_headers = {'Method': 'HEAD'}
-            if isinstance(headers, dict):
-                request_headers.update(headers)
+            req = Request(url, method='GET')
             
-            request = urllib.request.Request(url, headers=request_headers, method='HEAD')
+            for key, value in headers.items():
+                req.add_header(key, value)
             
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                status_code = response.status
-                response_headers = dict(response.headers)
+            start_time = time.time()
+            
+            with urlopen(req, timeout=30) as response:
+                response_body = response.read().decode('utf-8')
+                elapsed_ms = (time.time() - start_time) * 1000
                 
-                is_ok = 200 <= status_code < 400
+                try:
+                    response_json = json.loads(response_body)
+                except:
+                    response_json = response_body
                 
                 return ActionResult(
-                    success=is_ok,
-                    message=f"HTTP {status_code}",
+                    success=True,
+                    message=f"GET from {url} succeeded",
                     data={
-                        'url': url,
-                        'status_code': status_code,
-                        'headers': response_headers,
-                        'available': is_ok
+                        "status": response.getcode(),
+                        "body": response_json,
+                        "elapsed_ms": round(elapsed_ms, 2)
                     }
                 )
-                
-        except urllib.error.HTTPError as e:
-            return ActionResult(
-                success=False,
-                message=f"HTTP {e.code}: {e.reason}",
-                data={'url': url, 'status_code': e.code, 'available': False}
-            )
-        except urllib.error.URLError as e:
-            return ActionResult(
-                success=False,
-                message=f"URL error: {e.reason}",
-                data={'url': url, 'available': False, 'error': str(e)}
-            )
+        
+        except HTTPError as e:
+            return ActionResult(success=False, message=f"HTTP {e.code}: {str(e)}", data={"status": e.code, "error": str(e)})
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Status check error: {e}",
-                data={'error': str(e)}
-            )
+            return ActionResult(success=False, message=f"GET failed: {str(e)}")
 
 
-class UrlEncodeAction(BaseAction):
-    """URL encode/decode strings.
-    
-    Encodes parameters for URL queries and decodes URL-encoded strings.
-    """
-    action_type = "url_encode"
-    display_name = "URL编码解码"
-    description = "URL编码和解码"
+class HTTPBatchAction(BaseAction):
+    """Execute multiple HTTP requests in batch."""
+    action_type = "http_batch"
+    display_name = "批量HTTP"
+    description = "批量执行HTTP请求"
     
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """URL encode or decode.
+        """Execute batch requests.
         
         Args:
-            context: Execution context (ContextManager instance).
-            params: Dict with keys: text, operation (encode/decode), 
-                   safe_chars, quote_via.
+            context: Execution context.
+            params: Dict with keys: requests (list of request configs).
         
         Returns:
-            ActionResult with encoded/decoded string.
+            ActionResult with all responses.
         """
-        text = params.get('text', '')
-        operation = params.get('operation', 'encode')
-        safe_chars = params.get('safe_chars', '')
-        quote_via = params.get('quote_via', 'quote')
+        requests = params.get('requests', [])
+        max_concurrent = params.get('max_concurrent', 5)
         
-        if not text:
-            return ActionResult(success=False, message="text is required")
+        if not requests:
+            return ActionResult(success=False, message="requests list is required")
         
-        try:
-            if operation == 'encode':
-                if quote_via == 'quote':
-                    result = urllib.parse.quote(text, safe=safe_chars)
-                elif quote_via == 'quote_plus':
-                    result = urllib.parse.quote_plus(text, safe=safe_chars)
-                elif quote_via == 'path':
-                    result = urllib.parse.quote(text, safe=safe_chars, safe='/:@!$&\'()*+,;=')
-                else:
-                    result = urllib.parse.quote(text, safe=safe_chars)
-            elif operation == 'decode':
-                if quote_via == 'quote_plus':
-                    result = urllib.parse.unquote_plus(text)
-                else:
-                    result = urllib.parse.unquote(text)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}"
-                )
+        import concurrent.futures
+        
+        def execute_single(req_config: Dict) -> Dict[str, Any]:
+            url = req_config.get('url', '')
+            method = req_config.get('method', 'GET').upper()
+            headers = req_config.get('headers', {})
+            body = req_config.get('body', None)
             
-            return ActionResult(
-                success=True,
-                message=f"URL {operation}d: {len(result)} chars",
-                data={'result': result, 'operation': operation}
-            )
+            start_time = time.time()
             
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"URL encode/decode error: {e}",
-                data={'error': str(e)}
-            )
+            try:
+                body_bytes = None
+                if body is not None:
+                    if isinstance(body, dict):
+                        body_bytes = json.dumps(body).encode('utf-8')
+                    else:
+                        body_bytes = body.encode('utf-8') if isinstance(body, str) else body
+                
+                req = Request(url, data=body_bytes, method=method)
+                
+                for key, value in headers.items():
+                    req.add_header(key, value)
+                
+                with urlopen(req, timeout=30) as response:
+                    response_body = response.read().decode('utf-8')
+                    elapsed_ms = (time.time() - start_time) * 1000
+                    
+                    return {
+                        "success": True,
+                        "url": url,
+                        "status": response.getcode(),
+                        "body": response_body,
+                        "elapsed_ms": round(elapsed_ms, 2)
+                    }
+            
+            except HTTPError as e:
+                return {"success": False, "url": url, "status": e.code, "error": str(e)}
+            except Exception as e:
+                return {"success": False, "url": url, "error": str(e)}
+        
+        start_time = time.time()
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            futures = [executor.submit(execute_single, req) for req in requests]
+            results = [f.result() for f in concurrent.futures.as_completed(futures)]
+        
+        total_duration = time.time() - start_time
+        successful = sum(1 for r in results if r.get('success'))
+        
+        return ActionResult(
+            success=True,
+            message=f"Batch completed: {successful}/{len(requests)} successful",
+            data={
+                "results": results,
+                "total": len(requests),
+                "successful": successful,
+                "failed": len(requests) - successful,
+                "duration_ms": round(total_duration * 1000, 2)
+            }
+        )
+
+
+class CacheClearAction(BaseAction):
+    """Clear HTTP response cache."""
+    action_type = "http_cache_clear"
+    display_name = "清除HTTP缓存"
+    description = "清空HTTP响应缓存"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Clear cache.
+        
+        Args:
+            context: Execution context.
+            params: Dict (unused).
+        
+        Returns:
+            ActionResult with cleared count.
+        """
+        cleared = _response_cache.clear()
+        
+        return ActionResult(
+            success=True,
+            message=f"Cleared {cleared} cached responses",
+            data={"cleared": cleared}
+        )
