@@ -1,320 +1,274 @@
-"""Data filtering action module for RabAI AutoClick.
+"""
+Data Filtering Action Module.
 
-Provides advanced data filtering operations:
-- AdvancedFilterAction: Advanced filtering with multiple conditions
-- DateRangeFilterAction: Filter by date ranges
-- NumericRangeFilterAction: Filter by numeric ranges
-- TextSearchFilterAction: Text search and pattern filtering
+Provides data filtering capabilities with predicates,
+expressions, and transformation pipelines.
 """
 
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+import asyncio
+import logging
+import operator
 import re
-from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Union
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class AdvancedFilterAction(BaseAction):
-    """Advanced filtering with multiple conditions."""
-    action_type = "advanced_filter"
-    display_name = "高级过滤"
-    description = "多条件高级数据过滤"
+class FilterOperator(Enum):
+    """Filter operators."""
+    EQ = "eq"
+    NE = "ne"
+    GT = "gt"
+    GTE = "gte"
+    LT = "lt"
+    LTE = "lte"
+    IN = "in"
+    NOT_IN = "not_in"
+    CONTAINS = "contains"
+    STARTS_WITH = "starts_with"
+    ENDS_WITH = "ends_with"
+    REGEX = "regex"
+    IS_NULL = "is_null"
+    IS_NOT_NULL = "is_not_null"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            conditions = params.get("conditions", [])
-            logic = params.get("logic", "AND")
 
-            if not isinstance(data, list):
-                data = [data]
+@dataclass
+class FilterCondition:
+    """Single filter condition."""
+    field: str
+    operator: FilterOperator
+    value: Any = None
 
-            if not conditions:
-                return ActionResult(success=True, message="No conditions, returning all", data={"filtered": data, "count": len(data)})
 
-            filtered = []
-            for item in data:
-                if not isinstance(item, dict):
-                    item = {"value": item}
+@dataclass
+class FilterRule:
+    """Filter rule with conditions."""
+    rule_id: str
+    name: str
+    conditions: List[FilterCondition]
+    combine_mode: str = "and"
+    negate: bool = False
 
-                results = []
-                for cond in conditions:
-                    result = self._evaluate_condition(item, cond)
-                    results.append(result)
 
-                if logic == "AND":
-                    keep = all(results)
-                elif logic == "OR":
-                    keep = any(results)
-                elif logic == "NOT":
-                    keep = not any(results)
-                else:
-                    keep = all(results)
+class ExpressionEvaluator:
+    """Evaluates filter expressions."""
 
-                if keep:
-                    filtered.append(item)
+    OPS = {
+        FilterOperator.EQ: operator.eq,
+        FilterOperator.NE: operator.ne,
+        FilterOperator.GT: operator.gt,
+        FilterOperator.GTE: operator.ge,
+        FilterOperator.LT: operator.lt,
+        FilterOperator.LTE: operator.le,
+        FilterOperator.CONTAINS: lambda a, b: b in a if a is not None else False,
+        FilterOperator.STARTS_WITH: lambda a, b: str(a).startswith(b) if a is not None else False,
+        FilterOperator.ENDS_WITH: lambda a, b: str(a).endswith(b) if a is not None else False,
+    }
 
-            return ActionResult(
-                success=True,
-                message=f"Filtered {len(data)} items to {len(filtered)}",
-                data={"filtered": filtered, "count": len(filtered), "original_count": len(data)},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"AdvancedFilter error: {e}")
+    def evaluate(self, record: Dict[str, Any], condition: FilterCondition) -> bool:
+        """Evaluate a single condition."""
+        value = record.get(condition.field)
 
-    def _evaluate_condition(self, item: Dict, cond: Dict) -> bool:
-        field = cond.get("field")
-        operator = cond.get("operator", "eq")
-        value = cond.get("value")
+        if condition.operator == FilterOperator.IS_NULL:
+            return value is None
 
-        item_value = item.get(field) if field else item.get("value")
+        if condition.operator == FilterOperator.IS_NOT_NULL:
+            return value is not None
 
-        if operator == "eq":
-            return item_value == value
-        elif operator == "ne":
-            return item_value != value
-        elif operator == "gt":
-            return item_value is not None and item_value > value
-        elif operator == "ge":
-            return item_value is not None and item_value >= value
-        elif operator == "lt":
-            return item_value is not None and item_value < value
-        elif operator == "le":
-            return item_value is not None and item_value <= value
-        elif operator == "in":
-            return item_value in value if isinstance(value, (list, tuple, set)) else False
-        elif operator == "not_in":
-            return item_value not in value if isinstance(value, (list, tuple, set)) else True
-        elif operator == "contains":
-            return value in item_value if item_value is not None else False
-        elif operator == "not_contains":
-            return value not in item_value if item_value is not None else True
-        elif operator == "startswith":
-            return str(item_value).startswith(str(value)) if item_value is not None else False
-        elif operator == "endswith":
-            return str(item_value).endswith(str(value)) if item_value is not None else False
-        elif operator == "regex":
-            return bool(re.search(str(value), str(item_value))) if item_value is not None else False
-        elif operator == "is_null":
-            return item_value is None
-        elif operator == "is_not_null":
-            return item_value is not None
-        elif operator == "is_empty":
-            return item_value in ("", [], {}) or item_value is None
-        elif operator == "is_not_empty":
-            return item_value not in ("", [], {}) and item_value is not None
-        elif operator == "between":
-            if isinstance(value, (list, tuple)) and len(value) == 2:
-                return value[0] <= item_value <= value[1] if item_value is not None else False
-        elif operator == "length_eq":
-            return len(item_value) == value if item_value is not None else False
-        elif operator == "length_gt":
-            return len(item_value) > value if item_value is not None else False
-        elif operator == "length_lt":
-            return len(item_value) < value if item_value is not None else False
+        if condition.operator == FilterOperator.IN:
+            return value in condition.value
+
+        if condition.operator == FilterOperator.NOT_IN:
+            return value not in condition.value
+
+        if condition.operator == FilterOperator.REGEX:
+            try:
+                return bool(re.match(condition.value, str(value)))
+            except:
+                return False
+
+        op_func = self.OPS.get(condition.operator)
+        if op_func:
+            return op_func(value, condition.value)
 
         return False
 
 
-class DateRangeFilterAction(BaseAction):
-    """Filter by date ranges."""
-    action_type = "date_range_filter"
-    display_name = "日期范围过滤"
-    description = "按日期范围过滤数据"
+class DataFilter:
+    """Filters data based on rules."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            date_field = params.get("date_field", "date")
-            start_date = params.get("start_date")
-            end_date = params.get("end_date")
-            date_format = params.get("date_format", "%Y-%m-%d")
-            timezone = params.get("timezone", "UTC")
+    def __init__(self):
+        self.rules: List[FilterRule] = []
+        self.evaluator = ExpressionEvaluator()
 
-            if not isinstance(data, list):
-                data = [data]
+    def add_rule(self, rule: FilterRule):
+        """Add a filter rule."""
+        self.rules.append(rule)
 
-            if start_date:
-                start_dt = self._parse_date(start_date, date_format)
-            else:
-                start_dt = None
+    def remove_rule(self, rule_id: str) -> bool:
+        """Remove a filter rule."""
+        for i, rule in enumerate(self.rules):
+            if rule.rule_id == rule_id:
+                self.rules.pop(i)
+                return True
+        return False
 
-            if end_date:
-                end_dt = self._parse_date(end_date, date_format)
-                end_dt = end_dt + timedelta(days=1) - timedelta(seconds=1)
-            else:
-                end_dt = None
-
-            filtered = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                date_value = item.get(date_field)
-                item_dt = self._parse_date(date_value, date_format)
-
-                if item_dt is None:
-                    continue
-
-                if start_dt and item_dt < start_dt:
-                    continue
-                if end_dt and item_dt > end_dt:
-                    continue
-
-                filtered.append(item)
-
-            return ActionResult(
-                success=True,
-                message=f"Date filter: {len(data)} -> {len(filtered)} items",
-                data={
-                    "filtered": filtered,
-                    "count": len(filtered),
-                    "original_count": len(data),
-                    "start_date": str(start_date) if start_date else None,
-                    "end_date": str(end_date) if end_date else None,
-                },
+    def _evaluate_rule(self, record: Dict[str, Any], rule: FilterRule) -> bool:
+        """Evaluate a filter rule."""
+        if rule.combine_mode == "and":
+            result = all(
+                self.evaluator.evaluate(record, cond)
+                for cond in rule.conditions
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"DateRangeFilter error: {e}")
-
-    def _parse_date(self, value: Any, fmt: str) -> Optional[datetime]:
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value)
-        if isinstance(value, str):
-            try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                for try_fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
-                    try:
-                        return datetime.strptime(value, try_fmt)
-                    except ValueError:
-                        continue
-        return None
-
-
-class NumericRangeFilterAction(BaseAction):
-    """Filter by numeric ranges."""
-    action_type = "numeric_range_filter"
-    display_name = "数值范围过滤"
-    description = "按数值范围过滤数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", "value")
-            min_value = params.get("min")
-            max_value = params.get("max")
-            inclusive = params.get("inclusive", True)
-
-            if not isinstance(data, list):
-                data = [data]
-
-            filtered = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                val = item.get(field)
-
-                if not isinstance(val, (int, float)):
-                    continue
-
-                if min_value is not None:
-                    if inclusive and val < min_value:
-                        continue
-                    if not inclusive and val <= min_value:
-                        continue
-
-                if max_value is not None:
-                    if inclusive and val > max_value:
-                        continue
-                    if not inclusive and val >= max_value:
-                        continue
-
-                filtered.append(item)
-
-            return ActionResult(
-                success=True,
-                message=f"Numeric filter: {len(data)} -> {len(filtered)} items (range: {min_value}-{max_value})",
-                data={
-                    "filtered": filtered,
-                    "count": len(filtered),
-                    "original_count": len(data),
-                    "min": min_value,
-                    "max": max_value,
-                },
+        else:
+            result = any(
+                self.evaluator.evaluate(record, cond)
+                for cond in rule.conditions
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"NumericRangeFilter error: {e}")
+
+        return not result if rule.negate else result
+
+    def filter(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter records based on all rules."""
+        if not self.rules:
+            return records
+
+        filtered = []
+        for record in records:
+            if all(self._evaluate_rule(record, rule) for rule in self.rules):
+                filtered.append(record)
+
+        return filtered
+
+    def filter_one(self, records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Filter and return first match."""
+        filtered = self.filter(records)
+        return filtered[0] if filtered else None
 
 
-class TextSearchFilterAction(BaseAction):
-    """Text search and pattern filtering."""
-    action_type = "text_search_filter"
-    display_name = "文本搜索过滤"
-    description = "文本搜索和模式过滤"
+class PredicateBuilder:
+    """Builds filter predicates."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            search_field = params.get("search_field", "text")
-            query = params.get("query", "")
-            match_mode = params.get("match_mode", "contains")
-            case_sensitive = params.get("case_sensitive", False)
-            use_regex = params.get("use_regex", False)
+    def __init__(self):
+        self.conditions: List[FilterCondition] = []
+        self._combine_mode = "and"
 
-            if not isinstance(data, list):
-                data = [data]
+    def eq(self, field: str, value: Any) -> "PredicateBuilder":
+        """Add equals condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.EQ, value))
+        return self
 
-            filtered = []
-            for item in data:
-                if not isinstance(item, dict):
-                    text = str(item)
-                else:
-                    text = str(item.get(search_field, ""))
+    def ne(self, field: str, value: Any) -> "PredicateBuilder":
+        """Add not equals condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.NE, value))
+        return self
 
-                if not case_sensitive:
-                    text = text.lower()
-                    query_lower = query.lower()
-                else:
-                    query_lower = query
+    def gt(self, field: str, value: Any) -> "PredicateBuilder":
+        """Add greater than condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.GT, value))
+        return self
 
-                matched = False
-                if use_regex:
-                    try:
-                        matched = bool(re.search(query_lower, text))
-                    except re.error:
-                        matched = False
-                else:
-                    if match_mode == "contains":
-                        matched = query_lower in text
-                    elif match_mode == "startswith":
-                        matched = text.startswith(query_lower)
-                    elif match_mode == "endswith":
-                        matched = text.endswith(query_lower)
-                    elif match_mode == "exact":
-                        matched = text == query_lower
-                    elif match_mode == "word":
-                        matched = query_lower in text.split()
+    def gte(self, field: str, value: Any) -> "PredicateBuilder":
+        """Add greater than or equals condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.GTE, value))
+        return self
 
-                if matched:
-                    filtered.append(item)
+    def lt(self, field: str, value: Any) -> "PredicateBuilder":
+        """Add less than condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.LT, value))
+        return self
 
-            return ActionResult(
-                success=True,
-                message=f"Text search: {len(data)} -> {len(filtered)} items",
-                data={
-                    "filtered": filtered,
-                    "count": len(filtered),
-                    "original_count": len(data),
-                    "query": query,
-                    "match_mode": match_mode,
-                },
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"TextSearchFilter error: {e}")
+    def lte(self, field: str, value: Any) -> "PredicateBuilder":
+        """Add less than or equals condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.LTE, value))
+        return self
+
+    def contains(self, field: str, value: Any) -> "PredicateBuilder":
+        """Add contains condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.CONTAINS, value))
+        return self
+
+    def in_list(self, field: str, values: List[Any]) -> "PredicateBuilder":
+        """Add in list condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.IN, values))
+        return self
+
+    def is_null(self, field: str) -> "PredicateBuilder":
+        """Add is null condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.IS_NULL))
+        return self
+
+    def is_not_null(self, field: str) -> "PredicateBuilder":
+        """Add is not null condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.IS_NOT_NULL))
+        return self
+
+    def regex(self, field: str, pattern: str) -> "PredicateBuilder":
+        """Add regex condition."""
+        self.conditions.append(FilterCondition(field, FilterOperator.REGEX, pattern))
+        return self
+
+    def build(self) -> List[FilterCondition]:
+        """Build conditions list."""
+        return self.conditions.copy()
+
+
+class FilteringPipeline:
+    """Pipeline of filtering operations."""
+
+    def __init__(self):
+        self.filters: List[DataFilter] = []
+
+    def add_filter(self, filter_func: Callable[[List[Dict]], List[Dict]]):
+        """Add a filter function."""
+        new_filter = DataFilter()
+
+        def wrapped_filter(records):
+            return filter_func(records)
+
+        return self
+
+    def process(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Process records through pipeline."""
+        result = records
+        for data_filter in self.filters:
+            result = data_filter.filter(result)
+        return result
+
+
+def main():
+    """Demonstrate data filtering."""
+    data_filter = DataFilter()
+
+    data_filter.add_rule(FilterRule(
+        rule_id="r1",
+        name="Active users",
+        conditions=[
+            FilterCondition("status", FilterOperator.EQ, "active"),
+            FilterCondition("age", FilterOperator.GTE, 18)
+        ],
+        combine_mode="and"
+    ))
+
+    records = [
+        {"id": 1, "name": "Alice", "status": "active", "age": 25},
+        {"id": 2, "name": "Bob", "status": "inactive", "age": 30},
+        {"id": 3, "name": "Charlie", "status": "active", "age": 15},
+        {"id": 4, "name": "Diana", "status": "active", "age": 35},
+    ]
+
+    filtered = data_filter.filter(records)
+    print(f"Filtered: {len(filtered)} records")
+    for r in filtered:
+        print(f"  - {r['name']}")
+
+    builder = PredicateBuilder()
+    builder.eq("status", "active").gte("age", 20)
+    print(f"\nConditions: {len(builder.conditions)}")
+
+
+if __name__ == "__main__":
+    main()
