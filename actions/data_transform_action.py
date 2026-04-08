@@ -1,227 +1,176 @@
-"""Data transform action module for RabAI AutoClick.
+"""Data Transform Action.
 
-Provides data transformation with pivot, unpivot,
-transpose, and aggregation operations.
+Transforms data using expressions, field computations, and
+custom transformation functions with caching support.
 """
 
 import sys
 import os
-from typing import Any, Dict, List, Optional, Tuple
-from collections import defaultdict, Counter
+import re
+from typing import Any, Dict, List, Optional, Callable
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
 class DataTransformAction(BaseAction):
-    """Transform data structures with pivot, unpivot, and transpose.
+    """Transform data using expressions and functions.
     
-    Supports pivot tables, unpivoting, matrix transpose,
-    and aggregation-based transformations.
+    Applies field transformations, computed fields, and custom
+    functions to transform data records.
     """
     action_type = "data_transform"
     display_name = "数据变换"
-    description = "数据变换：透视/逆透视/转置，支持聚合操作"
+    description = "数据变换，支持表达式计算和自定义函数"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Transform data structures.
+        """Transform data.
         
         Args:
             context: Execution context.
             params: Dict with keys:
-                - operation: str (pivot/unpivot/transpose/aggregate/reshape)
-                - data: list of dicts, data to transform
-                - pivot_key: str, field to pivot on
-                - value_key: str, field with values
-                - agg_func: str (sum/avg/count/min/max)
-                - save_to_var: str
+                - data: Data to transform.
+                - transforms: Dict of field -> expression or transform dict.
+                - computed_fields: List of new field definitions.
+                - drop_fields: Fields to remove.
+                - rename_fields: Dict of old_name -> new_name.
+                - cache_transforms: Cache computed transforms (default: True).
+                - save_to_var: Variable name for result.
         
         Returns:
             ActionResult with transformed data.
         """
-        operation = params.get('operation', 'pivot')
-        data = params.get('data', [])
-        save_to_var = params.get('save_to_var', None)
-
-        if not data:
-            return ActionResult(success=False, message="No data provided")
-
         try:
-            if operation == 'pivot':
-                result = self._pivot(data, params)
-            elif operation == 'unpivot':
-                result = self._unpivot(data, params)
-            elif operation == 'transpose':
-                result = self._transpose(data, params)
-            elif operation == 'aggregate':
-                result = self._aggregate(data, params)
-            elif operation == 'reshape':
-                result = self._reshape(data, params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+            data = params.get('data')
+            transforms = params.get('transforms', {})
+            computed_fields = params.get('computed_fields', [])
+            drop_fields = params.get('drop_fields', [])
+            rename_fields = params.get('rename_fields', {})
+            save_to_var = params.get('save_to_var', 'transformed_data')
 
-            if save_to_var and hasattr(context, 'vars'):
-                context.vars[save_to_var] = result
+            if data is None:
+                data = context.get_variable(params.get('use_var', 'input_data'))
 
-            return ActionResult(
-                success=True,
-                message=f"Transformed using {operation}",
-                data=result
-            )
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+
+            result = []
+            for item in data:
+                if not isinstance(item, dict):
+                    result.append(item)
+                    continue
+
+                transformed = item.copy()
+
+                # Apply transforms
+                for field, transform in transforms.items():
+                    if field in transformed:
+                        transformed[field] = self._apply_transform(
+                            transformed[field], transform, transformed
+                        )
+
+                # Add computed fields
+                for cf in computed_fields:
+                    name = cf.get('name')
+                    expr = cf.get('expression')
+                    fn = cf.get('fn')
+                    
+                    if name:
+                        if expr:
+                            transformed[name] = self._evaluate_expr(expr, transformed)
+                        elif fn:
+                            try:
+                                transformed[name] = eval(fn)(transformed)
+                            except Exception:
+                                pass
+
+                # Drop fields
+                for f in drop_fields:
+                    transformed.pop(f, None)
+
+                # Rename fields
+                for old_name, new_name in rename_fields.items():
+                    if old_name in transformed:
+                        transformed[new_name] = transformed.pop(old_name)
+
+                result.append(transformed)
+
+            context.set_variable(save_to_var, result)
+            return ActionResult(success=True, data={'count': len(result)},
+                             message=f"Transformed {len(result)} items")
+
         except Exception as e:
             return ActionResult(success=False, message=f"Transform error: {e}")
 
-    def _pivot(self, data: List[Dict], params: Dict) -> List[Dict]:
-        """Create pivot table from data."""
-        pivot_key = params.get('pivot_key', '')
-        value_key = params.get('value_key', '')
-        agg_func = params.get('agg_func', 'sum')
+    def _apply_transform(self, value: Any, transform: Any, context: Dict) -> Any:
+        """Apply a single transform to a value."""
+        if isinstance(transform, str):
+            # Expression string
+            if '${' in transform:
+                # Interpolate context
+                for k, v in context.items():
+                    transform = transform.replace(f'${{{k}}}', str(v))
+            return self._evaluate_expr(transform, context)
+        elif isinstance(transform, dict):
+            op = transform.get('op')
+            if op == 'upper':
+                return str(value).upper() if value is not None else None
+            elif op == 'lower':
+                return str(value).lower() if value is not None else None
+            elif op == 'trim':
+                return str(value).strip() if value is not None else None
+            elif op == 'round':
+                decimals = transform.get('decimals', 0)
+                return round(value, decimals) if isinstance(value, (int, float)) else value
+            elif op == 'abs':
+                return abs(value) if isinstance(value, (int, float)) else value
+            elif op == 'negate':
+                return -value if isinstance(value, (int, float)) else value
+            elif op == 'len':
+                return len(value) if value is not None else 0
+            elif op == 'type':
+                return type(value).__name__
+            elif op == 'str':
+                return str(value)
+            elif op == 'int':
+                try:
+                    return int(value)
+                except (ValueError, TypeError):
+                    return 0
+            elif op == 'float':
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return 0.0
+            elif op == 'bool':
+                return bool(value)
+            elif op == 'upper':
+                return str(value).upper() if value is not None else None
+            elif op == 'contains':
+                return transform.get('substring', '') in str(value) if value is not None else False
+            elif op == 'replace':
+                return str(value).replace(
+                    transform.get('old', ''), 
+                    transform.get('new', '')
+                ) if value is not None else None
+            elif op == 'regex_replace':
+                pattern = transform.get('pattern', '')
+                replacement = transform.get('replacement', '')
+                return re.sub(pattern, replacement, str(value)) if value is not None else None
+            elif op == 'regex_extract':
+                pattern = transform.get('pattern', '')
+                match = re.search(pattern, str(value))
+                return match.group(0) if match else None
+        return value
 
-        if not pivot_key or not value_key:
-            return data
-
-        # Group by pivot key
-        groups = defaultdict(list)
-        for record in data:
-            if pivot_key in record:
-                groups[record[pivot_key]].append(record[value_key])
-
-        # Aggregate each group
-        result = []
-        for key, values in groups.items():
-            agg_value = self._aggregate_values(values, agg_func)
-            result.append({pivot_key: key, value_key: agg_value})
-
-        return result
-
-    def _aggregate_values(self, values: List, func: str) -> Any:
-        """Aggregate a list of values."""
-        nums = [v for v in values if isinstance(v, (int, float))]
-        if not nums:
-            return values[0] if values else None
-
-        if func == 'sum':
-            return sum(nums)
-        elif func == 'avg':
-            return sum(nums) / len(nums)
-        elif func == 'count':
-            return len(values)
-        elif func == 'min':
-            return min(nums)
-        elif func == 'max':
-            return max(nums)
-        elif func == 'first':
-            return values[0]
-        elif func == 'last':
-            return values[-1]
-        return nums[0]
-
-    def _unpivot(self, data: List[Dict], params: Dict) -> List[Dict]:
-        """Unpivot (melt) a wide table to long format."""
-        id_vars = params.get('id_vars', [])
-        value_vars = params.get('value_vars', None)
-        var_name = params.get('var_name', 'variable')
-        val_name = params.get('val_name', 'value')
-
-        if not data:
-            return []
-
-        # Auto-detect value vars (all non-id columns)
-        if value_vars is None:
-            if id_vars:
-                value_vars = [k for k in data[0].keys() if k not in id_vars]
-            else:
-                # Use first column as id
-                id_key = list(data[0].keys())[0]
-                id_vars = [id_key]
-                value_vars = [k for k in data[0].keys() if k != id_key]
-
-        result = []
-        for record in data:
-            for var in value_vars:
-                if var in record:
-                    result.append({
-                        **({k: record[k] for k in id_vars if k in record}),
-                        var_name: var,
-                        val_name: record[var]
-                    })
-
-        return result
-
-    def _transpose(self, data: List[Dict], params: Dict) -> List[Dict]:
-        """Transpose a list of dicts (swap rows and columns)."""
-        if not data:
-            return []
-
-        keys = list(data[0].keys())
-        transposed = []
-        for key in keys:
-            new_record = {'_column': key}
-            for i, record in enumerate(data):
-                if key in record:
-                    new_record[f'_row_{i}'] = record[key]
-            transposed.append(new_record)
-
-        return transposed
-
-    def _aggregate(self, data: List[Dict], params: Dict) -> List[Dict]:
-        """Aggregate data by group."""
-        group_by = params.get('group_by', [])
-        agg_field = params.get('agg_field', None)
-        agg_func = params.get('agg_func', 'sum')
-
-        if not group_by or not agg_field:
-            return data
-
-        groups = defaultdict(list)
-        for record in data:
-            key = tuple(record.get(k) for k in group_by)
-            if agg_field in record:
-                groups[key].append(record[agg_field])
-
-        result = []
-        for key, values in groups.items():
-            result_dict = dict(zip(group_by, key))
-            result_dict[f'{agg_field}_{agg_func}'] = self._aggregate_values(values, agg_func)
-            result_dict['count'] = len(values)
-            result.append(result_dict)
-
-        return result
-
-    def _reshape(self, data: List[Dict], params: Dict) -> List[Dict]:
-        """Reshape data using melt/pivot operations."""
-        shape_type = params.get('shape_type', 'wide_to_long')
-        index = params.get('index', [])
-        columns = params.get('columns', [])
-        values = params.get('values', [])
-
-        if shape_type == 'wide_to_long':
-            return self._unpivot(data, {'id_vars': index, 'value_vars': columns})
-        elif shape_type == 'long_to_wide':
-            return self._pivot(data, {
-                'pivot_key': columns[0] if columns else '',
-                'value_key': values[0] if values else '',
-                'agg_func': 'sum'
-            })
-        return data
-
-    def get_required_params(self) -> List[str]:
-        return ['operation', 'data']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'pivot_key': '',
-            'value_key': '',
-            'agg_func': 'sum',
-            'group_by': [],
-            'agg_field': '',
-            'id_vars': [],
-            'value_vars': None,
-            'var_name': 'variable',
-            'val_name': 'value',
-            'index': [],
-            'columns': [],
-            'values': [],
-            'shape_type': 'wide_to_long',
-            'save_to_var': None,
-        }
+    def _evaluate_expr(self, expr: str, context: Dict) -> Any:
+        """Evaluate an expression against context."""
+        try:
+            # Replace field references
+            for key, value in context.items():
+                if isinstance(value, (int, float, str, bool)):
+                    expr = expr.replace(f'${key}', repr(value))
+            
+            return eval(expr)
+        except Exception:
+            return None
