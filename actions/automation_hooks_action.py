@@ -1,194 +1,124 @@
-"""
-Automation Hooks Action Module.
+# Copyright (c) 2024. coded by claude
+"""Automation Hooks Action Module.
 
-Provides hook/extension points for automation
-workflows with event handling.
+Provides hook-based extensibility for automation workflows
+with support for pre/post hooks, error hooks, and custom hook points.
 """
-
-from typing import Any, Callable, Dict, List, Optional
+from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class HookType(Enum):
-    """Hook types."""
-    PRE_EXECUTE = "pre_execute"
-    POST_EXECUTE = "post_execute"
-    ON_SUCCESS = "on_success"
-    ON_FAILURE = "on_failure"
+class HookPoint(Enum):
+    BEFORE_START = "before_start"
+    AFTER_END = "after_end"
+    BEFORE_ACTION = "before_action"
+    AFTER_ACTION = "after_action"
+    ON_ERROR = "on_error"
     ON_TIMEOUT = "on_timeout"
-    PRE_COMMIT = "pre_commit"
-    POST_COMMIT = "post_commit"
-
-
-@dataclass
-class Hook:
-    """Automation hook."""
-    hook_id: str
-    name: str
-    hook_type: HookType
-    handler: Callable
-    enabled: bool = True
-    order: int = 0
-    timeout: float = 30.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    ON_SUCCESS = "on_success"
+    BEFORE_RETRY = "before_retry"
 
 
 @dataclass
 class HookContext:
-    """Context passed to hooks."""
-    workflow_id: Optional[str] = None
-    action_id: Optional[str] = None
-    action_name: Optional[str] = None
-    input_data: Any = None
-    output_data: Any = None
+    workflow_id: str
+    step_id: Optional[str]
+    timestamp: datetime
+    data: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[Exception] = None
+
+
+@dataclass
+class HookResult:
+    success: bool
+    modified_data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class HookExecutor:
-    """Executes hooks."""
-
+class AutomationHooks:
     def __init__(self):
-        self.hooks: Dict[HookType, List[Hook]] = {
-            hook_type: [] for hook_type in HookType
+        self._hooks: Dict[HookPoint, List[Callable]] = {
+            point: [] for point in HookPoint
         }
+        self._global_hooks: List[Callable] = []
 
-    def register(self, hook: Hook):
-        """Register a hook."""
-        self.hooks[hook.hook_type].append(hook)
-        self.hooks[hook.hook_type].sort(key=lambda h: h.order)
+    def register_hook(self, point: HookPoint, hook: Callable) -> None:
+        self._hooks[point].append(hook)
 
-    def unregister(self, hook_id: str) -> bool:
-        """Unregister a hook."""
-        for hooks in self.hooks.values():
-            for i, hook in enumerate(hooks):
-                if hook.hook_id == hook_id:
-                    hooks.pop(i)
-                    return True
+    def register_global_hook(self, hook: Callable) -> None:
+        self._global_hooks.append(hook)
+
+    async def execute_pre_start(self, workflow_id: str, context_data: Dict[str, Any]) -> HookResult:
+        return await self._execute_hooks(HookPoint.BEFORE_START, workflow_id, None, context_data)
+
+    async def execute_post_end(self, workflow_id: str, context_data: Dict[str, Any]) -> HookResult:
+        return await self._execute_hooks(HookPoint.AFTER_END, workflow_id, None, context_data)
+
+    async def execute_pre_action(self, workflow_id: str, step_id: str, context_data: Dict[str, Any]) -> HookResult:
+        return await self._execute_hooks(HookPoint.BEFORE_ACTION, workflow_id, step_id, context_data)
+
+    async def execute_post_action(self, workflow_id: str, step_id: str, context_data: Dict[str, Any]) -> HookResult:
+        return await self._execute_hooks(HookPoint.AFTER_ACTION, workflow_id, step_id, context_data)
+
+    async def execute_error(self, workflow_id: str, step_id: Optional[str], context_data: Dict[str, Any], error: Exception) -> HookResult:
+        ctx = HookContext(
+            workflow_id=workflow_id,
+            step_id=step_id,
+            timestamp=datetime.now(),
+            data=context_data,
+            error=error,
+        )
+        all_hooks = self._hooks[HookPoint.ON_ERROR] + self._global_hooks
+        return await self._run_hooks(all_hooks, ctx)
+
+    async def execute_timeout(self, workflow_id: str, step_id: Optional[str], context_data: Dict[str, Any]) -> HookResult:
+        return await self._execute_hooks(HookPoint.ON_TIMEOUT, workflow_id, step_id, context_data)
+
+    async def execute_success(self, workflow_id: str, context_data: Dict[str, Any]) -> HookResult:
+        return await self._execute_hooks(HookPoint.ON_SUCCESS, workflow_id, None, context_data)
+
+    async def execute_before_retry(self, workflow_id: str, step_id: str, context_data: Dict[str, Any]) -> HookResult:
+        return await self._execute_hooks(HookPoint.BEFORE_RETRY, workflow_id, step_id, context_data)
+
+    async def _execute_hooks(self, point: HookPoint, workflow_id: str, step_id: Optional[str], context_data: Dict[str, Any]) -> HookResult:
+        ctx = HookContext(
+            workflow_id=workflow_id,
+            step_id=step_id,
+            timestamp=datetime.now(),
+            data=context_data,
+        )
+        all_hooks = self._hooks[point] + self._global_hooks
+        return await self._run_hooks(all_hooks, ctx)
+
+    async def _run_hooks(self, hooks: List[Callable], ctx: HookContext) -> HookResult:
+        modified_data = dict(ctx.data)
+        for hook in hooks:
+            try:
+                result = hook(ctx)
+                if hasattr(result, "__await__"):
+                    result = await result
+                if result and isinstance(result, dict):
+                    modified_data.update(result)
+            except Exception as e:
+                logger.error(f"Hook execution failed: {e}")
+                return HookResult(success=False, modified_data=None, error=str(e))
+        return HookResult(success=True, modified_data=modified_data)
+
+    def unregister_hook(self, point: HookPoint, hook: Callable) -> bool:
+        if hook in self._hooks[point]:
+            self._hooks[point].remove(hook)
+            return True
         return False
 
-    def get_hooks(self, hook_type: HookType) -> List[Hook]:
-        """Get hooks for type."""
-        return [h for h in self.hooks.get(hook_type, []) if h.enabled]
-
-    async def execute(self, hook_type: HookType, context: HookContext) -> List[Any]:
-        """Execute all hooks of a type."""
-        results = []
-        hooks = self.get_hooks(hook_type)
-
-        for hook in hooks:
-            try:
-                result = await asyncio.wait_for(
-                    hook.handler(context),
-                    timeout=hook.timeout
-                )
-                results.append(result)
-            except asyncio.TimeoutError:
-                logger.warning(f"Hook {hook.name} timed out")
-            except Exception as e:
-                logger.error(f"Hook {hook.name} error: {e}")
-
-        return results
-
-    async def execute_pre_execute(self, context: HookContext) -> List[Any]:
-        """Execute pre-execute hooks."""
-        return await self.execute(HookType.PRE_EXECUTE, context)
-
-    async def execute_post_execute(self, context: HookContext) -> List[Any]:
-        """Execute post-execute hooks."""
-        return await self.execute(HookType.POST_EXECUTE, context)
-
-    async def execute_on_success(self, context: HookContext) -> List[Any]:
-        """Execute success hooks."""
-        return await self.execute(HookType.ON_SUCCESS, context)
-
-    async def execute_on_failure(self, context: HookContext) -> List[Any]:
-        """Execute failure hooks."""
-        return await self.execute(HookType.ON_FAILURE, context)
-
-
-class WorkflowHookManager:
-    """Manages workflow-level hooks."""
-
-    def __init__(self, executor: HookExecutor):
-        self.executor = executor
-        self.workflow_hooks: Dict[str, List[Hook]] = {}
-
-    def register_workflow_hook(
-        self,
-        workflow_id: str,
-        hook: Hook
-    ):
-        """Register hook for specific workflow."""
-        if workflow_id not in self.workflow_hooks:
-            self.workflow_hooks[workflow_id] = []
-        self.workflow_hooks[workflow_id].append(hook)
-
-    async def execute_workflow_hooks(
-        self,
-        workflow_id: str,
-        hook_type: HookType,
-        context: HookContext
-    ) -> List[Any]:
-        """Execute hooks for specific workflow."""
-        hooks = self.workflow_hooks.get(workflow_id, [])
-        hooks = [h for h in hooks if h.hook_type == hook_type and h.enabled]
-
-        results = []
-        for hook in hooks:
-            try:
-                result = await asyncio.wait_for(
-                    hook.handler(context),
-                    timeout=hook.timeout
-                )
-                results.append(result)
-            except Exception as e:
-                logger.error(f"Workflow hook error: {e}")
-
-        return results
-
-
-def create_hook(
-    name: str,
-    hook_type: HookType,
-    handler: Callable
-) -> Hook:
-    """Create a new hook."""
-    import uuid
-    return Hook(
-        hook_id=str(uuid.uuid4()),
-        name=name,
-        hook_type=hook_type,
-        handler=handler
-    )
-
-
-def main():
-    """Demonstrate hooks."""
-    executor = HookExecutor()
-
-    async def pre_hook(context: HookContext):
-        print(f"Pre-execute: {context.action_name}")
-
-    async def post_hook(context: HookContext):
-        print(f"Post-execute: {context.action_name}")
-
-    executor.register(create_hook("pre", HookType.PRE_EXECUTE, pre_hook))
-    executor.register(create_hook("post", HookType.POST_EXECUTE, post_hook))
-
-    context = HookContext(
-        action_name="test_action",
-        input_data={"test": "data"}
-    )
-
-    asyncio.run(executor.execute_pre_execute(context))
-
-
-if __name__ == "__main__":
-    main()
+    def clear_hooks(self, point: Optional[HookPoint] = None) -> None:
+        if point:
+            self._hooks[point].clear()
+        else:
+            for p in HookPoint:
+                self._hooks[p].clear()
+            self._global_hooks.clear()
