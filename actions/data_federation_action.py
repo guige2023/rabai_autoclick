@@ -1,27 +1,21 @@
 """
-Data Federation Action Module.
+Data Federation Action Module
 
-Provides unified data access across multiple data sources,
-query federation, data virtualization, and cross-source joins.
+Provides data federation, cross-source queries, and unified data access.
 """
-
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Optional, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-import asyncio
-import json
-import logging
-import uuid
 from collections import defaultdict
-
-logger = logging.getLogger(__name__)
+import asyncio
 
 
 class DataSourceType(Enum):
-    """Supported data source types."""
+    """Type of data source."""
+    SQL = "sql"
+    NOSQL = "nosql"
     REST_API = "rest_api"
-    DATABASE = "database"
     GRAPHQL = "graphql"
     FILE = "file"
     STREAM = "stream"
@@ -30,416 +24,372 @@ class DataSourceType(Enum):
 
 @dataclass
 class DataSource:
-    """Data source definition."""
-    source_id: str
+    """A federated data source."""
     name: str
     source_type: DataSourceType
-    connection_string: str
-    schema: Optional[Dict[str, Any]] = None
-    credentials: Optional[Dict[str, str]] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    connection_config: dict[str, Any]
+    connector: Optional[Any] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    priority: int = 0
+    timeout_seconds: float = 30.0
+    retry_attempts: int = 3
 
 
 @dataclass
 class FederatedQuery:
-    """Query across multiple data sources."""
-    query_id: str
-    sources: List[str]
-    join_conditions: List[Dict[str, Any]]
-    filters: List[Dict[str, Any]]
-    aggregations: List[Dict[str, Any]]
-    timeout: float = 30.0
+    """A query across multiple data sources."""
+    sources: list[str]
+    query_template: str
+    parameters: dict[str, Any]
+    join_strategy: str = "union"  # union, join, broadcast
+    aggregation: Optional[str] = None
 
 
 @dataclass
 class QueryResult:
-    """Result of a data query."""
-    query_id: str
-    source_id: str
-    success: bool
-    data: Any
-    row_count: int = 0
-    execution_time: float = 0.0
-    error: Optional[str] = None
+    """Result from a federated query."""
+    source: str
+    data: list[dict]
+    row_count: int
+    duration_ms: float
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass
-class DataJoinResult:
-    """Result of joining data from multiple sources."""
-    query_id: str
-    success: bool
-    data: List[Dict[str, Any]]
-    sources_used: List[str]
-    execution_time: float = 0.0
-    error: Optional[str] = None
+class FederatedResult:
+    """Combined result from federated query."""
+    results: list[QueryResult]
+    combined_data: list[dict]
+    total_rows: int
+    duration_ms: float
+    errors: list[str]
 
 
-class DataSourceConnector:
-    """Connector for a specific data source."""
-
-    def __init__(self, source: DataSource):
-        self.source = source
-        self._connection = None
-
-    async def connect(self):
-        """Establish connection to data source."""
-        await asyncio.sleep(0.01)
-
-    async def disconnect(self):
-        """Close connection to data source."""
-        self._connection = None
-
-    async def query(
-        self,
-        query: str,
-        params: Optional[Dict[str, Any]] = None
-    ) -> QueryResult:
-        """Execute query on data source."""
-        start_time = datetime.now()
-
-        try:
-            await asyncio.sleep(0.05)
-
-            result = QueryResult(
-                query_id=str(uuid.uuid4()),
-                source_id=self.source.source_id,
-                success=True,
-                data=[{"id": 1, "name": "sample"}],
-                row_count=1,
-                execution_time=0.05
-            )
-
-            return result
-
-        except Exception as e:
-            return QueryResult(
-                query_id=str(uuid.uuid4()),
-                source_id=self.source.source_id,
-                success=False,
-                data=None,
-                error=str(e),
-                execution_time=(datetime.now() - start_time).total_seconds()
-            )
-
-    async def stream_query(
-        self,
-        query: str,
-        callback: Callable[[Dict[str, Any]], None]
-    ):
-        """Stream query results."""
-        await asyncio.sleep(0.01)
-        for i in range(10):
-            await callback({"id": i, "value": f"item_{i}"})
-
-
-class DataJoiner:
-    """Joins data from multiple sources."""
-
-    def join(
-        self,
-        left_data: List[Dict[str, Any]],
-        right_data: List[Dict[str, Any]],
-        left_key: str,
-        right_key: str,
-        join_type: str = "inner"
-    ) -> List[Dict[str, Any]]:
-        """Perform join operation."""
-        index: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
-
-        for item in right_data:
-            key = item.get(right_key)
-            if key is not None:
-                index[key].append(item)
-
-        results = []
-        for left_item in left_data:
-            key = left_item.get(left_key)
-            matching = index.get(key, [])
-
-            if not matching and join_type == "left":
-                results.append({**left_item})
-            elif not matching and join_type != "outer":
-                continue
-
-            for right_item in matching:
-                merged = {**left_item, **right_item}
-                results.append(merged)
-
-        if join_type == "outer":
-            left_keys = {item.get(left_key) for item in left_data}
-            for right_item in right_data:
-                key = right_item.get(right_key)
-                if key not in left_keys:
-                    results.append({**right_item})
-
-        return results
-
-    def union(
-        self,
-        datasets: List[List[Dict[str, Any]]],
-        deduplicate: bool = False
-    ) -> List[Dict[str, Any]]:
-        """Union multiple datasets."""
-        result = []
-        seen = set() if deduplicate else None
-
-        for dataset in datasets:
-            for item in dataset:
-                item_key = json.dumps(item, sort_keys=True)
-                if deduplicate:
-                    if item_key in seen:
-                        continue
-                    seen.add(item_key)
-                result.append(item)
-
-        return result
-
-
-class QueryOptimizer:
-    """Optimizes federated queries."""
-
+class DataFederationAction:
+    """Main data federation action handler."""
+    
     def __init__(self):
-        self.cache: Dict[str, Any] = {}
-
-    def optimize(
+        self._sources: dict[str, DataSource] = {}
+        self._query_cache: dict[str, tuple[Any, datetime]] = {}
+        self._cache_ttl_seconds = 300
+        self._federation_stats: dict[str, dict] = defaultdict(lambda: {
+            "queries": 0, "rows": 0, "errors": 0, "avg_duration_ms": 0
+        })
+    
+    def register_source(
         self,
-        query: FederatedQuery
-    ) -> FederatedQuery:
-        """Optimize a federated query."""
-        optimized = FederatedQuery(
-            query_id=query.query_id,
-            sources=self._optimize_source_selection(query.sources),
-            join_conditions=query.join_conditions,
-            filters=self._push_down_filters(query.filters),
-            aggregations=query.aggregations,
-            timeout=query.timeout
-        )
-
-        return optimized
-
-    def _optimize_source_selection(
-        self,
-        sources: List[str]
-    ) -> List[str]:
-        """Select optimal sources."""
-        return sources
-
-    def _push_down_filters(
-        self,
-        filters: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Push filters down to source level."""
-        return filters
-
-
-class DataFederationEngine:
-    """Main data federation engine."""
-
-    def __init__(self):
-        self.sources: Dict[str, DataSource] = {}
-        self.connectors: Dict[str, DataSourceConnector] = {}
-        self.query_optimizer = QueryOptimizer()
-        self.data_joiner = DataJoiner()
-        self._query_cache: Dict[str, Tuple[Any, datetime]] = {}
-        self._cache_ttl: int = 300
-
-    def register_source(self, source: DataSource):
-        """Register a data source."""
-        self.sources[source.source_id] = source
-        self.connectors[source.source_id] = DataSourceConnector(source)
-        logger.info(f"Registered data source: {source.name}")
-
-    def unregister_source(self, source_id: str):
+        source: DataSource
+    ) -> "DataFederationAction":
+        """Register a data source for federation."""
+        self._sources[source.name] = source
+        return self
+    
+    def unregister_source(self, name: str) -> bool:
         """Unregister a data source."""
-        if source_id in self.sources:
-            del self.sources[source_id]
-            del self.connectors[source_id]
-
-    async def connect_all(self):
-        """Connect to all registered sources."""
-        for connector in self.connectors.values():
-            await connector.connect()
-
-    async def disconnect_all(self):
-        """Disconnect from all sources."""
-        for connector in self.connectors.values():
-            await connector.disconnect()
-
-    async def execute_query(
+        if name in self._sources:
+            del self._sources[name]
+            return True
+        return False
+    
+    async def execute_federated_query(
         self,
-        query: FederatedQuery,
-        use_cache: bool = True
-    ) -> DataJoinResult:
-        """Execute a federated query."""
-        query_id = query.query_id
-
-        if use_cache:
-            cached = self._query_cache.get(query_id)
-            if cached and (datetime.now() - cached[1]).total_seconds() < self._cache_ttl:
-                return DataJoinResult(
-                    query_id=query_id,
-                    success=True,
-                    data=cached[0],
-                    sources_used=query.sources,
-                    execution_time=0.0
-                )
-
-        optimized = self.query_optimizer.optimize(query)
-
-        results = []
-        for source_id in optimized.sources:
-            if source_id not in self.connectors:
-                continue
-
-            connector = self.connectors[source_id]
-            result = await connector.query(json.dumps({
-                "filters": optimized.filters,
-                "aggregations": optimized.aggregations
-            }))
-
-            if result.success:
-                results.append((source_id, result.data))
-
-        if len(results) == 1:
-            final_data = results[0][1]
-        elif len(results) > 1:
-            final_data = self._merge_results(results, optimized)
-        else:
-            final_data = []
-
-        if use_cache:
-            self._query_cache[query_id] = (final_data, datetime.now())
-
-        return DataJoinResult(
-            query_id=query_id,
-            success=True,
-            data=final_data,
-            sources_used=query.sources,
-            execution_time=0.1
-        )
-
-    def _merge_results(
-        self,
-        results: List[Tuple[str, Any]],
-        query: FederatedQuery
-    ) -> List[Dict[str, Any]]:
-        """Merge results from multiple sources."""
-        if not query.join_conditions:
-            combined = []
-            for _, data in results:
-                if isinstance(data, list):
-                    combined.extend(data)
-                else:
-                    combined.append(data)
-            return combined
-
-        left_data = None
-        right_data = None
-
-        for source_id, data in results:
-            if isinstance(data, list):
-                if left_data is None:
-                    left_data = data
-                else:
-                    right_data = data
-
-        if left_data and right_data and query.join_conditions:
-            join_cond = query.join_conditions[0]
-            return self.data_joiner.join(
-                left_data,
-                right_data,
-                join_cond.get("left_key", "id"),
-                join_cond.get("right_key", "id"),
-                join_cond.get("join_type", "inner")
+        federated_query: FederatedQuery
+    ) -> FederatedResult:
+        """
+        Execute a query across multiple data sources.
+        
+        Args:
+            federated_query: Query definition with source list and parameters
+            
+        Returns:
+            FederatedResult with combined data from all sources
+        """
+        start_time = datetime.now()
+        errors = []
+        
+        # Validate sources
+        valid_sources = [
+            s for s in federated_query.sources
+            if s in self._sources
+        ]
+        
+        if not valid_sources:
+            return FederatedResult(
+                results=[],
+                combined_data=[],
+                total_rows=0,
+                duration_ms=0,
+                errors=[f"No valid sources found from {federated_query.sources}"]
             )
-
-        return left_data or []
-
-    async def execute_parallel_queries(
-        self,
-        queries: List[FederatedQuery]
-    ) -> List[DataJoinResult]:
-        """Execute multiple queries in parallel."""
-        tasks = [self.execute_query(q) for q in queries]
-        return await asyncio.gather(*tasks)
-
-
-class DataVirtualizationLayer:
-    """Virtual layer for federated data access."""
-
-    def __init__(self, engine: DataFederationEngine):
-        self.engine = engine
-        self.virtual_tables: Dict[str, Dict[str, Any]] = {}
-
-    def create_virtual_table(
-        self,
-        name: str,
-        schema: Dict[str, Any],
-        source_mappings: List[Dict[str, Any]]
-    ):
-        """Create a virtual table definition."""
-        self.virtual_tables[name] = {
-            "name": name,
-            "schema": schema,
-            "source_mappings": source_mappings,
-            "created_at": datetime.now()
-        }
-
-    def query_virtual_table(
-        self,
-        table_name: str,
-        filters: Optional[Dict[str, Any]] = None
-    ) -> FederatedQuery:
-        """Create federated query for virtual table."""
-        if table_name not in self.virtual_tables:
-            raise ValueError(f"Virtual table not found: {table_name}")
-
-        vtable = self.virtual_tables[table_name]
-
-        return FederatedQuery(
-            query_id=str(uuid.uuid4()),
-            sources=[m["source_id"] for m in vtable["source_mappings"]],
-            join_conditions=[],
-            filters=filters or [],
-            aggregations=[]
+        
+        # Execute queries in parallel
+        tasks = [
+            self._execute_source_query(source_name, federated_query)
+            for source_name in valid_sources
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        query_results = []
+        all_data = []
+        
+        for source_name, result in zip(valid_sources, results):
+            if isinstance(result, Exception):
+                errors.append(f"{source_name}: {str(result)}")
+                self._federation_stats[source_name]["errors"] += 1
+            else:
+                query_results.append(result)
+                all_data.extend(result.data)
+                self._federation_stats[source_name]["queries"] += 1
+                self._federation_stats[source_name]["rows"] += result.row_count
+        
+        # Apply aggregation if specified
+        if federated_query.aggregation:
+            all_data = await self._apply_aggregation(
+                all_data,
+                federated_query.aggregation
+            )
+        
+        # Apply join strategy
+        combined_data = await self._apply_join_strategy(
+            [r.data for r in query_results],
+            federated_query.join_strategy
         )
-
-
-async def main():
-    """Demonstrate data federation."""
-    engine = DataFederationEngine()
-
-    engine.register_source(DataSource(
-        source_id="users",
-        name="Users DB",
-        source_type=DataSourceType.DATABASE,
-        connection_string="postgresql://localhost/users"
-    ))
-
-    engine.register_source(DataSource(
-        source_id="orders",
-        name="Orders DB",
-        source_type=DataSourceType.DATABASE,
-        connection_string="postgresql://localhost/orders"
-    ))
-
-    await engine.connect_all()
-
-    query = FederatedQuery(
-        query_id=str(uuid.uuid4()),
-        sources=["users", "orders"],
-        join_conditions=[
-            {"left_key": "id", "right_key": "user_id", "join_type": "inner"}
-        ],
-        filters=[],
-        aggregations=[]
-    )
-
-    result = await engine.execute_query(query)
-    print(f"Query result: {result.success}, rows: {len(result.data)}")
-
-    await engine.disconnect_all()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        
+        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+        
+        return FederatedResult(
+            results=query_results,
+            combined_data=combined_data,
+            total_rows=len(combined_data),
+            duration_ms=duration_ms,
+            errors=errors
+        )
+    
+    async def _execute_source_query(
+        self,
+        source_name: str,
+        federated_query: FederatedQuery
+    ) -> QueryResult:
+        """Execute query on a single source."""
+        start_time = datetime.now()
+        source = self._sources[source_name]
+        
+        # Check cache
+        cache_key = f"{source_name}:{federated_query.query_template}:{hash(frozenset(federated_query.parameters.items()))}"
+        if cache_key in self._query_cache:
+            cached_data, cached_at = self._query_cache[cache_key]
+            age = (datetime.now() - cached_at).total_seconds()
+            if age < self._cache_ttl_seconds:
+                return QueryResult(
+                    source=source_name,
+                    data=cached_data,
+                    row_count=len(cached_data),
+                    duration_ms=0,
+                    errors=[]
+                )
+        
+        # Simulate query execution
+        # In real implementation, this would use the connector
+        await asyncio.sleep(0.01)  # Simulate latency
+        
+        data = [federated_query.parameters]  # Simplified
+        
+        # Cache result
+        self._query_cache[cache_key] = (data, datetime.now())
+        
+        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+        
+        return QueryResult(
+            source=source_name,
+            data=data,
+            row_count=len(data),
+            duration_ms=duration_ms
+        )
+    
+    async def _apply_aggregation(
+        self,
+        data: list[dict],
+        aggregation: str
+    ) -> list[dict]:
+        """Apply aggregation to combined data."""
+        if not data:
+            return []
+        
+        if aggregation == "sum":
+            # Sum numeric fields
+            result = {}
+            for record in data:
+                for key, value in record.items():
+                    if isinstance(value, (int, float)):
+                        result[key] = result.get(key, 0) + value
+                    else:
+                        result[key] = value
+            return [result]
+        
+        elif aggregation == "avg":
+            # Average numeric fields
+            counts = defaultdict(int)
+            result = defaultdict(float)
+            
+            for record in data:
+                for key, value in record.items():
+                    if isinstance(value, (int, float)):
+                        result[key] += value
+                        counts[key] += 1
+                    else:
+                        result[key] = value
+            
+            for key in counts:
+                result[key] /= counts[key]
+            
+            return [dict(result)]
+        
+        elif aggregation == "count":
+            return [{"total_count": len(data)}]
+        
+        elif aggregation == "group_by":
+            # Group by first string field
+            groups = defaultdict(list)
+            group_key = None
+            
+            for record in data:
+                if not group_key:
+                    for k, v in record.items():
+                        if isinstance(v, str):
+                            group_key = k
+                            break
+                
+                if group_key and group_key in record:
+                    groups[record[group_key]].append(record)
+            
+            return [{"group": k, "count": len(v)} for k, v in groups.items()]
+        
+        return data
+    
+    async def _apply_join_strategy(
+        self,
+        data_list: list[list[dict]],
+        strategy: str
+    ) -> list[dict]:
+        """Apply join strategy to combine results from multiple sources."""
+        if not data_list:
+            return []
+        
+        if strategy == "union":
+            # Combine all records
+            combined = []
+            for data in data_list:
+                combined.extend(data)
+            return combined
+        
+        elif strategy == "broadcast":
+            # Broadcast first source to others
+            if len(data_list) < 2:
+                return data_list[0] if data_list else []
+            
+            base = data_list[0]
+            result = []
+            
+            for record in base:
+                for i, data in enumerate(data_list[1:], 1):
+                    merged = dict(record)
+                    merged[f"source_{i}"] = data[0] if data else {}
+                    result.append(merged)
+            
+            return result
+        
+        elif strategy == "join":
+            # Join records by key
+            if len(data_list) < 2:
+                return data_list[0] if data_list else []
+            
+            result = []
+            for i, data in enumerate(data_list):
+                for record in data:
+                    joined = {f"source_{i}_{k}": v for k, v in record.items()}
+                    result.append(joined)
+            
+            return result
+        
+        return data_list[0] if data_list else []
+    
+    async def federated_search(
+        self,
+        query: str,
+        sources: Optional[list[str]] = None,
+        filters: Optional[dict[str, Any]] = None
+    ) -> FederatedResult:
+        """Search across federated sources."""
+        sources = sources or list(self._sources.keys())
+        
+        federated_query = FederatedQuery(
+            sources=sources,
+            query_template=query,
+            parameters=filters or {},
+            join_strategy="union"
+        )
+        
+        return await self.execute_federated_query(federated_query)
+    
+    async def get_data_summary(
+        self,
+        source_name: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Get summary of federated data sources."""
+        if source_name:
+            if source_name not in self._sources:
+                return {"error": "Source not found"}
+            
+            source = self._sources[source_name]
+            stats = self._federation_stats.get(source_name, {})
+            
+            return {
+                "name": source.name,
+                "type": source.source_type.value,
+                "metadata": source.metadata,
+                "stats": stats
+            }
+        
+        return {
+            "total_sources": len(self._sources),
+            "sources": {
+                name: {
+                    "type": s.source_type.value,
+                    "priority": s.priority,
+                    "stats": self._federation_stats.get(name, {})
+                }
+                for name, s in self._sources.items()
+            },
+            "cache_size": len(self._query_cache)
+        }
+    
+    async def clear_cache(self, source_name: Optional[str] = None):
+        """Clear query cache."""
+        if source_name:
+            keys_to_remove = [
+                k for k in self._query_cache
+                if k.startswith(f"{source_name}:")
+            ]
+            for key in keys_to_remove:
+                del self._query_cache[key]
+        else:
+            self._query_cache.clear()
+    
+    def get_cache_stats(self) -> dict[str, Any]:
+        """Get cache statistics."""
+        total_size = len(self._query_cache)
+        oldest_entry = None
+        newest_entry = None
+        
+        if self._query_cache:
+            timestamps = [t for _, t in self._query_cache.values()]
+            oldest_entry = min(timestamps).isoformat()
+            newest_entry = max(timestamps).isoformat()
+        
+        return {
+            "cached_queries": total_size,
+            "oldest_entry": oldest_entry,
+            "newest_entry": newest_entry,
+            "ttl_seconds": self._cache_ttl_seconds
+        }
