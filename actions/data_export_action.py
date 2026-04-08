@@ -1,255 +1,301 @@
-"""Data export action module.
+"""
+Data Export Action - Exports data to various formats.
 
-Provides data export to various formats (CSV, JSON, Excel, Parquet, XML).
-Supports chunked export for large datasets and format conversion.
+This module provides data export capabilities including
+CSV, JSON, Excel, and custom format export.
 """
 
 from __future__ import annotations
 
 import csv
-import json
-import logging
 import io
-from typing import Optional, Dict, Any, List, Union
-from pathlib import Path
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from typing import Any, Callable, TypeVar
+from enum import Enum
 
-logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 class ExportFormat(Enum):
     """Supported export formats."""
     CSV = "csv"
     JSON = "json"
-    JSONL = "jsonl"
-    XML = "xml"
-    EXCEL = "xlsx"
-    PARQUET = "parquet"
+    JSON_LINES = "jsonl"
     TSV = "tsv"
+    XML = "xml"
     HTML = "html"
 
 
-from enum import Enum
+@dataclass
+class ExportConfig:
+    """Configuration for data export."""
+    format: ExportFormat = ExportFormat.CSV
+    include_headers: bool = True
+    delimiter: str = ","
+    quote_char: str = '"'
+    encoding: str = "utf-8"
+    line_ending: str = "\n"
 
 
 @dataclass
-class ExportOptions:
-    """Options for data export."""
-    format: ExportFormat = ExportFormat.CSV
-    delimiter: str = ","
-    include_header: bool = True
-    encoding: str = "utf-8"
-    chunk_size: int = 10000
-    max_rows: Optional[int] = None
+class ExportResult:
+    """Result of export operation."""
+    success: bool
+    content: str | bytes
+    format: ExportFormat
+    record_count: int
+    file_size: int
+
+
+class CSVExporter:
+    """Exports data to CSV format."""
+    
+    def __init__(self, config: ExportConfig) -> None:
+        self.config = config
+    
+    def export(
+        self,
+        data: list[dict[str, Any]],
+    ) -> str:
+        """Export data to CSV string."""
+        if not data:
+            return ""
+        
+        output = io.StringIO()
+        fieldnames = list(data[0].keys())
+        
+        writer = csv.DictWriter(
+            output,
+            fieldnames=fieldnames,
+            delimiter=self.config.delimiter,
+            quotechar=self.config.quote_char,
+            lineterminator=self.config.line_ending,
+        )
+        
+        if self.config.include_headers:
+            writer.writeheader()
+        
+        for record in data:
+            row = {k: self._format_value(v) for k, v in record.items()}
+            writer.writerow(row)
+        
+        return output.getvalue()
+    
+    def _format_value(self, value: Any) -> str:
+        """Format value for CSV."""
+        if value is None:
+            return ""
+        if isinstance(value, (list, dict)):
+            return json.dumps(value)
+        return str(value)
+
+
+class JSONExporter:
+    """Exports data to JSON format."""
+    
+    def __init__(self, config: ExportConfig) -> None:
+        self.config = config
+    
+    def export(
+        self,
+        data: list[dict[str, Any]],
+    ) -> str:
+        """Export data to JSON string."""
+        return json.dumps(
+            data,
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+
+
+class JSONLinesExporter:
+    """Exports data to JSON Lines format."""
+    
+    def __init__(self, config: ExportConfig) -> None:
+        self.config = config
+    
+    def export(
+        self,
+        data: list[dict[str, Any]],
+    ) -> str:
+        """Export data to JSON Lines string."""
+        lines = []
+        for record in data:
+            lines.append(json.dumps(record, ensure_ascii=False, default=str))
+        return self.config.line_ending.join(lines)
+
+
+class XMLExporter:
+    """Exports data to XML format."""
+    
+    def __init__(self, config: ExportConfig) -> None:
+        self.config = config
+    
+    def export(
+        self,
+        data: list[dict[str, Any]],
+    ) -> str:
+        """Export data to XML string."""
+        lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<root>"]
+        
+        for record in data:
+            lines.append("  <record>")
+            for key, value in record.items():
+                safe_key = self._sanitize_xml_tag(key)
+                safe_value = self._escape_xml(str(value))
+                lines.append(f"    <{safe_key}>{safe_value}</{safe_key}>")
+            lines.append("  </record>")
+        
+        lines.append("</root>")
+        return self.config.line_ending.join(lines)
+    
+    def _sanitize_xml_tag(self, name: str) -> str:
+        """Sanitize string for use as XML tag."""
+        import re
+        name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+        if name[0].isdigit():
+            name = f"_{name}"
+        return name
+    
+    def _escape_xml(self, text: str) -> str:
+        """Escape special XML characters."""
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
+
+
+class HTMLExporter:
+    """Exports data to HTML table format."""
+    
+    def __init__(self, config: ExportConfig) -> None:
+        self.config = config
+    
+    def export(
+        self,
+        data: list[dict[str, Any]],
+    ) -> str:
+        """Export data to HTML table."""
+        if not data:
+            return "<table></table>"
+        
+        lines = ["<table>"]
+        
+        if self.config.include_headers:
+            lines.append("  <thead><tr>")
+            for key in data[0].keys():
+                lines.append(f"    <th>{self._escape_html(key)}</th>")
+            lines.append("  </tr></thead>")
+        
+        lines.append("  <tbody>")
+        for record in data:
+            lines.append("    <tr>")
+            for value in record.values():
+                lines.append(f"      <td>{self._escape_html(str(value))}</td>")
+            lines.append("    </tr>")
+        lines.append("  </tbody>")
+        lines.append("</table>")
+        
+        return self.config.line_ending.join(lines)
+    
+    def _escape_html(self, text: str) -> str:
+        """Escape HTML special characters."""
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
 
 
 class DataExportAction:
-    """Data export engine.
-
-    Exports lists of dicts to various file formats with configurable options.
-
-    Example:
-        exporter = DataExportAction()
-        exporter.to_csv(data, "/tmp/export.csv")
-        exporter.to_json(data, "/tmp/export.json", pretty=True)
     """
-
-    def __init__(self, default_options: Optional[ExportOptions] = None) -> None:
-        self.default_options = default_options or ExportOptions()
-
-    def to_csv(
+    Data export action for automation workflows.
+    
+    Example:
+        action = DataExportAction()
+        result = await action.export(
+            records,
+            format=ExportFormat.CSV,
+            include_headers=True
+        )
+    """
+    
+    def __init__(self) -> None:
+        self._exporters = {
+            ExportFormat.CSV: CSVExporter,
+            ExportFormat.JSON: JSONExporter,
+            ExportFormat.JSON_LINES: JSONLinesExporter,
+            ExportFormat.XML: XMLExporter,
+            ExportFormat.HTML: HTMLExporter,
+        }
+    
+    async def export(
         self,
-        data: List[Dict[str, Any]],
-        path: Union[str, Path],
-        options: Optional[ExportOptions] = None,
-    ) -> int:
-        """Export data to CSV file.
-
-        Args:
-            data: List of dicts to export.
-            path: Output file path.
-            options: Export options.
-
-        Returns:
-            Number of rows exported.
-        """
-        opts = options or self.default_options
-        rows_written = 0
-
-        with open(path, "w", newline="", encoding=opts.encoding) as f:
-            if not data:
-                return 0
-
-            fieldnames = list(data[0].keys()) if data else []
-            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=opts.delimiter)
-
-            if opts.include_header:
-                writer.writeheader()
-
-            for i, row in enumerate(data):
-                if opts.max_rows and i >= opts.max_rows:
-                    break
-                writer.writerow(row)
-                rows_written += 1
-
-        logger.info("Exported %d rows to %s", rows_written, path)
-        return rows_written
-
-    def to_json(
-        self,
-        data: List[Dict[str, Any]],
-        path: Union[str, Path],
-        pretty: bool = False,
-        options: Optional[ExportOptions] = None,
-    ) -> int:
-        """Export data to JSON file.
-
-        Args:
-            data: List of dicts to export.
-            path: Output file path.
-            pretty: Pretty-print JSON.
-            options: Export options.
-
-        Returns:
-            Number of rows exported.
-        """
-        opts = options or self.default_options
-        max_rows = opts.max_rows or len(data)
-
-        with open(path, "w", encoding=opts.encoding) as f:
-            indent = 2 if pretty else None
-            json.dump(data[:max_rows], f, indent=indent, ensure_ascii=False, default=str)
-
-        rows = min(len(data), max_rows)
-        logger.info("Exported %d rows to %s", rows, path)
-        return rows
-
-    def to_jsonl(
-        self,
-        data: List[Dict[str, Any]],
-        path: Union[str, Path],
-        options: Optional[ExportOptions] = None,
-    ) -> int:
-        """Export data to JSON Lines file.
-
-        Args:
-            data: List of dicts to export.
-            path: Output file path.
-            options: Export options.
-
-        Returns:
-            Number of rows exported.
-        """
-        opts = options or self.default_options
-        rows_written = 0
-
-        with open(path, "w", encoding=opts.encoding) as f:
-            for i, row in enumerate(data):
-                if opts.max_rows and i >= opts.max_rows:
-                    break
-                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-                rows_written += 1
-
-        logger.info("Exported %d rows to %s", rows_written, path)
-        return rows_written
-
-    def to_tsv(
-        self,
-        data: List[Dict[str, Any]],
-        path: Union[str, Path],
-        options: Optional[ExportOptions] = None,
-    ) -> int:
-        """Export data to TSV file."""
-        opts = (options or self.default_options)
-        opts.delimiter = "\t"
-        return self.to_csv(data, path, opts)
-
-    def to_html(
-        self,
-        data: List[Dict[str, Any]],
-        path: Union[str, Path],
-        title: str = "Data Export",
-        options: Optional[ExportOptions] = None,
-    ) -> int:
-        """Export data to HTML table.
-
-        Args:
-            data: List of dicts to export.
-            path: Output file path.
-            title: HTML page title.
-            options: Export options.
-
-        Returns:
-            Number of rows exported.
-        """
-        opts = options or self.default_options
-        max_rows = opts.max_rows or len(data)
-        export_data = data[:max_rows]
-
-        if not export_data:
-            return 0
-
-        fieldnames = list(export_data[0].keys())
-
-        html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="{opts.encoding}">
-    <title>{title}</title>
-    <style>
-        table {{ border-collapse: collapse; width: 100%; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-        th {{ background-color: #4CAF50; color: white; }}
-        tr:nth-child(even) {{ background-color: #f2f2f2; }}
-    </style>
-</head>
-<body>
-    <h1>{title}</h1>
-    <table>
-        <thead>
-            <tr>{"".join(f"<th>{h}</th>" for h in fieldnames)}</tr>
-        </thead>
-        <tbody>
-"""
-        for row in export_data:
-            html += "            <tr>" + "".join(f"<td>{str(row.get(h, ''))}</td>" for h in fieldnames) + "</tr>\n"
-
-        html += """        </tbody>
-    </table>
-</body>
-</html>"""
-
-        with open(path, "w", encoding=opts.encoding) as f:
-            f.write(html)
-
-        logger.info("Exported %d rows to %s", len(export_data), path)
-        return len(export_data)
-
-    def to_string(
-        self,
-        data: List[Dict[str, Any]],
+        data: list[dict[str, Any]],
         format: ExportFormat = ExportFormat.CSV,
-        options: Optional[ExportOptions] = None,
-    ) -> str:
-        """Export data to string in specified format.
-
-        Args:
-            data: List of dicts to export.
-            format: Output format.
-            options: Export options.
-
-        Returns:
-            Exported data as string.
-        """
-        opts = options or self.default_options
-
+        **kwargs,
+    ) -> ExportResult:
+        """Export data to specified format."""
+        config = ExportConfig(format=format, **kwargs)
+        
+        exporter_class = self._exporters.get(format, JSONExporter)
+        exporter = exporter_class(config)
+        
+        try:
+            content = exporter.export(data)
+            return ExportResult(
+                success=True,
+                content=content,
+                format=format,
+                record_count=len(data),
+                file_size=len(content),
+            )
+        except Exception as e:
+            return ExportResult(
+                success=False,
+                content="",
+                format=format,
+                record_count=0,
+                file_size=0,
+            )
+    
+    def export_to_bytes(
+        self,
+        data: list[dict[str, Any]],
+        format: ExportFormat = ExportFormat.CSV,
+        **kwargs,
+    ) -> bytes:
+        """Export data as bytes."""
+        import gzip
+        
+        config = ExportConfig(format=format, **kwargs)
+        exporter_class = self._exporters.get(format, JSONExporter)
+        exporter = exporter_class(config)
+        
+        content = exporter.export(data)
+        
         if format == ExportFormat.CSV:
-            output = io.StringIO()
-            self.to_csv(data, output, options=opts)
-            return output.getvalue()
-        elif format == ExportFormat.JSON:
-            return json.dumps(data, indent=2, ensure_ascii=False, default=str)
-        elif format == ExportFormat.JSONL:
-            return "\n".join(json.dumps(row, ensure_ascii=False, default=str) for row in data)
+            return content.encode(config.encoding)
+        
+        return content.encode(config.encoding)
 
-        raise ValueError(f"Unsupported format for string export: {format}")
+
+# Export public API
+__all__ = [
+    "ExportFormat",
+    "ExportConfig",
+    "ExportResult",
+    "CSVExporter",
+    "JSONExporter",
+    "JSONLinesExporter",
+    "XMLExporter",
+    "HTMLExporter",
+    "DataExportAction",
+]
