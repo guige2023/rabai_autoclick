@@ -1,18 +1,16 @@
-"""Hook system action module for RabAI AutoClick.
+"""Hook action module for RabAI AutoClick.
 
-Provides hook/callback operations:
-- HookRegisterAction: Register hooks for events
-- HookTriggerAction: Trigger registered hooks
-- HookUnregisterAction: Unregister hooks
-- HookChainAction: Chain multiple hooks together
+Provides hook/callback utilities:
+- HookRegistry: Register and manage hooks
+- HookExecutor: Execute hooks
+- FilterChain: Chain filter hooks
 """
 
-import uuid
-import threading
 from typing import Any, Callable, Dict, List, Optional
-from dataclasses import dataclass, field
-from datetime import datetime
-
+from dataclasses import dataclass
+import threading
+import time
+import uuid
 
 import sys
 import os
@@ -24,21 +22,18 @@ from core.base_action import BaseAction, ActionResult
 
 @dataclass
 class Hook:
-    """Represents a hook callback."""
+    """Hook definition."""
     hook_id: str
     name: str
-    event: str
-    callback: Callable
+    func: Callable
     priority: int = 0
     enabled: bool = True
-    once: bool = False
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    call_count: int = 0
-    last_called: Optional[datetime] = None
+    metadata: Dict[str, Any] = None
 
 
-class HookManager:
-    """Manages hooks and their execution."""
+class HookRegistry:
+    """Registry for hooks."""
+
     def __init__(self):
         self._hooks: Dict[str, List[Hook]] = {}
         self._lock = threading.RLock()
@@ -46,231 +41,232 @@ class HookManager:
     def register(
         self,
         name: str,
-        event: str,
-        callback: Callable,
+        func: Callable,
+        hook_id: Optional[str] = None,
         priority: int = 0,
-        once: bool = False
     ) -> str:
-        hook_id = str(uuid.uuid4())
-        hook = Hook(hook_id=hook_id, name=name, event=event, callback=callback, priority=priority, once=once)
+        """Register a hook."""
         with self._lock:
-            if event not in self._hooks:
-                self._hooks[event] = []
-            self._hooks[event].append(hook)
-            self._hooks[event].sort(key=lambda h: h.priority, reverse=True)
-        return hook_id
+            hid = hook_id or str(uuid.uuid4())
 
-    def unregister(self, hook_id: str) -> bool:
+            hook = Hook(
+                hook_id=hid,
+                name=name,
+                func=func,
+                priority=priority,
+            )
+
+            if name not in self._hooks:
+                self._hooks[name] = []
+
+            self._hooks[name].append(hook)
+            self._hooks[name].sort(key=lambda h: h.priority, reverse=True)
+
+            return hid
+
+    def unregister(self, name: str, hook_id: str) -> bool:
+        """Unregister a hook."""
         with self._lock:
-            for event, hooks in self._hooks.items():
-                for hook in hooks[:]:
-                    if hook.hook_id == hook_id:
-                        hooks.remove(hook)
-                        return True
+            if name not in self._hooks:
+                return False
+
+            for i, hook in enumerate(self._hooks[name]):
+                if hook.hook_id == hook_id:
+                    self._hooks[name].pop(i)
+                    return True
+
+            return False
+
+    def enable(self, name: str, hook_id: str) -> bool:
+        """Enable a hook."""
+        with self._lock:
+            return self._set_enabled(name, hook_id, True)
+
+    def disable(self, name: str, hook_id: str) -> bool:
+        """Disable a hook."""
+        with self._lock:
+            return self._set_enabled(name, hook_id, False)
+
+    def _set_enabled(self, name: str, hook_id: str, enabled: bool) -> bool:
+        """Set hook enabled state."""
+        if name not in self._hooks:
+            return False
+
+        for hook in self._hooks[name]:
+            if hook.hook_id == hook_id:
+                hook.enabled = enabled
+                return True
+
         return False
 
-    def trigger(self, event: str, context: Any, data: Any = None) -> List[Any]:
-        results = []
+    def get_hooks(self, name: str) -> List[Hook]:
+        """Get all hooks for a name."""
         with self._lock:
-            hooks = list(self._hooks.get(event, []))
-        to_remove = []
+            if name not in self._hooks:
+                return []
+            return [h for h in self._hooks[name] if h.enabled]
+
+    def list_hooks(self) -> Dict[str, List[str]]:
+        """List all registered hooks."""
+        with self._lock:
+            return {name: [h.hook_id for h in hooks] for name, hooks in self._hooks.items()}
+
+
+class HookExecutor:
+    """Execute hooks."""
+
+    def __init__(self, registry: Optional[HookRegistry] = None):
+        self.registry = registry or HookRegistry()
+
+    def execute(self, name: str, *args, **kwargs) -> List[Any]:
+        """Execute all hooks for a name."""
+        hooks = self.registry.get_hooks(name)
+        results = []
+
         for hook in hooks:
-            if not hook.enabled:
-                continue
             try:
-                result = hook.callback(context, data)
-                hook.call_count += 1
-                hook.last_called = datetime.utcnow()
-                results.append(result)
-                if hook.once:
-                    to_remove.append(hook.hook_id)
-            except Exception:
-                pass
-        for hid in to_remove:
-            self.unregister(hid)
+                result = hook.func(*args, **kwargs)
+                results.append({"hook_id": hook.hook_id, "success": True, "result": result})
+            except Exception as e:
+                results.append({"hook_id": hook.hook_id, "success": False, "error": str(e)})
+
         return results
 
-    def enable(self, hook_id: str) -> bool:
-        with self._lock:
-            for hooks in self._hooks.values():
-                for hook in hooks:
-                    if hook.hook_id == hook_id:
-                        hook.enabled = True
-                        return True
-        return False
+    def execute_until_success(self, name: str, *args, **kwargs) -> Optional[Any]:
+        """Execute hooks until one succeeds."""
+        hooks = self.registry.get_hooks(name)
 
-    def disable(self, hook_id: str) -> bool:
-        with self._lock:
-            for hooks in self._hooks.values():
-                for hook in hooks:
-                    if hook.hook_id == hook_id:
-                        hook.enabled = False
-                        return True
-        return False
+        for hook in hooks:
+            try:
+                result = hook.func(*args, **kwargs)
+                return result
+            except Exception:
+                continue
 
-    def list_hooks(self, event: Optional[str] = None) -> List[Dict[str, Any]]:
-        with self._lock:
-            if event:
-                hooks = self._hooks.get(event, [])
+        return None
+
+
+class FilterChain:
+    """Chain of filter hooks."""
+
+    def __init__(self, filters: Optional[List[Callable]] = None):
+        self._filters = filters or []
+
+    def add_filter(self, filter_fn: Callable) -> None:
+        """Add a filter to chain."""
+        self._filters.append(filter_fn)
+
+    def execute(self, data: Any) -> Any:
+        """Execute filter chain."""
+        result = data
+        for filter_fn in self._filters:
+            result = filter_fn(result)
+        return result
+
+
+class HookAction(BaseAction):
+    """Hook management action."""
+    action_type = "hook"
+    display_name = "钩子管理"
+    description = "钩子注册执行"
+
+    def __init__(self):
+        super().__init__()
+        self._registry = HookRegistry()
+        self._executor = HookExecutor(self._registry)
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "register")
+
+            if operation == "register":
+                return self._register(params)
+            elif operation == "unregister":
+                return self._unregister(params)
+            elif operation == "enable":
+                return self._enable(params)
+            elif operation == "disable":
+                return self._disable(params)
+            elif operation == "execute":
+                return self._execute(params)
+            elif operation == "list":
+                return self._list()
             else:
-                all_hooks = []
-                for h_list in self._hooks.values():
-                    all_hooks.extend(h_list)
-                hooks = all_hooks
-            return [
-                {
-                    "hook_id": h.hook_id,
-                    "name": h.name,
-                    "event": h.event,
-                    "priority": h.priority,
-                    "enabled": h.enabled,
-                    "once": h.once,
-                    "call_count": h.call_count,
-                    "last_called": h.last_called.isoformat() if h.last_called else None
-                }
-                for h in hooks
-            ]
-
-
-_hook_manager = HookManager()
-
-
-class HookRegisterAction(BaseAction):
-    """Register a hook for an event."""
-    action_type = "hook_register"
-    display_name = "注册Hook"
-    description = "为事件注册Hook回调"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            event = params.get("event", "")
-            priority = params.get("priority", 0)
-            once = params.get("once", False)
-            callback_ref = params.get("callback_ref", None)
-
-            if not name:
-                return ActionResult(success=False, message="name is required")
-            if not event:
-                return ActionResult(success=False, message="event is required")
-
-            def default_callback(ctx, data):
-                return {"status": "ok", "event": event}
-
-            callback = callback_ref or default_callback
-            hook_id = _hook_manager.register(name=name, event=event, callback=callback, priority=priority, once=once)
-
-            return ActionResult(
-                success=True,
-                message=f"Hook '{name}' registered for event '{event}'",
-                data={"hook_id": hook_id, "event": event, "name": name}
-            )
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Hook register failed: {str(e)}")
+            return ActionResult(success=False, message=f"Hook error: {str(e)}")
 
+    def _register(self, params: Dict[str, Any]) -> ActionResult:
+        """Register a hook."""
+        name = params.get("name")
+        priority = params.get("priority", 0)
 
-class HookTriggerAction(BaseAction):
-    """Trigger all hooks for an event."""
-    action_type = "hook_trigger"
-    display_name = "触发Hook"
-    description = "触发事件的所有Hook"
+        if not name:
+            return ActionResult(success=False, message="name is required")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            event = params.get("event", "")
-            data = params.get("data", None)
-            blocking = params.get("blocking", True)
+        def dummy_func():
+            return {"executed": True}
 
-            if not event:
-                return ActionResult(success=False, message="event is required")
+        hook_id = self._registry.register(name, dummy_func, priority=priority)
 
-            results = _hook_manager.trigger(event, context, data)
+        return ActionResult(success=True, message=f"Hook registered: {hook_id}", data={"hook_id": hook_id})
 
-            return ActionResult(
-                success=True,
-                message=f"Triggered {len(results)} hooks for event '{event}'",
-                data={"event": event, "results": results, "count": len(results)}
-            )
+    def _unregister(self, params: Dict[str, Any]) -> ActionResult:
+        """Unregister a hook."""
+        name = params.get("name")
+        hook_id = params.get("hook_id")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hook trigger failed: {str(e)}")
+        if not name or not hook_id:
+            return ActionResult(success=False, message="name and hook_id are required")
 
+        success = self._registry.unregister(name, hook_id)
 
-class HookUnregisterAction(BaseAction):
-    """Unregister a hook."""
-    action_type = "hook_unregister"
-    display_name = "注销Hook"
-    description = "注销Hook回调"
+        return ActionResult(success=success, message="Unregistered" if success else "Hook not found")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            hook_id = params.get("hook_id", "")
-            name = params.get("name", None)
-            event = params.get("event", None)
+    def _enable(self, params: Dict[str, Any]) -> ActionResult:
+        """Enable a hook."""
+        name = params.get("name")
+        hook_id = params.get("hook_id")
 
-            if hook_id:
-                removed = _hook_manager.unregister(hook_id)
-                if removed:
-                    return ActionResult(success=True, message=f"Hook {hook_id} unregistered")
-                return ActionResult(success=False, message=f"Hook {hook_id} not found")
+        if not name or not hook_id:
+            return ActionResult(success=False, message="name and hook_id are required")
 
-            if name or event:
-                hooks = _hook_manager.list_hooks(event=event)
-                matching = [h for h in hooks if (not name) or (name and h["name"] == name)]
-                for h in matching:
-                    _hook_manager.unregister(h["hook_id"])
-                return ActionResult(success=True, message=f"Unregistered {len(matching)} hooks")
+        success = self._registry.enable(name, hook_id)
 
-            return ActionResult(success=False, message="hook_id or name/event required")
+        return ActionResult(success=success, message="Enabled" if success else "Hook not found")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hook unregister failed: {str(e)}")
+    def _disable(self, params: Dict[str, Any]) -> ActionResult:
+        """Disable a hook."""
+        name = params.get("name")
+        hook_id = params.get("hook_id")
 
+        if not name or not hook_id:
+            return ActionResult(success=False, message="name and hook_id are required")
 
-class HookChainAction(BaseAction):
-    """Chain multiple hooks together sequentially."""
-    action_type = "hook_chain"
-    display_name = "Hook链"
-    description = "顺序链接多个Hook"
+        success = self._registry.disable(name, hook_id)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            event = params.get("event", "")
-            data = params.get("data", None)
-            stop_on_error = params.get("stop_on_error", True)
+        return ActionResult(success=success, message="Disabled" if success else "Hook not found")
 
-            if not event:
-                return ActionResult(success=False, message="event is required")
+    def _execute(self, params: Dict[str, Any]) -> ActionResult:
+        """Execute hooks."""
+        name = params.get("name")
 
-            results = []
-            hooks = _hook_manager.list_hooks(event=event)
+        if not name:
+            return ActionResult(success=False, message="name is required")
 
-            for hook_info in hooks:
-                hook_id = hook_info["hook_id"]
-                hook = None
-                with threading.Lock():
-                    for h_list in _hook_manager._hooks.values():
-                        for h in h_list:
-                            if h.hook_id == hook_id:
-                                hook = h
-                                break
-                if not hook or not hook.enabled:
-                    continue
-                try:
-                    result = hook.callback(context, data)
-                    results.append({"hook_id": hook_id, "status": "ok", "result": result})
-                except Exception as ex:
-                    results.append({"hook_id": hook_id, "status": "error", "error": str(ex)})
-                    if stop_on_error:
-                        break
+        results = self._executor.execute(name)
 
-            errors = [r for r in results if r["status"] == "error"]
-            return ActionResult(
-                success=len(errors) == 0,
-                message=f"Hook chain completed: {len(results) - len(errors)}/{len(results)} succeeded",
-                data={"results": results, "count": len(results), "errors": len(errors)}
-            )
+        successful = sum(1 for r in results if r["success"])
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hook chain failed: {str(e)}")
+        return ActionResult(
+            success=successful > 0,
+            message=f"Executed: {successful}/{len(results)} successful",
+            data={"results": results, "successful": successful},
+        )
+
+    def _list(self) -> ActionResult:
+        """List all hooks."""
+        hooks = self._registry.list_hooks()
+
+        return ActionResult(success=True, message=f"{len(hooks)} hook types", data={"hooks": hooks})
