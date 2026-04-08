@@ -1,395 +1,255 @@
-"""Batch processing action module for RabAI AutoClick.
+"""Batch Process action module for RabAI AutoClick.
 
 Provides batch processing operations:
-- BatchProcessAction: Process items in batches
-- BatchParallelAction: Process items in parallel
-- BatchChunkAction: Split data into chunks
+- BatchSplitAction: Split data into batches
+- BatchProcessAction: Process data in batches
 - BatchMergeAction: Merge batch results
-- BatchRetryAction: Retry failed operations
-- BatchThrottleAction: Throttle batch operations
+- BatchRetryAction: Retry failed batch items
 """
 
-import concurrent.futures
-import time
-from typing import Any, Callable, Dict, List, Optional
+from __future__ import annotations
 
 import sys
 import os
+from typing import Any, Dict, List, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import os as _os
+_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
+class BatchSplitAction(BaseAction):
+    """Split data into batches."""
+    action_type = "batch_split"
+    display_name = "批量分割"
+    description = "将数据分割为批次"
+    version = "1.0"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute batch split."""
+        data = params.get('data', [])
+        batch_size = params.get('batch_size', 10)
+        output_var = params.get('output_var', 'batches')
+
+        if not data:
+            return ActionResult(success=False, message="data is required")
+
+        try:
+            resolved_data = context.resolve_value(data) if context else data
+
+            batches = []
+            for i in range(0, len(resolved_data), batch_size):
+                batches.append(resolved_data[i:i + batch_size])
+
+            result = {
+                'batches': batches,
+                'batch_count': len(batches),
+                'batch_size': batch_size,
+                'total_records': len(resolved_data),
+            }
+
+            return ActionResult(
+                success=True,
+                data={output_var: result},
+                message=f"Split into {len(batches)} batches of ~{batch_size}"
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Batch split error: {e}")
+
+
 class BatchProcessAction(BaseAction):
-    """Process items in batches."""
+    """Process data in batches."""
     action_type = "batch_process"
     display_name = "批量处理"
-    description = "批量处理数据项"
+    description = "批量处理数据"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            items = params.get("items", [])
-            batch_size = params.get("batch_size", 10)
-            operation = params.get("operation", "identity")
-            params_config = params.get("params", {})
+        """Execute batch processing."""
+        batches = params.get('batches', [])
+        processor = params.get('processor', 'identity')
+        max_workers = params.get('max_workers', 4)
+        output_var = params.get('output_var', 'batch_results')
 
-            if not items:
-                return ActionResult(success=False, message="items list is required")
+        if not batches:
+            return ActionResult(success=False, message="batches are required")
+
+        try:
+            resolved_batches = context.resolve_value(batches) if context else batches
 
             results = []
-            failed = []
-            total_batches = (len(items) + batch_size - 1) // batch_size
+            success_count = 0
+            error_count = 0
 
-            for batch_idx in range(total_batches):
-                start = batch_idx * batch_size
-                end = min(start + batch_size, len(items))
-                batch = items[start:end]
-
-                batch_results = []
+            def process_batch(batch):
+                processed = []
                 for item in batch:
-                    try:
-                        result = self._apply_operation(operation, item, params_config)
-                        batch_results.append(result)
-                        results.append({"item": item, "result": result, "success": True})
-                    except Exception as e:
-                        failed.append({"item": item, "error": str(e)})
-                        results.append({"item": item, "result": None, "success": False, "error": str(e)})
+                    if processor == 'identity':
+                        processed.append(item)
+                    elif processor == 'uppercase' and isinstance(item, dict):
+                        new_item = {}
+                        for k, v in item.items():
+                            new_item[k] = v.upper() if isinstance(v, str) else v
+                        processed.append(new_item)
+                    elif processor == 'lowercase' and isinstance(item, dict):
+                        new_item = {}
+                        for k, v in item.items():
+                            new_item[k] = v.lower() if isinstance(v, str) else v
+                        processed.append(new_item)
+                    else:
+                        processed.append(item)
+                return processed
 
-                params_config["_batch_index"] = batch_idx
-
-            return ActionResult(
-                success=True,
-                message=f"Processed {len(items)} items in {total_batches} batches",
-                data={
-                    "results": results,
-                    "total": len(items),
-                    "succeeded": len(items) - len(failed),
-                    "failed": len(failed),
-                    "batch_count": total_batches
-                }
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Batch process error: {str(e)}")
-
-    def _apply_operation(self, operation: str, item: Any, params: Dict) -> Any:
-        """Apply operation to item."""
-        if operation == "identity":
-            return item
-        elif operation == "double":
-            try:
-                return float(item) * 2
-            except:
-                return item
-        elif operation == "uppercase":
-            return str(item).upper()
-        elif operation == "lowercase":
-            return str(item).lower()
-        elif operation == "trim":
-            return str(item).strip()
-        elif operation == "length":
-            return len(item) if hasattr(item, "__len__") else 1
-        elif operation == "hash":
-            import hashlib
-            return hashlib.md5(str(item).encode()).hexdigest()
-        elif operation == "json":
-            import json
-            return json.dumps(item) if isinstance(item, dict) else item
-        else:
-            return item
-
-
-class BatchParallelAction(BaseAction):
-    """Process items in parallel."""
-    action_type = "batch_parallel"
-    display_name = "并行处理"
-    description = "并行处理数据项"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            items = params.get("items", [])
-            max_workers = params.get("max_workers", 4)
-            operation = params.get("operation", "identity")
-            params_config = params.get("params", {})
-
-            if not items:
-                return ActionResult(success=False, message="items list is required")
-
-            results = []
-            failed = []
-
-            def process_item(item):
-                try:
-                    result = self._apply_operation(operation, item, params_config)
-                    return {"item": item, "result": result, "success": True}
-                except Exception as e:
-                    return {"item": item, "result": None, "success": False, "error": str(e)}
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(process_item, item) for item in items]
-                for future in concurrent.futures.as_completed(futures):
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(process_batch, batch): i for i, batch in enumerate(resolved_batches)}
+                for future in as_completed(futures):
+                    batch_index = futures[future]
                     try:
                         result = future.result()
-                        results.append(result)
-                        if not result["success"]:
-                            failed.append(result)
+                        results.append({'batch': batch_index, 'success': True, 'result': result})
+                        success_count += 1
                     except Exception as e:
-                        failed.append({"error": str(e)})
+                        results.append({'batch': batch_index, 'success': False, 'error': str(e)})
+                        error_count += 1
+
+            all_results = []
+            for r in results:
+                if r['success']:
+                    all_results.extend(r['result'])
+
+            result = {
+                'results': all_results,
+                'batch_count': len(resolved_batches),
+                'success_count': success_count,
+                'error_count': error_count,
+            }
 
             return ActionResult(
-                success=True,
-                message=f"Parallel processed {len(items)} items",
-                data={
-                    "results": results,
-                    "total": len(items),
-                    "succeeded": len(items) - len(failed),
-                    "failed": len(failed),
-                    "workers": max_workers
-                }
+                success=error_count == 0,
+                data={output_var: result},
+                message=f"Batch process: {success_count}/{len(resolved_batches)} batches successful"
             )
-
         except Exception as e:
-            return ActionResult(success=False, message=f"Parallel process error: {str(e)}")
-
-    def _apply_operation(self, operation: str, item: Any, params: Dict) -> Any:
-        if operation == "identity":
-            return item
-        elif operation == "double":
-            try:
-                return float(item) * 2
-            except:
-                return item
-        elif operation == "uppercase":
-            return str(item).upper()
-        elif operation == "hash":
-            import hashlib
-            return hashlib.sha256(str(item).encode()).hexdigest()
-        else:
-            return item
-
-
-class BatchChunkAction(BaseAction):
-    """Split data into chunks."""
-    action_type = "batch_chunk"
-    display_name = "数据分块"
-    description = "将数据拆分为块"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            chunk_size = params.get("chunk_size", 10)
-            overlap = params.get("overlap", 0)
-
-            if not data:
-                return ActionResult(success=False, message="data list is required")
-
-            if isinstance(data, str):
-                data = list(data)
-
-            chunks = []
-            if overlap > 0 and overlap < chunk_size:
-                step = chunk_size - overlap
-                for i in range(0, len(data), step):
-                    chunk = data[i:i + chunk_size]
-                    if chunk:
-                        chunks.append(chunk)
-                    if i + chunk_size >= len(data):
-                        break
-            else:
-                for i in range(0, len(data), chunk_size):
-                    chunk = data[i:i + chunk_size]
-                    if chunk:
-                        chunks.append(chunk)
-
-            return ActionResult(
-                success=True,
-                message=f"Split into {len(chunks)} chunks",
-                data={"chunks": chunks, "chunk_count": len(chunks), "chunk_size": chunk_size}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Chunk error: {str(e)}")
+            return ActionResult(success=False, message=f"Batch process error: {e}")
 
 
 class BatchMergeAction(BaseAction):
     """Merge batch results."""
     action_type = "batch_merge"
-    display_name = "合并结果"
-    description = "合并批量处理结果"
+    display_name = "批量合并"
+    description = "合并批次结果"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute batch merge."""
+        batch_results = params.get('batch_results', [])
+        merge_strategy = params.get('strategy', 'concat')
+        output_var = params.get('output_var', 'merged_result')
+
+        if not batch_results:
+            return ActionResult(success=False, message="batch_results are required")
+
         try:
-            batches = params.get("batches", [])
-            merge_strategy = params.get("strategy", "concat")
+            resolved_results = context.resolve_value(batch_results) if context else batch_results
 
-            if not batches:
-                return ActionResult(success=False, message="batches list is required")
-
-            if merge_strategy == "concat":
+            if merge_strategy == 'concat':
                 merged = []
-                for batch in batches:
+                for batch in resolved_results:
                     if isinstance(batch, list):
                         merged.extend(batch)
                     else:
                         merged.append(batch)
-
-            elif merge_strategy == "union":
+            elif merge_strategy == 'union':
                 seen = set()
                 merged = []
-                for batch in batches:
+                for batch in resolved_results:
                     if isinstance(batch, list):
                         for item in batch:
-                            key = str(item)
+                            key = str(item) if not isinstance(item, (str, int, float)) else item
                             if key not in seen:
                                 seen.add(key)
                                 merged.append(item)
                     else:
-                        key = str(batch)
+                        key = str(batch) if not isinstance(batch, (str, int, float)) else batch
                         if key not in seen:
                             seen.add(key)
                             merged.append(batch)
-
-            elif merge_strategy == "zip":
+            elif merge_strategy == 'zip':
                 merged = []
-                max_len = max(len(b) for b in batches if isinstance(b, list))
+                max_len = max(len(b) for b in resolved_results if isinstance(b, list))
                 for i in range(max_len):
                     row = []
-                    for batch in batches:
+                    for batch in resolved_results:
                         if isinstance(batch, list) and i < len(batch):
                             row.append(batch[i])
-                        else:
-                            row.append(None)
                     merged.append(row)
-
-            elif merge_strategy == "dict_update":
-                merged = {}
-                for batch in batches:
-                    if isinstance(batch, dict):
-                        merged.update(batch)
-                merged = [merged]
-
             else:
-                merged = []
+                merged = list(resolved_results)
+
+            result = {
+                'merged': merged,
+                'record_count': len(merged),
+                'strategy': merge_strategy,
+                'batch_count': len(resolved_results),
+            }
 
             return ActionResult(
                 success=True,
-                message=f"Merged {len(batches)} batches into {len(merged)} items",
-                data={"merged": merged, "merged_count": len(merged), "strategy": merge_strategy}
+                data={output_var: result},
+                message=f"Merged {len(resolved_results)} batches into {len(merged)} records"
             )
-
         except Exception as e:
-            return ActionResult(success=False, message=f"Merge error: {str(e)}")
+            return ActionResult(success=False, message=f"Batch merge error: {e}")
 
 
 class BatchRetryAction(BaseAction):
-    """Retry failed operations."""
+    """Retry failed batch items."""
     action_type = "batch_retry"
-    display_name = "重试失败操作"
-    description = "重试失败的批量操作"
+    display_name = "批量重试"
+    description = "重试失败的批次"
+    version = "1.0"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute batch retry."""
+        failed_items = params.get('failed_items', [])
+        max_retries = params.get('max_retries', 3)
+        retry_delay = params.get('retry_delay', 1)
+        output_var = params.get('output_var', 'retry_result')
+
+        if not failed_items:
+            return ActionResult(success=True, data={output_var: {'retried': [], 'retry_count': 0}}, message="No failed items to retry")
+
         try:
-            failed_items = params.get("failed_items", [])
-            operation = params.get("operation", "identity")
-            max_retries = params.get("max_retries", 3)
-            retry_delay = params.get("retry_delay", 1.0)
-            params_config = params.get("params", {})
+            resolved_items = context.resolve_value(failed_items) if context else failed_items
 
-            if not failed_items:
-                return ActionResult(success=False, message="failed_items list is required")
+            retried = []
+            still_failed = []
 
-            results = []
-            still_failing = []
-
-            for item in failed_items:
-                last_error = None
-                for attempt in range(max_retries):
-                    try:
-                        result = self._apply_operation(operation, item, params_config)
-                        results.append({"item": item, "result": result, "success": True, "attempts": attempt + 1})
-                        break
-                    except Exception as e:
-                        last_error = str(e)
-                        if attempt < max_retries - 1:
-                            time.sleep(retry_delay * (attempt + 1))
+            for item in resolved_items:
+                retry_count = item.get('retry_count', 0)
+                if retry_count < max_retries:
+                    retried.append({
+                        **item,
+                        'retry_count': retry_count + 1,
+                        'last_retry_at': 'now',
+                    })
                 else:
-                    still_failing.append({"item": item, "error": last_error, "attempts": max_retries})
-                    results.append({"item": item, "result": None, "success": False, "error": last_error, "attempts": max_retries})
+                    still_failed.append(item)
+
+            result = {
+                'retried': retried,
+                'still_failed': still_failed,
+                'retry_count': len(retried),
+                'failed_count': len(still_failed),
+                'max_retries': max_retries,
+            }
 
             return ActionResult(
-                success=True,
-                message=f"Retry: {len(failed_items) - len(still_failing)}/{len(failed_items)} recovered",
-                data={
-                    "results": results,
-                    "recovered": len(failed_items) - len(still_failing),
-                    "still_failing": len(still_failing),
-                    "max_retries": max_retries
-                }
+                success=len(still_failed) == 0,
+                data={output_var: result},
+                message=f"Retried {len(retried)} items, {len(still_failed)} still failing"
             )
-
         except Exception as e:
-            return ActionResult(success=False, message=f"Retry error: {str(e)}")
-
-    def _apply_operation(self, operation: str, item: Any, params: Dict) -> Any:
-        if operation == "identity":
-            return item
-        elif operation == "double":
-            return float(item) * 2
-        elif operation == "uppercase":
-            return str(item).upper()
-        else:
-            return item
-
-
-class BatchThrottleAction(BaseAction):
-    """Throttle batch operations."""
-    action_type = "batch_throttle"
-    display_name = "批量限流"
-    description = "对批量操作进行限流"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            items = params.get("items", [])
-            rate_limit = params.get("rate_limit", 10)
-            time_window = params.get("time_window", 1.0)
-
-            if not items:
-                return ActionResult(success=False, message="items list is required")
-
-            interval = time_window / rate_limit if rate_limit > 0 else 0
-            processed = 0
-            start_time = time.time()
-
-            results = []
-            for item in items:
-                result = self._process_item(item)
-                results.append(result)
-                processed += 1
-
-                if processed < len(items) and interval > 0:
-                    elapsed = time.time() - start_time
-                    expected_elapsed = processed * interval
-                    if elapsed < expected_elapsed:
-                        time.sleep(expected_elapsed - elapsed)
-
-            total_time = time.time() - start_time
-
-            return ActionResult(
-                success=True,
-                message=f"Throttled processed {len(items)} items in {total_time:.2f}s",
-                data={
-                    "results": results,
-                    "count": len(items),
-                    "rate_limit": rate_limit,
-                    "time_window": time_window,
-                    "actual_rate": len(items) / total_time if total_time > 0 else 0,
-                    "total_time": total_time
-                }
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Throttle error: {str(e)}")
-
-    def _process_item(self, item: Any) -> Any:
-        return item
+            return ActionResult(success=False, message=f"Batch retry error: {e}")
