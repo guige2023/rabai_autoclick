@@ -1,157 +1,173 @@
 """
 API Auth Action Module.
 
-Handles API authentication: Bearer tokens, API keys, Basic Auth,
-OAuth2 flows, JWT generation and validation.
+Handles API authentication including OAuth 2.0, API keys,
+ bearer tokens, and basic auth with automatic token refresh.
 """
-from typing import Any, Optional
-from dataclasses import dataclass
-from actions.base_action import BaseAction
+
+from __future__ import annotations
+
+import time
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class AuthResult:
-    """Result of authentication."""
-    success: bool
-    token: Optional[str] = None
-    expires_at: Optional[float] = None
-    error: Optional[str] = None
+class AuthType(Enum):
+    """Authentication type."""
+    API_KEY = "api_key"
+    BEARER_TOKEN = "bearer_token"
+    BASIC_AUTH = "basic_auth"
+    OAUTH2 = "oauth2"
+    CUSTOM = "custom"
 
 
 @dataclass
 class AuthConfig:
     """Authentication configuration."""
-    type: str  # bearer, api_key, basic, oauth2, jwt
-    credentials: dict[str, str]
+    auth_type: AuthType
+    api_key: Optional[str] = None
+    bearer_token: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    oauth2_client_id: Optional[str] = None
+    oauth2_client_secret: Optional[str] = None
+    oauth2_token_url: Optional[str] = None
+    scopes: list[str] = field(default_factory=list)
 
 
-class APIAuthAction(BaseAction):
-    """Handle API authentication."""
+@dataclass
+class TokenInfo:
+    """OAuth2 token information."""
+    access_token: str
+    refresh_token: Optional[str] = None
+    expires_at: float = 0.0
+    token_type: str = "Bearer"
 
-    def __init__(self) -> None:
-        super().__init__("api_auth")
-        self._token_cache: dict[str, tuple[str, float]] = {}
 
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Perform authentication.
+class APIAuthAction:
+    """
+    API authentication handler with token management.
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - auth_type: bearer, api_key, basic, oauth2, jwt
-                - credentials: Dict with required credentials
-                - validate: Only validate without generating token
-                - cache_token: Cache token for reuse (default: True)
+    Supports multiple auth types including API keys, bearer tokens,
+    basic auth, and OAuth 2.0 with automatic refresh.
 
-        Returns:
-            dict with AuthResult and headers for authenticated requests
-        """
-        import time
-        import json
-        import base64
+    Example:
+        auth = APIAuthAction(config=AuthConfig(auth_type=AuthType.BEARER_TOKEN, bearer_token="xxx"))
+        headers = auth.get_auth_headers()
+        await auth.refresh_if_needed()
+    """
 
-        auth_type = params.get("auth_type", "bearer")
-        credentials = params.get("credentials", {})
-        validate_only = params.get("validate", False)
-        cache_token = params.get("cache_token", True)
-        cache_key = params.get("cache_key", "default")
+    def __init__(
+        self,
+        config: Optional[AuthConfig] = None,
+    ) -> None:
+        self.config = config or AuthConfig(auth_type=AuthType.BEARER_TOKEN)
+        self._current_token: Optional[TokenInfo] = None
+        self._custom_auth_func: Optional[Callable[[], dict[str, str]]] = None
 
-        if auth_type == "bearer":
-            token = credentials.get("token", "")
-            if not token:
-                return {"error": "Bearer token required", "success": False}
-            if validate_only:
-                return {"valid": True, "success": True}
-            headers = {"Authorization": f"Bearer {token}"}
-            return {"success": True, "headers": headers, "token": token}
+    def get_auth_headers(self) -> dict[str, str]:
+        """Get authentication headers for requests."""
+        if self.config.auth_type == AuthType.API_KEY:
+            key_name = self.config.api_key.split(":")[0] if ":" in self.config.api_key else "X-API-Key"
+            key_value = self.config.api_key.split(":")[1] if ":" in self.config.api_key else self.config.api_key
+            return {key_name: key_value}
 
-        elif auth_type == "api_key":
-            key = credentials.get("api_key", "")
-            header_name = credentials.get("header_name", "X-API-Key")
-            if not key:
-                return {"error": "API key required", "success": False}
-            if validate_only:
-                return {"valid": True, "success": True}
-            headers = {header_name: key}
-            return {"success": True, "headers": headers, "token": key}
+        elif self.config.auth_type == AuthType.BEARER_TOKEN:
+            token = self._current_token.access_token if self._current_token else self.config.bearer_token
+            return {"Authorization": f"Bearer {token}"}
 
-        elif auth_type == "basic":
-            username = credentials.get("username", "")
-            password = credentials.get("password", "")
-            if not username or not password:
-                return {"error": "Username and password required", "success": False}
-            if validate_only:
-                return {"valid": True, "success": True}
-            auth_string = base64.b64encode(f"{username}:{password}".encode()).decode()
-            headers = {"Authorization": f"Basic {auth_string}"}
-            return {"success": True, "headers": headers, "token": auth_string}
+        elif self.config.config_type == AuthType.BASIC_AUTH:
+            import base64
+            credentials = f"{self.config.username}:{self.config.password}"
+            encoded = base64.b64encode(credentials.encode()).decode()
+            return {"Authorization": f"Basic {encoded}"}
 
-        elif auth_type == "oauth2":
-            if cache_token and cache_key in self._token_cache:
-                token, expires_at = self._token_cache[cache_key]
-                if expires_at > time.time():
-                    return {"success": True, "headers": {"Authorization": f"Bearer {token}"}, "token": token, "cached": True}
+        elif self.config.auth_type == AuthType.OAUTH2:
+            token = self._current_token.access_token if self._current_token else ""
+            return {"Authorization": f"Bearer {token}"}
 
-            grant_type = credentials.get("grant_type", "client_credentials")
-            client_id = credentials.get("client_id", "")
-            client_secret = credentials.get("client_secret", "")
-            token_url = credentials.get("token_url", "")
+        elif self.config.auth_type == AuthType.CUSTOM:
+            if self._custom_auth_func:
+                return self._custom_auth_func()
+            return {}
 
-            if validate_only:
-                return {"valid": bool(token_url), "success": True}
+        return {}
 
-            if not all([token_url, client_id, client_secret]):
-                return {"error": "OAuth2 credentials incomplete", "success": False}
+    def set_custom_auth(
+        self,
+        auth_func: Callable[[], dict[str, str]],
+    ) -> "APIAuthAction":
+        """Set a custom authentication function."""
+        self._custom_auth_func = auth_func
+        self.config.auth_type = AuthType.CUSTOM
+        return self
 
-            result = self._get_oauth2_token(token_url, client_id, client_secret, grant_type)
-            if result.get("success"):
-                expires_in = result.get("expires_in", 3600)
-                expires_at = time.time() + expires_in
-                if cache_token:
-                    self._token_cache[cache_key] = (result["token"], expires_at)
-            return result
+    async def refresh_if_needed(self) -> bool:
+        """Refresh token if it's expired or about to expire."""
+        if self.config.auth_type != AuthType.OAUTH2:
+            return True
 
-        elif auth_type == "jwt":
-            secret = credentials.get("secret", "")
-            algorithm = credentials.get("algorithm", "HS256")
-            payload = credentials.get("payload", {})
-            if not secret:
-                return {"error": "JWT secret required", "success": False}
-            try:
-                import hmac
-                import hashlib
-                import json
-                header = base64.urlsafe_b64encode(json.dumps({"alg": algorithm, "typ": "JWT"}).encode()).decode().rstrip("=")
-                payload_encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-                signature = hmac.new(secret.encode(), f"{header}.{payload_encoded}".encode(), hashlib.sha256).hexdigest().rstrip("=")
-                token = f"{header}.{payload_encoded}.{signature}"
-                return {"success": True, "headers": {"Authorization": f"Bearer {token}"}, "token": token}
-            except Exception as e:
-                return {"error": str(e), "success": False}
+        if not self._current_token:
+            return await self._do_token_refresh()
 
-        return {"error": f"Unknown auth type: {auth_type}", "success": False}
+        buffer_seconds = 60
+        if self._current_token.expires_at > time.time() + buffer_seconds:
+            return True
 
-    def _get_oauth2_token(self, token_url: str, client_id: str, client_secret: str, grant_type: str) -> dict:
-        """Get OAuth2 token from token URL."""
-        import urllib.request
-        import urllib.parse
+        if self._current_token.refresh_token:
+            return await self._do_token_refresh(refresh_token=self._current_token.refresh_token)
 
-        data = urllib.parse.urlencode({
-            "grant_type": grant_type,
-            "client_id": client_id,
-            "client_secret": client_secret
-        }).encode()
+        return await self._do_token_refresh()
+
+    async def _do_token_refresh(
+        self,
+        refresh_token: Optional[str] = None,
+    ) -> bool:
+        """Perform OAuth2 token refresh."""
+        import aiohttp
 
         try:
-            req = urllib.request.Request(token_url, data=data, method="POST")
-            with urllib.request.urlopen(req, timeout=30) as response:
-                result = json.loads(response.read().decode())
-                return {
-                    "success": True,
-                    "token": result.get("access_token", ""),
-                    "expires_in": result.get("expires_in", 3600),
-                    "headers": {"Authorization": f"Bearer {result.get('access_token', '')}"}
-                }
+            data: dict[str, Any] = {
+                "grant_type": "refresh_token" if refresh_token else "client_credentials",
+                "client_id": self.config.oauth2_client_id,
+                "client_secret": self.config.oauth2_client_secret,
+            }
+
+            if refresh_token:
+                data["refresh_token"] = refresh_token
+            else:
+                data["scope"] = " ".join(self.config.scopes)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.config.oauth2_token_url,
+                    data=data,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Token refresh failed: {resp.status}")
+                        return False
+
+                    token_data = await resp.json()
+
+                    self._current_token = TokenInfo(
+                        access_token=token_data["access_token"],
+                        refresh_token=token_data.get("refresh_token"),
+                        expires_at=time.time() + token_data.get("expires_in", 3600),
+                        token_type=token_data.get("token_type", "Bearer"),
+                    )
+
+                    return True
+
         except Exception as e:
-            return {"error": str(e), "success": False}
+            logger.error(f"Token refresh error: {e}")
+            return False
+
+    def is_token_valid(self) -> bool:
+        """Check if current token is valid."""
+        if not self._current_token:
+            return self.config.bearer_token is not None
+        return self._current_token.expires_at > time.time()
