@@ -1,138 +1,241 @@
+"""Data Diff Action.
+
+Compares two datasets and reports differences with detailed change tracking,
+semantic versioning of changes, and patch generation.
 """
-Data Diff Action Module.
 
-Compares two datasets and produces detailed differences: added rows,
-removed rows, modified rows, and field-level changes with fuzzy matching.
-"""
-from typing import Any, Optional
-from dataclasses import dataclass
-from actions.base_action import BaseAction
+import sys
+import os
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-
-@dataclass
-class DiffResult:
-    """Result of dataset comparison."""
-    added: list[dict[str, Any]]
-    removed: list[dict[str, Any]]
-    modified: list[dict[str, Any]]
-    unchanged: list[dict[str, Any]]
-    summary: dict[str, int]
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
 class DataDiffAction(BaseAction):
-    """Compare two datasets and produce diff."""
+    """Compare datasets and report differences.
+    
+    Detects added, removed, and modified records with detailed
+    change tracking and patch generation.
+    """
+    action_type = "data_diff"
+    display_name = "数据对比"
+    description = "对比两个数据集，报告差异，支持变更追踪和补丁生成"
 
-    def __init__(self) -> None:
-        super().__init__("data_diff")
-
-    def execute(self, context: dict, params: dict) -> DiffResult:
-        """
-        Compare two datasets.
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Compare two datasets.
+        
         Args:
-            context: Execution context
-            params: Parameters:
-                - left: Left dataset (list of dicts)
-                - right: Right dataset (list of dicts)
-                - key_field: Primary key field for matching rows
-                - ignore_fields: Fields to ignore in comparison
-                - fuzzy_text: Enable fuzzy text comparison (default: False)
-                - tolerance: Numeric tolerance for float comparison (default: 0.001)
-
+            context: Execution context.
+            params: Dict with keys:
+                - data_a: First dataset (list of records).
+                - data_b: Second dataset (list of records).
+                - key_field: Field to use as unique key for comparison.
+                - compare_fields: Fields to compare (default: all).
+                - ignore_fields: Fields to ignore in comparison.
+                - detect_moves: Detect records that moved position.
+                - generate_patch: Generate patch for applying changes.
+                - save_to_var: Variable name for result.
+        
         Returns:
-            DiffResult with added, removed, modified, and unchanged records
+            ActionResult with diff results.
         """
-        left = params.get("left", [])
-        right = params.get("right", [])
-        key_field = params.get("key_field", "id")
-        ignore_fields = set(params.get("ignore_fields", []))
-        tolerance = params.get("tolerance", 0.001)
+        try:
+            data_a = params.get('data_a') or context.get_variable(params.get('use_var_a', 'data_a'))
+            data_b = params.get('data_b') or context.get_variable(params.get('use_var_b', 'data_b'))
+            key_field = params.get('key_field')
+            compare_fields = params.get('compare_fields')
+            ignore_fields = set(params.get('ignore_fields', []))
+            detect_moves = params.get('detect_moves', False)
+            generate_patch = params.get('generate_patch', False)
+            save_to_var = params.get('save_to_var', 'diff_result')
 
-        left_by_key: dict[str, dict] = {str(r.get(key_field, "")): r for r in left}
-        right_by_key: dict[str, dict] = {str(r.get(key_field, "")): r for r in right}
+            if not data_a or not data_b:
+                return ActionResult(success=False, message="Both data_a and data_b are required")
 
-        left_keys = set(left_by_key.keys())
-        right_keys = set(right_by_key.keys())
+            if not isinstance(data_a, list) or not isinstance(data_b, list):
+                return ActionResult(success=False, message="Both datasets must be lists")
 
-        added_keys = right_keys - left_keys
-        removed_keys = left_keys - right_keys
-        common_keys = left_keys & right_keys
+            if not key_field:
+                return ActionResult(success=False, message="key_field is required")
 
-        added: list[dict] = [right_by_key[k] for k in added_keys]
-        removed: list[dict] = [left_by_key[k] for k in removed_keys]
-
-        modified: list[dict] = []
-        unchanged: list[dict] = []
-
-        for key in common_keys:
-            l_record = left_by_key[key]
-            r_record = right_by_key[key]
-
-            l_filtered = {k: v for k, v in l_record.items() if k not in ignore_fields}
-            r_filtered = {k: v for k, v in r_record.items() if k not in ignore_fields}
-
-            if l_filtered == r_filtered:
-                unchanged.append(r_record)
+            # Determine fields to compare
+            all_fields = set()
+            for item in data_a + data_b:
+                if isinstance(item, dict):
+                    all_fields.update(item.keys())
+            
+            if compare_fields:
+                compare_fields = set(compare_fields) - ignore_fields
             else:
-                changes = self._compute_field_changes(l_filtered, r_filtered, tolerance)
-                modified.append({
-                    "key": key,
-                    "left": l_record,
-                    "right": r_record,
-                    "changes": changes
-                })
+                compare_fields = all_fields - ignore_fields - {key_field}
 
-        return DiffResult(
-            added=added,
-            removed=removed,
-            modified=modified,
-            unchanged=unchanged,
-            summary={
-                "added": len(added),
-                "removed": len(removed),
-                "modified": len(modified),
-                "unchanged": len(unchanged),
-                "total_left": len(left),
-                "total_right": len(right)
+            # Build index for both datasets
+            index_a = {item.get(key_field): item for item in data_a if isinstance(item, dict)}
+            index_b = {item.get(key_field): item for isinstance(item, dict) for item in data_b}
+
+            keys_a = set(index_a.keys())
+            keys_b = set(index_b.keys())
+
+            # Find differences
+            added_keys = keys_b - keys_a
+            removed_keys = keys_a - keys_b
+            common_keys = keys_a & keys_b
+
+            added = [index_b[k] for k in added_keys]
+            removed = [index_a[k] for k in removed_keys]
+            
+            modified = []
+            for key in common_keys:
+                item_a = index_a[key]
+                item_b = index_b[key]
+                diff_fields = self._compare_items(item_a, item_b, compare_fields)
+                if diff_fields:
+                    modified.append({
+                        'key': key,
+                        'before': item_a,
+                        'after': item_b,
+                        'changes': diff_fields
+                    })
+
+            # Detect moves
+            moves = []
+            if detect_moves and not modified:
+                moves = self._detect_moves(data_a, data_b, key_field, compare_fields)
+
+            # Generate patch if requested
+            patch = None
+            if generate_patch:
+                patch = self._generate_patch(added, removed, modified)
+
+            result = {
+                'summary': {
+                    'total_a': len(data_a),
+                    'total_b': len(data_b),
+                    'added_count': len(added),
+                    'removed_count': len(removed),
+                    'modified_count': len(modified),
+                    'moves_count': len(moves),
+                    'unchanged_count': len(common_keys) - len(modified)
+                },
+                'added': added,
+                'removed': removed,
+                'modified': modified,
+                'moves': moves,
+                'patch': patch
             }
-        )
 
-    def _compute_field_changes(self, left: dict, right: dict, tolerance: float) -> list[dict[str, Any]]:
-        """Compute field-level changes between two records."""
-        changes = []
-        all_keys = set(left.keys()) | set(right.keys())
+            context.set_variable(save_to_var, result)
+            return ActionResult(success=True, data=result,
+                             message=f"Diff: +{len(added)} -{len(removed)} ~{len(modified)}")
 
-        for key in all_keys:
-            l_val = left.get(key)
-            r_val = right.get(key)
+        except Exception as e:
+            return ActionResult(success=False, message=f"Diff error: {e}")
 
-            if l_val == r_val:
-                continue
-
-            if isinstance(l_val, (int, float)) and isinstance(r_val, (int, float)):
-                if abs(l_val - r_val) <= tolerance:
-                    continue
-                changes.append({
-                    "field": key,
-                    "old": l_val,
-                    "new": r_val,
-                    "change_type": "modified"
-                })
-            elif isinstance(l_val, str) and isinstance(r_val, str):
-                if l_val.strip() == r_val.strip():
-                    continue
-                changes.append({
-                    "field": key,
-                    "old": l_val,
-                    "new": r_val,
-                    "change_type": "modified"
-                })
-            else:
-                changes.append({
-                    "field": key,
-                    "old": l_val,
-                    "new": r_val,
-                    "change_type": "modified"
-                })
-
+    def _compare_items(self, item_a: Dict, item_b: Dict, 
+                     fields: Set[str]) -> Dict[str, Dict]:
+        """Compare two items and return changed fields."""
+        changes = {}
+        
+        for field in fields:
+            val_a = item_a.get(field)
+            val_b = item_b.get(field)
+            
+            if val_a != val_b:
+                changes[field] = {
+                    'before': val_a,
+                    'after': val_b,
+                    'change_type': self._classify_change(val_a, val_b)
+                }
+        
         return changes
+
+    def _classify_change(self, before: Any, after: Any) -> str:
+        """Classify the type of change."""
+        if before is None or before == '':
+            return 'added'
+        if after is None or after == '':
+            return 'removed'
+        if isinstance(before, (int, float)) and isinstance(after, (int, float)):
+            if after > before:
+                return 'increased'
+            elif after < before:
+                return 'decreased'
+        return 'changed'
+
+    def _detect_moves(self, data_a: List, data_b: List, 
+                    key_field: str, compare_fields: Set[str]) -> List[Dict]:
+        """Detect records that changed significantly (potential moves)."""
+        # Build signature index for data_a
+        sig_index = {}
+        for item in data_a:
+            if isinstance(item, dict):
+                key = item.get(key_field)
+                sig = self._make_signature(item, compare_fields)
+                sig_index[key] = sig
+
+        moves = []
+        for item in data_b:
+            if isinstance(item, dict):
+                key = item.get(key_field)
+                if key not in sig_index:
+                    sig = self._make_signature(item, compare_fields)
+                    for old_key, old_sig in sig_index.items():
+                        if self._signature_similarity(sig, old_sig) > 0.7:
+                            moves.append({
+                                'from': old_key,
+                                'to': key,
+                                'similarity': self._signature_similarity(sig, old_sig)
+                            })
+                            break
+
+        return moves
+
+    def _make_signature(self, item: Dict, fields: Set[str]) -> Set[str]:
+        """Make a signature set for an item."""
+        sig = set()
+        for field in fields:
+            val = item.get(field)
+            if val is not None:
+                sig.add(f"{field}={val}")
+        return sig
+
+    def _signature_similarity(self, sig1: Set[str], sig2: Set[str]) -> float:
+        """Calculate similarity between two signatures."""
+        if not sig1 or not sig2:
+            return 0.0
+        intersection = len(sig1 & sig2)
+        union = len(sig1 | sig2)
+        return intersection / union if union > 0 else 0.0
+
+    def _generate_patch(self, added: List, removed: List, 
+                       modified: List) -> Dict[str, Any]:
+        """Generate a patch that can be applied to transform data_a to data_b."""
+        patch = {
+            'version': '1.0',
+            'operations': []
+        }
+
+        for item in removed:
+            patch['operations'].append({
+                'op': 'remove',
+                'key': item.get(params.get('key_field', 'id')),
+                'data': item
+            })
+
+        for item in added:
+            patch['operations'].append({
+                'op': 'add',
+                'data': item
+            })
+
+        for change in modified:
+            patch['operations'].append({
+                'op': 'modify',
+                'key': change['key'],
+                'before': change['before'],
+                'after': change['after'],
+                'changes': change['changes']
+            })
+
+        return patch
