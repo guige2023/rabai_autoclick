@@ -1,456 +1,428 @@
 """Trigger action module for RabAI AutoClick.
 
-Provides trigger-based automation with various trigger types
-including schedule, webhook, and event triggers.
+Provides trigger management with condition evaluation,
+scheduled triggers, and event-based triggers.
 """
 
 import time
-import hashlib
-import hmac
 import sys
 import os
-from typing import Any, Dict, List, Optional, Callable
+import json
+from typing import Any, Dict, List, Optional, Union, Callable
+from enum import Enum
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class TriggerCheckAction(BaseAction):
-    """Check if trigger conditions are met.
-    
-    Evaluates trigger rules and returns match status.
-    """
-    action_type = "trigger_check"
-    display_name = "触发器检查"
-    description = "检查触发器条件"
+class TriggerType(Enum):
+    """Trigger types."""
+    CONDITION = "condition"
+    SCHEDULE = "schedule"
+    EVENT = "event"
+    COUNTDOWN = "countdown"
 
+
+class TriggerState(Enum):
+    """Trigger states."""
+    ACTIVE = "active"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+
+
+class Trigger:
+    """Represents a trigger."""
+    
+    def __init__(
+        self,
+        trigger_id: str,
+        trigger_type: TriggerType,
+        config: Dict[str, Any],
+        callback: Optional[Callable] = None
+    ):
+        self.trigger_id = trigger_id
+        self.trigger_type = trigger_type
+        self.config = config
+        self.callback = callback
+        self.state = TriggerState.ACTIVE
+        self.created_at = time.time()
+        self.last_fired = None
+        self.fire_count = 0
+        self.next_fire = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'trigger_id': self.trigger_id,
+            'trigger_type': self.trigger_type.value,
+            'config': self.config,
+            'state': self.state.value,
+            'created_at': self.created_at,
+            'last_fired': self.last_fired,
+            'fire_count': self.fire_count,
+            'next_fire': self.next_fire
+        }
+
+
+class TriggerAction(BaseAction):
+    """Manage triggers for conditional and scheduled execution.
+    
+    Supports condition-based, schedule-based, and event-based triggers.
+    Provides trigger lifecycle management.
+    """
+    action_type = "trigger"
+    display_name = "触发器"
+    description = "条件触发器和调度触发器"
+    
+    def __init__(self):
+        super().__init__()
+        self._triggers: Dict[str, Trigger] = {}
+        self._lock = threading.RLock()
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._running = False
+    
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Check trigger.
+        """Execute trigger operations.
         
         Args:
             context: Execution context.
-            params: Dict with keys: trigger_type, trigger_config,
-                   event_data.
+            params: Dict with keys: action (create, fire, list,
+                   pause, resume, delete, start_monitor), config.
         
         Returns:
-            ActionResult with trigger status.
+            ActionResult with operation result.
         """
-        trigger_type = params.get('trigger_type', 'manual')
-        trigger_config = params.get('trigger_config', {})
-        event_data = params.get('event_data', {})
-
-        if trigger_type == 'manual':
+        action = params.get('action', 'create')
+        
+        if action == 'create':
+            return self._create_trigger(params)
+        elif action == 'fire':
+            return self._fire_trigger(params)
+        elif action == 'list':
+            return self._list_triggers(params)
+        elif action == 'pause':
+            return self._pause_trigger(params)
+        elif action == 'resume':
+            return self._resume_trigger(params)
+        elif action == 'delete':
+            return self._delete_trigger(params)
+        elif action == 'start_monitor':
+            return self._start_monitor(params)
+        elif action == 'stop_monitor':
+            return self._stop_monitor(params)
+        elif action == 'evaluate':
+            return self._evaluate_condition(params)
+        else:
             return ActionResult(
-                success=True,
-                message="Manual trigger always fires",
-                data={'triggered': True, 'type': 'manual'}
+                success=False,
+                message=f"Unknown action: {action}"
             )
-
-        elif trigger_type == 'schedule':
-            return self._check_schedule(trigger_config)
-
-        elif trigger_type == 'event':
-            return self._check_event(trigger_config, event_data)
-
-        elif trigger_type == 'webhook':
-            return self._check_webhook(trigger_config, event_data)
-
-        elif trigger_type == 'state_change':
-            return self._check_state_change(trigger_config, event_data)
-
-        return ActionResult(success=False, message=f"Unknown trigger type: {trigger_type}")
-
-    def _check_schedule(self, config: Dict) -> ActionResult:
-        """Check schedule trigger."""
-        cron = config.get('cron', '')
-        interval = config.get('interval', 0)
-        last_run = config.get('last_run', 0)
-
-        if cron:
-            try:
-                if self._matches_cron(cron):
-                    return ActionResult(
-                        success=True,
-                        message="Schedule trigger matches",
-                        data={'triggered': True, 'type': 'schedule', 'cron': cron}
-                    )
-            except:
-                pass
-
-        if interval > 0:
-            elapsed = time.time() - last_run
-            if elapsed >= interval:
-                return ActionResult(
-                    success=True,
-                    message=f"Interval trigger: {elapsed:.0f}s elapsed",
-                    data={'triggered': True, 'type': 'interval', 'elapsed': elapsed}
-                )
-
-        return ActionResult(
-            success=True,
-            message="Schedule trigger not matched",
-            data={'triggered': False, 'type': 'schedule'}
-        )
-
-    def _check_event(self, config: Dict, event_data: Dict) -> ActionResult:
-        """Check event trigger."""
-        event_type = config.get('event_type', '')
-        data_filter = config.get('filter', {})
-
-        if event_type and event_data.get('type') != event_type:
+    
+    def _create_trigger(
+        self,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Create a new trigger."""
+        trigger_id = params.get('trigger_id')
+        if not trigger_id:
+            return ActionResult(success=False, message="trigger_id is required")
+        
+        trigger_type_str = params.get('trigger_type', 'condition').lower()
+        try:
+            trigger_type = TriggerType(trigger_type_str)
+        except ValueError:
             return ActionResult(
-                success=True,
-                message=f"Event type mismatch: expected {event_type}",
-                data={'triggered': False, 'type': 'event'}
+                success=False,
+                message=f"Unknown trigger type: {trigger_type_str}"
             )
-
-        for key, expected in data_filter.items():
-            actual = event_data.get(key)
-            if actual != expected:
-                return ActionResult(
-                    success=True,
-                    message=f"Event filter mismatch: {key}",
-                    data={'triggered': False, 'type': 'event', 'mismatch': key}
-                )
-
-        return ActionResult(
-            success=True,
-            message="Event trigger matched",
-            data={'triggered': True, 'type': 'event', 'event_data': event_data}
-        )
-
-    def _check_webhook(self, config: Dict, event_data: Dict) -> ActionResult:
-        """Check webhook trigger."""
-        secret = config.get('secret', '')
-        expected_signature = config.get('signature', '')
-
-        if secret and expected_signature:
-            body = event_data.get('body', '')
-            body_str = body if isinstance(body, str) else str(body)
-            
-            signature = hmac.new(
-                secret.encode('utf-8'),
-                body_str.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
-
-            if signature != expected_signature:
+        
+        config = params.get('config', {})
+        
+        if trigger_type == TriggerType.SCHEDULE:
+            if 'cron' not in config and 'interval' not in config:
                 return ActionResult(
                     success=False,
-                    message="Webhook signature mismatch",
-                    data={'triggered': False, 'type': 'webhook', 'error': 'invalid_signature'}
+                    message="Schedule trigger requires 'cron' or 'interval'"
                 )
-
+        elif trigger_type == TriggerType.CONDITION:
+            if 'conditions' not in config:
+                return ActionResult(
+                    success=False,
+                    message="Condition trigger requires 'conditions'"
+                )
+        
+        with self._lock:
+            if trigger_id in self._triggers:
+                return ActionResult(
+                    success=False,
+                    message=f"Trigger '{trigger_id}' already exists"
+                )
+            
+            trigger = Trigger(
+                trigger_id=trigger_id,
+                trigger_type=trigger_type,
+                config=config
+            )
+            
+            self._triggers[trigger_id] = trigger
+        
         return ActionResult(
             success=True,
-            message="Webhook trigger validated",
-            data={'triggered': True, 'type': 'webhook'}
+            message=f"Created {trigger_type.value} trigger '{trigger_id}'",
+            data={'trigger': trigger.to_dict()}
         )
-
-    def _check_state_change(self, config: Dict, event_data: Dict) -> ActionResult:
-        """Check state change trigger."""
-        state_field = config.get('state_field', 'state')
-        from_values = config.get('from_values', [])
-        to_values = config.get('to_values', [])
-
-        old_value = event_data.get(f'{state_field}_old')
-        new_value = event_data.get(state_field)
-
-        if from_values and old_value not in from_values:
-            return ActionResult(
-                success=True,
-                message=f"State change: old value not in from_values",
-                data={'triggered': False, 'type': 'state_change'}
-            )
-
-        if to_values and new_value not in to_values:
-            return ActionResult(
-                success=True,
-                message=f"State change: new value not in to_values",
-                data={'triggered': False, 'type': 'state_change'}
-            )
-
+    
+    def _fire_trigger(
+        self,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Manually fire a trigger."""
+        trigger_id = params.get('trigger_id')
+        
+        if not trigger_id:
+            return ActionResult(success=False, message="trigger_id is required")
+        
+        with self._lock:
+            if trigger_id not in self._triggers:
+                return ActionResult(
+                    success=False,
+                    message=f"Trigger '{trigger_id}' not found"
+                )
+            
+            trigger = self._triggers[trigger_id]
+            trigger.last_fired = time.time()
+            trigger.fire_count += 1
+        
         return ActionResult(
             success=True,
-            message=f"State change triggered: {old_value} -> {new_value}",
-            data={'triggered': True, 'type': 'state_change', 'from': old_value, 'to': new_value}
+            message=f"Fired trigger '{trigger_id}'",
+            data={'trigger': trigger.to_dict()}
         )
-
-    def _matches_cron(self, cron_expr: str) -> bool:
-        """Simple cron matching."""
-        import re
-        parts = cron_expr.split()
-        if len(parts) < 5:
-            return False
+    
+    def _list_triggers(
+        self,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """List all triggers."""
+        trigger_type = params.get('trigger_type')
+        state = params.get('state')
         
-        now = time.localtime()
-        minute, hour, day, month, weekday = now.tm_min, now.tm_hour, now.tm_mday, now.tm_mon, now.tm_wday
+        with self._lock:
+            triggers = list(self._triggers.values())
         
-        if not self._matches_cron_part(parts[0], minute):
-            return False
-        if not self._matches_cron_part(parts[1], hour):
-            return False
-        if not self._matches_cron_part(parts[2], day):
-            return False
-        if not self._matches_cron_part(parts[3], month):
-            return False
-        if not self._matches_cron_part(parts[4], weekday):
-            return False
+        if trigger_type:
+            try:
+                tt = TriggerType(trigger_type.lower())
+                triggers = [t for t in triggers if t.trigger_type == tt]
+            except ValueError:
+                pass
+        
+        if state:
+            try:
+                ts = TriggerState(state.lower())
+                triggers = [t for t in triggers if t.state == ts]
+            except ValueError:
+                pass
+        
+        return ActionResult(
+            success=True,
+            message=f"Found {len(triggers)} triggers",
+            data={
+                'triggers': [t.to_dict() for t in triggers],
+                'count': len(triggers)
+            }
+        )
+    
+    def _pause_trigger(
+        self,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Pause a trigger."""
+        trigger_id = params.get('trigger_id')
+        
+        if not trigger_id:
+            return ActionResult(success=False, message="trigger_id is required")
+        
+        with self._lock:
+            if trigger_id not in self._triggers:
+                return ActionResult(
+                    success=False,
+                    message=f"Trigger '{trigger_id}' not found"
+                )
+            
+            trigger = self._triggers[trigger_id]
+            trigger.state = TriggerState.PAUSED
+        
+        return ActionResult(
+            success=True,
+            message=f"Paused trigger '{trigger_id}'",
+            data={'trigger': trigger.to_dict()}
+        )
+    
+    def _resume_trigger(
+        self,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Resume a paused trigger."""
+        trigger_id = params.get('trigger_id')
+        
+        if not trigger_id:
+            return ActionResult(success=False, message="trigger_id is required")
+        
+        with self._lock:
+            if trigger_id not in self._triggers:
+                return ActionResult(
+                    success=False,
+                    message=f"Trigger '{trigger_id}' not found"
+                )
+            
+            trigger = self._triggers[trigger_id]
+            trigger.state = TriggerState.ACTIVE
+        
+        return ActionResult(
+            success=True,
+            message=f"Resumed trigger '{trigger_id}'",
+            data={'trigger': trigger.to_dict()}
+        )
+    
+    def _delete_trigger(
+        self,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Delete a trigger."""
+        trigger_id = params.get('trigger_id')
+        
+        if not trigger_id:
+            return ActionResult(success=False, message="trigger_id is required")
+        
+        with self._lock:
+            if trigger_id not in self._triggers:
+                return ActionResult(
+                    success=False,
+                    message=f"Trigger '{trigger_id}' not found"
+                )
+            
+            del self._triggers[trigger_id]
+        
+        return ActionResult(
+            success=True,
+            message=f"Deleted trigger '{trigger_id}'"
+        )
+    
+    def _evaluate_condition(
+        self,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Evaluate a condition against data."""
+        conditions = params.get('conditions', [])
+        data = params.get('data', {})
+        
+        if not conditions:
+            return ActionResult(
+                success=False,
+                message="No conditions to evaluate"
+            )
+        
+        match = self._check_conditions(conditions, data)
+        
+        return ActionResult(
+            success=True,
+            message=f"Condition evaluation: {'matched' if match else 'not matched'}",
+            data={'matched': match}
+        )
+    
+    def _check_conditions(
+        self,
+        conditions: List[Dict[str, Any]],
+        data: Dict[str, Any]
+    ) -> bool:
+        """Check if conditions match data."""
+        for condition in conditions:
+            field = condition.get('field')
+            operator = condition.get('operator', 'eq')
+            value = condition.get('value')
+            
+            record_value = data.get(field)
+            
+            if operator == 'eq' and record_value != value:
+                return False
+            elif operator == 'ne' and record_value == value:
+                return False
+            elif operator == 'gt' and not (isinstance(record_value, (int, float)) and record_value > value):
+                return False
+            elif operator == 'gte' and not (isinstance(record_value, (int, float)) and record_value >= value):
+                return False
+            elif operator == 'lt' and not (isinstance(record_value, (int, float)) and record_value < value):
+                return False
+            elif operator == 'lte' and not (isinstance(record_value, (int, float)) and record_value <= value):
+                return False
+            elif operator == 'exists' and (value and field not in data):
+                return False
         
         return True
-
-    def _matches_cron_part(self, pattern: str, value: int) -> bool:
-        """Match cron pattern part."""
-        if pattern == '*':
-            return True
-        if ',' in pattern:
-            return str(value) in pattern.split(',')
-        if '/' in pattern:
-            base, step = pattern.split('/')
-            step = int(step)
-            return value % step == 0
-        return str(value) == pattern
-
-
-class TriggerRegisterAction(BaseAction):
-    """Register trigger handler.
     
-    Sets up trigger with callback and configuration.
-    """
-    action_type = "trigger_register"
-    display_name = "注册触发器"
-    description = "注册触发器处理"
-
-    def execute(
+    def _start_monitor(
         self,
-        context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Register trigger.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: trigger_id, trigger_type,
-                   trigger_config, handler.
-        
-        Returns:
-            ActionResult with registration status.
-        """
-        trigger_id = params.get('trigger_id', '')
-        trigger_type = params.get('trigger_type', 'manual')
-        trigger_config = params.get('trigger_config', {})
-        handler = params.get('handler', None)
-
-        if not trigger_id:
-            return ActionResult(success=False, message="trigger_id required")
-
-        try:
-            triggers = getattr(context, '_triggers', None)
-            if triggers is None:
-                context._triggers = {}
-
-            triggers[trigger_id] = {
-                'type': trigger_type,
-                'config': trigger_config,
-                'handler': handler,
-                'enabled': True,
-                'last_triggered': None,
-                'trigger_count': 0,
-                'registered_at': time.strftime('%Y-%m-%d %H:%M:%S')
-            }
-
+        """Start the trigger monitor thread."""
+        if self._running:
             return ActionResult(
                 success=True,
-                message=f"Trigger registered: {trigger_id}",
-                data={
-                    'trigger_id': trigger_id,
-                    'type': trigger_type,
-                    'enabled': True
-                }
+                message="Monitor already running",
+                data={'running': True}
             )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Registration failed: {str(e)}")
-
-
-class TriggerListAction(BaseAction):
-    """List registered triggers.
+        
+        self._running = True
+        self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._monitor_thread.start()
+        
+        return ActionResult(
+            success=True,
+            message="Trigger monitor started",
+            data={'running': True}
+        )
     
-    Returns all registered triggers and their status.
-    """
-    action_type = "trigger_list"
-    display_name = "触发器列表"
-    description = "列出所有触发器"
-
-    def execute(
+    def _stop_monitor(
         self,
-        context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """List triggers.
+        """Stop the trigger monitor thread."""
+        self._running = False
         
-        Args:
-            context: Execution context.
-            params: Dict with keys: enabled_only, trigger_type.
+        if self._monitor_thread:
+            self._monitor_thread.join(timeout=5)
+            self._monitor_thread = None
         
-        Returns:
-            ActionResult with trigger list.
-        """
-        enabled_only = params.get('enabled_only', False)
-        trigger_type = params.get('trigger_type', None)
-
-        try:
-            triggers = getattr(context, '_triggers', None)
-            if triggers is None:
-                return ActionResult(
-                    success=True,
-                    message="No triggers registered",
-                    data={'triggers': [], 'count': 0}
-                )
-
-            result = []
-            for trigger_id, config in triggers.items():
-                if enabled_only and not config.get('enabled'):
-                    continue
-                if trigger_type and config.get('type') != trigger_type:
-                    continue
+        return ActionResult(
+            success=True,
+            message="Trigger monitor stopped",
+            data={'running': False}
+        )
+    
+    def _monitor_loop(self):
+        """Main monitor loop for checking triggers."""
+        while self._running:
+            try:
+                now = time.time()
                 
-                result.append({
-                    'trigger_id': trigger_id,
-                    'type': config.get('type'),
-                    'enabled': config.get('enabled'),
-                    'last_triggered': config.get('last_triggered'),
-                    'trigger_count': config.get('trigger_count', 0)
-                })
-
-            return ActionResult(
-                success=True,
-                message=f"Found {len(result)} triggers",
-                data={'triggers': result, 'count': len(result)}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"List failed: {str(e)}")
-
-
-class TriggerFireAction(BaseAction):
-    """Fire registered trigger.
-    
-    Manually fires a trigger by ID.
-    """
-    action_type = "trigger_fire"
-    display_name = "触发触发器"
-    description = "手动触发触发器"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Fire trigger.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: trigger_id, event_data.
-        
-        Returns:
-            ActionResult with fire result.
-        """
-        trigger_id = params.get('trigger_id', '')
-        event_data = params.get('event_data', {})
-
-        if not trigger_id:
-            return ActionResult(success=False, message="trigger_id required")
-
-        try:
-            triggers = getattr(context, '_triggers', None)
-            if triggers is None or trigger_id not in triggers:
-                return ActionResult(
-                    success=False,
-                    message=f"Trigger not found: {trigger_id}"
-                )
-
-            trigger = triggers[trigger_id]
-            
-            if not trigger.get('enabled'):
-                return ActionResult(
-                    success=False,
-                    message=f"Trigger disabled: {trigger_id}"
-                )
-
-            trigger['last_triggered'] = time.time()
-            trigger['trigger_count'] = trigger.get('trigger_count', 0) + 1
-
-            handler = trigger.get('handler')
-            handler_result = None
-            
-            if handler and callable(handler):
-                try:
-                    handler_result = handler(event_data)
-                except Exception as e:
-                    handler_result = {'error': str(e)}
-
-            return ActionResult(
-                success=True,
-                message=f"Trigger fired: {trigger_id}",
-                data={
-                    'trigger_id': trigger_id,
-                    'type': trigger.get('type'),
-                    'handler_result': handler_result,
-                    'trigger_count': trigger['trigger_count']
-                }
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Fire failed: {str(e)}")
-
-
-class TriggerDeleteAction(BaseAction):
-    """Delete registered trigger.
-    
-    Removes trigger from registry.
-    """
-    action_type = "trigger_delete"
-    display_name = "删除触发器"
-    description = "删除触发器"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Delete trigger.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: trigger_id.
-        
-        Returns:
-            ActionResult with deletion status.
-        """
-        trigger_id = params.get('trigger_id', '')
-
-        if not trigger_id:
-            return ActionResult(success=False, message="trigger_id required")
-
-        try:
-            triggers = getattr(context, '_triggers', None)
-            if triggers is None or trigger_id not in triggers:
-                return ActionResult(
-                    success=False,
-                    message=f"Trigger not found: {trigger_id}"
-                )
-
-            del triggers[trigger_id]
-
-            return ActionResult(
-                success=True,
-                message=f"Trigger deleted: {trigger_id}"
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Delete failed: {str(e)}")
+                with self._lock:
+                    for trigger in self._triggers.values():
+                        if trigger.state != TriggerState.ACTIVE:
+                            continue
+                        
+                        if trigger.trigger_type == TriggerType.COUNTDOWN:
+                            interval = trigger.config.get('interval', 60)
+                            if not trigger.last_fired or (now - trigger.last_fired) >= interval:
+                                trigger.last_fired = now
+                                trigger.fire_count += 1
+                
+                time.sleep(1)
+                
+            except Exception:
+                time.sleep(1)
