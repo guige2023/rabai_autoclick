@@ -1,4 +1,4 @@
-"""Outbox Pattern action module for RabAI AutoClick.
+"""Transactional Outbox action module for RabAI AutoClick.
 
 Provides the transactional outbox pattern for reliable
 event publishing alongside database operations.
@@ -27,7 +27,7 @@ class OutboxStatus(Enum):
 
 @dataclass
 class OutboxEntry:
-    """Represents an event in the outbox."""
+    """Represents an event in the transactional outbox."""
     entry_id: str
     aggregate_type: str
     aggregate_id: str
@@ -40,10 +40,12 @@ class OutboxEntry:
     max_attempts: int = 3
     last_error: Optional[str] = None
     expires_at: float = 0.0
+    correlation_id: Optional[str] = None
+    causation_id: Optional[str] = None
 
 
-class OutboxStore:
-    """Transactional outbox for reliable event publishing."""
+class TransactionalOutbox:
+    """Transactional outbox store for reliable event publishing."""
     
     def __init__(self, persistence_path: Optional[str] = None):
         self._entries: Dict[str, OutboxEntry] = {}
@@ -59,14 +61,16 @@ class OutboxStore:
                     data = json.load(f)
                     for entry_data in data.get("entries", []):
                         entry_data.pop('status', None)
-                        entry = OutboxEntry(status=OutboxStatus(entry_data.pop('_status')),
-                                           **entry_data)
+                        entry = OutboxEntry(
+                            status=OutboxStatus(entry_data.pop('_status')),
+                            **entry_data
+                        )
                         self._entries[entry.entry_id] = entry
             except (json.JSONDecodeError, TypeError, KeyError):
                 pass
     
     def _persist(self) -> None:
-        """Persist outbox."""
+        """Persist outbox entries."""
         if self._persistence_path:
             try:
                 data = {
@@ -83,7 +87,9 @@ class OutboxStore:
                             "attempts": e.attempts,
                             "max_attempts": e.max_attempts,
                             "last_error": e.last_error,
-                            "expires_at": e.expires_at
+                            "expires_at": e.expires_at,
+                            "correlation_id": e.correlation_id,
+                            "causation_id": e.causation_id
                         }
                         for e in self._entries.values()
                     ]
@@ -99,9 +105,11 @@ class OutboxStore:
         aggregate_id: str,
         event_type: str,
         payload: Dict[str, Any],
-        ttl_seconds: float = 86400.0
+        ttl_seconds: float = 86400.0,
+        correlation_id: Optional[str] = None,
+        causation_id: Optional[str] = None
     ) -> str:
-        """Add an entry to the outbox."""
+        """Add an entry to the outbox atomically with data changes."""
         entry_id = str(uuid.uuid4())
         entry = OutboxEntry(
             entry_id=entry_id,
@@ -111,18 +119,20 @@ class OutboxStore:
             payload=payload,
             status=OutboxStatus.PENDING,
             created_at=time.time(),
-            expires_at=time.time() + ttl_seconds
+            expires_at=time.time() + ttl_seconds,
+            correlation_id=correlation_id or str(uuid.uuid4()),
+            causation_id=causation_id
         )
         self._entries[entry_id] = entry
         self._persist()
         return entry_id
     
     def register_handler(self, event_type: str, handler: callable) -> None:
-        """Register a handler for an event type."""
+        """Register a handler for publishing an event type."""
         self._publish_handlers[event_type] = handler
     
     def publish_entry(self, entry_id: str) -> tuple[bool, str]:
-        """Publish a single outbox entry."""
+        """Attempt to publish a single outbox entry."""
         entry = self._entries.get(entry_id)
         if not entry:
             return False, "Entry not found"
@@ -130,42 +140,33 @@ class OutboxStore:
         if entry.status == OutboxStatus.PUBLISHED:
             return True, "Already published"
         
+        entry.attempts += 1
         handler = self._publish_handlers.get(entry.event_type)
         
         try:
             if handler:
                 handler(entry.payload)
-            else:
-                # No handler, just mark as published
-                pass
-            
             entry.status = OutboxStatus.PUBLISHED
             entry.published_at = time.time()
             self._persist()
-            return True, "Published"
+            return True, "Published successfully"
         
         except Exception as e:
-            entry.attempts += 1
             entry.last_error = str(e)
-            
             if entry.attempts >= entry.max_attempts:
                 entry.status = OutboxStatus.FAILED
-            
             self._persist()
             return False, str(e)
     
-    def publish_pending(self, batch_size: int = 100) -> Dict[str, int]:
-        """Publish all pending entries.
-        
-        Returns counts of published, failed, and expired.
-        """
+    def publish_batch(self, batch_size: int = 100) -> Dict[str, int]:
+        """Publish all pending entries in a batch."""
         now = time.time()
-        stats = {"published": 0, "failed": 0, "expired": 0}
+        stats = {"published": 0, "failed": 0, "expired": 0, "skipped": 0}
         
-        pending = [
-            e for e in self._entries.values()
-            if e.status == OutboxStatus.PENDING
-        ]
+        pending = sorted(
+            [e for e in self._entries.values() if e.status == OutboxStatus.PENDING],
+            key=lambda x: x.created_at
+        )
         
         for entry in pending[:batch_size]:
             if entry.expires_at < now:
@@ -201,8 +202,8 @@ class OutboxStore:
         """Get outbox statistics."""
         by_status = {}
         for e in self._entries.values():
-            status_name by_status = e.status.value
-           [status_name] = by_status.get(status_name, 0) + 1
+            status_name = e.status.value
+            by_status[status_name] = by_status.get(status_name, 0) + 1
         
         return {
             "total_entries": len(self._entries),
@@ -211,19 +212,19 @@ class OutboxStore:
         }
 
 
-class OutboxPatternAction(BaseAction):
-    """Transactional outbox pattern for reliable events.
+class TransactionalOutboxAction(BaseAction):
+    """Transactional outbox pattern for reliable event publishing.
     
     Ensures events are atomically stored with data changes
-    and reliably published to consumers.
+    and reliably published to downstream consumers.
     """
-    action_type = "outbox_pattern"
-    display_name = "发件箱模式"
-    description = "事务性发件箱模式，确保事件可靠发布"
+    action_type = "transactional_outbox"
+    display_name = "事务发件箱"
+    description = "事务性发件箱，确保事件可靠发布"
     
     def __init__(self):
         super().__init__()
-        self._outbox = OutboxStore()
+        self._outbox = TransactionalOutbox()
     
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         """Execute outbox operation."""
@@ -231,11 +232,11 @@ class OutboxPatternAction(BaseAction):
         
         try:
             if operation == "add":
-                return self._add(params)
+                return self._add_entry(params)
             elif operation == "publish":
                 return self._publish(params)
-            elif operation == "publish_pending":
-                return self._publish_pending(params)
+            elif operation == "publish_batch":
+                return self._publish_batch(params)
             elif operation == "retry":
                 return self._retry(params)
             elif operation == "get_stats":
@@ -245,7 +246,7 @@ class OutboxPatternAction(BaseAction):
         except Exception as e:
             return ActionResult(success=False, message=f"Error: {str(e)}")
     
-    def _add(self, params: Dict[str, Any]) -> ActionResult:
+    def _add_entry(self, params: Dict[str, Any]) -> ActionResult:
         """Add entry to outbox."""
         entry_id = self._outbox.add_entry(
             aggregate_type=params.get("aggregate_type", ""),
@@ -263,11 +264,11 @@ class OutboxPatternAction(BaseAction):
         success, msg = self._outbox.publish_entry(entry_id)
         return ActionResult(success=success, message=msg)
     
-    def _publish_pending(self, params: Dict[str, Any]) -> ActionResult:
-        """Publish all pending entries."""
+    def _publish_batch(self, params: Dict[str, Any]) -> ActionResult:
+        """Publish pending entries."""
         batch_size = params.get("batch_size", 100)
-        stats = self._outbox.publish_pending(batch_size)
-        return ActionResult(success=True, message="Published",
+        stats = self._outbox.publish_batch(batch_size)
+        return ActionResult(success=True, message="Batch complete",
                          data={"published": stats["published"],
                                "failed": stats["failed"],
                                "expired": stats["expired"]})
