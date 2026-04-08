@@ -1,460 +1,353 @@
 """
-API Fault Tolerance Action Module
+API Fault Tolerance Action Module.
 
-Provides circuit breaker, retry policies, and fault tolerance patterns for APIs.
+Provides fault tolerance patterns including
+timeout handling, bulkhead isolation, and fallback strategies.
 """
-from typing import Any, Optional, Callable, Awaitable
+
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 import asyncio
-import random
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
-class CircuitState(Enum):
-    """Circuit breaker state."""
-    CLOSED = "closed"  # Normal operation
-    OPEN = "open"  # Failing, reject requests
-    HALF_OPEN = "half_open"  # Testing if service recovered
+class FaultToleranceStrategy(Enum):
+    """Fault tolerance strategies."""
+    TIMEOUT = "timeout"
+    RETRY = "retry"
+    CIRCUIT_BREAKER = "circuit_breaker"
+    BULKHEAD = "bulkhead"
+    FALLBACK = "fallback"
+    RATE_LIMIT = "rate_limit"
 
 
-class RetryStrategy(Enum):
-    """Retry strategy."""
-    FIXED = "fixed"
-    EXPONENTIAL = "exponential"
-    LINEAR = "linear"
-    FIBONACCI = "fibonacci"
+@dataclass
+class TimeoutConfig:
+    """Timeout configuration."""
+    timeout_seconds: float
+    timeout_strategy: str = "cancel"
 
 
 @dataclass
 class RetryConfig:
-    """Configuration for retry behavior."""
+    """Retry configuration."""
     max_attempts: int = 3
-    initial_delay: float = 1.0
+    base_delay: float = 1.0
     max_delay: float = 60.0
-    strategy: RetryStrategy = RetryStrategy.EXPONENTIAL
-    jitter: bool = True
-    jitter_factor: float = 0.1
-    retry_on: tuple[type, ...] = (Exception,)
+    exponential_base: float = 2.0
+    retryable_exceptions: Tuple[type, ...] = (Exception,)
 
 
 @dataclass
 class CircuitBreakerConfig:
-    """Configuration for circuit breaker."""
+    """Circuit breaker configuration."""
     failure_threshold: int = 5
     success_threshold: int = 2
     timeout_seconds: float = 60.0
-    half_open_requests: int = 3
-    excluded_exceptions: tuple[type, ...] = ()
+    half_open_max_calls: int = 3
 
 
 @dataclass
-class CircuitBreakerStats:
-    """Statistics for circuit breaker."""
+class BulkheadConfig:
+    """Bulkhead configuration."""
+    max_concurrent_calls: int = 10
+    max_queue_size: int = 100
+
+
+@dataclass
+class FaultToleranceMetrics:
+    """Fault tolerance metrics."""
     total_calls: int = 0
     successful_calls: int = 0
     failed_calls: int = 0
+    timeout_calls: int = 0
     rejected_calls: int = 0
-    state: CircuitState = CircuitState.CLOSED
-    last_failure: Optional[datetime] = None
-    last_success: Optional[datetime] = None
-    consecutive_failures: int = 0
-    consecutive_successes: int = 0
+    circuit_breaker_trips: int = 0
 
 
-@dataclass
-class FaultToleranceResult:
-    """Result of fault tolerance operation."""
-    success: bool
-    result: Any = None
-    error: Optional[str] = None
-    attempts: int = 0
-    circuit_state: CircuitState = CircuitState.CLOSED
-    duration_ms: float = 0
+class TimeoutHandler:
+    """Handles timeout for operations."""
 
+    def __init__(self, config: TimeoutConfig):
+        self.config = config
+        self._timed_out = False
 
-class CircuitBreaker:
-    """Circuit breaker implementation."""
-    
-    def __init__(self, name: str, config: Optional[CircuitBreakerConfig] = None):
-        self.name = name
-        self.config = config or CircuitBreakerConfig()
-        self.state = CircuitState.CLOSED
-        self.stats = CircuitBreakerStats()
-        self._last_state_change = datetime.now()
-        self._half_open_calls = 0
-    
-    def _should_record_failure(self, exception: Exception) -> bool:
-        """Check if this failure should be recorded."""
-        for exc_type in self.config.excluded_exceptions:
-            if isinstance(exception, exc_type):
-                return False
-        return True
-    
-    def record_success(self):
-        """Record a successful call."""
-        self.stats.successful_calls += 1
-        self.stats.consecutive_successes += 1
-        self.stats.consecutive_failures = 0
-        self.stats.last_success = datetime.now()
-        
-        if self.state == CircuitState.HALF_OPEN:
-            if self.stats.consecutive_successes >= self.config.success_threshold:
-                self._transition_to(CircuitState.CLOSED)
-    
-    def record_failure(self, exception: Exception):
-        """Record a failed call."""
-        if not self._should_record_failure(exception):
-            return
-        
-        self.stats.failed_calls += 1
-        self.stats.consecutive_failures += 1
-        self.stats.consecutive_successes = 0
-        self.stats.last_failure = datetime.now()
-        
-        if self.state == CircuitState.CLOSED:
-            if self.stats.consecutive_failures >= self.config.failure_threshold:
-                self._transition_to(CircuitState.OPEN)
-        
-        elif self.state == CircuitState.HALF_OPEN:
-            self._transition_to(CircuitState.OPEN)
-    
-    def _transition_to(self, new_state: CircuitState):
-        """Transition to a new state."""
-        old_state = self.state
-        self.state = new_state
-        self._last_state_change = datetime.now()
-        self.stats.state = new_state
-        
-        if new_state == CircuitState.HALF_OPEN:
-            self._half_open_calls = 0
-            self.stats.consecutive_successes = 0
-            self.stats.consecutive_failures = 0
-        
-        if new_state == CircuitState.CLOSED:
-            self.stats.consecutive_failures = 0
-    
-    def can_execute(self) -> bool:
-        """Check if a request can be executed."""
-        self.stats.total_calls += 1
-        
-        if self.state == CircuitState.CLOSED:
-            return True
-        
-        if self.state == CircuitState.OPEN:
-            # Check if timeout has elapsed
-            elapsed = (datetime.now() - self._last_state_change).total_seconds()
-            if elapsed >= self.config.timeout_seconds:
-                self._transition_to(CircuitState.HALF_OPEN)
-                return True
-            self.stats.rejected_calls += 1
-            return False
-        
-        if self.state == CircuitState.HALF_OPEN:
-            if self._half_open_calls < self.config.half_open_requests:
-                self._half_open_calls += 1
-                return True
-            self.stats.rejected_calls += 1
-            return False
-        
-        return False
-    
-    def get_stats(self) -> dict[str, Any]:
-        """Get circuit breaker statistics."""
-        return {
-            "name": self.name,
-            "state": self.state.value,
-            "total_calls": self.stats.total_calls,
-            "successful_calls": self.stats.successful_calls,
-            "failed_calls": self.stats.failed_calls,
-            "rejected_calls": self.stats.rejected_calls,
-            "consecutive_failures": self.stats.consecutive_failures,
-            "consecutive_successes": self.stats.consecutive_successes,
-            "last_failure": self.stats.last_failure.isoformat() if self.stats.last_failure else None,
-            "last_success": self.stats.last_success.isoformat() if self.stats.last_success else None
-        }
-
-
-class ApiFaultToleranceAction:
-    """Main fault tolerance action handler."""
-    
-    def __init__(self):
-        self._circuit_breakers: dict[str, CircuitBreaker] = {}
-        self._default_retry_config = RetryConfig()
-        self._default_circuit_config = CircuitBreakerConfig()
-    
-    def get_circuit_breaker(
+    async def execute(
         self,
-        name: str,
-        config: Optional[CircuitBreakerConfig] = None
-    ) -> CircuitBreaker:
-        """Get or create a circuit breaker."""
-        if name not in self._circuit_breakers:
-            self._circuit_breakers[name] = CircuitBreaker(name, config)
-        return self._circuit_breakers[name]
-    
-    async def execute_with_retry(
-        self,
-        operation: Callable[[], Awaitable[Any]],
-        config: Optional[RetryConfig] = None
-    ) -> FaultToleranceResult:
-        """
-        Execute operation with retry logic.
-        
-        Args:
-            operation: Async operation to execute
-            config: Retry configuration
-            
-        Returns:
-            FaultToleranceResult with outcome
-        """
-        cfg = config or self._default_retry_config
-        start_time = datetime.now()
-        last_error = None
-        attempt = 0
-        
-        while attempt < cfg.max_attempts:
-            attempt += 1
-            
-            try:
-                result = await operation()
-                
-                duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-                
-                return FaultToleranceResult(
-                    success=True,
-                    result=result,
-                    attempts=attempt,
-                    duration_ms=duration_ms
-                )
-                
-            except Exception as e:
-                last_error = e
-                
-                # Check if we should retry
-                should_retry = any(isinstance(e, exc_type) for exc_type in cfg.retry_on)
-                
-                if not should_retry or attempt >= cfg.max_attempts:
-                    break
-                
-                # Calculate delay
-                delay = self._calculate_delay(attempt, cfg)
-                
-                # Add jitter
-                if cfg.jitter:
-                    jitter_amount = delay * cfg.jitter_factor
-                    delay += random.uniform(-jitter_amount, jitter_amount)
-                
-                await asyncio.sleep(delay)
-        
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return FaultToleranceResult(
-            success=False,
-            error=str(last_error),
-            attempts=attempt,
-            duration_ms=duration_ms
-        )
-    
-    async def execute_with_circuit_breaker(
-        self,
-        operation: Callable[[], Awaitable[Any]],
-        circuit_name: str,
-        circuit_config: Optional[CircuitBreakerConfig] = None
-    ) -> FaultToleranceResult:
-        """
-        Execute operation with circuit breaker.
-        
-        Args:
-            operation: Async operation to execute
-            circuit_name: Name of circuit breaker
-            circuit_config: Circuit breaker configuration
-            
-        Returns:
-            FaultToleranceResult with outcome
-        """
-        breaker = self.get_circuit_breaker(circuit_name, circuit_config)
-        start_time = datetime.now()
-        
-        if not breaker.can_execute():
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return FaultToleranceResult(
-                success=False,
-                error=f"Circuit breaker {circuit_name} is {breaker.state.value}",
-                circuit_state=breaker.state,
-                duration_ms=duration_ms
-            )
-        
+        func: Callable[..., T],
+        *args,
+        **kwargs
+    ) -> T:
+        """Execute with timeout."""
+        self._timed_out = False
+
         try:
-            result = await operation()
-            breaker.record_success()
-            
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return FaultToleranceResult(
-                success=True,
-                result=result,
-                circuit_state=breaker.state,
-                duration_ms=duration_ms
+            result = await asyncio.wait_for(
+                func(*args, **kwargs),
+                timeout=self.config.timeout_seconds
             )
-            
-        except Exception as e:
-            breaker.record_failure(e)
-            
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            return FaultToleranceResult(
-                success=False,
-                error=str(e),
-                circuit_state=breaker.state,
-                duration_ms=duration_ms
-            )
-    
-    async def execute_with_fault_tolerance(
+            return result
+
+        except asyncio.TimeoutError:
+            self._timed_out = True
+            logger.warning(f"Operation timed out after {self.config.timeout_seconds}s")
+            raise TimeoutError(f"Operation timed out after {self.config.timeout_seconds}s")
+
+
+class RetryHandler:
+    """Handles retry with backoff."""
+
+    def __init__(self, config: RetryConfig):
+        self.config = config
+
+    async def execute(
         self,
-        operation: Callable[[], Awaitable[Any]],
-        circuit_name: str,
-        retry_config: Optional[RetryConfig] = None,
-        circuit_config: Optional[CircuitBreakerConfig] = None
-    ) -> FaultToleranceResult:
-        """
-        Execute operation with both circuit breaker and retry.
-        
-        Circuit breaker is checked before retry logic.
-        """
-        breaker = self.get_circuit_breaker(circuit_name, circuit_config)
-        cfg = retry_config or self._default_retry_config
-        start_time = datetime.now()
-        last_error = None
-        attempt = 0
-        
-        while attempt < cfg.max_attempts:
-            if not breaker.can_execute():
-                duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-                
-                return FaultToleranceResult(
-                    success=False,
-                    error=f"Circuit breaker {circuit_name} is {breaker.state.value}",
-                    attempts=attempt,
-                    circuit_state=breaker.state,
-                    duration_ms=duration_ms
-                )
-            
-            attempt += 1
-            
+        func: Callable[..., T],
+        *args,
+        **kwargs
+    ) -> T:
+        """Execute with retry."""
+        last_exception = None
+
+        for attempt in range(self.config.max_attempts):
             try:
-                result = await operation()
-                breaker.record_success()
-                
-                duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-                
-                return FaultToleranceResult(
-                    success=True,
-                    result=result,
-                    attempts=attempt,
-                    circuit_state=breaker.state,
-                    duration_ms=duration_ms
-                )
-                
-            except Exception as e:
-                last_error = e
-                breaker.record_failure(e)
-                
-                should_retry = any(isinstance(e, exc_type) for exc_type in cfg.retry_on)
-                
-                if not should_retry or attempt >= cfg.max_attempts:
-                    break
-                
-                delay = self._calculate_delay(attempt, cfg)
-                if cfg.jitter:
-                    delay += random.uniform(-delay * cfg.jitter_factor, delay * cfg.jitter_factor)
-                
-                await asyncio.sleep(delay)
-        
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return FaultToleranceResult(
-            success=False,
-            error=str(last_error),
-            attempts=attempt,
-            circuit_state=breaker.state,
-            duration_ms=duration_ms
-        )
-    
-    def _calculate_delay(self, attempt: int, config: RetryConfig) -> float:
-        """Calculate delay for retry attempt."""
-        if config.strategy == RetryStrategy.FIXED:
-            delay = config.initial_delay
-        
-        elif config.strategy == RetryStrategy.EXPONENTIAL:
-            delay = config.initial_delay * (2 ** (attempt - 1))
-        
-        elif config.strategy == RetryStrategy.LINEAR:
-            delay = config.initial_delay * attempt
-        
-        elif config.strategy == RetryStrategy.FIBONACCI:
-            # Fibonacci sequence
-            a, b = 1, 1
-            for _ in range(attempt - 1):
-                a, b = b, a + b
-            delay = config.initial_delay * a
-        
-        else:
-            delay = config.initial_delay
-        
-        return min(delay, config.max_delay)
-    
-    async def get_circuit_breaker_stats(self, name: str) -> Optional[dict[str, Any]]:
-        """Get statistics for a circuit breaker."""
-        breaker = self._circuit_breakers.get(name)
-        if breaker:
-            return breaker.get_stats()
-        return None
-    
-    async def list_circuit_breakers(self) -> dict[str, dict[str, Any]]:
-        """List all circuit breakers and their stats."""
-        return {
-            name: breaker.get_stats()
-            for name, breaker in self._circuit_breakers.items()
-        }
-    
-    async def reset_circuit_breaker(self, name: str) -> bool:
-        """Manually reset a circuit breaker."""
-        if name in self._circuit_breakers:
-            breaker = self._circuit_breakers[name]
-            breaker._transition_to(CircuitState.CLOSED)
+                if asyncio.iscoroutinefunction(func):
+                    return await func(*args, **kwargs)
+                else:
+                    return await asyncio.to_thread(func, *args, **kwargs)
+
+            except self.config.retryable_exceptions as e:
+                last_exception = e
+                if attempt < self.config.max_attempts - 1:
+                    delay = min(
+                        self.config.base_delay * (self.config.exponential_base ** attempt),
+                        self.config.max_delay
+                    )
+                    logger.warning(f"Retry attempt {attempt + 1} after {delay:.2f}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"All {self.config.max_attempts} attempts failed")
+
+        if last_exception:
+            raise last_exception
+
+
+class CircuitBreakerState:
+    """Circuit breaker state."""
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class CircuitBreakerHandler:
+    """Handles circuit breaker pattern."""
+
+    def __init__(self, name: str, config: CircuitBreakerConfig):
+        self.name = name
+        self.config = config
+        self.state = CircuitBreakerState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time: Optional[datetime] = None
+        self.half_open_calls = 0
+
+    def can_execute(self) -> bool:
+        """Check if can execute."""
+        if self.state == CircuitBreakerState.CLOSED:
             return True
-        return False
-    
-    async def execute_batch_with_fault_tolerance(
+
+        if self.state == CircuitBreakerState.OPEN:
+            elapsed = (datetime.now() - self.last_failure_time).total_seconds()
+            if elapsed >= self.config.timeout_seconds:
+                self.state = CircuitBreakerState.HALF_OPEN
+                self.half_open_calls = 0
+                return True
+            return False
+
+        if self.state == CircuitBreakerState.HALF_OPEN:
+            return self.half_open_calls < self.config.half_open_max_calls
+
+        return True
+
+    def record_success(self):
+        """Record successful call."""
+        if self.state == CircuitBreakerState.HALF_OPEN:
+            self.success_count += 1
+            if self.success_count >= self.config.success_threshold:
+                self.state = CircuitBreakerState.CLOSED
+                self.failure_count = 0
+                self.success_count = 0
+        elif self.state == CircuitBreakerState.CLOSED:
+            self.failure_count = max(0, self.failure_count - 1)
+
+    def record_failure(self):
+        """Record failed call."""
+        self.failure_count += 1
+        self.last_failure_time = datetime.now()
+
+        if self.state == CircuitBreakerState.HALF_OPEN:
+            self.state = CircuitBreakerState.OPEN
+
+        elif self.state == CircuitBreakerState.CLOSED:
+            if self.failure_count >= self.config.failure_threshold:
+                self.state = CircuitBreakerState.OPEN
+
+
+class BulkheadHandler:
+    """Handles bulkhead isolation."""
+
+    def __init__(self, config: BulkheadConfig):
+        self.config = config
+        self.semaphore = asyncio.Semaphore(config.max_concurrent_calls)
+        self.active_calls = 0
+        self.queued_calls = 0
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=config.max_queue_size)
+
+    async def execute(
         self,
-        operations: list[tuple[str, Callable[[], Awaitable[Any]]]],
-        circuit_prefix: str = "batch"
-    ) -> dict[str, FaultToleranceResult]:
-        """
-        Execute multiple operations with fault tolerance.
-        
-        Each operation gets its own circuit breaker named {prefix}:{index}
-        """
-        results = {}
-        tasks = []
-        
-        for i, (name, op) in enumerate(operations):
-            circuit_name = f"{circuit_prefix}:{i}:{name}"
-            task = self.execute_with_fault_tolerance(op, circuit_name)
-            tasks.append(task)
-        
-        # Execute all in parallel
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for i, outcome in enumerate(outcomes):
-            if isinstance(outcome, Exception):
-                results[operations[i][0]] = FaultToleranceResult(
-                    success=False,
-                    error=str(outcome)
+        func: Callable[..., T],
+        *args,
+        **kwargs
+    ) -> T:
+        """Execute within bulkhead."""
+        async with self.semaphore:
+            self.active_calls += 1
+            try:
+                if asyncio.iscoroutinefunction(func):
+                    return await func(*args, **kwargs)
+                else:
+                    return await asyncio.to_thread(func, *args, **kwargs)
+            finally:
+                self.active_calls -= 1
+
+
+class FaultToleranceManager:
+    """Manages all fault tolerance strategies."""
+
+    def __init__(self):
+        self.strategies: Dict[FaultToleranceStrategy, Any] = {}
+        self.metrics = FaultToleranceMetrics()
+        self.circuit_breakers: Dict[str, CircuitBreakerHandler] = {}
+        self.bulkheads: Dict[str, BulkheadHandler] = {}
+
+    def set_timeout(self, config: TimeoutConfig):
+        """Set timeout strategy."""
+        self.strategies[FaultToleranceStrategy.TIMEOUT] = TimeoutHandler(config)
+
+    def set_retry(self, config: RetryConfig):
+        """Set retry strategy."""
+        self.strategies[FaultToleranceStrategy.RETRY] = RetryHandler(config)
+
+    def add_circuit_breaker(self, name: str, config: CircuitBreakerConfig):
+        """Add circuit breaker."""
+        self.circuit_breakers[name] = CircuitBreakerHandler(name, config)
+
+    def add_bulkhead(self, name: str, config: BulkheadConfig):
+        """Add bulkhead."""
+        self.bulkheads[name] = BulkheadHandler(config)
+
+    async def execute(
+        self,
+        func: Callable,
+        *args,
+        timeout: Optional[TimeoutConfig] = None,
+        retry: Optional[RetryConfig] = None,
+        circuit_breaker: Optional[str] = None,
+        bulkhead: Optional[str] = None,
+        fallback: Optional[Callable] = None,
+        **kwargs
+    ) -> Any:
+        """Execute with fault tolerance."""
+        self.metrics.total_calls += 1
+
+        if circuit_breaker and circuit_breaker in self.circuit_breakers:
+            cb = self.circuit_breakers[circuit_breaker]
+            if not cb.can_execute():
+                self.metrics.rejected_calls += 1
+                if fallback:
+                    return fallback()
+                raise Exception(f"Circuit breaker {circuit_breaker} is open")
+
+            try:
+                result = await self._execute_internal(
+                    func, timeout, retry, *args, **kwargs
                 )
-            else:
-                results[operations[i][0]] = outcome
-        
-        return results
+                cb.record_success()
+                self.metrics.successful_calls += 1
+                return result
+
+            except Exception as e:
+                cb.record_failure()
+                self.metrics.failed_calls += 1
+                if fallback:
+                    return fallback()
+                raise
+
+        if bulkhead and bulkhead in self.bulkheads:
+            bh = self.bulkheads[bulkhead]
+            result = await bh.execute(
+                self._execute_internal, func, timeout, retry, *args, **kwargs
+            )
+            self.metrics.successful_calls += 1
+            return result
+
+        return await self._execute_internal(func, timeout, retry, *args, **kwargs)
+
+    async def _execute_internal(
+        self,
+        func: Callable,
+        timeout: Optional[TimeoutConfig],
+        retry: Optional[RetryConfig],
+        *args,
+        **kwargs
+    ) -> Any:
+        """Internal execution with timeout and retry."""
+        if timeout:
+            handler = TimeoutHandler(timeout)
+            func = handler.execute
+
+        if retry:
+            retry_handler = RetryHandler(retry)
+            original_func = func
+
+            async def wrapped():
+                return await original_func(*args, **kwargs)
+
+            return await retry_handler.execute(wrapped)
+
+        if asyncio.iscoroutinefunction(func):
+            return await func(*args, **kwargs)
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def main():
+    """Demonstrate fault tolerance."""
+    manager = FaultToleranceManager()
+
+    manager.add_circuit_breaker("api", CircuitBreakerConfig(failure_threshold=3))
+
+    async def demo_func():
+        await asyncio.sleep(0.1)
+        return "success"
+
+    try:
+        result = await manager.execute(
+            demo_func,
+            circuit_breaker="api"
+        )
+        print(f"Result: {result}")
+        print(f"Metrics: {manager.metrics.total_calls}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
