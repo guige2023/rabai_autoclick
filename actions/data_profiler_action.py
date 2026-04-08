@@ -1,303 +1,427 @@
 """Data profiler action module for RabAI AutoClick.
 
-Provides data profiling with statistics computation,
-schema inference, and quality assessment.
+Provides data profiling actions for analyzing data quality,
+statistics, and schema information.
 """
 
 import sys
 import os
 import json
-from typing import Any, Dict, List, Optional, Union, Callable
+from typing import Any, Dict, List, Optional, Union
 from collections import Counter
-import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
 class DataProfilerAction(BaseAction):
-    """Profile data and compute statistics.
+    """Profile dataset and generate statistics.
     
-    Supports column profiling, type inference,
-    pattern detection, and quality scoring.
+    Analyzes data structure, types, and distributions.
     """
     action_type = "data_profiler"
     display_name = "数据画像"
-    description = "数据统计分析，质量评分和类型推断"
-    
+    description = "生成数据统计画像"
+
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute data profiling operations.
+        """Profile data.
         
         Args:
             context: Execution context.
-            params: Dict with keys: records, profile_type, compute_stats.
+            params: Dict with keys: data, include_histograms,
+                   include_top_values, sample_size.
         
         Returns:
-            ActionResult with profiling results.
+            ActionResult with profile statistics.
         """
-        records = params.get('records', [])
-        if not records:
-            return ActionResult(success=False, message="No records provided")
-        
-        if isinstance(records, dict):
-            records = [records]
-        
-        profile_type = params.get('profile_type', 'full')
-        compute_stats = params.get('compute_stats', True)
-        
-        if profile_type == 'full':
-            return self._full_profile(records, compute_stats)
-        elif profile_type == 'column':
-            return self._column_profile(records, params.get('column'))
-        elif profile_type == 'schema':
-            return self._schema_inference(records)
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown profile_type: {profile_type}"
-            )
-    
-    def _full_profile(
-        self,
-        records: List[Dict[str, Any]],
-        compute_stats: bool
-    ) -> ActionResult:
-        """Generate full data profile."""
-        if not records:
-            return ActionResult(success=False, message="No records to profile")
-        
-        columns = {}
-        
-        for record in records:
-            for key, value in record.items():
-                if key not in columns:
-                    columns[key] = []
-                columns[key].append(value)
+        data = params.get('data', [])
+        include_histograms = params.get('include_histograms', False)
+        include_top_values = params.get('include_top_values', True)
+        sample_size = params.get('sample_size', 10000)
+
+        if not data:
+            return ActionResult(success=False, message="data is required")
+
+        if not isinstance(data, list):
+            data = [data]
+
+        sample = data[:sample_size] if len(data) > sample_size else data
         
         profile = {
-            'record_count': len(records),
-            'column_count': len(columns),
-            'columns': {}
+            'record_count': len(data),
+            'sample_count': len(sample),
+            'fields': {}
         }
-        
-        for col_name, values in columns.items():
-            col_profile = self._profile_column(col_name, values, compute_stats)
-            profile['columns'][col_name] = col_profile
-        
-        quality_score = self._compute_quality_score(profile)
-        profile['quality_score'] = quality_score
-        
+
+        if not sample:
+            return ActionResult(success=True, message="No data to profile", data=profile)
+
+        field_names = set()
+        for record in sample:
+            if isinstance(record, dict):
+                field_names.update(record.keys())
+
+        for field in field_names:
+            values = [r.get(field) for r in sample if isinstance(r, dict) and field in r]
+            non_null = [v for v in values if v is not None]
+            
+            field_stats = {
+                'type': self._infer_type(non_null) if non_null else 'null',
+                'count': len(values),
+                'null_count': len(values) - len(non_null),
+                'null_pct': round((len(values) - len(non_null)) / len(values) * 100, 2) if values else 0
+            }
+
+            if non_null:
+                if all(isinstance(v, (int, float)) for v in non_null):
+                    numeric = [v for v in non_null if isinstance(v, (int, float))]
+                    if numeric:
+                        field_stats['min'] = min(numeric)
+                        field_stats['max'] = max(numeric)
+                        field_stats['avg'] = sum(numeric) / len(numeric)
+                        field_stats['sum'] = sum(numeric)
+                        
+                        if include_histograms:
+                            field_stats['histogram'] = self._compute_histogram(numeric)
+                
+                if include_top_values:
+                    counter = Counter(str(v) for v in non_null)
+                    field_stats['top_values'] = counter.most_common(10)
+
+            profile['fields'][field] = field_stats
+
         return ActionResult(
             success=True,
-            message=f"Profiled {len(records)} records across {len(columns)} columns",
+            message=f"Profiled {profile['record_count']} records, {len(field_names)} fields",
             data=profile
         )
-    
-    def _profile_column(
-        self,
-        col_name: str,
-        values: List[Any],
-        compute_stats: bool
-    ) -> Dict[str, Any]:
-        """Profile a single column."""
-        non_null = [v for v in values if v is not None and v != '']
-        null_count = len(values) - len(non_null)
-        
-        profile = {
-            'name': col_name,
-            'total_count': len(values),
-            'null_count': null_count,
-            'null_percentage': (null_count / len(values) * 100) if values else 0,
-            'unique_count': len(set(non_null)) if non_null else 0,
-            'inferred_type': self._infer_type(non_null)
-        }
-        
-        if non_null:
-            types = [type(v).__name__ for v in non_null]
-            type_counts = Counter(types)
-            profile['type_distribution'] = dict(type_counts.most_common())
-        
-        if compute_stats and non_null:
-            if all(isinstance(v, (int, float)) for v in non_null):
-                numeric_values = [float(v) for v in non_null if v is not None]
-                if numeric_values:
-                    profile['min'] = min(numeric_values)
-                    profile['max'] = max(numeric_values)
-                    profile['mean'] = sum(numeric_values) / len(numeric_values)
-                    profile['sum'] = sum(numeric_values)
-            
-            if all(isinstance(v, str) for v in non_null):
-                lengths = [len(str(v)) for v in non_null]
-                profile['min_length'] = min(lengths)
-                profile['max_length'] = max(lengths)
-                profile['avg_length'] = sum(lengths) / len(lengths)
-                
-                patterns = self._detect_patterns(non_null)
-                if patterns:
-                    profile['patterns'] = patterns
-        
-        return profile
-    
-    def _infer_type(self, values: List[Any]) -> str:
-        """Infer the type of a column."""
+
+    def _infer_type(self, values: List) -> str:
+        """Infer data type from values."""
         if not values:
             return 'unknown'
         
-        type_counts = Counter()
-        
-        for v in values:
-            if v is None or v == '':
-                type_counts['null'] += 1
-            elif isinstance(v, bool):
-                type_counts['boolean'] += 1
-            elif isinstance(v, int):
-                type_counts['integer'] += 1
-            elif isinstance(v, float):
-                type_counts['float'] += 1
-            elif isinstance(v, str):
-                if self._looks_like_email(v):
-                    type_counts['email'] += 1
-                elif self._looks_like_url(v):
-                    type_counts['url'] += 1
-                elif self._looks_like_date(v):
-                    type_counts['date'] += 1
-                elif self._looks_like_phone(v):
-                    type_counts['phone'] += 1
-                else:
-                    type_counts['string'] += 1
-            else:
-                type_counts[type(v).__name__] += 1
-        
-        if not type_counts:
-            return 'unknown'
-        
+        type_counts = Counter(type(v).__name__ for v in values)
         most_common = type_counts.most_common(1)[0][0]
         
-        if type_counts['null'] > len(values) * 0.5:
-            return 'mostly_null'
-        
-        return most_common
-    
-    def _looks_like_email(self, value: str) -> bool:
-        import re
-        return bool(re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', str(value)))
-    
-    def _looks_like_url(self, value: str) -> bool:
-        import re
-        return bool(re.match(r'^https?://[\w\.-]+', str(value)))
-    
-    def _looks_like_date(self, value: str) -> bool:
-        import re
-        return bool(re.match(r'\d{4}[-/]\d{2}[-/]\d{2}', str(value)))
-    
-    def _looks_like_phone(self, value: str) -> bool:
-        import re
-        return bool(re.match(r'^[\d\s\-\+\(\)]{7,}$', str(value)))
-    
-    def _detect_patterns(self, values: List[str]) -> Dict[str, int]:
-        """Detect common patterns in string values."""
-        import re
-        
-        patterns = {
-            'has_uppercase': 0,
-            'has_lowercase': 0,
-            'has_digits': 0,
-            'has_special': 0,
-            'is_alphanumeric': 0,
-            'is_hex': 0
+        type_map = {
+            'str': 'string',
+            'int': 'integer',
+            'float': 'float',
+            'bool': 'boolean',
+            'list': 'array',
+            'dict': 'object'
         }
         
-        for v in values:
-            s = str(v)
-            if any(c.isupper() for c in s):
-                patterns['has_uppercase'] += 1
-            if any(c.islower() for c in s):
-                patterns['has_lowercase'] += 1
-            if any(c.isdigit() for c in s):
-                patterns['has_digits'] += 1
-            if any(not c.isalnum() for c in s):
-                patterns['has_special'] += 1
-            if s.isalnum():
-                patterns['is_alphanumeric'] += 1
-            if re.match(r'^[0-9a-fA-F]+$', s):
-                patterns['is_hex'] += 1
-        
-        return {k: v for k, v in patterns.items() if v > 0}
-    
-    def _schema_inference(
-        self,
-        records: List[Dict[str, Any]]
-    ) -> ActionResult:
-        """Infer schema from records."""
-        schema = {
-            'fields': {},
-            'required_fields': [],
-            'optional_fields': []
-        }
-        
-        all_keys = set()
-        for record in records:
-            all_keys.update(record.keys())
-        
-        for key in all_keys:
-            values = [r.get(key) for r in records if key in r]
-            non_null = [v for v in values if v is not None and v != '']
-            
-            field_schema = {
-                'name': key,
-                'type': self._infer_type(non_null),
-                'nullable': len(non_null) < len(values),
-                'unique': len(set(non_null)) == len(non_null) if non_null else False
-            }
-            
-            schema['fields'][key] = field_schema
-            
-            if not field_schema['nullable']:
-                schema['required_fields'].append(key)
-            else:
-                schema['optional_fields'].append(key)
-        
-        return ActionResult(
-            success=True,
-            message=f"Inferred schema with {len(schema['fields'])} fields",
-            data=schema
-        )
-    
-    def _compute_quality_score(self, profile: Dict[str, Any]) -> float:
-        """Compute overall data quality score."""
-        score = 100.0
-        
-        for col_name, col_profile in profile.get('columns', {}).items():
-            null_pct = col_profile.get('null_percentage', 0)
-            score -= null_pct * 0.5
-        
-        return max(0.0, min(100.0, score))
-    
-    def _column_profile(
-        self,
-        records: List[Dict[str, Any]],
-        column: Optional[str]
-    ) -> ActionResult:
-        """Profile a specific column."""
-        if not column:
-            return ActionResult(success=False, message="column is required")
-        
-        values = [r.get(column) for r in records if column in r]
-        
+        return type_map.get(most_common, most_common)
+
+    def _compute_histogram(self, values: List, bins: int = 10) -> Dict:
+        """Compute histogram for numeric values."""
         if not values:
-            return ActionResult(
-                success=False,
-                message=f"Column '{column}' not found"
-            )
+            return {}
         
-        profile = self._profile_column(column, values, True)
+        min_val = min(values)
+        max_val = max(values)
+        range_val = max_val - min_val if max_val != min_val else 1
+        bin_width = range_val / bins
         
+        histogram = {}
+        for i in range(bins):
+            bin_start = min_val + i * bin_width
+            bin_end = bin_start + bin_width
+            bin_label = f"{bin_start:.2f}-{bin_end:.2f}"
+            count = sum(1 for v in values if bin_start <= v < bin_end)
+            histogram[bin_label] = count
+        
+        return histogram
+
+
+class DataQualityCheckAction(BaseAction):
+    """Perform data quality checks.
+    
+    Validates data against quality rules.
+    """
+    action_type = "data_quality_check"
+    display_name = "数据质量检查"
+    description = "数据质量规则检查"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Check data quality.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: data, rules, fail_fast.
+                   rules: list of {name, field, check, threshold}.
+        
+        Returns:
+            ActionResult with quality check results.
+        """
+        data = params.get('data', [])
+        rules = params.get('rules', [])
+        fail_fast = params.get('fail_fast', False)
+
+        if not data:
+            return ActionResult(success=False, message="data is required")
+
+        if not isinstance(data, list):
+            data = [data]
+
+        results = []
+        passed = 0
+        failed = 0
+
+        for rule in rules:
+            name = rule.get('name', 'unnamed')
+            field = rule.get('field', '')
+            check_type = rule.get('check', 'completeness')
+            threshold = rule.get('threshold', 0)
+
+            rule_result = self._check_rule(data, field, check_type, threshold)
+            rule_result['name'] = name
+            
+            results.append(rule_result)
+            
+            if rule_result['passed']:
+                passed += 1
+            else:
+                failed += 1
+                if fail_fast:
+                    break
+
+        return ActionResult(
+            success=failed == 0,
+            message=f"Quality check: {passed} passed, {failed} failed",
+            data={
+                'passed': passed,
+                'failed': failed,
+                'total': len(rules),
+                'results': results
+            }
+        )
+
+    def _check_rule(self, data: List, field: str, check_type: str, threshold: float) -> Dict:
+        """Check a single rule."""
+        if check_type == 'completeness':
+            non_null = sum(1 for r in data if isinstance(r, dict) and r.get(field) is not None)
+            score = non_null / len(data) if data else 0
+            return {'passed': score >= threshold, 'score': round(score, 4), 'type': 'completeness'}
+        
+        elif check_type == 'uniqueness':
+            values = [r.get(field) for r in data if isinstance(r, dict) and field in r]
+            unique = len(set(values))
+            score = unique / len(values) if values else 0
+            return {'passed': score >= threshold, 'score': round(score, 4), 'type': 'uniqueness'}
+        
+        elif check_type == 'validity':
+            valid = sum(1 for r in data if isinstance(r, dict) and r.get(field) is not None)
+            score = valid / len(data) if data else 0
+            return {'passed': score >= threshold, 'score': round(score, 4), 'type': 'validity'}
+        
+        elif check_type == 'consistency':
+            score = 1.0
+            return {'passed': score >= threshold, 'score': round(score, 4), 'type': 'consistency'}
+        
+        return {'passed': False, 'score': 0, 'type': check_type, 'error': 'unknown check type'}
+
+
+class DataSchemaInferAction(BaseAction):
+    """Infer schema from data.
+    
+    Generates schema definition from data samples.
+    """
+    action_type = "data_schema_infer"
+    display_name = "推断Schema"
+    description = "从数据推断Schema"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Infer schema.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: data, strict, sample_size.
+        
+        Returns:
+            ActionResult with inferred schema.
+        """
+        data = params.get('data', [])
+        strict = params.get('strict', False)
+        sample_size = params.get('sample_size', 1000)
+
+        if not data:
+            return ActionResult(success=False, message="data is required")
+
+        if not isinstance(data, list):
+            data = [data]
+
+        sample = data[:sample_size] if len(data) > sample_size else data
+        
+        schema = {
+            'type': 'array',
+            'items': {'type': 'object', 'properties': {}},
+            'record_count': len(data)
+        }
+
+        for record in sample:
+            if not isinstance(record, dict):
+                continue
+            
+            for field, value in record.items():
+                if field not in schema['items']['properties']:
+                    schema['items']['properties'][field] = {
+                        'type': self._get_type(value),
+                        'nullable': True,
+                        'samples': []
+                    }
+                
+                prop = schema['items']['properties'][field]
+                prop['type'] = self._merge_types(prop['type'], self._get_type(value))
+                
+                if len(prop['samples']) < 5:
+                    prop['samples'].append(value)
+
+        if strict:
+            for field in schema['items']['properties']:
+                schema['items']['properties'][field]['nullable'] = False
+
         return ActionResult(
             success=True,
-            message=f"Profiled column '{column}'",
-            data=profile
+            message=f"Inferred schema with {len(schema['items']['properties'])} fields",
+            data={'schema': schema}
+        )
+
+    def _get_type(self, value: Any) -> str:
+        """Get JSON schema type."""
+        if value is None:
+            return 'null'
+        elif isinstance(value, bool):
+            return 'boolean'
+        elif isinstance(value, int):
+            return 'integer'
+        elif isinstance(value, float):
+            return 'number'
+        elif isinstance(value, str):
+            return 'string'
+        elif isinstance(value, list):
+            return 'array'
+        elif isinstance(value, dict):
+            return 'object'
+        return 'string'
+
+    def _merge_types(self, type1: str, type2: str) -> str:
+        """Merge two types."""
+        if type1 == type2:
+            return type1
+        if 'null' in (type1, type2):
+            return type2 if type1 == 'null' else type1
+        return 'string'
+
+
+class DataAnomalyDetectAction(BaseAction):
+    """Detect anomalies in data.
+    
+    Identifies outliers and unusual patterns.
+    """
+    action_type = "data_anomaly_detect"
+    display_name = "异常检测"
+    description = "检测数据异常值"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Detect anomalies.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: data, field, method,
+                   threshold, z_threshold.
+        
+        Returns:
+            ActionResult with detected anomalies.
+        """
+        data = params.get('data', [])
+        field = params.get('field', '')
+        method = params.get('method', 'zscore')
+        threshold = params.get('threshold', 3)
+        z_threshold = params.get('z_threshold', 3)
+
+        if not data:
+            return ActionResult(success=False, message="data is required")
+
+        if not field:
+            return ActionResult(success=False, message="field is required")
+
+        numeric_values = []
+        for i, record in enumerate(data):
+            if isinstance(record, dict) and field in record:
+                value = record[field]
+                if isinstance(value, (int, float)):
+                    numeric_values.append((i, value, record))
+
+        if not numeric_values:
+            return ActionResult(success=True, message="No numeric values found", data={'anomalies': []})
+
+        values = [v[1] for v in numeric_values]
+        
+        if method == 'zscore':
+            mean = sum(values) / len(values)
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            std = variance ** 0.5
+            
+            anomalies = []
+            for idx, value, record in numeric_values:
+                if std > 0:
+                    zscore = abs((value - mean) / std)
+                    if zscore > z_threshold:
+                        anomalies.append({
+                            'index': idx,
+                            'value': value,
+                            'zscore': round(zscore, 3),
+                            'record': record
+                        })
+        
+        elif method == 'iqr':
+            sorted_vals = sorted(values)
+            n = len(sorted_vals)
+            q1 = sorted_vals[n // 4]
+            q3 = sorted_vals[3 * n // 4]
+            iqr = q3 - q1
+            
+            lower = q1 - threshold * iqr
+            upper = q3 + threshold * iqr
+            
+            anomalies = []
+            for idx, value, record in numeric_values:
+                if value < lower or value > upper:
+                    anomalies.append({
+                        'index': idx,
+                        'value': value,
+                        'bounds': (lower, upper),
+                        'record': record
+                    })
+        
+        else:
+            return ActionResult(success=False, message=f"Unknown method: {method}")
+
+        return ActionResult(
+            success=True,
+            message=f"Detected {len(anomalies)} anomalies using {method}",
+            data={
+                'anomalies': anomalies,
+                'count': len(anomalies),
+                'method': method
+            }
         )
