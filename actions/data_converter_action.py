@@ -1,396 +1,169 @@
-"""Data converter action for format conversion.
+"""Data converter action module for RabAI AutoClick.
 
-This module provides data format conversion including
-JSON, CSV, XML, YAML, and binary formats.
-
-Example:
-    >>> action = DataConverterAction()
-    >>> result = action.execute(operation="json_to_csv", data='{"a":1}')
+Provides data conversion:
+- DataConverterAction: Convert data formats
+- FormatConverterAction: Convert between formats
+- TypeConverterAction: Convert data types
 """
 
-from __future__ import annotations
+from typing import Any, Dict, List, Optional
+from datetime import datetime
 
-import base64
-import json
-from dataclasses import dataclass
-from typing import Any, Optional
+import sys
+import os
 
-
-@dataclass
-class ConversionResult:
-    """Result from data conversion."""
-    success: bool
-    data: Any = None
-    format: str = ""
-    error: Optional[str] = None
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class DataConverterAction:
-    """Data format conversion action.
+class DataConverterAction(BaseAction):
+    """Convert data formats."""
+    action_type = "data_converter"
+    display_name = "数据转换器"
+    description = "转换数据格式"
 
-    Converts between common data formats including
-    JSON, CSV, XML, YAML, and encoded formats.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", {})
+            from_format = params.get("from_format", "dict")
+            to_format = params.get("to_format", "json")
 
-    Example:
-        >>> action = DataConverterAction()
-        >>> result = action.execute(
-        ...     operation="csv_to_json",
-        ...     data="a,b\\nc,d"
-        ... )
-    """
+            if from_format == "dict" and to_format == "json":
+                import json
+                converted = json.dumps(data)
+            elif from_format == "json" and to_format == "dict":
+                import json
+                converted = json.loads(data) if isinstance(data, str) else data
+            elif from_format == "dict" and to_format == "xml":
+                converted = self._dict_to_xml(data)
+            elif from_format == "xml" and to_format == "dict":
+                converted = self._xml_to_dict(data)
+            else:
+                converted = data
 
-    def __init__(self) -> None:
-        """Initialize data converter."""
-        self._last_conversion: Optional[ConversionResult] = None
+            return ActionResult(
+                success=True,
+                data={
+                    "from_format": from_format,
+                    "to_format": to_format,
+                    "converted": converted
+                },
+                message=f"Converted: {from_format} -> {to_format}"
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Data converter error: {str(e)}")
 
-    def execute(
-        self,
-        operation: str,
-        data: Any,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Execute conversion operation.
+    def _dict_to_xml(self, data: Dict, root: str = "root") -> str:
+        xml = f"<{root}>"
+        for key, value in data.items():
+            if isinstance(value, dict):
+                xml += self._dict_to_xml(value, key)
+            else:
+                xml += f"<{key}>{value}</{key}>"
+        xml += f"</{root}>"
+        return xml
 
-        Args:
-            operation: Conversion operation (json_to_csv, etc.).
-            data: Input data to convert.
-            **kwargs: Additional parameters.
-
-        Returns:
-            Conversion result dictionary.
-
-        Raises:
-            ValueError: If operation is invalid.
-        """
-        op = operation.lower()
-        result: dict[str, Any] = {"operation": op, "success": True}
-
-        # JSON conversions
-        if op == "json_to_csv":
-            result.update(self._json_to_csv(data, kwargs.get("delimiter", ",")))
-            result["format"] = "csv"
-        elif op == "json_to_xml":
-            result.update(self._json_to_xml(data))
-            result["format"] = "xml"
-        elif op == "json_to_yaml":
-            result.update(self._json_to_yaml(data))
-            result["format"] = "yaml"
-        elif op == "csv_to_json":
-            result.update(self._csv_to_json(data, kwargs.get("delimiter", ",")))
-            result["format"] = "json"
-        elif op == "xml_to_json":
-            result.update(self._xml_to_json(data))
-            result["format"] = "json"
-        elif op == "yaml_to_json":
-            result.update(self._yaml_to_json(data))
-            result["format"] = "json"
-        elif op == "dict_to_json":
-            result["data"] = json.dumps(data, indent=kwargs.get("indent", 2), ensure_ascii=False)
-            result["format"] = "json"
-        elif op == "json_to_dict":
-            result["data"] = json.loads(data) if isinstance(data, str) else data
-            result["format"] = "dict"
-        elif op == "json_prettify":
-            result["data"] = json.dumps(json.loads(data) if isinstance(data, str) else data, indent=2)
-            result["format"] = "json"
-        elif op == "json_minify":
-            result["data"] = json.dumps(json.loads(data) if isinstance(data, str) else data, separators=(",", ":"))
-            result["format"] = "json"
-
-        # Encoding conversions
-        elif op == "to_base64":
-            result.update(self._to_base64(data))
-            result["format"] = "base64"
-        elif op == "from_base64":
-            result.update(self._from_base64(data))
-            result["format"] = "string"
-        elif op == "to_hex":
-            result.update(self._to_hex(data))
-            result["format"] = "hex"
-        elif op == "from_hex":
-            result.update(self._from_hex(data))
-            result["format"] = "string"
-        elif op == "to_urlencoding":
-            result.update(self._to_urlencoding(data))
-            result["format"] = "urlencoded"
-        elif op == "from_urlencoding":
-            result.update(self._from_urlencoding(data))
-            result["format"] = "string"
-
-        # Type conversions
-        elif op == "to_string":
-            result["data"] = str(data)
-            result["format"] = "string"
-        elif op == "to_int":
-            try:
-                result["data"] = int(data)
-                result["format"] = "int"
-            except (ValueError, TypeError) as e:
-                result["success"] = False
-                result["error"] = str(e)
-        elif op == "to_float":
-            try:
-                result["data"] = float(data)
-                result["format"] = "float"
-            except (ValueError, TypeError) as e:
-                result["success"] = False
-                result["error"] = str(e)
-        elif op == "to_bool":
-            result["data"] = bool(data)
-            result["format"] = "bool"
-        elif op == "to_list":
-            result["data"] = list(data) if not isinstance(data, list) else data
-            result["format"] = "list"
-        elif op == "to_dict":
-            result["data"] = dict(data) if not isinstance(data, dict) else data
-            result["format"] = "dict"
-
-        # Array conversions
-        elif op == "list_to_dict":
-            key = kwargs.get("key")
-            if not key:
-                return {"success": False, "error": "key required for list_to_dict"}
-            result["data"] = {item.get(key) if isinstance(item, dict) else item: item for item in data}
-            result["format"] = "dict"
-        elif op == "dict_to_list":
-            result["data"] = list(data.values()) if isinstance(data, dict) else data
-            result["format"] = "list"
-
-        else:
-            return {"success": False, "error": f"Unknown operation: {operation}"}
-
+    def _xml_to_dict(self, xml: str) -> Dict:
+        import re
+        result = {}
+        tags = re.findall(r"<(\w+)>(.*?)</\1>", xml, re.DOTALL)
+        for tag, value in tags:
+            result[tag] = value
         return result
 
-    def _json_to_csv(self, data: Any, delimiter: str) -> dict[str, Any]:
-        """Convert JSON to CSV.
 
-        Args:
-            data: JSON data (list or dict).
-            delimiter: CSV delimiter.
+class FormatConverterAction(BaseAction):
+    """Convert between formats."""
+    action_type = "format_converter"
+    display_name = "格式转换器"
+    description = "格式间转换"
 
-        Returns:
-            Result dictionary.
-        """
-        import csv
-        import io
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", "")
+            from_fmt = params.get("from", "csv")
+            to_fmt = params.get("to", "json")
 
-        if isinstance(data, str):
-            data = json.loads(data)
-
-        if isinstance(data, dict):
-            data = [data]
-
-        if not isinstance(data, list):
-            return {"success": False, "error": "Data must be list or dict"}
-
-        if not data:
-            return {"data": "", "success": True}
-
-        output = io.StringIO()
-        fieldnames = list(data[0].keys())
-        writer = csv.DictWriter(output, fieldnames=fieldnames, delimiter=delimiter)
-        writer.writeheader()
-        writer.writerows(data)
-
-        return {"data": output.getvalue()}
-
-    def _csv_to_json(self, data: str, delimiter: str) -> dict[str, Any]:
-        """Convert CSV to JSON.
-
-        Args:
-            data: CSV string.
-            delimiter: CSV delimiter.
-
-        Returns:
-            Result dictionary.
-        """
-        import csv
-        import io
-
-        reader = csv.DictReader(io.StringIO(data), delimiter=delimiter)
-        rows = list(reader)
-
-        return {"data": rows}
-
-    def _json_to_xml(self, data: Any, root: str = "root") -> dict[str, Any]:
-        """Convert JSON to XML.
-
-        Args:
-            data: JSON data.
-            root: Root element name.
-
-        Returns:
-            Result dictionary.
-        """
-        def json_to_xml_element(key: str, value: Any) -> str:
-            if isinstance(value, dict):
-                children = "".join(json_to_xml_element(k, v) for k, v in value.items())
-                return f"<{key}>{children}</{key}>"
-            elif isinstance(value, list):
-                items = "".join(json_to_xml_element("item", v) for v in value)
-                return f"<{key}>{items}</{key}>"
+            if from_fmt == "csv" and to_fmt == "json":
+                lines = data.strip().split("\n")
+                headers = lines[0].split(",") if lines else []
+                result = []
+                for line in lines[1:]:
+                    values = line.split(",")
+                    result.append(dict(zip(headers, values)))
+            elif from_fmt == "json" and to_fmt == "csv":
+                import json
+                items = json.loads(data) if isinstance(data, str) else data
+                if items and isinstance(items, list) and len(items) > 0:
+                    headers = list(items[0].keys())
+                    csv = ",".join(headers) + "\n"
+                    for item in items:
+                        csv += ",".join(str(item.get(h, "")) for h in headers) + "\n"
+                    result = csv
+                else:
+                    result = ""
             else:
-                return f"<{key}>{value}</{key}>"
+                result = data
 
-        try:
-            if isinstance(data, str):
-                data = json.loads(data)
-
-            xml = f"<{root}>" + "".join(json_to_xml_element(k, v) for k, v in data.items()) + f"</{root}>"
-            return {"data": xml}
+            return ActionResult(
+                success=True,
+                data={
+                    "from": from_fmt,
+                    "to": to_fmt,
+                    "result": result
+                },
+                message=f"Format conversion: {from_fmt} -> {to_fmt}"
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"Format converter error: {str(e)}")
 
-    def _xml_to_json(self, data: str) -> dict[str, Any]:
-        """Convert XML to JSON.
 
-        Args:
-            data: XML string.
+class TypeConverterAction(BaseAction):
+    """Convert data types."""
+    action_type = "type_converter"
+    display_name = "类型转换器"
+    description = "数据类型转换"
 
-        Returns:
-            Result dictionary.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            import xmltodict
-            result = xmltodict.parse(data)
-            return {"data": json.loads(json.dumps(result))}
+            data = params.get("data", None)
+            to_type = params.get("to_type", "string")
+
+            if data is None:
+                return ActionResult(success=False, message="data is required")
+
+            converted = None
+            if to_type == "string":
+                converted = str(data)
+            elif to_type == "int" or to_type == "integer":
+                converted = int(float(data)) if data else 0
+            elif to_type == "float":
+                converted = float(data) if data else 0.0
+            elif to_type == "bool" or to_type == "boolean":
+                converted = bool(data) if data is not None else False
+            elif to_type == "list":
+                converted = list(data) if isinstance(data, (list, tuple, set)) else [data]
+            elif to_type == "dict":
+                if isinstance(data, dict):
+                    converted = data
+                elif isinstance(data, str):
+                    import json
+                    converted = json.loads(data)
+                else:
+                    converted = {"value": data}
+            else:
+                converted = str(data)
+
+            return ActionResult(
+                success=True,
+                data={
+                    "original": data,
+                    "original_type": type(data).__name__,
+                    "converted": converted,
+                    "converted_type": to_type
+                },
+                message=f"Type conversion: {type(data).__name__} -> {to_type}"
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _json_to_yaml(self, data: Any) -> dict[str, Any]:
-        """Convert JSON to YAML.
-
-        Args:
-            data: JSON data.
-
-        Returns:
-            Result dictionary.
-        """
-        try:
-            import yaml
-            if isinstance(data, str):
-                data = json.loads(data)
-            return {"data": yaml.dump(data, allow_unicode=True)}
-        except ImportError:
-            return {"success": False, "error": "PyYAML not installed"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _yaml_to_json(self, data: str) -> dict[str, Any]:
-        """Convert YAML to JSON.
-
-        Args:
-            data: YAML string.
-
-        Returns:
-            Result dictionary.
-        """
-        try:
-            import yaml
-            parsed = yaml.safe_load(data)
-            return {"data": parsed}
-        except ImportError:
-            return {"success": False, "error": "PyYAML not installed"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _to_base64(self, data: Any) -> dict[str, Any]:
-        """Convert to base64.
-
-        Args:
-            data: Input data.
-
-        Returns:
-            Result dictionary.
-        """
-        try:
-            if isinstance(data, dict):
-                data = json.dumps(data)
-            if isinstance(data, str):
-                data = data.encode()
-            return {"data": base64.b64encode(data).decode()}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _from_base64(self, data: str) -> dict[str, Any]:
-        """Decode base64.
-
-        Args:
-            data: Base64 string.
-
-        Returns:
-            Result dictionary.
-        """
-        try:
-            decoded = base64.b64decode(data.encode()).decode()
-            # Try to parse as JSON
-            try:
-                return {"data": json.loads(decoded)}
-            except (json.JSONDecodeError, TypeError):
-                return {"data": decoded}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _to_hex(self, data: Any) -> dict[str, Any]:
-        """Convert to hex.
-
-        Args:
-            data: Input data.
-
-        Returns:
-            Result dictionary.
-        """
-        try:
-            if isinstance(data, str):
-                data = data.encode()
-            return {"data": data.hex()}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _from_hex(self, data: str) -> dict[str, Any]:
-        """Decode hex.
-
-        Args:
-            data: Hex string.
-
-        Returns:
-            Result dictionary.
-        """
-        try:
-            decoded = bytes.fromhex(data)
-            return {"data": decoded.decode()}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _to_urlencoding(self, data: Any) -> dict[str, Any]:
-        """Convert to URL encoding.
-
-        Args:
-            data: Input data.
-
-        Returns:
-            Result dictionary.
-        """
-        try:
-            from urllib.parse import urlencode
-            if isinstance(data, dict):
-                return {"data": urlencode(data)}
-            return {"data": urlencode({"data": data})}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _from_urlencoding(self, data: str) -> dict[str, Any]:
-        """Decode URL encoding.
-
-        Args:
-            data: URL encoded string.
-
-        Returns:
-            Result dictionary.
-        """
-        try:
-            from urllib.parse import parse_qs
-            parsed = parse_qs(data)
-            return {"data": {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"Type converter error: {str(e)}")
