@@ -1,17 +1,18 @@
 """State machine action module for RabAI AutoClick.
 
 Provides state machine operations:
-- StateMachineCreateAction: Create a state machine
-- StateMachineTransitionAction: Transition between states
-- StateMachineGuardAction: Guard conditions for transitions
-- StateMachineHistoryAction: Track state machine history
+- StateMachine: Generic state machine
+- StateTransition: State transition management
+- StateValidator: Validate state transitions
+- StateHistory: Track state history
+- StateMonitor: Monitor state changes
 """
 
-from typing import Any, Dict, List, Optional, Set, Callable
+import time
+import threading
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-
 
 import sys
 import os
@@ -22,279 +23,483 @@ from core.base_action import BaseAction, ActionResult
 
 
 class TransitionType(Enum):
-    """Types of state transitions."""
-    EXTERNAL = "external"
+    """Transition types."""
     INTERNAL = "internal"
+    EXTERNAL = "external"
     LOCAL = "local"
 
 
 @dataclass
-class Transition:
-    """Represents a state transition."""
-    from_state: str
-    to_state: str
-    event: str
-    guard: Optional[Callable] = None
-    action: Optional[Callable] = None
-    transition_type: TransitionType = TransitionType.EXTERNAL
+class State:
+    """State definition."""
+    name: str
+    is_initial: bool = False
+    is_final: bool = False
+    is_history: bool = False
+    entry_action: Optional[Callable] = None
+    exit_action: Optional[Callable] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class StateHistoryEntry:
-    """Represents a state history entry."""
-    state: str
-    timestamp: datetime
+class Transition:
+    """State transition."""
+    source: str
+    target: str
     event: str
-    transition: Optional[str] = None
+    guard: Optional[Callable[[Dict], bool]] = None
+    action: Optional[Callable] = None
+    transition_type: TransitionType = TransitionType.EXTERNAL
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class StateSnapshot:
+    """State snapshot."""
+    state: str
+    timestamp: float
+    event: Optional[str] = None
+    context: Dict[str, Any] = field(default_factory=dict)
 
 
 class StateMachine:
-    """Simple state machine implementation."""
+    """Generic state machine."""
 
-    def __init__(self, initial_state: str, name: str = "unnamed"):
+    def __init__(self, name: str):
         self.name = name
-        self.initial_state = initial_state
-        self.current_state = initial_state
-        self.states: Set[str] = {initial_state}
-        self.transitions: Dict[str, List[Transition]] = {}
-        self.history: List[StateHistoryEntry] = [
-            StateHistoryEntry(state=initial_state, timestamp=datetime.utcnow(), event="init")
-        ]
+        self._states: Dict[str, State] = {}
+        self._transitions: Dict[Tuple[str, str], List[Transition]] = {}
+        self._transitions_by_event: Dict[str, List[Transition]] = {}
+        self._initial_state: Optional[str] = None
+        self._current_state: Optional[str] = None
+        self._history: List[StateSnapshot] = []
+        self._context: Dict[str, Any] = {}
+        self._lock = threading.RLock()
 
-    def add_state(self, state: str) -> None:
-        """Add a state to the state machine."""
-        self.states.add(state)
+    def add_state(
+        self,
+        name: str,
+        is_initial: bool = False,
+        is_final: bool = False,
+        entry_action: Optional[Callable] = None,
+        exit_action: Optional[Callable] = None,
+        metadata: Optional[Dict] = None,
+    ) -> "StateMachine":
+        """Add a state."""
+        state = State(
+            name=name,
+            is_initial=is_initial,
+            is_final=is_final,
+            entry_action=entry_action,
+            exit_action=exit_action,
+            metadata=metadata or {},
+        )
+        self._states[name] = state
+
+        if is_initial:
+            self._initial_state = name
+
+        return self
 
     def add_transition(
         self,
-        from_state: str,
-        to_state: str,
+        source: str,
+        target: str,
         event: str,
         guard: Optional[Callable] = None,
-        action: Optional[Callable] = None
-    ) -> None:
-        """Add a transition to the state machine."""
-        self.states.add(from_state)
-        self.states.add(to_state)
-        transition = Transition(from_state, to_state, event, guard, action)
-        if event not in self.transitions:
-            self.transitions[event] = []
-        self.transitions[event].append(transition)
+        action: Optional[Callable] = None,
+        transition_type: TransitionType = TransitionType.EXTERNAL,
+    ) -> "StateMachine":
+        """Add a transition."""
+        transition = Transition(
+            source=source,
+            target=target,
+            event=event,
+            guard=guard,
+            action=action,
+            transition_type=transition_type,
+        )
 
-    def can_transition(self, event: str, context: Any = None) -> bool:
-        """Check if a transition is possible for the given event."""
-        if event not in self.transitions:
-            return False
-        for transition in self.transitions[event]:
-            if transition.from_state != self.current_state:
-                continue
-            if transition.guard and not transition.guard(context):
-                continue
+        if source not in self._transitions:
+            self._transitions[source] = []
+        self._transitions[source].append(transition)
+
+        if event not in self._transitions_by_event:
+            self._transitions_by_event[event] = []
+        self._transitions_by_event[event].append(transition)
+
+        return self
+
+    def initialize(self, context: Optional[Dict] = None) -> bool:
+        """Initialize state machine."""
+        with self._lock:
+            if not self._initial_state:
+                return False
+
+            self._current_state = self._initial_state
+            self._context = context or {}
+            self._history.clear()
+
+            self._record_snapshot(self._initial_state, "init")
+
+            state = self._states.get(self._initial_state)
+            if state and state.entry_action:
+                try:
+                    state.entry_action(self._context)
+                except Exception:
+                    pass
+
             return True
+
+    def send_event(self, event: str, event_data: Optional[Dict] = None) -> Tuple[bool, str]:
+        """Send an event to state machine."""
+        with self._lock:
+            if not self._current_state:
+                return False, "Not initialized"
+
+            current = self._current_state
+            transitions = self._get_possible_transitions(current, event)
+
+            for transition in transitions:
+                if transition.guard and not transition.guard(self._context):
+                    continue
+
+                if transition.action:
+                    try:
+                        result = transition.action(self._context, event_data or {})
+                        if result is False:
+                            continue
+                    except Exception:
+                        pass
+
+                self._execute_transition(transition, event)
+                return True, "Transition executed"
+
+            return False, f"No valid transition for event '{event}' from state '{current}'"
+
+    def _get_possible_transitions(self, state: str, event: str) -> List[Transition]:
+        """Get possible transitions."""
+        result = []
+
+        if (state, "*") in self._transitions:
+            result.extend(self._transitions[(state, "*")])
+
+        if state in self._transitions:
+            for t in self._transitions[state]:
+                if t.event == event or t.event == "*":
+                    result.append(t)
+
+        return result
+
+    def _execute_transition(self, transition: Transition, event: str):
+        """Execute a transition."""
+        if transition.transition_type == TransitionType.EXTERNAL:
+            old_state = self._states.get(self._current_state)
+            if old_state and old_state.exit_action:
+                try:
+                    old_state.exit_action(self._context)
+                except Exception:
+                    pass
+
+        old_state_name = self._current_state
+        self._current_state = transition.target
+
+        self._record_snapshot(transition.target, event, {"from": old_state_name})
+
+        new_state = self._states.get(transition.target)
+        if new_state and new_state.entry_action:
+            try:
+                new_state.entry_action(self._context)
+            except Exception:
+                pass
+
+    def _record_snapshot(self, state: str, event: Optional[str] = None, extra: Optional[Dict] = None):
+        """Record state snapshot."""
+        snapshot = StateSnapshot(
+            state=state,
+            timestamp=time.time(),
+            event=event,
+            context=dict(self._context),
+        )
+        if extra:
+            snapshot.context.update(extra)
+        self._history.append(snapshot)
+
+    def get_current_state(self) -> Optional[str]:
+        """Get current state."""
+        return self._current_state
+
+    def get_history(self, limit: Optional[int] = None) -> List[StateSnapshot]:
+        """Get state history."""
+        if limit:
+            return self._history[-limit:]
+        return list(self._history)
+
+    def get_context(self) -> Dict[str, Any]:
+        """Get state context."""
+        return dict(self._context)
+
+    def is_final(self) -> bool:
+        """Check if in final state."""
+        if not self._current_state:
+            return False
+        state = self._states.get(self._current_state)
+        return state.is_final if state else False
+
+    def can_handle_event(self, event: str) -> bool:
+        """Check if event can be handled."""
+        if not self._current_state:
+            return False
+        transitions = self._get_possible_transitions(self._current_state, event)
+        for t in transitions:
+            if t.guard is None or t.guard(self._context):
+                return True
         return False
 
-    def trigger(self, event: str, context: Any = None) -> Optional[str]:
-        """Trigger an event and transition if possible."""
-        if event not in self.transitions:
-            return None
 
-        for transition in self.transitions[event]:
-            if transition.from_state != self.current_state:
-                continue
-            if transition.guard and not transition.guard(context):
-                continue
+class StateHistory:
+    """Track state history."""
 
-            if transition.action:
-                transition.action(context)
+    def __init__(self, max_size: int = 1000):
+        self.max_size = max_size
+        self._history: List[StateSnapshot] = []
+        self._lock = threading.RLock()
 
-            prev_state = self.current_state
-            self.current_state = transition.to_state
-            self.history.append(StateHistoryEntry(
-                state=self.current_state,
-                timestamp=datetime.utcnow(),
-                event=event,
-                transition=f"{prev_state} -> {self.current_state}"
-            ))
-            return self.current_state
+    def record(self, snapshot: StateSnapshot):
+        """Record a snapshot."""
+        with self._lock:
+            self._history.append(snapshot)
+            if len(self._history) > self.max_size:
+                self._history.pop(0)
 
-        return None
+    def get_history(
+        self,
+        state: Optional[str] = None,
+        from_time: Optional[float] = None,
+        to_time: Optional[float] = None,
+        limit: int = 100,
+    ) -> List[StateSnapshot]:
+        """Get filtered history."""
+        with self._lock:
+            result = list(self._history)
 
-    def get_history(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get state history."""
-        entries = self.history[-limit:]
-        return [
-            {
-                "state": e.state,
-                "timestamp": e.timestamp.isoformat(),
-                "event": e.event,
-                "transition": e.transition
+            if state:
+                result = [s for s in result if s.state == state]
+
+            if from_time:
+                result = [s for s in result if s.timestamp >= from_time]
+
+            if to_time:
+                result = [s for s in result if s.timestamp <= to_time]
+
+            return result[-limit:]
+
+    def clear(self):
+        """Clear history."""
+        with self._lock:
+            self._history.clear()
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get history statistics."""
+        with self._lock:
+            if not self._history:
+                return {}
+
+            state_counts: Dict[str, int] = {}
+            for snapshot in self._history:
+                state_counts[snapshot.state] = state_counts.get(snapshot.state, 0) + 1
+
+            return {
+                "total_snapshots": len(self._history),
+                "states": state_counts,
+                "first_timestamp": self._history[0].timestamp,
+                "last_timestamp": self._history[-1].timestamp,
             }
-            for e in entries
-        ]
 
 
-_machines: Dict[str, StateMachine] = {}
+class StateMachineAction(BaseAction):
+    """State machine action."""
+    action_type = "state_machine"
+    display_name = "状态机"
+    description = "状态机和工作流"
 
-
-class StateMachineCreateAction(BaseAction):
-    """Create a new state machine."""
-    action_type = "state_machine_create"
-    display_name = "创建状态机"
-    description = "创建新的状态机"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            initial_state = params.get("initial_state", "initial")
-            states = params.get("states", [])
-            transitions = params.get("transitions", [])
-
-            if not name:
-                return ActionResult(success=False, message="name is required")
-
-            machine = StateMachine(initial_state=initial_state, name=name)
-
-            for state in states:
-                machine.add_state(state)
-
-            for trans in transitions:
-                machine.add_transition(
-                    from_state=trans.get("from_state", ""),
-                    to_state=trans.get("to_state", ""),
-                    event=trans.get("event", ""),
-                    guard=None,
-                    action=None
-                )
-
-            _machines[name] = machine
-
-            return ActionResult(
-                success=True,
-                message=f"State machine '{name}' created",
-                data={
-                    "name": name,
-                    "initial_state": initial_state,
-                    "states": list(machine.states),
-                    "current_state": machine.current_state
-                }
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"State machine creation failed: {str(e)}")
-
-
-class StateMachineTransitionAction(BaseAction):
-    """Trigger a state transition."""
-    action_type = "state_machine_transition"
-    display_name = "状态机转换"
-    description = "触发状态机转换"
+    def __init__(self):
+        super().__init__()
+        self._machines: Dict[str, StateMachine] = {}
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            name = params.get("name", "")
-            event = params.get("event", "")
+            operation = params.get("operation", "create")
 
-            if not name:
-                return ActionResult(success=False, message="name is required")
-            if not event:
-                return ActionResult(success=False, message="event is required")
-
-            if name not in _machines:
-                return ActionResult(success=False, message=f"State machine '{name}' not found")
-
-            machine = _machines[name]
-            prev_state = machine.current_state
-            new_state = machine.trigger(event)
-
-            if new_state:
-                return ActionResult(
-                    success=True,
-                    message=f"Transitioned: {prev_state} -> {new_state} on event '{event}'",
-                    data={
-                        "previous_state": prev_state,
-                        "current_state": new_state,
-                        "event": event
-                    }
-                )
+            if operation == "create":
+                return self._create_machine(params)
+            elif operation == "add_state":
+                return self._add_state(params)
+            elif operation == "add_transition":
+                return self._add_transition(params)
+            elif operation == "init":
+                return self._initialize(params)
+            elif operation == "send":
+                return self._send_event(params)
+            elif operation == "state":
+                return self._get_current_state(params)
+            elif operation == "history":
+                return self._get_history(params)
+            elif operation == "can_handle":
+                return self._can_handle(params)
             else:
-                return ActionResult(
-                    success=False,
-                    message=f"No transition available for event '{event}' from state '{prev_state}'",
-                    data={"current_state": prev_state, "event": event}
-                )
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
         except Exception as e:
-            return ActionResult(success=False, message=f"State machine transition failed: {str(e)}")
+            return ActionResult(success=False, message=f"State machine error: {str(e)}")
 
+    def _create_machine(self, params: Dict) -> ActionResult:
+        """Create a state machine."""
+        name = params.get("name")
+        if not name:
+            return ActionResult(success=False, message="name is required")
 
-class StateMachineGuardAction(BaseAction):
-    """Define and evaluate guard conditions for transitions."""
-    action_type = "state_machine_guard"
-    display_name = "状态机守卫"
-    description = "评估状态机转换的守卫条件"
+        machine = StateMachine(name)
+        self._machines[name] = machine
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            event = params.get("event", "")
-            guard_expression = params.get("guard_expression", "")
-            guard_params = params.get("guard_params", {})
+        return ActionResult(success=True, message=f"State machine '{name}' created")
 
-            if not name:
-                return ActionResult(success=False, message="name is required")
-            if not event:
-                return ActionResult(success=False, message="event is required")
+    def _add_state(self, params: Dict) -> ActionResult:
+        """Add a state to machine."""
+        machine_name = params.get("machine")
+        state_name = params.get("state")
+        is_initial = params.get("is_initial", False)
+        is_final = params.get("is_final", False)
 
-            if name not in _machines:
-                return ActionResult(success=False, message=f"State machine '{name}' not found")
+        if not machine_name or not state_name:
+            return ActionResult(success=False, message="machine and state are required")
 
-            machine = _machines[name]
-            result = machine.can_transition(event, guard_params)
+        machine = self._machines.get(machine_name)
+        if not machine:
+            return ActionResult(success=False, message=f"Machine '{machine_name}' not found")
 
-            return ActionResult(
-                success=True,
-                message=f"Guard condition for event '{event}': {'allowed' if result else 'denied'}",
-                data={
-                    "allowed": result,
-                    "current_state": machine.current_state,
-                    "event": event,
-                    "guard_expression": guard_expression
-                }
-            )
+        machine.add_state(
+            name=state_name,
+            is_initial=is_initial,
+            is_final=is_final,
+        )
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Guard evaluation failed: {str(e)}")
+        return ActionResult(success=True, message=f"State '{state_name}' added")
 
+    def _add_transition(self, params: Dict) -> ActionResult:
+        """Add a transition."""
+        machine_name = params.get("machine")
+        source = params.get("source")
+        target = params.get("target")
+        event = params.get("event")
 
-class StateMachineHistoryAction(BaseAction):
-    """Get state machine transition history."""
-    action_type = "state_machine_history"
-    display_name = "状态机历史"
-    description = "获取状态机转换历史"
+        if not all([machine_name, source, target, event]):
+            return ActionResult(success=False, message="machine, source, target, and event are required")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            limit = params.get("limit", 100)
+        machine = self._machines.get(machine_name)
+        if not machine:
+            return ActionResult(success=False, message=f"Machine '{machine_name}' not found")
 
-            if not name:
-                return ActionResult(success=False, message="name is required")
+        machine.add_transition(source, target, event)
 
-            if name not in _machines:
-                return ActionResult(success=False, message=f"State machine '{name}' not found")
+        return ActionResult(success=True, message=f"Transition {source} -> {target} on '{event}' added")
 
-            machine = _machines[name]
-            history = machine.get_history(limit)
+    def _initialize(self, params: Dict) -> ActionResult:
+        """Initialize state machine."""
+        machine_name = params.get("machine")
+        init_context = params.get("context", {})
 
-            return ActionResult(
-                success=True,
-                message=f"Retrieved {len(history)} history entries for '{name}'",
-                data={
-                    "machine_name": name,
-                    "current_state": machine.current_state,
-                    "history": history
-                }
-            )
+        if not machine_name:
+            return ActionResult(success=False, message="machine is required")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"History retrieval failed: {str(e)}")
+        machine = self._machines.get(machine_name)
+        if not machine:
+            return ActionResult(success=False, message=f"Machine '{machine_name}' not found")
+
+        success = machine.initialize(init_context)
+        return ActionResult(
+            success=success,
+            message=f"Initialized to '{machine.get_current_state()}'" if success else "Failed to initialize",
+        )
+
+    def _send_event(self, params: Dict) -> ActionResult:
+        """Send event to machine."""
+        machine_name = params.get("machine")
+        event = params.get("event")
+        event_data = params.get("data", {})
+
+        if not machine_name or not event:
+            return ActionResult(success=False, message="machine and event are required")
+
+        machine = self._machines.get(machine_name)
+        if not machine:
+            return ActionResult(success=False, message=f"Machine '{machine_name}' not found")
+
+        success, message = machine.send_event(event, event_data)
+        return ActionResult(
+            success=success,
+            message=message,
+            data={"current_state": machine.get_current_state()},
+        )
+
+    def _get_current_state(self, params: Dict) -> ActionResult:
+        """Get current state."""
+        machine_name = params.get("machine")
+
+        if not machine_name:
+            return ActionResult(success=False, message="machine is required")
+
+        machine = self._machines.get(machine_name)
+        if not machine:
+            return ActionResult(success=False, message=f"Machine '{machine_name}' not found")
+
+        current = machine.get_current_state()
+        return ActionResult(
+            success=True,
+            message=f"Current state: {current}",
+            data={"state": current, "is_final": machine.is_final()},
+        )
+
+    def _get_history(self, params: Dict) -> ActionResult:
+        """Get state history."""
+        machine_name = params.get("machine")
+        limit = params.get("limit", 100)
+
+        if not machine_name:
+            return ActionResult(success=False, message="machine is required")
+
+        machine = self._machines.get(machine_name)
+        if not machine:
+            return ActionResult(success=False, message=f"Machine '{machine_name}' not found")
+
+        history = machine.get_history(limit)
+
+        return ActionResult(
+            success=True,
+            message=f"{len(history)} history entries",
+            data={
+                "history": [
+                    {"state": h.state, "timestamp": h.timestamp, "event": h.event}
+                    for h in history
+                ]
+            },
+        )
+
+    def _can_handle(self, params: Dict) -> ActionResult:
+        """Check if event can be handled."""
+        machine_name = params.get("machine")
+        event = params.get("event")
+
+        if not machine_name or not event:
+            return ActionResult(success=False, message="machine and event are required")
+
+        machine = self._machines.get(machine_name)
+        if not machine:
+            return ActionResult(success=False, message=f"Machine '{machine_name}' not found")
+
+        can_handle = machine.can_handle_event(event)
+        return ActionResult(
+            success=True,
+            message=f"Can handle: {can_handle}",
+            data={"can_handle": can_handle},
+        )
