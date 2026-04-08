@@ -1,20 +1,26 @@
 """
-API Versioning Action Module
+API Versioning Action Module.
 
-Provides API versioning, deprecation management, and version negotiation.
+Provides API versioning strategies including URL-based,
+header-based, and content negotiation versioning.
 """
-from typing import Any, Optional, Callable
+
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
+import asyncio
+import logging
 import re
 
+logger = logging.getLogger(__name__)
 
-class VersionScheme(Enum):
-    """API versioning scheme."""
-    URI_PATH = "uri_path"  # /v1/resource
-    HEADER = "header"  # Accept: application/vnd.api+json; version=1
-    QUERY_PARAM = "query_param"  # ?version=1
+
+class VersionStrategy(Enum):
+    """Versioning strategies."""
+    URL_PATH = "url_path"
+    HEADER = "header"
+    QUERY_PARAM = "query_param"
     CONTENT_NEGOTIATION = "content_negotiation"
 
 
@@ -22,402 +28,235 @@ class VersionScheme(Enum):
 class APIVersion:
     """API version definition."""
     version: str
-    status: str  # active, deprecated, sunset, retired
-    release_date: datetime
+    major: int
+    minor: int
+    deprecated: bool = False
     sunset_date: Optional[datetime] = None
-    retirement_date: Optional[datetime] = None
-    migration_guide: Optional[str] = None
-    breaking_changes: list[str] = field(default_factory=list)
+    docs_url: Optional[str] = None
+
+    def is_compatible_with(self, other: "APIVersion") -> bool:
+        """Check if versions are compatible."""
+        return self.major == other.major
+
+    def __str__(self) -> str:
+        return f"v{self.major}.{self.minor}"
+
+    def __lt__(self, other: "APIVersion") -> bool:
+        if self.major != other.major:
+            return self.major < other.major
+        return self.minor < other.minor
 
 
 @dataclass
 class VersionedEndpoint:
-    """A versioned API endpoint."""
+    """Versioned API endpoint."""
     path: str
     method: str
-    versions: dict[str, Callable]  # version -> handler
+    versions: Dict[str, Callable]
     default_version: Optional[str] = None
-    deprecated: bool = False
-    sunset_date: Optional[datetime] = None
+    deprecation_warnings: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
-class VersionNegotiationResult:
-    """Result of version negotiation."""
-    selected_version: str
-    content_type: Optional[str] = None
-    warning: Optional[str] = None
-    deprecation_notice: Optional[str] = None
-
-
-@dataclass
-class VersionMigrationStep:
-    """A single migration step."""
+class VersionMigration:
+    """Migration path between versions."""
     from_version: str
     to_version: str
-    step_order: int
-    description: str
-    transform: Optional[Callable[[dict], dict]] = None
-    rollback: Optional[Callable[[dict], dict]] = None
+    migration_func: Callable
+    breaking_changes: List[str] = field(default_factory=list)
 
 
-class ApiVersioningAction:
-    """Main API versioning action handler."""
-    
-    def __init__(self, scheme: VersionScheme = VersionScheme.URI_PATH):
-        self.scheme = scheme
-        self._versions: dict[str, APIVersion] = {}
-        self._endpoints: dict[str, VersionedEndpoint] = {}
-        self._migrations: list[VersionMigrationStep] = []
-        self._current_stable = "v1"
-    
-    def register_version(
-        self,
-        version: str,
-        status: str = "active",
-        release_date: Optional[datetime] = None,
-        sunset_date: Optional[datetime] = None,
-        retirement_date: Optional[datetime] = None,
-        migration_guide: Optional[str] = None,
-        breaking_changes: Optional[list[str]] = None
-    ) -> "ApiVersioningAction":
-        """Register an API version."""
-        self._versions[version] = APIVersion(
-            version=version,
-            status=status,
-            release_date=release_date or datetime.now(),
-            sunset_date=sunset_date,
-            retirement_date=retirement_date,
-            migration_guide=migration_guide,
-            breaking_changes=breaking_changes or []
-        )
-        return self
-    
+class VersionManager:
+    """Manages API versions."""
+
+    def __init__(self, strategy: VersionStrategy = VersionStrategy.URL_PATH):
+        self.strategy = strategy
+        self.endpoints: Dict[str, VersionedEndpoint] = {}
+        self.migrations: Dict[Tuple[str, str], VersionMigration] = {}
+        self.supported_versions: Set[str] = set()
+
     def register_endpoint(
         self,
-        path: str,
-        method: str,
-        handler: Callable,
-        version: str,
-        set_as_default: bool = False
-    ) -> "ApiVersioningAction":
-        """Register a versioned endpoint handler."""
-        key = f"{method}:{path}"
-        
-        if key not in self._endpoints:
-            self._endpoints[key] = VersionedEndpoint(
-                path=path,
-                method=method,
-                versions={}
-            )
-        
-        self._endpoints[key].versions[version] = handler
-        
-        if set_as_default or not self._endpoints[key].default_version:
-            self._endpoints[key].default_version = version
-        
-        return self
-    
-    def add_migration_step(
-        self,
-        from_version: str,
-        to_version: str,
-        step_order: int,
-        description: str,
-        transform: Optional[Callable[[dict], dict]] = None,
-        rollback: Optional[Callable[[dict], dict]] = None
-    ) -> "ApiVersioningAction":
-        """Add a migration step between versions."""
-        step = VersionMigrationStep(
-            from_version=from_version,
-            to_version=to_version,
-            step_order=step_order,
-            description=description,
-            transform=transform,
-            rollback=rollback
-        )
-        self._migrations.append(step)
-        self._migrations.sort(key=lambda s: s.step_order)
-        return self
-    
-    async def negotiate_version(
-        self,
-        request: dict[str, Any],
-        default_version: Optional[str] = None
-    ) -> VersionNegotiationResult:
-        """
-        Negotiate API version from request.
-        
-        Args:
-            request: Request data containing version info
-            default_version: Fallback version
-            
-        Returns:
-            VersionNegotiationResult with selected version
-        """
-        requested_version = None
-        warning = None
-        deprecation_notice = None
-        
-        if self.scheme == VersionScheme.URI_PATH:
-            path = request.get("path", "")
-            match = re.match(r"(/v\d+(?:\.\d+)?)", path)
-            if match:
-                requested_version = match.group(1)
-        
-        elif self.scheme == VersionScheme.HEADER:
-            headers = request.get("headers", {})
-            accept = headers.get("Accept", "")
-            
-            # Parse version from Accept header
-            match = re.search(r"version=(\d+)", accept)
-            if match:
-                requested_version = f"v{match.group(1)}"
-            
-            # Check for content type
-            content_type_match = re.search(r"application/vnd\.(\w+)\+json", accept)
-            content_type = content_type_match.group(1) if content_type_match else None
-        
-        elif self.scheme == VersionScheme.QUERY_PARAM:
-            query = request.get("query", {})
-            requested_version = query.get("version") or query.get("v")
-        
-        # Validate requested version
-        if requested_version:
-            if requested_version in self._versions:
-                version_info = self._versions[requested_version]
-                
-                if version_info.status == "deprecated":
-                    deprecation_notice = (
-                        f"API version {requested_version} is deprecated. "
-                        f"Please migrate to a newer version."
-                    )
-                    if version_info.sunset_date:
-                        deprecation_notice += f" Sunset date: {version_info.sunset_date.strftime('%Y-%m-%d')}"
-                
-                elif version_info.status == "sunset":
-                    warning = f"API version {requested_version} has reached sunset date."
-                
-                elif version_info.status == "retired":
-                    warning = f"API version {requested_version} has been retired."
-                    requested_version = None  # Force downgrade
-            
-            else:
-                warning = f"Requested version {requested_version} not found."
-                requested_version = None
-        
-        # Fall back to default
-        final_version = requested_version or default_version or self._current_stable
-        
-        return VersionNegotiationResult(
-            selected_version=final_version,
-            warning=warning,
-            deprecation_notice=deprecation_notice
-        )
-    
-    async def get_handler(
-        self,
-        path: str,
-        method: str,
-        version: str
-    ) -> Optional[Callable]:
-        """Get handler for specific endpoint and version."""
-        key = f"{method}:{path}"
-        
-        if key not in self._endpoints:
+        endpoint: VersionedEndpoint
+    ):
+        """Register a versioned endpoint."""
+        key = f"{endpoint.method}:{endpoint.path}"
+        self.endpoints[key] = endpoint
+
+        for version in endpoint.versions.keys():
+            self.supported_versions.add(version)
+
+    def add_migration(self, migration: VersionMigration):
+        """Add migration path."""
+        key = (migration.from_version, migration.to_version)
+        self.migrations[key] = migration
+
+    def parse_version(self, version_str: str) -> Optional[APIVersion]:
+        """Parse version string."""
+        match = re.match(r"v?(\d+)\.?(\d*)", version_str)
+        if not match:
             return None
-        
-        endpoint = self._endpoints[key]
-        
-        # Try exact version match
-        if version in endpoint.versions:
+
+        major = int(match.group(1))
+        minor = int(match.group(2)) if match.group(2) else 0
+
+        return APIVersion(version=version_str, major=major, minor=minor)
+
+    def get_version_from_request(
+        self,
+        method: str,
+        path: str,
+        headers: Dict[str, str],
+        query_params: Dict[str, str]
+    ) -> Optional[str]:
+        """Extract version from request."""
+        if self.strategy == VersionStrategy.URL_PATH:
+            return self._get_version_from_path(path)
+
+        elif self.strategy == VersionStrategy.HEADER:
+            return headers.get("API-Version") or headers.get("Accept-Version")
+
+        elif self.strategy == VersionStrategy.QUERY_PARAM:
+            return query_params.get("version")
+
+        elif self.strategy == VersionStrategy.CONTENT_NEGOTIATION:
+            accept = headers.get("Accept", "")
+            match = re.search(r"version=[\"']?v?(\d+\.?\d*)", accept)
+            if match:
+                return match.group(1)
+
+        return None
+
+    def _get_version_from_path(self, path: str) -> Optional[str]:
+        """Extract version from URL path."""
+        match = re.search(r"/v(\d+)/", path)
+        if match:
+            return f"v{match.group(1)}"
+
+        match = re.search(r"/version/(\d+)", path)
+        if match:
+            return f"v{match.group(1)}"
+
+        return None
+
+    def resolve_endpoint(
+        self,
+        method: str,
+        path: str,
+        version: Optional[str] = None
+    ) -> Optional[Callable]:
+        """Resolve endpoint handler for version."""
+        key = f"{method}:{path}"
+        endpoint = self.endpoints.get(key)
+
+        if not endpoint:
+            return None
+
+        if version and version in endpoint.versions:
             return endpoint.versions[version]
-        
-        # Try compatible version
-        for v in sorted(endpoint.versions.keys()):
-            if v.startswith(version.split(".")[0]):  # Major version match
-                return endpoint.versions[v]
-        
-        # Fall back to default
+
         if endpoint.default_version:
             return endpoint.versions.get(endpoint.default_version)
-        
-        return None
-    
-    async def get_version_info(self, version: str) -> Optional[APIVersion]:
-        """Get information about a specific version."""
-        return self._versions.get(version)
-    
-    async def list_versions(
-        self,
-        status: Optional[str] = None,
-        include_retired: bool = False
-    ) -> list[APIVersion]:
-        """List all registered versions."""
-        versions = list(self._versions.values())
-        
-        if status:
-            versions = [v for v in versions if v.status == status]
-        
-        if not include_retired:
-            versions = [v for v in versions if v.status != "retired"]
-        
-        return sorted(versions, key=lambda v: v.version, reverse=True)
-    
-    async def get_migration_path(
-        self,
-        from_version: str,
-        to_version: str
-    ) -> list[VersionMigrationStep]:
-        """Get migration steps between versions."""
-        return [
-            step for step in self._migrations
-            if step.from_version == from_version and step.to_version == to_version
-        ]
-    
-    async def execute_migration(
-        self,
-        data: dict[str, Any],
-        from_version: str,
-        to_version: str
-    ) -> dict[str, Any]:
-        """Execute migration from one version to another."""
-        steps = await self.get_migration_path(from_version, to_version)
-        
-        result = dict(data)
-        for step in steps:
-            if step.transform:
-                try:
-                    result = step.transform(result)
-                except Exception as e:
-                    raise Exception(f"Migration step {step.step_order} failed: {e}")
-        
-        return result
-    
-    async def rollback_migration(
-        self,
-        data: dict[str, Any],
-        from_version: str,
-        to_version: str
-    ) -> dict[str, Any]:
-        """Rollback migration from one version to another."""
-        steps = await self.get_migration_path(from_version, to_version)
-        
-        result = dict(data)
-        # Apply rollbacks in reverse order
-        for step in reversed(steps):
-            if step.rollback:
-                try:
-                    result = step.rollback(result)
-                except Exception as e:
-                    raise Exception(f"Rollback step {step.step_order} failed: {e}")
-        
-        return result
-    
-    def deprecate_version(
-        self,
-        version: str,
-        sunset_date: Optional[datetime] = None,
-        migration_guide: Optional[str] = None
-    ) -> bool:
-        """Mark a version as deprecated."""
-        if version not in self._versions:
-            return False
-        
-        v = self._versions[version]
-        v.status = "deprecated"
-        v.sunset_date = sunset_date
-        v.migration_guide = migration_guide
-        
-        return True
-    
-    def sunset_version(
-        self,
-        version: str,
-        retirement_date: Optional[datetime] = None
-    ) -> bool:
-        """Mark a version as sunset."""
-        if version not in self._versions:
-            return False
-        
-        v = self._versions[version]
-        v.status = "sunset"
-        v.retirement_date = retirement_date
-        
-        return True
-    
-    def retire_version(self, version: str) -> bool:
-        """Retire a version completely."""
-        if version not in self._versions:
-            return False
-        
-        self._versions[version].status = "retired"
-        return True
-    
-    async def get_deprecation_notice(
-        self,
-        version: str,
-        format: str = "header"
-    ) -> Optional[str]:
-        """Generate deprecation notice for a version."""
-        if version not in self._versions:
-            return None
-        
-        v = self._versions[version]
-        
-        if format == "header":
-            if v.status == "deprecated":
-                notice = f"API version {version} is deprecated"
-                if v.sunset_date:
-                    notice += f". Sunset date: {v.sunset_date.strftime('%Y-%m-%d')}"
-                if v.migration_guide:
-                    notice += f". Migration guide: {v.migration_guide}"
-                return notice
-            elif v.status == "sunset":
-                return f"API version {version} has reached sunset date."
-            elif v.status == "retired":
-                return f"API version {version} has been retired."
-        
-        return None
-    
-    def get_version_compatibility(
-        self,
-        version_a: str,
-        version_b: str
-    ) -> dict[str, Any]:
-        """Check compatibility between two versions."""
-        if version_a not in self._versions or version_b not in self._versions:
-            return {"compatible": False, "reason": "Version not found"}
-        
-        v_a = self._versions[version_a]
-        v_b = self._versions[version_b]
-        
-        # Extract major version
-        major_a = version_a.split(".")[0]
-        major_b = version_b.split(".")[0]
-        
-        if major_a == major_b:
-            return {
-                "compatible": True,
-                "level": "minor",
-                "breaking_changes": []
-            }
-        
-        # Different major versions - check if migration exists
-        migration_steps = asyncio.run(
-            self.get_migration_path(version_a, version_b)
+
+        versions = sorted(
+            [self.parse_version(v) for v in endpoint.versions.keys()],
+            reverse=True
         )
-        
-        if migration_steps:
-            return {
-                "compatible": True,
-                "level": "major",
-                "migration_steps": len(migration_steps),
-                "breaking_changes": v_a.breaking_changes
-            }
-        
-        return {
-            "compatible": False,
-            "reason": "No migration path available",
-            "breaking_changes": v_a.breaking_changes
-        }
+
+        if versions:
+            latest = versions[0]
+            return endpoint.versions.get(str(latest))
+
+        return None
+
+    def get_deprecation_warning(self, method: str, path: str, version: str) -> Optional[str]:
+        """Get deprecation warning for endpoint."""
+        key = f"{method}:{path}"
+        endpoint = self.endpoints.get(key)
+
+        if endpoint and version in endpoint.deprecation_warnings:
+            return endpoint.deprecation_warnings[version]
+
+        return None
+
+    def check_migration_path(
+        self,
+        from_version: str,
+        to_version: str
+    ) -> Optional[VersionMigration]:
+        """Check if migration path exists."""
+        key = (from_version, to_version)
+        return self.migrations.get(key)
+
+
+class VersionCompatChecker:
+    """Checks version compatibility."""
+
+    def __init__(self, version_manager: VersionManager):
+        self.version_manager = version_manager
+
+    def is_breaking_change(
+        self,
+        from_version: str,
+        to_version: str
+    ) -> bool:
+        """Check if version change is breaking."""
+        from_ver = self.version_manager.parse_version(from_version)
+        to_ver = self.version_manager.parse_version(to_version)
+
+        if not from_ver or not to_ver:
+            return True
+
+        if from_ver.major != to_ver.major:
+            return True
+
+        return False
+
+    def get_compatible_version(
+        self,
+        requested_version: str,
+        supported_versions: List[str]
+    ) -> Optional[str]:
+        """Get best compatible version."""
+        requested = self.version_manager.parse_version(requested_version)
+        if not requested:
+            return None
+
+        for version in supported_versions:
+            supported = self.version_manager.parse_version(version)
+            if supported and supported.is_compatible_with(requested):
+                return version
+
+        return None
+
+
+async def main():
+    """Demonstrate API versioning."""
+    manager = VersionManager(strategy=VersionStrategy.URL_PATH)
+
+    async def handler_v1():
+        return {"version": "1.0", "data": "v1 handler"}
+
+    async def handler_v2():
+        return {"version": "2.0", "data": "v2 handler"}
+
+    endpoint = VersionedEndpoint(
+        path="/api/users",
+        method="GET",
+        versions={"v1": handler_v1, "v2": handler_v2},
+        default_version="v2"
+    )
+
+    manager.register_endpoint(endpoint)
+
+    version = manager.get_version_from_request("GET", "/api/users", {}, {})
+    print(f"Detected version: {version}")
+
+    handler = manager.resolve_endpoint("GET", "/api/users", "v1")
+    if handler:
+        result = await handler()
+        print(f"Handler result: {result}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
