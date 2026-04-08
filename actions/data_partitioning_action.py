@@ -1,233 +1,225 @@
-"""Data partitioning action module for RabAI AutoClick.
+"""
+Data Partitioning Action Module.
 
-Provides data partitioning operations:
-- HashPartitionAction: Hash-based data partitioning
-- RangePartitionAction: Range-based data partitioning
-- RoundRobinPartitionAction: Round-robin partitioning
-- ListPartitionAction: List-based partitioning
+Provides data partitioning strategies including
+range, list, hash, and round-robin partitioning.
 """
 
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+import asyncio
 import hashlib
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class HashPartitionAction(BaseAction):
-    """Hash-based data partitioning."""
-    action_type = "hash_partition"
-    display_name = "哈希分区"
-    description = "基于哈希函数的数据分区"
+class PartitionStrategy(Enum):
+    """Partition strategies."""
+    RANGE = "range"
+    LIST = "list"
+    HASH = "hash"
+    ROUND_ROBIN = "round_robin"
+    COMPOSITE = "composite"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            partition_key = params.get("partition_key", "id")
-            num_partitions = params.get("num_partitions", 4)
-            hash_algo = params.get("hash_algo", "md5")
 
-            if not isinstance(data, list):
-                data = [data]
+@dataclass
+class Partition:
+    """Data partition."""
+    partition_id: str
+    name: str
+    strategy: PartitionStrategy
+    records: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-            partitions: List[List] = [[] for _ in range(num_partitions)]
 
-            for item in data:
-                if isinstance(item, dict):
-                    key_value = item.get(partition_key, "")
-                else:
-                    key_value = str(item)
+@dataclass
+class PartitionConfig:
+    """Partition configuration."""
+    partition_by: List[str]
+    strategy: PartitionStrategy
+    num_partitions: int = 4
+    ranges: Optional[List[Tuple[Any, Any]]] = None
+    lists: Optional[Dict[Any, List[Any]]] = None
 
-                hash_input = str(key_value).encode("utf-8")
-                if hash_algo == "md5":
-                    hash_val = hashlib.md5(hash_input).hexdigest()
-                elif hash_algo == "sha1":
-                    hash_val = hashlib.sha1(hash_input).hexdigest()
-                elif hash_algo == "sha256":
-                    hash_val = hashlib.sha256(hash_input).hexdigest()
-                else:
-                    hash_val = str(hash(key_value))
 
-                partition_idx = int(hash_val, 16) % num_partitions if hash_val.startswith(("0x", "0X")) else int(hash_val[:8], 16) % num_partitions
-                partitions[partition_idx].append(item)
+class RangePartitioner:
+    """Range-based partitioner."""
 
-            partition_info = {f"partition_{i}": {"size": len(partitions[i]), "index": i} for i in range(num_partitions)}
+    def __init__(self, field: str, ranges: List[Tuple[Any, Any]]):
+        self.field = field
+        self.ranges = ranges
 
-            return ActionResult(
-                success=True,
-                message=f"Hash partitioned {len(data)} items into {num_partitions} partitions",
-                data={"partitions": partitions, "partition_info": partition_info, "num_partitions": num_partitions},
+    def get_partition(self, record: Dict[str, Any]) -> int:
+        """Get partition index for record."""
+        value = record.get(self.field)
+
+        for i, (low, high) in enumerate(self.ranges):
+            if low <= value <= high:
+                return i
+
+        return len(self.ranges)
+
+
+class ListPartitioner:
+    """List-based partitioner."""
+
+    def __init__(self, field: str, lists: Dict[Any, List[Any]]):
+        self.field = field
+        self.lists = lists
+        self._value_to_partition: Dict[Any, int] = {}
+
+        for partition_id, values in enumerate(lists):
+            for value in lists[values]:
+                self._value_to_partition[value] = partition_id
+
+    def get_partition(self, record: Dict[str, Any]) -> int:
+        """Get partition index for record."""
+        value = record.get(self.field)
+        return self._value_to_partition.get(value, -1)
+
+
+class HashPartitioner:
+    """Hash-based partitioner."""
+
+    def __init__(self, field: str, num_partitions: int):
+        self.field = field
+        self.num_partitions = num_partitions
+
+    def _hash(self, value: Any) -> int:
+        """Hash a value."""
+        if isinstance(value, str):
+            return int(hashlib.md5(value.encode()).hexdigest(), 16)
+        return hash(value)
+
+    def get_partition(self, record: Dict[str, Any]) -> int:
+        """Get partition index for record."""
+        value = record.get(self.field)
+        if value is None:
+            return 0
+        return self._hash(value) % self.num_partitions
+
+
+class RoundRobinPartitioner:
+    """Round-robin partitioner."""
+
+    def __init__(self, num_partitions: int):
+        self.num_partitions = num_partitions
+        self._current = 0
+
+    def get_partition(self, record: Dict[str, Any]) -> int:
+        """Get partition index for record."""
+        partition = self._current
+        self._current = (self._current + 1) % self.num_partitions
+        return partition
+
+
+class DataPartitioner:
+    """Partitions data based on configuration."""
+
+    def __init__(self, config: PartitionConfig):
+        self.config = config
+        self.partitioner = self._create_partitioner()
+
+    def _create_partitioner(self):
+        """Create partitioner based on strategy."""
+        field = self.config.partition_by[0] if self.config.partition_by else "id"
+
+        if self.config.strategy == PartitionStrategy.RANGE:
+            return RangePartitioner(field, self.config.ranges or [])
+
+        elif self.config.strategy == PartitionStrategy.LIST:
+            return ListPartitioner(field, self.config.lists or {})
+
+        elif self.config.strategy == PartitionStrategy.HASH:
+            return HashPartitioner(field, self.config.num_partitions)
+
+        elif self.config.strategy == PartitionStrategy.ROUND_ROBIN:
+            return RoundRobinPartitioner(self.config.num_partitions)
+
+        else:
+            return HashPartitioner(field, self.config.num_partitions)
+
+    def partition(self, records: List[Dict[str, Any]]) -> List[Partition]:
+        """Partition records into partitions."""
+        partitions = [
+            Partition(
+                partition_id=str(i),
+                name=f"partition_{i}",
+                strategy=self.config.strategy
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"HashPartition error: {e}")
+            for i in range(self.config.num_partitions)
+        ]
+
+        for record in records:
+            partition_id = self.partitioner.get_partition(record)
+            if 0 <= partition_id < len(partitions):
+                partitions[partition_id].records.append(record)
+
+        for i, partition in enumerate(partitions):
+            partition.metadata = {
+                "count": len(partition.records),
+                "partition_id": i
+            }
+
+        return partitions
+
+    def get_partition_for_record(self, record: Dict[str, Any]) -> int:
+        """Get partition ID for a single record."""
+        return self.partitioner.get_partition(record)
 
 
-class RangePartitionAction(BaseAction):
-    """Range-based data partitioning."""
-    action_type = "range_partition"
-    display_name = "范围分区"
-    description = "基于数值范围的数据分区"
+class CompositePartitioner:
+    """Composite partitioner using multiple strategies."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            partition_key = params.get("partition_key", "value")
-            boundaries = params.get("boundaries", [0, 25, 50, 75, 100])
-            labels = params.get("labels", None)
+    def __init__(self, partitioners: List[DataPartitioner]):
+        self.partitioners = partitioners
 
-            if not isinstance(data, list):
-                data = [data]
+    def partition(self, records: List[Dict[str, Any]]) -> List[Partition]:
+        """Partition using multiple partitioners."""
+        if not self.partitioners:
+            return []
 
-            if not boundaries:
-                return ActionResult(success=False, message="boundaries is required")
+        current_partitions = self.partitioners[0].partition(records)
 
-            num_partitions = len(boundaries) + 1
-            partitions: List[List] = [[] for _ in range(num_partitions)]
+        for partitioner in self.partitioners[1:]:
+            new_partitions = []
+            for part in current_partitions:
+                sub_partitions = partitioner.partition(part.records)
+                for i, sub_part in enumerate(sub_partitions):
+                    sub_part.name = f"{part.name}_{sub_part.name}"
+                    sub_part.partition_id = f"{part.partition_id}_{i}"
+                    new_partitions.append(sub_part)
 
-            for item in data:
-                if isinstance(item, dict):
-                    val = item.get(partition_key, 0)
-                else:
-                    val = item
+            current_partitions = new_partitions
 
-                if not isinstance(val, (int, float)):
-                    partitions[-1].append(item)
-                    continue
-
-                partition_idx = 0
-                for i, boundary in enumerate(boundaries):
-                    if val >= boundary:
-                        partition_idx = i + 1
-                partition_idx = min(partition_idx, num_partitions - 1)
-                partitions[partition_idx].append(item)
-
-            if labels:
-                partition_labels = labels[:num_partitions] + [f"partition_{i}" for i in range(len(labels), num_partitions)]
-            else:
-                partition_labels = [f"partition_{i}" for i in range(num_partitions)]
-
-            partition_info = {}
-            for i, label in enumerate(partition_labels):
-                partition_info[label] = {"size": len(partitions[i]), "index": i}
-
-            return ActionResult(
-                success=True,
-                message=f"Range partitioned {len(data)} items into {num_partitions} partitions",
-                data={
-                    "partitions": partitions,
-                    "partition_info": partition_info,
-                    "num_partitions": num_partitions,
-                    "boundaries": boundaries,
-                },
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"RangePartition error: {e}")
+        return current_partitions
 
 
-class RoundRobinPartitionAction(BaseAction):
-    """Round-robin partitioning."""
-    action_type = "round_robin_partition"
-    display_name = "轮询分区"
-    description = "轮询分配数据到分区"
+def main():
+    """Demonstrate data partitioning."""
+    config = PartitionConfig(
+        partition_by=["status"],
+        strategy=PartitionStrategy.HASH,
+        num_partitions=3
+    )
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            num_partitions = params.get("num_partitions", 4)
+    partitioner = DataPartitioner(config)
 
-            if not isinstance(data, list):
-                data = [data]
+    records = [
+        {"id": 1, "status": "active", "value": 100},
+        {"id": 2, "status": "inactive", "value": 200},
+        {"id": 3, "status": "active", "value": 150},
+        {"id": 4, "status": "pending", "value": 50},
+    ]
 
-            partitions: List[List] = [[] for _ in range(num_partitions)]
+    partitions = partitioner.partition(records)
 
-            for i, item in enumerate(data):
-                partition_idx = i % num_partitions
-                partitions[partition_idx].append(item)
-
-            partition_info = {f"partition_{i}": {"size": len(partitions[i]), "index": i} for i in range(num_partitions)}
-
-            sizes = [len(p) for p in partitions]
-            max_diff = max(sizes) - min(sizes) if sizes else 0
-
-            return ActionResult(
-                success=True,
-                message=f"Round-robin partitioned {len(data)} items into {num_partitions} partitions (max imbalance: {max_diff})",
-                data={
-                    "partitions": partitions,
-                    "partition_info": partition_info,
-                    "num_partitions": num_partitions,
-                    "max_imbalance": max_diff,
-                },
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"RoundRobinPartition error: {e}")
+    for part in partitions:
+        print(f"{part.name}: {len(part.records)} records")
 
 
-class ListPartitionAction(BaseAction):
-    """List-based partitioning."""
-    action_type = "list_partition"
-    display_name = "列表分区"
-    description = "基于列表值的数据分区"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            partition_key = params.get("partition_key", "category")
-            partition_map = params.get("partition_map", {})
-            default_partition = params.get("default_partition", "other")
-
-            if not isinstance(data, list):
-                data = [data]
-
-            if not partition_map:
-                unique_values = set()
-                for item in data:
-                    if isinstance(item, dict):
-                        val = item.get(partition_key)
-                        if val is not None:
-                            unique_values.add(str(val))
-                partition_names = sorted(unique_values)
-                partition_map = {v: v for v in partition_names}
-                partitions: Dict[str, List] = {v: [] for v in partition_names}
-                partitions[default_partition] = []
-            else:
-                partition_names = list(partition_map.values())
-                partitions = {name: [] for name in partition_names}
-                if default_partition not in partitions:
-                    partitions[default_partition] = []
-
-            for item in data:
-                if isinstance(item, dict):
-                    val = str(item.get(partition_key, ""))
-                else:
-                    val = str(item)
-
-                matched_partition = None
-                for src_val, dst_name in partition_map.items():
-                    if str(src_val) == val:
-                        matched_partition = dst_name
-                        break
-
-                if matched_partition:
-                    partitions[matched_partition].append(item)
-                else:
-                    partitions[default_partition].append(item)
-
-            partition_info = {name: {"size": len(partitions[name]), "index": i} for i, name in enumerate(partitions)}
-
-            return ActionResult(
-                success=True,
-                message=f"List partitioned {len(data)} items into {len(partitions)} partitions",
-                data={
-                    "partitions": partitions,
-                    "partition_info": partition_info,
-                    "num_partitions": len(partitions),
-                    "partition_map": partition_map,
-                },
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"ListPartition error: {e}")
+if __name__ == "__main__":
+    main()
