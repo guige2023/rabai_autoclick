@@ -1,186 +1,277 @@
-"""
-Object pool pattern implementation.
+"""Object pool utilities for resource reuse.
 
-Provides reusable object pools for expensive resources
-like database connections or thread pools.
+Provides object pooling to reduce allocation overhead
+for frequently created/destroyed objects.
 """
-
-from __future__ import annotations
 
 import threading
-import time
-from typing import Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, List, Optional, TypeVar
 
 
 T = TypeVar("T")
 
 
 class ObjectPool(Generic[T]):
-    """
-    Generic object pool for managing reusable resources.
+    """Pool of reusable objects.
 
-    Thread-safe implementation with min/max pool size limits.
+    Example:
+        pool = ObjectPool(factory=lambda: ExpensiveObject())
+        obj = pool.acquire()
+        # use obj
+        pool.release(obj)
     """
 
     def __init__(
         self,
         factory: Callable[[], T],
-        min_size: int = 0,
-        max_size: int = 10,
-        idle_timeout: float = 300.0,
-        validator: Callable[[T], bool] | None = None,
-    ):
-        self.factory = factory
-        self.min_size = min_size
-        self.max_size = max_size
-        self.idle_timeout = idle_timeout
-        self.validator = validator
-
-        self._available: list[T] = []
-        self._in_use: set[T] = set()
+        max_size: int = 100,
+        validator: Optional[Callable[[T], bool]] = None,
+    ) -> None:
+        self._factory = factory
+        self._max_size = max_size
+        self._validator = validator
+        self._pool: List[T] = []
         self._lock = threading.Lock()
         self._total_created = 0
+        self._total_reused = 0
 
-        self._initialize()
-
-    def _initialize(self) -> None:
-        """Pre-create minimum number of objects."""
-        for _ in range(self.min_size):
-            obj = self.factory()
-            self._available.append(obj)
-            self._total_created += 1
-
-    def acquire(self, timeout: float | None = None) -> T:
-        """
-        Acquire an object from the pool.
-
-        Args:
-            timeout: Max wait time (None = wait forever)
+    def acquire(self) -> T:
+        """Acquire an object from the pool.
 
         Returns:
-            Pooled object
-
-        Raises:
-            RuntimeError: If timeout exceeded
+            Object from pool or newly created.
         """
-        deadline = time.time() + timeout if timeout else None
-
-        while True:
-            obj = self._try_acquire()
-            if obj is not None:
-                return obj
-            if deadline and time.time() >= deadline:
-                raise RuntimeError("Pool acquisition timeout")
-            time.sleep(0.01)
-
-    def _try_acquire(self) -> T | None:
         with self._lock:
-            while self._available:
-                obj = self._available.pop()
-                if self.validator and not self.validator(obj):
-                    self._destroy(obj)
-                    continue
-                self._in_use.add(obj)
-                return obj
-            if self._total_created < self.max_size:
-                obj = self.factory()
-                self._total_created += 1
-                self._in_use.add(obj)
-                return obj
-        return None
+            while self._pool:
+                obj = self._pool.pop()
+                if self._validator is None or self._validator(obj):
+                    self._total_reused += 1
+                    return obj
+            self._total_created += 1
+            return self._factory()
 
     def release(self, obj: T) -> None:
-        """
-        Return an object to the pool.
+        """Return an object to the pool.
 
         Args:
-            obj: Object to return
+            obj: Object to return.
         """
+        if obj is None:
+            return
         with self._lock:
-            if obj in self._in_use:
-                self._in_use.discard(obj)
-                if self.validator and not self.validator(obj):
-                    self._destroy(obj)
-                    return
-                self._available.append(obj)
+            if len(self._pool) < self._max_size:
+                self._pool.append(obj)
 
-    def _destroy(self, obj: T) -> None:
-        """Destroy an object (call cleanup)."""
-        self._total_created -= 1
-
-    def shrink(self, target_size: int | None = None) -> int:
-        """
-        Shrink pool to target size.
-
-        Args:
-            target_size: Desired pool size (defaults to min_size)
-
-        Returns:
-            Number of objects removed
-        """
-        if target_size is None:
-            target_size = self.min_size
-        removed = 0
+    def clear(self) -> None:
+        """Clear all objects from pool."""
         with self._lock:
-            while len(self._available) > target_size:
-                self._available.pop()
-                self._total_created -= 1
-                removed += 1
-        return removed
+            self._pool.clear()
 
-    def grow(self, target_size: int) -> int:
-        """
-        Grow pool to target size.
+    @property
+    def size(self) -> int:
+        """Get current pool size."""
+        with self._lock:
+            return len(self._pool)
 
-        Args:
-            target_size: Desired pool size
-
-        Returns:
-            Number of objects added
-        """
-        added = 0
-        while self._total_created < target_size and self._total_created < self.max_size:
-            self.acquire()
-            added += 1
-        return added
-
+    @property
     def stats(self) -> dict:
         """Get pool statistics."""
         with self._lock:
             return {
-                "total": self._total_created,
-                "available": len(self._available),
-                "in_use": len(self._in_use),
-                "max_size": self.max_size,
+                "pool_size": len(self._pool),
+                "max_size": self._max_size,
+                "total_created": self._total_created,
+                "total_reused": self._total_reused,
+                "reuse_rate": self._total_reused / max(1, self._total_created + self._total_reused),
             }
 
-    @property
-    def available_count(self) -> int:
-        return len(self._available)
 
-    @property
-    def in_use_count(self) -> int:
-        with self._lock:
-            return len(self._in_use)
+class PooledObject(Generic[T]):
+    """Wrapper for pooled objects with context manager.
 
+    Example:
+        pool = ObjectPool(factory=lambda: MyObject())
+        with PooledObject(pool) as obj:
+            obj.do_work()
+    """
 
-class PooledObject:
-    """Context manager wrapper for pooled objects."""
-
-    def __init__(self, pool: ObjectPool, obj: T):
+    def __init__(self, pool: ObjectPool[T]) -> None:
         self._pool = pool
-        self._obj = obj
+        self._obj: Optional[T] = None
 
     def __enter__(self) -> T:
+        self._obj = self._pool.acquire()
         return self._obj
 
-    def __exit__(self, *args: object) -> None:
-        self._pool.release(self._obj)
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._obj is not None:
+            self._pool.release(self._obj)
+            self._obj = None
 
 
-def create_pool(
-    factory: Callable[[], T],
-    **kwargs: Any,
-) -> ObjectPool[T]:
-    """Factory to create an ObjectPool."""
-    return ObjectPool(factory=factory, **kwargs)
+class ByteStringPool:
+    """Pool for byte string buffers.
+
+    Example:
+        pool = ByteStringPool(min_size=64, max_size=4096)
+        buf = pool.acquire(1024)
+        # use buffer
+        pool.release(buf)
+    """
+
+    def __init__(self, min_size: int = 64, max_size: int = 65536) -> None:
+        self._min_size = min_size
+        self._max_size = max_size
+        self._pools: dict = {}
+        self._lock = threading.Lock()
+
+    def _get_pool(self, size: int) -> List[bytearray]:
+        if size not in self._pools:
+            self._pools[size] = []
+        return self._pools[size]
+
+    def acquire(self, size: int) -> bytearray:
+        """Acquire buffer of given size.
+
+        Args:
+            size: Required buffer size.
+
+        Returns:
+            Bytearray buffer.
+        """
+        size = self._round_size(size)
+        if size > self._max_size:
+            return bytearray(size)
+
+        with self._lock:
+            pool = self._get_pool(size)
+            if pool:
+                return pool.pop()
+        return bytearray(size)
+
+    def release(self, buf: bytearray) -> None:
+        """Release buffer back to pool.
+
+        Args:
+            buf: Buffer to release.
+        """
+        size = len(buf)
+        if size > self._max_size:
+            return
+
+        size = self._round_size(size)
+        with self._lock:
+            pool = self._get_pool(size)
+            if len(pool) < 100:  # Limit per size
+                buf[:] = b""
+                pool.append(buf)
+
+    def _round_size(self, size: int) -> int:
+        """Round size to power of 2 or nearest bucket."""
+        if size <= self._min_size:
+            return self._min_size
+        if size >= self._max_size:
+            return self._max_size
+        v = 1
+        while v < size:
+            v *= 2
+        return v
+
+    def clear(self) -> None:
+        """Clear all pools."""
+        with self._lock:
+            self._pools.clear()
+
+
+class ConnectionPool(Generic[T]):
+    """Pool for managing reusable connections.
+
+    Example:
+        pool = ConnectionPool(
+            factory=lambda: create_connection(),
+            validator=lambda c: c.is_open(),
+            max_size=10,
+        )
+        conn = pool.get_connection()
+        # use connection
+        pool.release_connection(conn)
+    """
+
+    def __init__(
+        self,
+        factory: Callable[[], T],
+        validator: Optional[Callable[[T], bool]] = None,
+        max_size: int = 10,
+    ) -> None:
+        self._factory = factory
+        self._validator = validator
+        self._max_size = max_size
+        self._available: List[T] = []
+        self._in_use: List[T] = []
+        self._lock = threading.Lock()
+
+    def get_connection(self, timeout: float = None) -> Optional[T]:
+        """Get a connection from pool.
+
+        Args:
+            timeout: Maximum wait time.
+
+        Returns:
+            Connection or None if timeout.
+        """
+        import time
+        start = time.time()
+        while True:
+            conn = None
+            with self._lock:
+                while self._available:
+                    c = self._available.pop()
+                    if self._validator is None or self._validator(c):
+                        conn = c
+                        self._in_use.append(c)
+                        break
+                if not conn and len(self._in_use) + len(self._available) < self._max_size:
+                    conn = self._factory()
+                    self._in_use.append(conn)
+
+            if conn:
+                return conn
+
+            if timeout and (time.time() - start) >= timeout:
+                return None
+
+            time.sleep(0.01)
+
+    def release_connection(self, conn: T) -> None:
+        """Release connection back to pool.
+
+        Args:
+            conn: Connection to release.
+        """
+        with self._lock:
+            if conn in self._in_use:
+                self._in_use.remove(conn)
+                if self._validator is None or self._validator(conn):
+                    self._available.append(conn)
+
+    def close_all(self) -> None:
+        """Close all connections."""
+        with self._lock:
+            for conn in self._available + self._in_use:
+                try:
+                    if hasattr(conn, "close"):
+                        conn.close()
+                except Exception:
+                    pass
+            self._available.clear()
+            self._in_use.clear()
+
+    @property
+    def stats(self) -> dict:
+        """Get pool statistics."""
+        with self._lock:
+            return {
+                "available": len(self._available),
+                "in_use": len(self._in_use),
+                "max_size": self._max_size,
+            }

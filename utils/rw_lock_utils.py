@@ -1,260 +1,219 @@
-"""
-Read-write lock implementation.
+"""Read-Write lock utilities.
 
-Provides reader-writer lock with priority modes,
-thread-safe access tracking, and deadlock prevention.
+Provides read-write lock for managing concurrent
+read and write access to shared resources.
 """
-
-from __future__ import annotations
 
 import threading
-import time
-from typing import Literal
+from typing import Optional
 
 
 class ReadWriteLock:
-    """
-    Read-write lock allowing multiple readers OR single writer.
+    """Read-Write lock implementation.
 
-    Supports read-biased, write-biased, or fair scheduling.
+    Multiple readers can hold the lock simultaneously,
+    but writers get exclusive access.
+
+    Example:
+        rwlock = ReadWriteLock()
+        with rwlock.read_lock():
+            # read shared data
+            data = self._data
+        with rwlock.write_lock():
+            # write exclusive access
+            self._data = new_data
     """
 
-    def __init__(self, priority: Literal["read", "write", "fair"] = "read"):
-        self.priority = priority
+    def __init__(self) -> None:
+        self._readers = 0
+        self._writers_waiting = 0
+        self._writer_active = False
         self._lock = threading.Lock()
         self._readers_condition = threading.Condition(self._lock)
         self._writers_condition = threading.Condition(self._lock)
-        self._readers = 0
-        self._writers = 0
-        self._waiting_writers = 0
 
-    def acquire_read(self, timeout: float | None = None) -> bool:
-        """
-        Acquire read lock.
+    class ReadLock:
+        """Read lock context manager."""
 
-        Args:
-            timeout: Max wait time
+        def __init__(self, rwlock: "ReadWriteLock") -> None:
+            self._rwlock = rwlock
+
+        def __enter__(self) -> None:
+            self._rwlock.acquire_read()
+
+        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+            self._rwlock.release_read()
+
+    class WriteLock:
+        """Write lock context manager."""
+
+        def __init__(self, rwlock: "ReadWriteLock") -> None:
+            self._rwlock = rwlock
+
+        def __enter__(self) -> None:
+            self._rwlock.acquire_write()
+
+        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+            self._rwlock.release_write()
+
+    def read_lock(self) -> ReadLock:
+        """Acquire read lock.
 
         Returns:
-            True if acquired
+            ReadLock context manager.
         """
-        deadline = time.time() + timeout if timeout else None
-        with self._readers_condition:
-            while self._writers > 0 or (self.priority == "write" and self._waiting_writers > 0):
-                if deadline:
-                    remaining = deadline - time.time()
-                    if remaining <= 0:
-                        return False
-                    self._readers_condition.wait(remaining)
-                else:
-                    self._readers_condition.wait()
+        return self.ReadLock(self)
+
+    def write_lock(self) -> WriteLock:
+        """Acquire write lock.
+
+        Returns:
+            WriteLock context manager.
+        """
+        return self.WriteLock(self)
+
+    def acquire_read(self) -> None:
+        """Acquire read lock.
+
+        Multiple readers can hold simultaneously.
+        Writers wait for all readers to finish.
+        """
+        with self._lock:
+            while self._writer_active or self._writers_waiting > 0:
+                self._readers_condition.wait()
             self._readers += 1
-            return True
 
     def release_read(self) -> None:
         """Release read lock."""
-        with self._readers_condition:
+        with self._lock:
             self._readers -= 1
             if self._readers == 0:
-                self._writers_condition.notify_all()
+                self._writers_condition.notify()
 
-    def acquire_write(self, timeout: float | None = None) -> bool:
+    def acquire_write(self) -> None:
+        """Acquire write lock.
+
+        Exclusive access - waits for all readers and
+        other writers to finish.
         """
-        Acquire write lock.
-
-        Args:
-            timeout: Max wait time
-
-        Returns:
-            True if acquired
-        """
-        deadline = time.time() + timeout if timeout else None
-        with self._writers_condition:
-            self._waiting_writers += 1
-            try:
-                while self._readers > 0 or self._writers > 0:
-                    if deadline:
-                        remaining = deadline - time.time()
-                        if remaining <= 0:
-                            return False
-                        self._writers_condition.wait(remaining)
-                    else:
-                        self._writers_condition.wait()
-                self._writers += 1
-                return True
-            finally:
-                self._waiting_writers -= 1
+        with self._lock:
+            self._writers_waiting += 1
+            while self._readers > 0 or self._writer_active:
+                self._writers_condition.wait()
+            self._writers_waiting -= 1
+            self._writer_active = True
 
     def release_write(self) -> None:
         """Release write lock."""
-        with self._writers_condition:
-            self._writers -= 1
+        with self._lock:
+            self._writer_active = False
             self._readers_condition.notify_all()
-            self._writers_condition.notify_all()
+            self._writers_condition.notify()
 
-    def __enter__(self) -> "ReadWriteLock":
-        return self
+    @property
+    def readers(self) -> int:
+        """Get number of active readers."""
+        with self._lock:
+            return self._readers
 
-    def __exit__(self, *args: object) -> None:
-        pass
+    @property
+    def writers_waiting(self) -> int:
+        """Get number of waiting writers."""
+        with self._lock:
+            return self._writers_waiting
+
+    @property
+    def writer_active(self) -> bool:
+        """Check if writer is active."""
+        with self._lock:
+            return self._writer_active
 
 
 class ReadLock:
-    """Context manager for read lock."""
+    """Read lock context manager."""
 
-    def __init__(self, rwlock: ReadWriteLock, timeout: float | None = None):
-        self._rwlock = rwlock
-        self._timeout = timeout
+    def __init__(self, lock: ReadWriteLock) -> None:
+        self._lock = lock
 
     def __enter__(self) -> "ReadLock":
-        self._rwlock.acquire_read(self._timeout)
+        self._lock.acquire_read()
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self._rwlock.release_read()
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self._lock.release_read()
 
 
 class WriteLock:
-    """Context manager for write lock."""
+    """Write lock context manager."""
 
-    def __init__(self, rwlock: ReadWriteLock, timeout: float | None = None):
-        self._rwlock = rwlock
-        self._timeout = timeout
+    def __init__(self, lock: ReadWriteLock) -> None:
+        self._lock = lock
 
     def __enter__(self) -> "WriteLock":
-        self._rwlock.acquire_write(self._timeout)
+        self._lock.acquire_write()
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self._rwlock.release_write()
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self._lock.release_write()
 
 
-class StampedLock:
-    """
-    Stamped lock with optimistic read mode.
+class RWLock:
+    """Alias for ReadWriteLock for convenience."""
 
-    Uses stamps instead of locks for better performance.
-    """
+    def __init__(self) -> None:
+        self._lock = ReadWriteLock()
 
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._readers = 0
-        self._writer = False
-        self._stamp = 0
-        self._condition = threading.Condition(self._lock)
+    def read_lock(self) -> ReadLock:
+        return self._lock.read_lock()
 
-    def try_read(self) -> int | None:
-        """
-        Try to acquire read lock.
-
-        Returns:
-            Stamp if acquired, None otherwise
-        """
-        with self._lock:
-            if self._writer:
-                return None
-            self._readers += 1
-            self._stamp += 1
-            return self._stamp
-
-    def try_write(self) -> int | None:
-        """
-        Try to acquire write lock.
-
-        Returns:
-            Stamp if acquired, None otherwise
-        """
-        with self._lock:
-            if self._writer or self._readers > 0:
-                return None
-            self._writer = True
-            self._stamp += 1
-            return self._stamp
-
-    def try_optimistic_read(self) -> int:
-        """
-        Try optimistic read (no lock, just get stamp).
-
-        Returns:
-            Stamp for validation
-        """
-        with self._lock:
-            self._stamp += 1
-            return self._stamp
-
-    def validate(self, stamp: int) -> bool:
-        """
-        Validate stamp after optimistic read.
-
-        Args:
-            stamp: Stamp from try_optimistic_read
-
-        Returns:
-            True if read was valid
-        """
-        with self._lock:
-            return stamp == self._stamp and not self._writer
-
-    def release(self, stamp: int) -> None:
-        """
-        Release lock for given stamp.
-
-        Args:
-            stamp: Stamp from try_read/try_write
-        """
-        with self._lock:
-            if stamp <= 0:
-                return
-            if stamp == self._stamp and self._writer:
-                self._writer = False
-                self._condition.notify_all()
-            elif stamp == self._stamp and self._readers > 0:
-                self._readers -= 1
-
-    def read_lock(self, timeout: float | None = None) -> int | None:
-        """Acquire read lock with blocking."""
-        deadline = time.time() + timeout if timeout else None
-        while True:
-            stamp = self.try_read()
-            if stamp:
-                return stamp
-            if deadline:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    return None
-                time.sleep(0.01)
-            else:
-                time.sleep(0.01)
-
-    def write_lock(self, timeout: float | None = None) -> int | None:
-        """Acquire write lock with blocking."""
-        deadline = time.time() + timeout if timeout else None
-        while True:
-            stamp = self.try_write()
-            if stamp:
-                return stamp
-            if deadline:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    return None
-                time.sleep(0.01)
-            else:
-                time.sleep(0.01)
+    def write_lock(self) -> WriteLock:
+        return self._lock.write_lock()
 
 
-class RWLockWrapper:
-    """Thread-safe wrapper using read-write lock."""
+class TryReadLock:
+    """Try-read lock (non-blocking)."""
 
-    def __init__(self, value: T, priority: Literal["read", "write", "fair"] = "read"):
-        self._value = value
-        self._lock = ReadWriteLock(priority)
+    def __init__(self, lock: ReadWriteLock) -> None:
+        self._lock = lock
+        self._acquired = False
 
-    def read(self, func: Callable[[T], R]) -> R:
-        """Read value through lock."""
-        with ReadLock(self._lock):
-            return func(self._value)
+    def __enter__(self) -> "TryReadLock":
+        with self._lock._lock:
+            if not self._lock._writer_active and self._lock._writers_waiting == 0:
+                self._lock._readers += 1
+                self._acquired = True
+        return self
 
-    def write(self, func: Callable[[T], R]) -> R:
-        """Write value through lock."""
-        with WriteLock(self._lock):
-            return func(self._value)
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._acquired:
+            self._lock.release_read()
+            self._acquired = False
+
+    @property
+    def acquired(self) -> bool:
+        return self._acquired
+
+
+class TryWriteLock:
+    """Try-write lock (non-blocking)."""
+
+    def __init__(self, lock: ReadWriteLock) -> None:
+        self._lock = lock
+        self._acquired = False
+
+    def __enter__(self) -> "TryWriteLock":
+        with self._lock._lock:
+            if self._lock._readers == 0 and not self._lock._writer_active:
+                self._lock._writers_waiting += 1
+                self._lock._writer_active = True
+                self._acquired = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._acquired:
+            self._lock.release_write()
+            self._acquired = False
+
+    @property
+    def acquired(self) -> bool:
+        return self._acquired
