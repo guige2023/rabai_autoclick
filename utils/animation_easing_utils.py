@@ -1,352 +1,274 @@
-"""Animation easing utilities.
+"""Animation easing utilities for smooth transitions.
 
-This module provides easing functions for smooth animations
-and transitions in UI automation.
+This module provides easing functions for animations and transitions.
 """
 
-from __future__ import annotations
-
-from typing import Callable
-import math
+from typing import Callable, List, Tuple
 
 
-# Easing function type
+# Easing functions take a normalized time t (0.0 to 1.0) and return a float.
 EasingFunc = Callable[[float], float]
 
 
 def linear(t: float) -> float:
-    """Linear easing (no easing).
+    """Linear easing, no acceleration.
 
     Args:
-        t: Progress 0.0-1.0.
+        t: Normalized time from 0.0 to 1.0.
 
     Returns:
-        Eased value.
+        The same value t.
     """
     return t
 
 
 def ease_in_quad(t: float) -> float:
-    """Ease-in quadratic.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
+    """Quadratic ease-in."""
     return t * t
 
 
 def ease_out_quad(t: float) -> float:
-    """Ease-out quadratic.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
+    """Quadratic ease-out."""
     return t * (2 - t)
 
 
 def ease_in_out_quad(t: float) -> float:
-    """Ease-in-out quadratic.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return 2 * t * t if t < 0.5 else -1 + (4 - 2 * t) * t
+    """Quadratic ease-in-out."""
+    if t < 0.5:
+        return 2 * t * t
+    return -1 + (4 - 2 * t) * t
 
 
 def ease_in_cubic(t: float) -> float:
-    """Ease-in cubic.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
+    """Cubic ease-in."""
     return t * t * t
 
 
 def ease_out_cubic(t: float) -> float:
-    """Ease-out cubic.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return 1 - pow(1 - t, 3)
+    """Cubic ease-out."""
+    return (t - 1) ** 3 + 1
 
 
 def ease_in_out_cubic(t: float) -> float:
-    """Ease-in-out cubic.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return 4 * t * t * t if t < 0.5 else 1 - pow(-2 * t + 2, 3) / 2
+    """Cubic ease-in-out."""
+    if t < 0.5:
+        return 4 * t * t * t
+    return (t - 1) ** 3 * 4 + 1
 
 
 def ease_in_quart(t: float) -> float:
-    """Ease-in quart.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return t * t * t * t
+    """Quartic ease-in."""
+    return t ** 4
 
 
 def ease_out_quart(t: float) -> float:
-    """Ease-out quart.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return 1 - pow(1 - t, 4)
+    """Quartic ease-out."""
+    return 1 - (t - 1) ** 4
 
 
 def ease_in_out_quart(t: float) -> float:
-    """Ease-in-out quart.
+    """Quartic ease-in-out."""
+    if t < 0.5:
+        return 8 * t ** 4
+    return 1 - 8 * (t - 1) ** 4
 
-    Args:
-        t: Progress 0.0-1.0.
 
-    Returns:
-        Eased value.
-    """
-    return 8 * t * t * t * t if t < 0.5 else 1 - pow(-2 * t + 2, 4) / 2
+def ease_in_quint(t: float) -> float:
+    """Quintic ease-in."""
+    return t ** 5
+
+
+def ease_out_quint(t: float) -> float:
+    """Quintic ease-out."""
+    return 1 + (t - 1) ** 5
+
+
+def ease_in_out_quint(t: float) -> float:
+    """Quintic ease-in-out."""
+    if t < 0.5:
+        return 16 * t ** 5
+    return 1 + 16 * (t - 1) ** 5
 
 
 def ease_in_sine(t: float) -> float:
-    """Ease-in sine.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return 1 - math.cos(t * math.pi / 2)
+    """Sine ease-in."""
+    return 1 - __cos(t * __HALF_PI)
 
 
 def ease_out_sine(t: float) -> float:
-    """Ease-out sine.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return math.sin(t * math.pi / 2)
+    """Sine ease-out."""
+    return __sin(t * __HALF_PI)
 
 
 def ease_in_out_sine(t: float) -> float:
-    """Ease-in-out sine.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return -(math.cos(math.pi * t) - 1) / 2
+    """Sine ease-in-out."""
+    return -0.5 * (__cos(__PI * t) - 1)
 
 
 def ease_in_expo(t: float) -> float:
-    """Ease-in exponential.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return 0 if t == 0 else pow(2, 10 * t - 10)
+    """Exponential ease-in."""
+    if t == 0:
+        return 0.0
+    return 2 ** (10 * (t - 1))
 
 
 def ease_out_expo(t: float) -> float:
-    """Ease-out exponential.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    return 1 if t == 1 else 1 - pow(2, -10 * t)
+    """Exponential ease-out."""
+    if t == 1:
+        return 1.0
+    return 1 - 2 ** (-10 * t)
 
 
 def ease_in_out_expo(t: float) -> float:
-    """Ease-in-out exponential.
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
+    """Exponential ease-in-out."""
     if t == 0:
-        return 0
+        return 0.0
     if t == 1:
-        return 1
-    return (pow(2, 20 * t - 10) / 2) if t < 0.5 else (2 - pow(2, -20 * t + 10)) / 2
+        return 1.0
+    if t < 0.5:
+        return 2 ** (20 * t - 11) * 0.5
+    return (2 - 2 ** (-20 * t + 11)) * 0.5
 
 
 def ease_in_back(t: float) -> float:
-    """Ease-in back (with overshoot).
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    c1 = 1.70158
-    c3 = c1 + 1
-    return c3 * t * t * t - c1 * t * t
+    """Back ease-in with slight overshoot."""
+    return 2.70158 * t * t * t - 1.70158 * t * t
 
 
 def ease_out_back(t: float) -> float:
-    """Ease-out back (with overshoot).
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    c1 = 1.70158
-    c3 = c1 + 1
-    return 1 + c3 * pow(t - 1, 3) + c1 * pow(t - 1, 2)
+    """Back ease-out with slight overshoot."""
+    return 1 + 2.70158 * (t - 1) ** 3 + 1.70158 * (t - 1) ** 2
 
 
 def ease_in_out_back(t: float) -> float:
-    """Ease-in-out back (with overshoot).
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
+    """Back ease-in-out."""
     c1 = 1.70158
     c2 = c1 * 1.525
-    return (pow(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) / 2 if t < 0.5 else (pow(2 * t - 2, 2) * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2
+    if t < 0.5:
+        return ((2 * t) ** 2 * ((c2 + 1) * 2 * t - c2)) * 0.5
+    return ((2 * t - 2) ** 2 * ((c2 + 1) * (t * 2 - 2) + c2) + 2) * 0.5
+
+
+def ease_in_elastic(t: float) -> float:
+    """Elastic ease-in."""
+    if t == 0:
+        return 0.0
+    if t == 1:
+        return 1.0
+    return -(2 ** (10 * t - 10)) * __sin((t * 10 - 10.75) * __TWO_PI_OVER_THREE)
 
 
 def ease_out_elastic(t: float) -> float:
-    """Ease-out elastic (with bounce).
-
-    Args:
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Eased value.
-    """
-    c4 = (2 * math.pi) / 3
-    return 0 if t == 0 else 1 if t == 1 else pow(2, -10 * t) * math.sin((t * 10 - 0.75) * c4) + 1
+    """Elastic ease-out."""
+    if t == 0:
+        return 0.0
+    if t == 1:
+        return 1.0
+    return 2 ** (-10 * t) * __sin((t * 10 - 0.75) * __TWO_PI_OVER_THREE) + 1
 
 
-EASING_FUNCTIONS: dict[str, EasingFunc] = {
-    "linear": linear,
-    "ease_in_quad": ease_in_quad,
-    "ease_out_quad": ease_out_quad,
-    "ease_in_out_quad": ease_in_out_quad,
-    "ease_in_cubic": ease_in_cubic,
-    "ease_out_cubic": ease_out_cubic,
-    "ease_in_out_cubic": ease_in_out_cubic,
-    "ease_in_quart": ease_in_quart,
-    "ease_out_quart": ease_out_quart,
-    "ease_in_out_quart": ease_in_out_quart,
-    "ease_in_sine": ease_in_sine,
-    "ease_out_sine": ease_out_sine,
-    "ease_in_out_sine": ease_in_out_sine,
-    "ease_in_expo": ease_in_expo,
-    "ease_out_expo": ease_out_expo,
-    "ease_in_out_expo": ease_in_out_expo,
-    "ease_in_back": ease_in_back,
-    "ease_out_back": ease_out_back,
-    "ease_in_out_back": ease_in_out_back,
-    "ease_out_elastic": ease_out_elastic,
-}
+def ease_in_out_elastic(t: float) -> float:
+    """Elastic ease-in-out."""
+    if t == 0:
+        return 0.0
+    if t == 1:
+        return 1.0
+    if t < 0.5:
+        return -(2 ** (20 * t - 11) * __sin((20 * t - 11.625) * __TWO_PI_OVER_THREE)) * 0.5
+    return (2 ** (-20 * t + 11) * __sin((20 * t - 11.625) * __TWO_PI_OVER_THREE)) * 0.5 + 1
 
 
-def lerp(start: float, end: float, t: float) -> float:
-    """Linear interpolation between two values.
-
-    Args:
-        start: Start value.
-        end: End value.
-        t: Progress 0.0-1.0.
-
-    Returns:
-        Interpolated value.
-    """
-    return start + (end - start) * t
+def ease_in_bounce(t: float) -> float:
+    """Bounce ease-in."""
+    return 1 - ease_out_bounce(1 - t)
 
 
-def interpolate_values(
-    start: tuple[float, ...],
-    end: tuple[float, ...],
-    t: float,
-    easing: EasingFunc = linear,
-) -> tuple[float, ...]:
-    """Interpolate between two coordinate tuples.
-
-    Args:
-        start: Start coordinates.
-        end: End coordinates.
-        t: Progress 0.0-1.0.
-        easing: Easing function.
-
-    Returns:
-        Interpolated coordinates.
-    """
-    et = easing(t)
-    return tuple(lerp(s, e, et) for s, e in zip(start, end))
+def ease_out_bounce(t: float) -> float:
+    """Bounce ease-out."""
+    n1 = 7.5625
+    d1 = 2.75
+    if t < 1 / d1:
+        return n1 * t * t
+    elif t < 2 / d1:
+        t -= 1.5 / d1
+        return n1 * t * t + 0.75
+    elif t < 2.5 / d1:
+        t -= 2.25 / d1
+        return n1 * t * t + 0.9375
+    else:
+        t -= 2.625 / d1
+        return n1 * t * t + 0.984375
 
 
-__all__ = [
-    "EasingFunc",
-    "linear",
-    "ease_in_quad",
-    "ease_out_quad",
-    "ease_in_out_quad",
-    "ease_in_cubic",
-    "ease_out_cubic",
-    "ease_in_out_cubic",
-    "ease_in_quart",
-    "ease_out_quart",
-    "ease_in_out_quart",
-    "ease_in_sine",
-    "ease_out_sine",
-    "ease_in_out_sine",
-    "ease_in_expo",
-    "ease_out_expo",
-    "ease_in_out_expo",
-    "ease_in_back",
-    "ease_out_back",
-    "ease_in_out_back",
-    "ease_out_elastic",
-    "EASING_FUNCTIONS",
-    "lerp",
-    "interpolate_values",
+def ease_in_out_bounce(t: float) -> float:
+    """Bounce ease-in-out."""
+    if t < 0.5:
+        return (1 - ease_out_bounce(1 - 2 * t)) * 0.5
+    return (1 + ease_out_bounce(2 * t - 1)) * 0.5
+
+
+# Pre-built named easing presets
+PRESETS: List[Tuple[str, EasingFunc]] = [
+    ("linear", linear),
+    ("easeInQuad", ease_in_quad),
+    ("easeOutQuad", ease_out_quad),
+    ("easeInOutQuad", ease_in_out_quad),
+    ("easeInCubic", ease_in_cubic),
+    ("easeOutCubic", ease_out_cubic),
+    ("easeInOutCubic", ease_in_out_cubic),
+    ("easeInQuart", ease_in_quart),
+    ("easeOutQuart", ease_out_quart),
+    ("easeInOutQuart", ease_in_out_quart),
+    ("easeInQuint", ease_in_quint),
+    ("easeOutQuint", ease_out_quint),
+    ("easeInOutQuint", ease_in_out_quint),
+    ("easeInSine", ease_in_sine),
+    ("easeOutSine", ease_out_sine),
+    ("easeInOutSine", ease_in_out_sine),
+    ("easeInExpo", ease_in_expo),
+    ("easeOutExpo", ease_out_expo),
+    ("easeInOutExpo", ease_in_out_expo),
+    ("easeInBack", ease_in_back),
+    ("easeOutBack", ease_out_back),
+    ("easeInOutBack", ease_in_out_back),
+    ("easeInElastic", ease_in_elastic),
+    ("easeOutElastic", ease_out_elastic),
+    ("easeInOutElastic", ease_in_out_elastic),
+    ("easeInBounce", ease_in_bounce),
+    ("easeOutBounce", ease_out_bounce),
+    ("easeInOutBounce", ease_in_out_bounce),
 ]
+
+
+# Constants
+__HALF_PI = 1.5707963267948966
+__PI = 3.141592653589793
+__TWO_PI_OVER_THREE = 2.0943951023931953
+
+
+def __sin(x: float) -> float:
+    import math
+    return math.sin(x)
+
+
+def __cos(x: float) -> float:
+    import math
+    return math.cos(x)
+
+
+def get_easing(name: str) -> EasingFunc:
+    """Get easing function by name.
+
+    Args:
+        name: Easing function name (e.g., "easeOutQuad").
+
+    Returns:
+        The easing function.
+
+    Raises:
+        ValueError: If name is not recognized.
+    """
+    for n, func in PRESETS:
+        if n == name:
+            return func
+    raise ValueError(f"Unknown easing: {name!r}")

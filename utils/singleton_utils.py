@@ -1,125 +1,122 @@
-"""Singleton utilities for RabAI AutoClick.
+"""Singleton pattern utilities.
 
-Provides:
-- Singleton pattern implementations
-- Thread-safe singleton
-- Singleton registry
+Provides thread-safe singleton implementations for
+managing shared resources in automation workflows.
 """
 
-from __future__ import annotations
-
 import threading
-from typing import (
-    Any,
-    Callable,
-    Generic,
-    Type,
-    TypeVar,
-)
+from typing import Any, Callable, Generic, TypeVar
 
 
 T = TypeVar("T")
 
 
-class Singleton(Generic[T]):
-    """Thread-safe singleton base class.
+def singleton(cls: Type[T]) -> Type[T]:
+    """Decorator to make a class a singleton.
 
-    Use by inheriting: class MyClass(Singleton[MyClass]):
+    Example:
+        @singleton
+        class Config:
+            pass
     """
+    _instance: Type[T] = None  # type: ignore
+    _lock = threading.Lock()
 
+    def get_instance(*args: Any, **kwargs: Any) -> Type[T]:
+        nonlocal _instance
+        if _instance is None:
+            with _lock:
+                if _instance is None:
+                    _instance = cls(*args, **kwargs)
+        return _instance
+
+    return get_instance  # type: ignore
+
+
+class Singleton(Generic[T]):
+    """Base class for singleton instances.
+
+    Example:
+        class MySingleton(Singleton[MySingleton]):
+            def __init__(self):
+                self.value = 0
+
+        obj = MySingleton.get_instance()
+    """
     _instance: Optional[T] = None
     _lock = threading.Lock()
 
-    def __new__(cls: Type[T]) -> T:
+    @classmethod
+    def get_instance(cls: type) -> T:
+        """Get singleton instance."""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
-                    cls._instance = super().__new__(cls)
+                    cls._instance = cls.__new__(cls)
+                    cls._instance.__init__()
         return cls._instance
 
     @classmethod
-    def get_instance(cls: Type[T]) -> T:
-        """Get the singleton instance.
-
-        Returns:
-            The singleton instance.
-        """
-        return cls()
-
-    @classmethod
-    def reset(cls: Type[T]) -> None:
-        """Reset the singleton instance (for testing)."""
+    def reset(cls) -> None:
+        """Reset singleton instance (for testing)."""
         with cls._lock:
             cls._instance = None
 
+    @classmethod
+    def has_instance(cls) -> bool:
+        """Check if instance exists."""
+        return cls._instance is not None
 
-def singleton(
-    cls: Optional[Type[T]] = None,
-    *,
-    thread_safe: bool = True,
-) -> Type[T]:
-    """Singleton decorator.
 
-    Args:
-        cls: Class to make singleton.
-        thread_safe: Whether to use thread-safe implementation.
+class LazySingleton(Generic[T]):
+    """Lazy initialization singleton with thread safety.
 
-    Returns:
-        Singleton class.
+    Example:
+        class Registry(LazySingleton["Registry"]):
+            def __init__(self):
+                self.data = {}
     """
-    instances: Dict[str, T] = {}
-    lock = threading.Lock()
-
-    def decorator(c: Type[T]) -> Type[T]:
-        _instance: T
-
-        def get_instance() -> T:
-            if thread_safe:
-                with lock:
-                    if c.__name__ not in instances:
-                        instances[c.__name__] = c()
-                    return instances[c.__name__]
-            if c.__name__ not in instances:
-                instances[c.__name__] = c()
-            return instances[c.__name__]
-
-        class SingletonClass(c):  # type: ignore
-            pass
-
-        SingletonClass.get_instance = staticmethod(get_instance)  # type: ignore
-        SingletonClass.reset = classmethod(  # type: ignore
-            lambda cls: instances.pop(cls.__name__, None)
-        )
-        return SingletonClass
-
-    if cls is not None:
-        return decorator(cls)
-    return decorator
-
-
-class Borg:
-    """Borg singleton pattern - all instances share state."""
-
-    _shared_state: Dict[str, Any] = {}
+    _instance: Optional[T] = None
+    _initialized = False
     _lock = threading.Lock()
 
-    def __new__(cls: Type[T]) -> T:
-        obj = super().__new__(cls)
-        obj.__dict__ = cls._shared_state
-        return obj
-
     @classmethod
-    def reset(cls) -> None:
-        """Reset shared state."""
-        with cls._lock:
-            cls._shared_state.clear()
+    def get_instance(cls: type) -> T:
+        """Get or create singleton instance."""
+        if not cls._initialized:
+            with cls._lock:
+                if not cls._initialized:
+                    cls._instance = cls.__new__(cls)
+                    cls._instance.__init__()
+                    cls._initialized = True
+        return cls._instance  # type: ignore
 
 
-__all__ = [
-    "Singleton",
-    "singleton",
-    "Borg",
-]
+def lazy_singleton(cls: Type[T]) -> Callable[[], T]:
+    """Create a lazy singleton accessor.
+
+    Args:
+        cls: Class to make lazy singleton.
+
+    Returns:
+        Function that returns the singleton instance.
+
+    Example:
+        get_config = lazy_singleton(Config)
+        config = get_config()
+    """
+    _instance: T = None  # type: ignore
+    _lock = threading.Lock()
+
+    def get_instance() -> T:
+        nonlocal _instance
+        if _instance is None:
+            with _lock:
+                if _instance is None:
+                    _instance = cls()
+        return _instance
+
+    return get_instance
 
 
-from typing import Dict, Optional  # noqa: E402
+from typing import Optional

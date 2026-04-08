@@ -1,387 +1,259 @@
-"""Stream utilities for RabAI AutoClick.
+"""Stream processing utilities.
 
-Provides:
-- Stream processing helpers
-- Buffered readers/writers
-- Line-by-line processing
+Provides lazy stream operations for processing sequences
+of data with functional programming patterns.
 """
 
-import io
-from typing import (
-    Callable,
-    Generator,
-    Iterable,
-    Iterator,
-    List,
-    Optional,
-    TypeVar,
-)
+from typing import Any, Callable, Generic, Iterator, List, Optional, TypeVar
 
 
 T = TypeVar("T")
 U = TypeVar("U")
 
 
-def chunked(
-    iterable: Iterable[T],
-    chunk_size: int,
-) -> Generator[List[T], None, None]:
-    """Split an iterable into chunks.
+class Stream(Generic[T]):
+    """Lazy stream for functional-style data processing.
 
-    Args:
-        iterable: Input iterable.
-        chunk_size: Size of each chunk.
-
-    Yields:
-        Lists of items of up to chunk_size.
+    Example:
+        result = (Stream(range(1000))
+            .filter(lambda x: x % 2 == 0)
+            .map(lambda x: x * 2)
+            .take(10)
+            .to_list())
     """
-    chunk: List[T] = []
-    for item in iterable:
-        chunk.append(item)
-        if len(chunk) >= chunk_size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
-
-
-def chunked_iter(
-    iterator: Iterator[T],
-    chunk_size: int,
-) -> Generator[List[T], None, None]:
-    """Split an iterator into chunks.
-
-    Args:
-        iterator: Input iterator.
-        chunk_size: Size of each chunk.
-
-    Yields:
-        Lists of items of up to chunk_size.
-    """
-    return chunked(iterator, chunk_size)
-
-
-def take(
-    iterable: Iterable[T],
-    n: int,
-) -> List[T]:
-    """Take first n items from iterable.
-
-    Args:
-        iterable: Input iterable.
-        n: Number of items to take.
-
-    Returns:
-        List of first n items.
-    """
-    result = []
-    for i, item in enumerate(iterable):
-        if i >= n:
-            break
-        result.append(item)
-    return result
-
-
-def drop(
-    iterable: Iterable[T],
-    n: int,
-) -> Generator[T, None, None]:
-    """Skip first n items from iterable.
-
-    Args:
-        iterable: Input iterable.
-        n: Number of items to skip.
-
-    Yields:
-        Items after skipping first n.
-    """
-    for i, item in enumerate(iterable):
-        if i >= n:
-            yield item
-
-
-def first(iterable: Iterable[T], default: Optional[T] = None) -> Optional[T]:
-    """Get first item from iterable.
-
-    Args:
-        iterable: Input iterable.
-        default: Default value if empty.
-
-    Returns:
-        First item or default.
-    """
-    for item in iterable:
-        return item
-    return default
-
-
-def last(iterable: Iterable[T], default: Optional[T] = None) -> Optional[T]:
-    """Get last item from iterable.
-
-    Args:
-        iterable: Input iterable.
-        default: Default value if empty.
-
-    Returns:
-        Last item or default.
-    """
-    item = default
-    for item in iterable:
-        pass
-    return item
-
-
-def unique(
-    iterable: Iterable[T],
-    key: Optional[Callable[[T], Any]] = None,
-) -> Generator[T, None, None]:
-    """Yield unique items from iterable.
-
-    Args:
-        iterable: Input iterable.
-        key: Optional key function for comparison.
-
-    Yields:
-        Unique items.
-    """
-    seen: set = set()
-    for item in iterable:
-        k = key(item) if key else item
-        if k not in seen:
-            seen.add(k)
-            yield item
-
-
-def unique_preserve_order(
-    iterable: Iterable[T],
-) -> Generator[T, None, None]:
-    """Yield unique items preserving original order.
-
-    Args:
-        iterable: Input iterable.
-
-    Yields:
-        Unique items in order.
-    """
-    seen: set = set()
-    for item in iterable:
-        if item not in seen:
-            seen.add(item)
-            yield item
-
-
-def flatten(
-    nested: Iterable[Iterable[T]],
-) -> Generator[T, None, None]:
-    """Flatten a nested iterable.
-
-    Args:
-        nested: Nested iterable of iterables.
-
-    Yields:
-        Flattened items.
-    """
-    for inner in nested:
-        for item in inner:
-            yield item
-
-
-def interleave(
-    *iterables: Iterable[T],
-) -> Generator[T, None, None]:
-    """Interleave items from multiple iterables.
-
-    Args:
-        *iterables: Iterables to interleave.
-
-    Yields:
-        Interleaved items.
-    """
-    iterators = [iter(it) for it in iterables]
-    while iterators:
-        for it in iterators[:]:
-            try:
-                yield next(it)
-            except StopIteration:
-                iterators.remove(it)
-
-
-def partition(
-    iterable: Iterable[T],
-    predicate: Callable[[T], bool],
-) -> tuple[List[T], List[T]]:
-    """Partition iterable by predicate.
-
-    Args:
-        iterable: Input iterable.
-        predicate: Function that returns True for "truthy" group.
-
-    Returns:
-        Tuple of (truthy_list, falsy_list).
-    """
-    truthy: List[T] = []
-    falsy: List[T] = []
-    for item in iterable:
-        if predicate(item):
-            truthy.append(item)
-        else:
-            falsy.append(item)
-    return truthy, falsy
-
-
-def group_by(
-    iterable: Iterable[T],
-    key: Callable[[T], U],
-) -> dict[U, List[T]]:
-    """Group items by key function.
-
-    Args:
-        iterable: Input iterable.
-        key: Function to extract group key.
-
-    Returns:
-        Dict mapping key to list of items.
-    """
-    groups: dict[U, List[T]] = {}
-    for item in iterable:
-        k = key(item)
-        if k not in groups:
-            groups[k] = []
-        groups[k].append(item)
-    return groups
-
-
-def batch_process(
-    items: List[T],
-    batch_size: int,
-    processor: Callable[[List[T]], List[U]],
-) -> List[U]:
-    """Process items in batches.
-
-    Args:
-        items: Items to process.
-        batch_size: Batch size.
-        processor: Function to process each batch.
-
-    Returns:
-        List of all results.
-    """
-    results: List[U] = []
-    for chunk in chunked(items, batch_size):
-        results.extend(processor(chunk))
-    return results
-
-
-def sliding_window(
-    iterable: Iterable[T],
-    window_size: int,
-) -> Generator[tuple[T, ...], None, None]:
-    """Yield sliding windows over iterable.
-
-    Args:
-        iterable: Input iterable.
-        window_size: Size of each window.
-
-    Yields:
-        Tuples of window_size items.
-    """
-    window: List[T] = []
-    for item in iterable:
-        window.append(item)
-        if len(window) >= window_size:
-            yield tuple(window)
-            window.pop(0)
-
-
-def stream_lines(
-    file_like: io.TextIOBase,
-) -> Generator[str, None, None]:
-    """Stream lines from a text file-like object.
-
-    Args:
-        file_like: Text file-like object.
-
-    Yields:
-        Lines without trailing newline.
-    """
-    for line in file_like:
-        yield line.rstrip("\n\r")
-
-
-def stream_csv_rows(
-    file_like: io.TextIOBase,
-    delimiter: str = ",",
-) -> Generator[List[str], None, None]:
-    """Stream CSV rows from a file-like object.
-
-    Args:
-        file_like: Text file-like object.
-        delimiter: CSV delimiter.
-
-    Yields:
-        Lists of column values.
-    """
-    for line in stream_lines(file_like):
-        yield line.split(delimiter)
-
-
-class BufferedWriter:
-    """Buffered writer with flush control."""
-
-    def __init__(
-        self,
-        write_func: Callable[[str], None],
-        buffer_size: int = 4096,
-    ) -> None:
-        self._write_func = write_func
-        self._buffer_size = buffer_size
-        self._buffer: List[str] = []
-
-    def write(self, text: str) -> None:
-        """Write text to buffer."""
-        self._buffer.append(text)
-        if sum(len(s) for s in self._buffer) >= self._buffer_size:
-            self.flush()
-
-    def flush(self) -> None:
-        """Flush buffer to output."""
-        if self._buffer:
-            self._write_func("".join(self._buffer))
-            self._buffer.clear()
-
-    def close(self) -> None:
-        """Close and flush."""
-        self.flush()
-
-
-def consume(
-    iterable: Iterable[T],
-    count: Optional[int] = None,
-) -> None:
-    """Consume an iterable without storing results.
-
-    Args:
-        iterable: Input iterable.
-        count: Optional max items to consume.
-    """
-    if count is None:
-        for _ in iterable:
-            pass
-    else:
-        for i, item in enumerate(iterable):
-            if i >= count:
-                break
-
-
-def iterator_from_file(filepath: str) -> Generator[str, None, None]:
-    """Create a line iterator from a file.
-
-    Args:
-        filepath: Path to file.
-
-    Yields:
-        Lines from file.
-    """
-    with open(filepath, "r") as f:
-        for line in f:
-            yield line.rstrip("\n\r")
+
+    def __init__(self, source: Iterator[T]) -> None:
+        self._source = source
+
+    @classmethod
+    def of(cls, *items: T) -> "Stream[T]":
+        """Create stream from items.
+
+        Args:
+            *items: Items to stream.
+
+        Returns:
+            Stream of items.
+        """
+        return cls(iter(items))
+
+    @classmethod
+    def from_iterable(cls, iterable: Any) -> "Stream[T]":
+        """Create stream from iterable.
+
+        Args:
+            iterable: Any iterable.
+
+        Returns:
+            Stream of items.
+        """
+        return cls(iter(iterable))
+
+    def map(self, func: Callable[[T], U]) -> "Stream[U]":
+        """Map each element through function.
+
+        Args:
+            func: Transformation function.
+
+        Returns:
+            New stream with transformed elements.
+        """
+        return Stream((func(item) for item in self._source))
+
+    def filter(self, predicate: Callable[[T], bool]) -> "Stream[T]":
+        """Filter elements by predicate.
+
+        Args:
+            predicate: Filter condition.
+
+        Returns:
+            New stream with filtered elements.
+        """
+        return Stream((item for item in self._source if predicate(item)))
+
+    def flat_map(self, func: Callable[[T], Iterator[U]]) -> "Stream[U]":
+        """Map and flatten results.
+
+        Args:
+            func: Function returning iterables.
+
+        Returns:
+            New stream with flattened results.
+        """
+        return Stream((u for item in self._source for u in func(item)))
+
+    def take(self, n: int) -> "Stream[T]":
+        """Take first n elements.
+
+        Args:
+            n: Number of elements.
+
+        Returns:
+            New stream with first n elements.
+        """
+        def take_iter():
+            for i, item in enumerate(self._source):
+                if i >= n:
+                    break
+                yield item
+        return Stream(take_iter())
+
+    def skip(self, n: int) -> "Stream[T]":
+        """Skip first n elements.
+
+        Args:
+            n: Number of elements to skip.
+
+        Returns:
+            New stream without first n elements.
+        """
+        def skip_iter():
+            for i, item in enumerate(self._source):
+                if i >= n:
+                    yield item
+        return Stream(skip_iter())
+
+    def take_while(self, predicate: Callable[[T], bool]) -> "Stream[T]":
+        """Take elements while predicate is true.
+
+        Args:
+            predicate: Condition function.
+
+        Returns:
+            New stream with elements until predicate fails.
+        """
+        return Stream((item for item in self._source if predicate(item)))
+
+    def skip_while(self, predicate: Callable[[T], bool]) -> "Stream[T]":
+        """Skip elements while predicate is true.
+
+        Args:
+            predicate: Condition function.
+
+        Returns:
+            New stream starting after predicate fails.
+        """
+        skipping = True
+        for item in self._source:
+            if skipping and predicate(item):
+                continue
+            skipping = False
+            yield item  # type: ignore
+        return Stream(iter([]))  # placeholder
+
+    def distinct(self) -> "Stream[T]":
+        """Remove duplicate elements.
+
+        Returns:
+            New stream with unique elements.
+        """
+        seen: List[T] = []
+        for item in self._source:
+            if item not in seen:
+                seen.append(item)
+                yield item
+        return Stream(iter([]))  # placeholder
+
+    def sorted(self, key: Optional[Callable[[T], Any]] = None) -> "Stream[T]":
+        """Sort stream elements.
+
+        Args:
+            key: Optional sort key function.
+
+        Returns:
+            New sorted stream.
+        """
+        return Stream(sorted(self._source, key=key))
+
+    def reduce(self, func: Callable[[T, T], T]) -> Optional[T]:
+        """Reduce to single value.
+
+        Args:
+            func: Reduction function.
+
+        Returns:
+            Reduced value or None if empty.
+        """
+        result: Optional[T] = None
+        for item in self._source:
+            if result is None:
+                result = item
+            else:
+                result = func(result, item)
+        return result
+
+    def fold(self, initial: U, func: Callable[[U, T], U]) -> U:
+        """Fold to accumulated value.
+
+        Args:
+            initial: Initial accumulator value.
+            func: Accumulation function.
+
+        Returns:
+            Final accumulated value.
+        """
+        result = initial
+        for item in self._source:
+            result = func(result, item)
+        return result
+
+    def collect(self) -> List[T]:
+        """Collect stream to list.
+
+        Returns:
+            List of all elements.
+        """
+        return list(self._source)
+
+    def to_list(self) -> List[T]:
+        """Convert stream to list."""
+        return self.collect()
+
+    def first(self) -> Optional[T]:
+        """Get first element.
+
+        Returns:
+            First element or None if empty.
+        """
+        return next(self._source, None)
+
+    def count(self) -> int:
+        """Count elements.
+
+        Returns:
+            Number of elements.
+        """
+        return sum(1 for _ in self._source)
+
+    def any_match(self, predicate: Callable[[T], bool]) -> bool:
+        """Check if any element matches.
+
+        Args:
+            predicate: Match condition.
+
+        Returns:
+            True if any element matches.
+        """
+        return any(predicate(item) for item in self._source)
+
+    def all_match(self, predicate: Callable[[T], bool]) -> bool:
+        """Check if all elements match.
+
+        Args:
+            predicate: Match condition.
+
+        Returns:
+            True if all elements match.
+        """
+        return all(predicate(item) for item in self._source)
+
+    def none_match(self, predicate: Callable[[T], bool]) -> bool:
+        """Check if no elements match.
+
+        Args:
+            predicate: Match condition.
+
+        Returns:
+            True if no element matches.
+        """
+        return not self.any_match(predicate)

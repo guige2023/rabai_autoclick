@@ -1,298 +1,170 @@
+"""Graph and traversal utilities.
+
+Provides graph data structures and traversal algorithms
+for dependency resolution and path finding.
 """
-Graph algorithms and data structures.
 
-Provides adjacency list graphs, BFS, DFS, Dijkstra, Bellman-Ford,
-topological sort, and cycle detection.
-"""
-
-from __future__ import annotations
-
-import heapq
-from typing import Callable
+from collections import deque
+from typing import Any, Callable, Dict, List, Optional, Set
 
 
 class Graph:
-    """Undirected graph using adjacency lists."""
+    """Generic directed graph with adjacency list representation.
 
-    def __init__(self):
-        self.adj: dict[int, set[int]] = {}
-        self.edges: list[tuple[int, int, float]] = []
+    Example:
+        g = Graph()
+        g.add_edge("a", "b")
+        g.add_edge("b", "c")
+        for node in g.topological_sort():
+            print(node)
+    """
 
-    def add_node(self, u: int) -> None:
-        if u not in self.adj:
-            self.adj[u] = set()
+    def __init__(self) -> None:
+        self._adj: Dict[str, Set[str]] = {}
+        self._nodes: Set[str] = set()
 
-    def add_edge(self, u: int, v: int, weight: float = 1.0) -> None:
-        self.add_node(u)
-        self.add_node(v)
-        self.adj[u].add(v)
-        self.adj[v].add(u)
-        self.edges.append((u, v, weight))
+    def add_node(self, node: str) -> None:
+        """Add a node to the graph."""
+        self._nodes.add(node)
+        if node not in self._adj:
+            self._adj[node] = set()
 
-    def nodes(self) -> list[int]:
-        return list(self.adj.keys())
+    def add_edge(self, from_node: str, to_node: str) -> None:
+        """Add a directed edge from one node to another."""
+        self.add_node(from_node)
+        self.add_node(to_node)
+        self._adj[from_node].add(to_node)
 
-    def bfs(self, start: int) -> list[int]:
-        """Breadth-first search traversal."""
-        if start not in self.adj:
+    def remove_edge(self, from_node: str, to_node: str) -> None:
+        """Remove a directed edge."""
+        if from_node in self._adj:
+            self._adj[from_node].discard(to_node)
+
+    def nodes(self) -> List[str]:
+        """Get all nodes."""
+        return list(self._nodes)
+
+    def edges(self, node: str) -> List[str]:
+        """Get outgoing edges from a node."""
+        return list(self._adj.get(node, set()))
+
+    def has_node(self, node: str) -> bool:
+        """Check if node exists."""
+        return node in self._nodes
+
+    def bfs(self, start: str) -> List[str]:
+        """Breadth-first traversal from start node."""
+        if start not in self._nodes:
             return []
-        visited: set[int] = set()
-        queue = [start]
-        order: list[int] = []
+        visited: Set[str] = set()
+        queue = deque([start])
+        order: List[str] = []
         while queue:
-            u = queue.pop(0)
-            if u in visited:
+            node = queue.popleft()
+            if node in visited:
                 continue
-            visited.add(u)
-            order.append(u)
-            for v in sorted(self.adj.get(u, [])):
-                if v not in visited:
-                    queue.append(v)
+            visited.add(node)
+            order.append(node)
+            for neighbor in self._adj.get(node, set()):
+                if neighbor not in visited:
+                    queue.append(neighbor)
         return order
 
-    def dfs(self, start: int) -> list[int]:
-        """Depth-first search traversal (iterative)."""
-        if start not in self.adj:
+    def dfs(self, start: str) -> List[str]:
+        """Depth-first traversal from start node."""
+        if start not in self._nodes:
             return []
-        visited: set[int] = set()
-        stack = [start]
-        order: list[int] = []
-        while stack:
-            u = stack.pop()
-            if u in visited:
-                continue
-            visited.add(u)
-            order.append(u)
-            for v in sorted(self.adj.get(u, []), reverse=True):
-                if v not in visited:
-                    stack.append(v)
+        visited: Set[str] = set()
+        order: List[str] = []
+
+        def dfs_recursive(node: str) -> None:
+            visited.add(node)
+            order.append(node)
+            for neighbor in self._adj.get(node, set()):
+                if neighbor not in visited:
+                    dfs_recursive(neighbor)
+
+        dfs_recursive(start)
         return order
 
-    def dfs_recursive(self, u: int, visited: set[int] | None = None) -> list[int]:
-        """DFS starting from node u."""
-        if visited is None:
-            visited = set()
-        if u in visited or u not in self.adj:
-            return []
-        visited.add(u)
-        order = [u]
-        for v in sorted(self.adj[u]):
-            order.extend(self.dfs_recursive(v, visited))
-        return order
+    def topological_sort(self) -> List[str]:
+        """Return nodes in topological order (Kahn's algorithm).
 
-    def has_cycle(self) -> bool:
-        """Detect if the graph has a cycle (DFS-based)."""
-        visited: set[int] = set()
-        rec_stack: set[int] = set()
-
-        def dfs(u: int) -> bool:
-            visited.add(u)
-            rec_stack.add(u)
-            for v in self.adj.get(u, []):
-                if v not in visited:
-                    if dfs(v):
-                        return True
-                elif v in rec_stack:
-                    return True
-            rec_stack.remove(u)
-            return False
-
-        for u in self.adj:
-            if u not in visited:
-                if dfs(u):
-                    return True
-        return False
-
-    def topological_sort(self) -> list[int] | None:
+        Raises:
+            ValueError: If graph contains a cycle.
         """
-        Kahn's algorithm for topological sort.
-        Returns None if graph has a cycle.
-        """
-        in_degree: dict[int, int] = {u: 0 for u in self.adj}
-        for u in self.adj:
-            for v in self.adj[u]:
-                in_degree[v] = in_degree.get(v, 0) + 1
+        in_degree: Dict[str, int] = {n: 0 for n in self._nodes}
+        for node in self._nodes:
+            for neighbor in self._adj.get(node, set()):
+                in_degree[neighbor] += 1
 
-        queue = [u for u, d in in_degree.items() if d == 0]
-        order: list[int] = []
+        queue = deque([n for n, d in in_degree.items() if d == 0])
+        order: List[str] = []
         while queue:
-            u = queue.pop(0)
-            order.append(u)
-            for v in self.adj.get(u, []):
-                in_degree[v] -= 1
-                if in_degree[v] == 0:
-                    queue.append(v)
+            node = queue.popleft()
+            order.append(node)
+            for neighbor in self._adj.get(node, set()):
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
 
-        if len(order) != len(self.adj):
-            return None  # cycle detected
+        if len(order) != len(self._nodes):
+            raise ValueError("Graph contains a cycle")
         return order
 
-
-class DirectedGraph:
-    """Directed graph."""
-
-    def __init__(self):
-        self.adj: dict[int, set[int]] = {}
-        self.edges: list[tuple[int, int, float]] = []
-
-    def add_node(self, u: int) -> None:
-        if u not in self.adj:
-            self.adj[u] = set()
-
-    def add_edge(self, u: int, v: int, weight: float = 1.0) -> None:
-        self.add_node(u)
-        self.add_node(v)
-        self.adj[u].add(v)
-        self.edges.append((u, v, weight))
-
-    def dijkstra(self, source: int) -> dict[int, float]:
-        """
-        Dijkstra's shortest path algorithm.
+    def find_path(self, start: str, end: str) -> Optional[List[str]]:
+        """Find path from start to end using BFS.
 
         Returns:
-            Dictionary of shortest distance from source to each node.
+            Path as list of nodes, or None if no path.
         """
-        dist: dict[int, float] = {u: float("inf") for u in self.adj}
-        dist[source] = 0.0
-        pq: list[tuple[float, int]] = [(0.0, source)]
-        visited: set[int] = set()
-
-        while pq:
-            d, u = heapq.heappop(pq)
-            if u in visited:
-                continue
-            visited.add(u)
-            for v in self.adj.get(u, []):
-                edge_weight = next(w for (a, b, w) in self.edges if a == u and b == v)
-                if dist[u] + edge_weight < dist[v]:
-                    dist[v] = dist[u] + edge_weight
-                    heapq.heappush(pq, (dist[v], v))
-
-        return dist
-
-    def bellman_ford(self, source: int) -> tuple[dict[int, float], bool]:
-        """
-        Bellman-Ford algorithm. Handles negative weights.
-
-        Returns:
-            Tuple of (distances, has_negative_cycle).
-        """
-        dist: dict[int, float] = {u: float("inf") for u in self.adj}
-        dist[source] = 0.0
-        n = len(self.adj)
-
-        for _ in range(n - 1):
-            for u, v, w in self.edges:
-                if dist[u] != float("inf") and dist[u] + w < dist[v]:
-                    dist[v] = dist[u] + w
-
-        # Check for negative cycles
-        has_neg_cycle = False
-        for u, v, w in self.edges:
-            if dist[u] != float("inf") and dist[u] + w < dist[v]:
-                has_neg_cycle = True
-                break
-
-        return dist, has_neg_cycle
-
-    def has_cycle(self) -> bool:
-        """Detect cycle in directed graph using DFS with three-color marking."""
-        WHITE, GRAY, BLACK = 0, 1, 2
-        color: dict[int, int] = {u: WHITE for u in self.adj}
-
-        def dfs(u: int) -> bool:
-            color[u] = GRAY
-            for v in self.adj.get(u, []):
-                if color.get(v, WHITE) == GRAY:
-                    return True
-                if color.get(v, WHITE) == WHITE and dfs(v):
-                    return True
-            color[u] = BLACK
-            return False
-
-        for u in self.adj:
-            if color.get(u, WHITE) == WHITE and dfs(u):
-                return True
-        return False
-
-    def topological_sort(self) -> list[int] | None:
-        """Topological sort for DAG."""
-        if self.has_cycle():
+        if start not in self._nodes or end not in self._nodes:
             return None
-        in_degree: dict[int, int] = {u: 0 for u in self.adj}
-        for u in self.adj:
-            for v in self.adj[u]:
-                in_degree[v] += 1
-        queue = [u for u, d in in_degree.items() if d == 0]
-        order: list[int] = []
+        if start == end:
+            return [start]
+
+        visited: Set[str] = {start}
+        queue = deque([(start, [start])])
         while queue:
-            u = queue.pop(0)
-            order.append(u)
-            for v in self.adj.get(u, []):
-                in_degree[v] -= 1
-                if in_degree[v] == 0:
-                    queue.append(v)
-        return order if len(order) == len(self.adj) else None
+            node, path = queue.popleft()
+            for neighbor in self._adj.get(node, set()):
+                if neighbor == end:
+                    return path + [neighbor]
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+        return None
 
+    def detect_cycle(self) -> Optional[List[str]]:
+        """Detect if graph contains a cycle.
 
-def page_rank(
-    adj: dict[int, list[int]],
-    damping: float = 0.85,
-    iterations: int = 100,
-    tol: float = 1e-6,
-) -> dict[int, float]:
-    """
-    PageRank algorithm.
+        Returns:
+            Cycle path if found, None otherwise.
+        """
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color: Dict[str, int] = {n: WHITE for n in self._nodes}
+        parent: Dict[str, Optional[str]] = {n: None for n in self._nodes}
 
-    Args:
-        adj: Adjacency dict {page: [outlinks]}
-        damping: Damping factor (default 0.85)
-        iterations: Maximum iterations
-        tol: Convergence tolerance
+        def dfs_cycle(node: str) -> Optional[List[str]]:
+            color[node] = GRAY
+            for neighbor in self._adj.get(node, set()):
+                if color[neighbor] == GRAY:
+                    path = [neighbor, node]
+                    while parent[node] is not None:
+                        node = parent[node]
+                        path.append(node)
+                    return list(reversed(path))
+                if color[neighbor] == WHITE:
+                    parent[neighbor] = node
+                    result = dfs_cycle(neighbor)
+                    if result:
+                        return result
+            color[node] = BLACK
+            return None
 
-    Returns:
-        Dictionary of PageRank scores.
-    """
-    nodes = list(adj.keys())
-    n = len(nodes)
-    if n == 0:
-        return {}
-    node_idx = {u: i for i, u in enumerate(nodes)}
-    ranks = [1.0 / n] * n
-
-    for _ in range(iterations):
-        new_ranks = [(1.0 - damping) / n] * n
-        for i, u in enumerate(nodes):
-            rank_sum = 0.0
-            for v in adj.get(u, []):
-                out_degree = len(adj.get(v, []))
-                if out_degree > 0:
-                    rank_sum += ranks[node_idx[v]] / out_degree
-            new_ranks[i] += damping * rank_sum
-
-        if all(abs(new_ranks[i] - ranks[i]) < tol for i in range(n)):
-            break
-        ranks = new_ranks
-
-    return {u: ranks[i] for i, u in enumerate(nodes)}
-
-
-def connected_components(adj: dict[int, set[int]]) -> list[set[int]]:
-    """Find all connected components."""
-    visited: set[int] = set()
-    components: list[set[int]] = []
-
-    def dfs(u: int, comp: set[int]) -> None:
-        visited.add(u)
-        comp.add(u)
-        for v in adj.get(u, []):
-            if v not in visited:
-                dfs(v, comp)
-
-    for u in adj:
-        if u not in visited:
-            comp: set[int] = set()
-            dfs(u, comp)
-            components.append(comp)
-
-    return components
+        for node in self._nodes:
+            if color[node] == WHITE:
+                result = dfs_cycle(node)
+                if result:
+                    return result
+        return None

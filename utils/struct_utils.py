@@ -1,192 +1,191 @@
-"""Struct utilities for RabAI AutoClick.
+"""Structure and data class utilities.
 
-Provides:
-- Structured data helpers
-- Named tuple utilities
-- Record/row utilities
-- Schema validation helpers
+Provides utilities for working with data classes, records,
+and structured data in automation workflows.
 """
 
-from __future__ import annotations
-
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    NamedTuple,
-    Optional,
-    Tuple,
-    Type,
-    TypeVar,
-)
+import copy
+from dataclasses import dataclass, fields, is_dataclass, asdict, astuple
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 
 T = TypeVar("T")
 
 
-def make_namedtuple(
-    name: str,
-    fields: List[str],
-    defaults: Optional[Dict[str, Any]] = None,
-) -> Type[NamedTuple]:
-    """Create a namedtuple class dynamically.
+@dataclass
+class Record:
+    """Base class for records with utility methods."""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert record to dictionary."""
+        if is_dataclass(self):
+            return asdict(self)
+        return vars(self)
+
+    def to_tuple(self) -> tuple:
+        """Convert record to tuple."""
+        if is_dataclass(self):
+            return astuple(self)
+        return tuple(vars(self).values())
+
+    @classmethod
+    def from_dict(cls: type, d: Dict[str, Any]) -> Any:
+        """Create record from dictionary.
+
+        Args:
+            d: Dictionary with field values.
+
+        Returns:
+            New record instance.
+        """
+        if is_dataclass(cls):
+            return cls(**d)
+        obj = cls()
+        for k, v in d.items():
+            setattr(obj, k, v)
+        return obj
+
+    def copy(self) -> Any:
+        """Create a shallow copy."""
+        return copy.copy(self)
+
+    def deep_copy(self) -> Any:
+        """Create a deep copy."""
+        return copy.deepcopy(self)
+
+
+def get_fields(cls: type) -> List[str]:
+    """Get field names from a dataclass.
 
     Args:
-        name: Name of the namedtuple.
-        fields: List of field names.
-        defaults: Optional dict of field defaults.
+        cls: Dataclass type.
 
     Returns:
-        Namedtuple class.
+        List of field names.
     """
-    defaults = defaults or {}
-    field_defaults: List[Any] = []
-    for f in fields:
-        field_defaults.append(defaults.get(f))
-
-    return NamedTuple(  # type: ignore
-        name,
-        [(f, Any) for f in fields],
-    )
+    if is_dataclass(cls):
+        return [f.name for f in fields(cls)]
+    return list(vars(cls))
 
 
-def namedtuple_to_dict(nt: NamedTuple) -> Dict[str, Any]:
-    """Convert a namedtuple to a dictionary.
+def get_field_types(cls: type) -> Dict[str, type]:
+    """Get field types from a dataclass.
 
     Args:
-        nt: Namedtuple instance.
+        cls: Dataclass type.
 
     Returns:
-        Dict representation.
+        Dict mapping field names to types.
     """
-    return dict(nt._asdict())
+    if is_dataclass(cls):
+        return {f.name: f.type for f in fields(cls)}
+    return {}
 
 
-def namedtuple_from_dict(
-    nt_class: Type[NamedTuple],
-    data: Dict[str, Any],
-) -> NamedTuple:
-    """Create a namedtuple from a dictionary.
+def apply_defaults(obj: Any) -> None:
+    """Fill in default values for missing fields.
 
     Args:
-        nt_class: Namedtuple class.
-        data: Dict with field values.
-
-    Returns:
-        Namedtuple instance.
+        obj: Object with dataclass fields.
     """
-    return nt_class(**{
-        k: v for k, v in data.items()
-        if k in nt_class._fields
-    })
+    if is_dataclass(type(obj)):
+        for field_def in fields(obj):
+            if not hasattr(obj, field_def.name):
+                if field_def.default is not None:
+                    setattr(obj, field_def.name, field_def.default)
+                elif field_def.default_factory is not None:
+                    setattr(obj, field_def.name, field_def.default_factory())
 
 
-def dict_to_row(
-    data: Dict[str, Any],
-    keys: List[str],
-) -> Tuple[Any, ...]:
-    """Convert a dict to a tuple ordered by keys.
+def pick_fields(obj: Any, field_names: List[str]) -> Dict[str, Any]:
+    """Pick specific fields from an object.
 
     Args:
-        data: Source dict.
-        keys: Ordered list of keys.
+        obj: Object to pick from.
+        field_names: Fields to pick.
 
     Returns:
-        Tuple of values in key order.
+        Dict with selected fields.
     """
-    return tuple(data.get(k) for k in keys)
-
-
-def row_to_dict(
-    row: Tuple[Any, ...],
-    keys: List[str],
-) -> Dict[str, Any]:
-    """Convert a tuple to a dict using keys.
-
-    Args:
-        row: Source tuple.
-        keys: Ordered list of keys.
-
-    Returns:
-        Dict mapping keys to tuple values.
-    """
-    return dict(zip(keys, row))
-
-
-def merge_rows(
-    *rows: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Merge multiple dicts (rows) into one.
-
-    Args:
-        *rows: Dicts to merge.
-
-    Returns:
-        Merged dict.
-    """
-    result: Dict[str, Any] = {}
-    for row in rows:
-        result.update(row)
+    result = {}
+    for name in field_names:
+        if hasattr(obj, name):
+            result[name] = getattr(obj, name)
     return result
 
 
-def select_fields(
-    data: Dict[str, Any],
-    fields: List[str],
+def omit_fields(obj: Any, field_names: List[str]) -> Dict[str, Any]:
+    """Omit specific fields from an object.
+
+    Args:
+        obj: Object to omit from.
+        field_names: Fields to omit.
+
+    Returns:
+        Dict without specified fields.
+    """
+    result = {}
+    for name in get_fields(type(obj)):
+        if name not in field_names:
+            result[name] = getattr(obj, name)
+    return result
+
+
+def merge_records(
+    base: T,
+    *overlays: Dict[str, Any],
+    copy_result: bool = True,
+) -> T:
+    """Merge overlays into base record.
+
+    Args:
+        base: Base record.
+        *overlays: Dictionaries to merge.
+        copy_result: Create a copy of base before merging.
+
+    Returns:
+        Merged record.
+    """
+    result = base.copy() if copy_result else base
+    for overlay in overlays:
+        for key, value in overlay.items():
+            if hasattr(result, key):
+                setattr(result, key, value)
+    return result
+
+
+def filter_record(
+    obj: Any,
+    predicate: Callable[[str, Any], bool],
 ) -> Dict[str, Any]:
-    """Select specific fields from a dict.
+    """Filter record fields by predicate.
 
     Args:
-        data: Source dict.
-        fields: Fields to select.
+        obj: Object to filter.
+        predicate: Function(field_name, value) -> bool.
 
     Returns:
-        Dict with only selected fields.
+        Dict with filtered fields.
     """
-    return {k: data[k] for k in fields if k in data}
+    result = {}
+    for name in get_fields(type(obj)):
+        value = getattr(obj, name)
+        if predicate(name, value):
+            result[name] = value
+    return result
 
 
-def exclude_fields(
-    data: Dict[str, Any],
-    fields: List[str],
+def transform_record(
+    obj: Any,
+    transformer: Callable[[str, Any], Any],
 ) -> Dict[str, Any]:
-    """Exclude specific fields from a dict.
+    """Transform record fields.
 
     Args:
-        data: Source dict.
-        fields: Fields to exclude.
+        obj: Object to transform.
+        transformer: Function(field_name, value) -> new_value.
 
     Returns:
-        Dict without excluded fields.
+        Dict with transformed fields.
     """
-    return {k: v for k, v in data.items() if k not in fields}
-
-
-def validate_fields(
-    data: Dict[str, Any],
-    required: List[str],
-) -> List[str]:
-    """Validate that required fields are present.
-
-    Args:
-        data: Dict to validate.
-        required: List of required field names.
-
-    Returns:
-        List of missing field names (empty if all present).
-    """
-    return [f for f in required if f not in data]
-
-
-__all__ = [
-    "make_namedtuple",
-    "namedtuple_to_dict",
-    "namedtuple_from_dict",
-    "dict_to_row",
-    "row_to_dict",
-    "merge_rows",
-    "select_fields",
-    "exclude_fields",
-    "validate_fields",
-]
+    return {name: transformer(name, getattr(obj, name)) for name in get_fields(type(obj))}
