@@ -1,348 +1,312 @@
-"""
-Event bus and pub/sub module for asynchronous event-driven architectures.
+"""Event Bus Action Module.
 
-Supports event filtering, routing, dead letter queues, and multiple
-transport backends (in-memory, Redis, Kafka, SQS).
+Provides in-memory event publishing and subscription with support for
+topics, patterns, dead letter queues, and event filtering.
 """
 from __future__ import annotations
 
-import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+import sys
+import os
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
 
 
-class EventDeliveryMode(Enum):
+class DeliveryMode(Enum):
     """Event delivery mode."""
     AT_MOST_ONCE = "at_most_once"
     AT_LEAST_ONCE = "at_least_once"
     EXACTLY_ONCE = "exactly_once"
 
 
-class EventStatus(Enum):
-    """Event processing status."""
-    PENDING = "pending"
-    DELIVERED = "delivered"
-    FAILED = "failed"
-    DLQ = "dead_letter"
-
-
 @dataclass
 class Event:
-    """An event in the bus."""
+    """Bus event structure."""
     id: str
     topic: str
-    data: Any
-    metadata: dict = field(default_factory=dict)
+    payload: Any
+    metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
-    source: str = ""
-    event_type: str = ""
+    source: str = "system"
     correlation_id: Optional[str] = None
-    causation_id: Optional[str] = None
-    partition_key: Optional[str] = None
-
-    def __post_init__(self):
-        if not self.id:
-            self.id = str(uuid.uuid4())
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "topic": self.topic,
-            "data": self.data,
-            "metadata": self.metadata,
-            "timestamp": self.timestamp,
-            "source": self.source,
-            "event_type": self.event_type,
-            "correlation_id": self.correlation_id,
-            "causation_id": self.causation_id,
-            "partition_key": self.partition_key,
-        }
+    reply_to: Optional[str] = None
 
 
 @dataclass
 class Subscription:
-    """An event subscription."""
+    """Event subscription."""
     id: str
     topic: str
-    handler: Callable
-    filter_function: Optional[Callable] = None
-    concurrency: int = 1
+    callback: Any
+    filter_func: Optional[Callable[[Event], bool]] = None
     auto_ack: bool = True
-    dead_letter_queue: Optional[str] = None
-    retry_count: int = 3
-    retry_delay_seconds: float = 1.0
+    max_retries: int = 3
 
 
 @dataclass
-class DeadLetterEntry:
-    """Entry in the dead letter queue."""
+class DeadLetterEvent:
+    """Dead letter queue entry."""
     event: Event
     error: str
-    failed_at: float = field(default_factory=time.time)
-    retry_count: int = 0
-    original_subscription: Optional[str] = None
+    failed_at: float
+    retry_count: int
 
 
 @dataclass
-class EventEnvelope:
-    """Wrapper for events with routing information."""
-    event: Event
-    status: EventStatus = EventStatus.PENDING
-    delivery_count: int = 0
-    last_delivery_attempt: Optional[float] = None
-    next_delivery: Optional[float] = None
+class PublishResult:
+    """Publish result."""
+    success: bool
+    event_id: str
+    topic: str
+    subscribers_notified: int = 0
     error: Optional[str] = None
 
 
-class EventBus:
-    """
-    Event bus for pub/sub messaging.
+class EventBusStore:
+    """In-memory event bus store."""
 
-    Supports event filtering, routing, dead letter queues,
-    and multiple transport backends.
-    """
+    def __init__(self):
+        self._subscriptions: Dict[str, List[Subscription]] = {}
+        self._dlq: List[DeadLetterEvent] = []
+        self._event_history: List[Event] = []
+        self._max_history = 1000
 
-    def __init__(
-        self,
-        name: str = "default",
-        delivery_mode: EventDeliveryMode = EventDeliveryMode.AT_LEAST_ONCE,
-    ):
-        self.name = name
-        self.delivery_mode = delivery_mode
-        self._topics: dict[str, list[Subscription]] = {}
-        self._subscriptions: dict[str, Subscription] = {}
-        self._pending_events: list[EventEnvelope] = []
-        self._dead_letter_queue: list[DeadLetterEntry] = []
-        self._event_history: list[Event] = []
-        self._max_history: int = 10000
+    def subscribe(self, topic: str, callback: Any,
+                  filter_func: Optional[Callable[[Event], bool]] = None) -> str:
+        """Subscribe to topic."""
+        sub_id = uuid.uuid4().hex
+        sub = Subscription(id=sub_id, topic=topic, callback=callback, filter_func=filter_func)
 
-    def create_topic(self, topic: str) -> None:
-        """Create a new topic."""
-        if topic not in self._topics:
-            self._topics[topic] = []
+        if topic not in self._subscriptions:
+            self._subscriptions[topic] = []
+        self._subscriptions[topic].append(sub)
 
-    def subscribe(
-        self,
-        topic: str,
-        handler: Callable,
-        subscription_id: Optional[str] = None,
-        filter_function: Optional[Callable] = None,
-        concurrency: int = 1,
-        auto_ack: bool = True,
-        dead_letter_queue: Optional[str] = None,
-        retry_count: int = 3,
-        retry_delay_seconds: float = 1.0,
-    ) -> Subscription:
-        """Subscribe to a topic with a handler."""
-        self.create_topic(topic)
+        return sub_id
 
-        sub_id = subscription_id or str(uuid.uuid4())[:8]
-        subscription = Subscription(
-            id=sub_id,
-            topic=topic,
-            handler=handler,
-            filter_function=filter_function,
-            concurrency=concurrency,
-            auto_ack=auto_ack,
-            dead_letter_queue=dead_letter_queue,
-            retry_count=retry_count,
-            retry_delay_seconds=retry_delay_seconds,
-        )
+    def unsubscribe(self, sub_id: str) -> bool:
+        """Unsubscribe."""
+        for topic, subs in self._subscriptions.items():
+            for sub in subs:
+                if sub.id == sub_id:
+                    subs.remove(sub)
+                    return True
+        return False
 
-        self._subscriptions[sub_id] = subscription
-        self._topics[topic].append(subscription)
+    def publish(self, event: Event) -> PublishResult:
+        """Publish event to subscribers."""
+        notified = 0
+        topics_to_check = [event.topic]
 
-        return subscription
+        for topic, subs in self._subscriptions.items():
+            if self._matches_pattern(topic, event.topic):
+                topics_to_check.append(topic)
 
-    def unsubscribe(self, subscription_id: str) -> bool:
-        """Unsubscribe from a topic."""
-        subscription = self._subscriptions.get(subscription_id)
-        if not subscription:
-            return False
-
-        topic_subs = self._topics.get(subscription.topic, [])
-        topic_subs = [s for s in topic_subs if s.id != subscription_id]
-        self._topics[subscription.topic] = topic_subs
-
-        del self._subscriptions[subscription_id]
-        return True
-
-    def publish(
-        self,
-        topic: str,
-        data: Any,
-        event_type: str = "",
-        source: str = "",
-        correlation_id: Optional[str] = None,
-        partition_key: Optional[str] = None,
-        metadata: Optional[dict] = None,
-    ) -> Event:
-        """Publish an event to a topic."""
-        event = Event(
-            id=str(uuid.uuid4()),
-            topic=topic,
-            data=data,
-            metadata=metadata or {},
-            source=source,
-            event_type=event_type,
-            correlation_id=correlation_id,
-            partition_key=partition_key,
-        )
+        for topic in topics_to_check:
+            if topic in self._subscriptions:
+                for sub in self._subscriptions[topic]:
+                    if sub.filter_func is None or sub.filter_func(event):
+                        try:
+                            if callable(sub.callback):
+                                sub.callback(event)
+                            notified += 1
+                        except Exception as e:
+                            self._add_to_dlq(event, str(e))
 
         self._event_history.append(event)
         if len(self._event_history) > self._max_history:
             self._event_history = self._event_history[-self._max_history:]
 
-        envelope = EventEnvelope(event=event)
-        self._pending_events.append(envelope)
-
-        return event
-
-    def _deliver_event(self, envelope: EventEnvelope, subscription: Subscription) -> bool:
-        """Deliver an event to a subscription handler."""
-        try:
-            if subscription.filter_function:
-                if not subscription.filter_function(envelope.event):
-                    return True
-
-            result = subscription.handler(envelope.event)
-
-            if subscription.auto_ack:
-                envelope.status = EventStatus.DELIVERED
-
-            return True
-
-        except Exception as e:
-            envelope.error = str(e)
-            envelope.delivery_count += 1
-            envelope.last_delivery_attempt = time.time()
-
-            if envelope.delivery_count >= subscription.retry_count:
-                envelope.status = EventStatus.FAILED
-                self._move_to_dlq(envelope, subscription)
-                return False
-
-            envelope.next_delivery = (
-                time.time() + subscription.retry_delay_seconds * envelope.delivery_count
-            )
-            return False
-
-    def _move_to_dlq(self, envelope: EventEnvelope, subscription: Subscription) -> None:
-        """Move a failed event to the dead letter queue."""
-        dlq_entry = DeadLetterEntry(
-            event=envelope.event,
-            error=envelope.error or "Unknown error",
-            retry_count=envelope.delivery_count,
-            original_subscription=subscription.id,
+        return PublishResult(
+            success=True,
+            event_id=event.id,
+            topic=event.topic,
+            subscribers_notified=notified
         )
-        self._dead_letter_queue.append(dlq_entry)
-        envelope.status = EventStatus.DLQ
 
-    def process_pending(self, max_events: int = 100) -> int:
-        """Process pending events (call this in a loop or worker)."""
-        processed = 0
-        now = time.time()
+    def _matches_pattern(self, pattern: str, topic: str) -> bool:
+        """Check if topic matches pattern."""
+        if pattern == topic:
+            return True
+        if "*" in pattern:
+            regex = pattern.replace(".", r"\.").replace("*", "[^.]+")
+            return bool(re.match(f"^{regex}$", topic))
+        return False
 
-        for envelope in self._pending_events[:max_events]:
-            if envelope.status in (EventStatus.DELIVERED, EventStatus.FAILED, EventStatus.DLQ):
-                continue
+    def _add_to_dlq(self, event: Event, error: str) -> None:
+        """Add failed event to DLQ."""
+        dlq_entry = DeadLetterEvent(
+            event=event,
+            error=error,
+            failed_at=time.time(),
+            retry_count=0
+        )
+        self._dlq.append(dlq_entry)
 
-            if envelope.next_delivery and envelope.next_delivery > now:
-                continue
+    def get_dlq(self) -> List[DeadLetterEvent]:
+        """Get dead letter queue."""
+        return self._dlq
 
-            topic = envelope.event.topic
-            subscriptions = self._topics.get(topic, [])
+    def get_history(self, topic: Optional[str] = None,
+                    limit: int = 100) -> List[Event]:
+        """Get event history."""
+        events = self._event_history
+        if topic:
+            events = [e for e in events if e.topic == topic]
+        return events[-limit:]
 
-            if not subscriptions:
-                continue
 
-            for subscription in subscriptions:
-                self._deliver_event(envelope, subscription)
+_global_bus = EventBusStore()
 
-                if envelope.status == EventStatus.DELIVERED:
-                    break
 
-            processed += 1
+class EventBusAction:
+    """Event bus action.
 
-        self._pending_events = [
-            e for e in self._pending_events
-            if e.status not in (EventStatus.DELIVERED, EventStatus.FAILED)
-        ]
+    Example:
+        action = EventBusAction()
 
-        return processed
+        action.subscribe("user.*", lambda e: print(e.payload))
+        action.publish("user.created", {"user_id": "123"})
 
-    def retry_dlq(self, max_entries: int = 10) -> int:
-        """Retry dead letter queue entries."""
-        retried = 0
+        events = action.get_history("user.*")
+    """
 
-        for entry in self._dead_letter_queue[:max_entries]:
-            event = entry.event
-            topic = event.topic
-            subscriptions = self._topics.get(topic, [])
+    def __init__(self, store: Optional[EventBusStore] = None):
+        self._store = store or _global_bus
+        self._handlers: Dict[str, List[Callable]] = {}
 
-            for subscription in subscriptions:
-                envelope = EventEnvelope(event=event, delivery_count=entry.retry_count)
-                if self._deliver_event(envelope, subscription):
-                    self._dead_letter_queue.remove(entry)
-                    retried += 1
-                    break
+    def subscribe(self, topic: str, handler_id: Optional[str] = None) -> Dict[str, Any]:
+        """Subscribe to topic."""
+        def handler(event: Event):
+            print(f"[Event] {topic}: {event.payload}")
 
-        return retried
+        sub_id = self._store.subscribe(topic, handler)
 
-    def get_pending_count(self) -> int:
-        """Get count of pending events."""
-        return len(self._pending_events)
-
-    def get_dlq_size(self) -> int:
-        """Get size of dead letter queue."""
-        return len(self._dead_letter_queue)
-
-    def get_events_by_topic(
-        self,
-        topic: str,
-        limit: int = 100,
-    ) -> list[Event]:
-        """Get recent events for a topic."""
-        topic_events = [e for e in self._event_history if e.topic == topic]
-        return topic_events[-limit:]
-
-    def get_subscription_stats(self, subscription_id: str) -> dict:
-        """Get statistics for a subscription."""
-        subscription = self._subscriptions.get(subscription_id)
-        if not subscription:
-            return {}
-
-        topic_events = self.get_events_by_topic(subscription.topic)
-        total_events = len(topic_events)
+        if handler_id:
+            if handler_id not in self._handlers:
+                self._handlers[handler_id] = []
+            self._handlers[handler_id].append(sub_id)
 
         return {
-            "subscription_id": subscription_id,
-            "topic": subscription.topic,
-            "total_events": total_events,
-            "concurrency": subscription.concurrency,
-            "retry_count": subscription.retry_count,
+            "success": True,
+            "subscription_id": sub_id,
+            "topic": topic,
+            "message": f"Subscribed to {topic}"
         }
 
-    def list_topics(self) -> list[str]:
-        """List all topics."""
-        return list(self._topics.keys())
+    def unsubscribe(self, subscription_id: str) -> Dict[str, Any]:
+        """Unsubscribe."""
+        if self._store.unsubscribe(subscription_id):
+            return {"success": True, "message": "Unsubscribed"}
+        return {"success": False, "message": "Subscription not found"}
 
-    def list_subscriptions(self, topic: Optional[str] = None) -> list[Subscription]:
-        """List subscriptions."""
-        if topic:
-            return self._topics.get(topic, [])
-        return list(self._subscriptions.values())
+    def publish(self, topic: str, payload: Any,
+                metadata: Optional[Dict[str, Any]] = None,
+                source: str = "action") -> Dict[str, Any]:
+        """Publish event."""
+        event = Event(
+            id=uuid.uuid4().hex,
+            topic=topic,
+            payload=payload,
+            metadata=metadata or {},
+            source=source
+        )
 
-    def list_dlq(self, limit: int = 100) -> list[DeadLetterEntry]:
-        """List dead letter queue entries."""
-        return self._dead_letter_queue[-limit:]
+        result = self._store.publish(event)
 
-    def clear_dlq(self) -> int:
-        """Clear the dead letter queue."""
-        count = len(self._dead_letter_queue)
-        self._dead_letter_queue.clear()
-        return count
+        return {
+            "success": result.success,
+            "event_id": result.event_id,
+            "topic": result.topic,
+            "subscribers_notified": result.subscribers_notified,
+            "message": f"Published to {topic}"
+        }
+
+    def get_history(self, topic: Optional[str] = None,
+                    limit: int = 100) -> Dict[str, Any]:
+        """Get event history."""
+        events = self._store.get_history(topic, limit)
+        return {
+            "success": True,
+            "events": [
+                {
+                    "id": e.id,
+                    "topic": e.topic,
+                    "payload": e.payload,
+                    "timestamp": e.timestamp,
+                    "source": e.source
+                }
+                for e in events
+            ],
+            "count": len(events)
+        }
+
+    def get_dlq(self) -> Dict[str, Any]:
+        """Get dead letter queue."""
+        dlq = self._store.get_dlq()
+        return {
+            "success": True,
+            "dlq": [
+                {
+                    "event_id": d.event.id,
+                    "topic": d.event.topic,
+                    "error": d.error,
+                    "failed_at": d.failed_at,
+                    "retry_count": d.retry_count
+                }
+                for d in dlq
+            ],
+            "count": len(dlq)
+        }
+
+
+def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute event bus action."""
+    operation = params.get("operation", "publish")
+    action = EventBusAction()
+
+    try:
+        if operation == "subscribe":
+            topic = params.get("topic", "")
+            if not topic:
+                return {"success": False, "message": "topic required"}
+            return action.subscribe(topic, params.get("handler_id"))
+
+        elif operation == "unsubscribe":
+            sub_id = params.get("subscription_id", "")
+            if not sub_id:
+                return {"success": False, "message": "subscription_id required"}
+            return action.unsubscribe(sub_id)
+
+        elif operation == "publish":
+            topic = params.get("topic", "")
+            payload = params.get("payload", {})
+            if not topic:
+                return {"success": False, "message": "topic required"}
+            return action.publish(
+                topic=topic,
+                payload=payload,
+                metadata=params.get("metadata"),
+                source=params.get("source", "action")
+            )
+
+        elif operation == "history":
+            return action.get_history(
+                topic=params.get("topic"),
+                limit=params.get("limit", 100)
+            )
+
+        elif operation == "dlq":
+            return action.get_dlq()
+
+        else:
+            return {"success": False, "message": f"Unknown operation: {operation}"}
+
+    except Exception as e:
+        return {"success": False, "message": f"Event bus error: {str(e)}"}

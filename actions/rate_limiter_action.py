@@ -1,31 +1,25 @@
-"""Rate limiter action module for RabAI AutoClick.
+"""Rate Limiter Action Module.
 
-Provides rate limiting mechanisms:
-- TokenBucket: Token bucket rate limiter
-- SlidingWindow: Sliding window rate limiter
-- LeakyBucket: Leaky bucket rate limiter
-- FixedWindow: Fixed window counter
-- AdaptiveRateLimiter: Adaptive rate limiting
-- DistributedRateLimiter: Distributed rate limiting
+Provides distributed rate limiting with token bucket, sliding window,
+leaky bucket, and fixed window algorithms.
 """
+from __future__ import annotations
 
 import time
-import threading
-from typing import Any, Callable, Dict, List, Optional
-from dataclasses import dataclass
-from collections import deque
+from collections import defaultdict
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 import sys
 import os
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
 
 
-class RateLimitStrategy(Enum):
-    """Rate limiting strategies."""
+class RateLimitAlgorithm(Enum):
+    """Rate limiting algorithm."""
     TOKEN_BUCKET = "token_bucket"
     SLIDING_WINDOW = "sliding_window"
     LEAKY_BUCKET = "leaky_bucket"
@@ -33,415 +27,319 @@ class RateLimitStrategy(Enum):
 
 
 @dataclass
-class RateLimitResult:
-    """Result of rate limit check."""
-    allowed: bool
-    current_rate: float
-    remaining: int
-    reset_at: float
-    retry_after: Optional[float] = None
+class RateLimitConfig:
+    """Rate limit configuration."""
+    rate: float
+    capacity: int
+    algorithm: RateLimitAlgorithm
+    window_seconds: float = 60.0
 
 
 @dataclass
-class RateLimitConfig:
-    """Configuration for rate limiter."""
-    rate: float  # requests per second
-    burst: int = 1  # burst capacity
-    strategy: RateLimitStrategy = RateLimitStrategy.TOKEN_BUCKET
+class RateLimitResult:
+    """Rate limit check result."""
+    allowed: bool
+    limit_type: str
+    remaining: int
+    reset_at: float
+    retry_after: float = 0.0
 
 
+@dataclass
 class TokenBucket:
+    """Token bucket state."""
+    tokens: float
+    last_update: float
+    capacity: int
+    refill_rate: float
+
+
+class TokenBucketLimiter:
     """Token bucket rate limiter."""
 
-    def __init__(self, rate: float, burst: int = 1):
-        self.rate = rate
-        self.burst = burst
-        self.tokens = float(burst)
-        self.last_update = time.time()
-        self._lock = threading.Lock()
+    def __init__(self, capacity: int, refill_rate: float):
+        self._bucket = TokenBucket(
+            tokens=float(capacity),
+            last_update=time.time(),
+            capacity=capacity,
+            refill_rate=refill_rate
+        )
 
     def allow(self, tokens: int = 1) -> RateLimitResult:
         """Check if request is allowed."""
-        with self._lock:
-            now = time.time()
-            elapsed = now - self.last_update
-            self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
-            self.last_update = now
+        now = time.time()
+        elapsed = now - self._bucket.last_update
 
-            if self.tokens >= tokens:
-                self.tokens -= tokens
-                return RateLimitResult(
-                    allowed=True,
-                    current_rate=self.rate,
-                    remaining=int(self.tokens),
-                    reset_at=now,
-                )
-            else:
-                retry_after = (tokens - self.tokens) / self.rate
-                return RateLimitResult(
-                    allowed=False,
-                    current_rate=self.rate,
-                    remaining=int(self.tokens),
-                    reset_at=now + retry_after,
-                    retry_after=retry_after,
-                )
+        self._bucket.tokens = min(
+            self._bucket.capacity,
+            self._bucket.tokens + elapsed * self._bucket.refill_rate
+        )
+        self._bucket.last_update = now
 
-    def reset(self):
-        """Reset the bucket."""
-        with self._lock:
-            self.tokens = float(self.burst)
-            self.last_update = time.time()
+        if self._bucket.tokens >= tokens:
+            self._bucket.tokens -= tokens
+            return RateLimitResult(
+                allowed=True,
+                limit_type="token_bucket",
+                remaining=int(self._bucket.tokens),
+                reset_at=now + (self._bucket.capacity - self._bucket.tokens) / self._bucket.refill_rate
+            )
+
+        retry_after = (tokens - self._bucket.tokens) / self._bucket.refill_rate
+        return RateLimitResult(
+            allowed=False,
+            limit_type="token_bucket",
+            remaining=0,
+            reset_at=now + retry_after,
+            retry_after=retry_after
+        )
 
 
-class SlidingWindow:
+class SlidingWindowLimiter:
     """Sliding window rate limiter."""
 
-    def __init__(self, rate: float, window_size: float = 60.0):
-        self.rate = rate
-        self.window_size = window_size
-        self.requests: deque = deque()
-        self._lock = threading.Lock()
+    def __init__(self, max_requests: int, window_seconds: float):
+        self._max = max_requests
+        self._window = window_seconds
+        self._requests: List[float] = []
 
     def allow(self, tokens: int = 1) -> RateLimitResult:
         """Check if request is allowed."""
-        with self._lock:
-            now = time.time()
-            cutoff = now - self.window_size
+        now = time.time()
+        cutoff = now - self._window
 
-            while self.requests and self.requests[0] < cutoff:
-                self.requests.popleft()
+        self._requests = [t for t in self._requests if t > cutoff]
 
-            current_count = len(self.requests)
+        if len(self._requests) + tokens <= self._max:
+            self._requests.extend([now] * tokens)
+            return RateLimitResult(
+                allowed=True,
+                limit_type="sliding_window",
+                remaining=self._max - len(self._requests),
+                reset_at=now + self._window
+            )
 
-            if current_count < self.rate * self.window_size:
-                for _ in range(tokens):
-                    self.requests.append(now)
-                return RateLimitResult(
-                    allowed=True,
-                    current_rate=self.rate,
-                    remaining=int(self.rate * self.window_size - current_count - tokens),
-                    reset_at=now,
-                )
-            else:
-                oldest = self.requests[0] if self.requests else now
-                retry_after = oldest + self.window_size - now
-                return RateLimitResult(
-                    allowed=False,
-                    current_rate=self.rate,
-                    remaining=0,
-                    reset_at=now + retry_after,
-                    retry_after=retry_after,
-                )
+        oldest = min(self._requests) if self._requests else now
+        retry_after = (oldest + self._window) - now
 
-    def reset(self):
-        """Reset the window."""
-        with self._lock:
-            self.requests.clear()
+        return RateLimitResult(
+            allowed=False,
+            limit_type="sliding_window",
+            remaining=0,
+            reset_at=now + retry_after,
+            retry_after=max(0, retry_after)
+        )
 
 
-class LeakyBucket:
+class LeakyBucketLimiter:
     """Leaky bucket rate limiter."""
 
-    def __init__(self, rate: float, capacity: int):
-        self.rate = rate
-        self.capacity = capacity
-        self.level = 0.0
-        self.last_update = time.time()
-        self._lock = threading.Lock()
+    def __init__(self, capacity: int, leak_rate: float):
+        self._capacity = capacity
+        self._leak_rate = leak_rate
+        self._level = 0.0
+        self._last_leak = time.time()
+
+    def _leak(self) -> None:
+        """Leak water from bucket."""
+        now = time.time()
+        leaked = (now - self._last_leak) * self._leak_rate
+        self._level = max(0, self._level - leaked)
+        self._last_leak = now
 
     def allow(self, tokens: int = 1) -> RateLimitResult:
         """Check if request is allowed."""
-        with self._lock:
-            now = time.time()
-            elapsed = now - self.last_update
-            self.level = max(0, self.level - elapsed * self.rate)
-            self.last_update = now
+        self._leak()
 
-            if self.level + tokens <= self.capacity:
-                self.level += tokens
-                return RateLimitResult(
-                    allowed=True,
-                    current_rate=self.rate,
-                    remaining=int(self.capacity - self.level),
-                    reset_at=now,
-                )
-            else:
-                retry_after = (self.level + tokens - self.capacity) / self.rate
-                return RateLimitResult(
-                    allowed=False,
-                    current_rate=self.rate,
-                    remaining=0,
-                    reset_at=now + retry_after,
-                    retry_after=retry_after,
-                )
+        if self._level + tokens <= self._capacity:
+            self._level += tokens
+            return RateLimitResult(
+                allowed=True,
+                limit_type="leaky_bucket",
+                remaining=int(self._capacity - self._level),
+                reset_at=time.time() + (self._level / self._leak_rate) if self._leak_rate > 0 else 0
+            )
 
-    def reset(self):
-        """Reset the bucket."""
-        with self._lock:
-            self.level = 0.0
-            self.last_update = time.time()
+        retry_after = (self._capacity - self._level + tokens) / self._leak_rate
+
+        return RateLimitResult(
+            allowed=False,
+            limit_type="leaky_bucket",
+            remaining=0,
+            reset_at=time.time() + retry_after,
+            retry_after=retry_after
+        )
 
 
-class FixedWindow:
-    """Fixed window counter rate limiter."""
+class FixedWindowLimiter:
+    """Fixed window rate limiter."""
 
-    def __init__(self, rate: float, window_size: float = 60.0):
-        self.rate = rate
-        self.window_size = window_size
-        self.window_start = time.time()
-        self.count = 0
-        self._lock = threading.Lock()
+    def __init__(self, max_requests: int, window_seconds: float):
+        self._max = max_requests
+        self._window = window_seconds
+        self._count = 0
+        self._window_start = time.time()
 
     def allow(self, tokens: int = 1) -> RateLimitResult:
         """Check if request is allowed."""
-        with self._lock:
-            now = time.time()
+        now = time.time()
 
-            if now - self.window_start >= self.window_size:
-                self.window_start = now
-                self.count = 0
+        if now - self._window_start >= self._window:
+            self._count = 0
+            self._window_start = now
 
-            if self.count < self.rate * self.window_size:
-                self.count += tokens
-                return RateLimitResult(
-                    allowed=True,
-                    current_rate=self.rate,
-                    remaining=int(self.rate * self.window_size - self.count),
-                    reset_at=self.window_start + self.window_size,
-                )
-            else:
-                retry_after = self.window_start + self.window_size - now
-                return RateLimitResult(
-                    allowed=False,
-                    current_rate=self.rate,
-                    remaining=0,
-                    reset_at=self.window_start + self.window_size,
-                    retry_after=retry_after,
-                )
+        if self._count + tokens <= self._max:
+            self._count += tokens
+            return RateLimitResult(
+                allowed=True,
+                limit_type="fixed_window",
+                remaining=self._max - self._count,
+                reset_at=self._window_start + self._window
+            )
 
-    def reset(self):
-        """Reset the window."""
-        with self._lock:
-            self.window_start = time.time()
-            self.count = 0
+        retry_after = (self._window_start + self._window) - now
+
+        return RateLimitResult(
+            allowed=False,
+            limit_type="fixed_window",
+            remaining=0,
+            reset_at=self._window_start + self._window,
+            retry_after=max(0, retry_after)
+        )
 
 
-class AdaptiveRateLimiter:
-    """Adaptive rate limiter that adjusts based on success/failure."""
-
-    def __init__(
-        self,
-        initial_rate: float,
-        min_rate: float = 0.1,
-        max_rate: float = 100.0,
-        increase_factor: float = 1.1,
-        decrease_factor: float = 0.5,
-    ):
-        self.current_rate = initial_rate
-        self.min_rate = min_rate
-        self.max_rate = max_rate
-        self.increase_factor = increase_factor
-        self.decrease_factor = decrease_factor
-        self._lock = threading.Lock()
-        self._limiter = TokenBucket(initial_rate, burst=int(initial_rate))
-
-    def allow(self, tokens: int = 1) -> RateLimitResult:
-        """Check if request is allowed."""
-        with self._lock:
-            return self._limiter.allow(tokens)
-
-    def report_success(self):
-        """Report successful request to increase rate."""
-        with self._lock:
-            new_rate = min(self.current_rate * self.increase_factor, self.max_rate)
-            if new_rate != self.current_rate:
-                self.current_rate = new_rate
-                self._limiter = TokenBucket(new_rate, burst=int(new_rate))
-
-    def report_failure(self):
-        """Report failed request to decrease rate."""
-        with self._lock:
-            new_rate = max(self.current_rate * self.decrease_factor, self.min_rate)
-            if new_rate != self.current_rate:
-                self.current_rate = new_rate
-                self._limiter = TokenBucket(new_rate, burst=int(new_rate))
-
-
-class RateLimiterManager:
-    """Manage multiple rate limiters."""
+class RateLimiterStore:
+    """Store for rate limiters."""
 
     def __init__(self):
         self._limiters: Dict[str, Any] = {}
-        self._lock = threading.RLock()
 
-    def create_limiter(
-        self,
-        name: str,
-        strategy: RateLimitStrategy,
-        rate: float,
-        burst: int = 1,
-        window_size: float = 60.0,
-    ) -> bool:
-        """Create a new rate limiter."""
-        with self._lock:
-            if strategy == RateLimitStrategy.TOKEN_BUCKET:
-                self._limiters[name] = TokenBucket(rate, burst)
-            elif strategy == RateLimitStrategy.SLIDING_WINDOW:
-                self._limiters[name] = SlidingWindow(rate, window_size)
-            elif strategy == RateLimitStrategy.LEAKY_BUCKET:
-                self._limiters[name] = LeakyBucket(rate, burst)
-            elif strategy == RateLimitStrategy.FIXED_WINDOW:
-                self._limiters[name] = FixedWindow(rate, window_size)
-            else:
-                return False
-            return True
+    def get_or_create(self, key: str, algorithm: RateLimitAlgorithm,
+                      **kwargs) -> Any:
+        """Get or create rate limiter."""
+        if key not in self._limiters:
+            if algorithm == RateLimitAlgorithm.TOKEN_BUCKET:
+                capacity = kwargs.get("capacity", 100)
+                refill_rate = kwargs.get("refill_rate", 10)
+                self._limiters[key] = TokenBucketLimiter(capacity, refill_rate)
+            elif algorithm == RateLimitAlgorithm.SLIDING_WINDOW:
+                max_requests = kwargs.get("max_requests", 100)
+                window = kwargs.get("window_seconds", 60)
+                self._limiters[key] = SlidingWindowLimiter(max_requests, window)
+            elif algorithm == RateLimitAlgorithm.LEAKY_BUCKET:
+                capacity = kwargs.get("capacity", 100)
+                leak_rate = kwargs.get("leak_rate", 10)
+                self._limiters[key] = LeakyBucketLimiter(capacity, leak_rate)
+            elif algorithm == RateLimitAlgorithm.FIXED_WINDOW:
+                max_requests = kwargs.get("max_requests", 100)
+                window = kwargs.get("window_seconds", 60)
+                self._limiters[key] = FixedWindowLimiter(max_requests, window)
 
-    def get_limiter(self, name: str) -> Optional[Any]:
-        """Get a rate limiter by name."""
-        with self._lock:
-            return self._limiters.get(name)
-
-    def allow(self, name: str, tokens: int = 1) -> Optional[RateLimitResult]:
-        """Check if request is allowed."""
-        limiter = self.get_limiter(name)
-        if not limiter:
-            return None
-        return limiter.allow(tokens)
-
-    def remove_limiter(self, name: str) -> bool:
-        """Remove a rate limiter."""
-        with self._lock:
-            if name in self._limiters:
-                del self._limiters[name]
-                return True
-            return False
-
-    def list_limiters(self) -> List[str]:
-        """List all rate limiter names."""
-        with self._lock:
-            return list(self._limiters.keys())
+        return self._limiters[key]
 
 
-class RateLimiterAction(BaseAction):
-    """Rate limiter action for automation."""
-    action_type = "rate_limiter"
-    display_name = "限流器"
-    description = "多种限流策略管理"
+_global_store = RateLimiterStore()
 
-    def __init__(self):
-        super().__init__()
-        self._manager = RateLimiterManager()
-        self._adaptive_limiters: Dict[str, AdaptiveRateLimiter] = {}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+class RateLimiterAction:
+    """Rate limiting action.
+
+    Example:
+        action = RateLimiterAction()
+
+        action.configure("api", "token_bucket", capacity=100, refill_rate=10)
+        result = action.check("api", "client-123")
+    """
+
+    def __init__(self, store: Optional[RateLimiterStore] = None):
+        self._store = store or _global_store
+        self._configs: Dict[str, RateLimitConfig] = {}
+
+    def configure(self, name: str, algorithm: str,
+                  rate: float = 10, capacity: int = 100,
+                  window_seconds: float = 60) -> Dict[str, Any]:
+        """Configure rate limiter."""
         try:
-            operation = params.get("operation", "allow")
+            algo = RateLimitAlgorithm(algorithm)
+        except ValueError:
+            return {"success": False, "message": f"Invalid algorithm: {algorithm}"}
 
-            if operation == "create":
-                return self._create_limiter(params)
-            elif operation == "allow":
-                return self._check_allow(params)
-            elif operation == "remove":
-                return self._remove_limiter(params)
-            elif operation == "list":
-                return self._list_limiters()
-            elif operation == "adaptive":
-                return self._adaptive_limiter(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Rate limiter error: {str(e)}")
-
-    def _create_limiter(self, params: Dict) -> ActionResult:
-        """Create a rate limiter."""
-        name = params.get("name")
-        strategy = params.get("strategy", "token_bucket").upper()
-        rate = params.get("rate", 1.0)
-        burst = params.get("burst", 1)
-        window_size = params.get("window_size", 60.0)
-
-        if not name:
-            return ActionResult(success=False, message="name is required")
-
-        try:
-            strategy_enum = RateLimitStrategy[strategy]
-        except KeyError:
-            return ActionResult(success=False, message=f"Unknown strategy: {strategy}")
-
-        success = self._manager.create_limiter(name, strategy_enum, rate, burst, window_size)
-
-        return ActionResult(
-            success=success,
-            message=f"Limiter '{name}' created with {strategy} strategy" if success else "Failed to create limiter",
+        self._configs[name] = RateLimitConfig(
+            rate=rate,
+            capacity=capacity,
+            algorithm=algo,
+            window_seconds=window_seconds
         )
 
-    def _check_allow(self, params: Dict) -> ActionResult:
-        """Check if request is allowed."""
-        name = params.get("name", "default")
-        tokens = params.get("tokens", 1)
+        return {
+            "success": True,
+            "name": name,
+            "algorithm": algo.value,
+            "capacity": capacity,
+            "rate": rate,
+            "message": f"Configured {name} with {algo.value}"
+        }
 
-        result = self._manager.allow(name, tokens)
+    def check(self, name: str, key: str = "default",
+             tokens: int = 1) -> Dict[str, Any]:
+        """Check rate limit."""
+        if name not in self._configs:
+            return {"success": False, "message": f"Limiter {name} not configured"}
 
-        if result is None:
-            self._manager.create_limiter(name, RateLimitStrategy.TOKEN_BUCKET, 1.0)
-            result = self._manager.allow(name, tokens)
+        config = self._configs[name]
+        limiter_key = f"{name}:{key}"
 
-        return ActionResult(
-            success=result.allowed,
-            message="Allowed" if result.allowed else f"Rate limited, retry after {result.retry_after:.2f}s",
-            data={
-                "allowed": result.allowed,
-                "remaining": result.remaining,
-                "reset_at": result.reset_at,
-                "retry_after": result.retry_after,
-            },
+        limiter = self._store.get_or_create(
+            limiter_key,
+            config.algorithm,
+            capacity=config.capacity,
+            refill_rate=config.rate,
+            max_requests=int(config.rate * config.window_seconds),
+            window_seconds=config.window_seconds
         )
 
-    def _remove_limiter(self, params: Dict) -> ActionResult:
-        """Remove a rate limiter."""
-        name = params.get("name")
-        if not name:
-            return ActionResult(success=False, message="name is required")
+        result = limiter.allow(tokens)
 
-        success = self._manager.remove_limiter(name)
-        return ActionResult(success=success, message="Limiter removed" if success else "Limiter not found")
+        return {
+            "success": True,
+            "allowed": result.allowed,
+            "limit_type": result.limit_type,
+            "remaining": result.remaining,
+            "reset_at": result.reset_at,
+            "retry_after": result.retry_after,
+            "message": "Allowed" if result.allowed else "Rate limited"
+        }
 
-    def _list_limiters(self) -> ActionResult:
-        """List all limiters."""
-        names = self._manager.list_limiters()
-        return ActionResult(success=True, message=f"{len(names)} limiters", data={"limiters": names})
 
-    def _adaptive_limiter(self, params: Dict) -> ActionResult:
-        """Use adaptive rate limiter."""
-        name = params.get("name", "adaptive_default")
-        operation = params.get("sub_operation", "allow")
-        initial_rate = params.get("initial_rate", 1.0)
-        min_rate = params.get("min_rate", 0.1)
-        max_rate = params.get("max_rate", 100.0)
+def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute rate limiter action."""
+    operation = params.get("operation", "check")
+    action = RateLimiterAction()
 
-        if name not in self._adaptive_limiters:
-            self._adaptive_limiters[name] = AdaptiveRateLimiter(
-                initial_rate=initial_rate,
-                min_rate=min_rate,
-                max_rate=max_rate,
+    try:
+        if operation == "configure":
+            name = params.get("name", "")
+            algorithm = params.get("algorithm", "token_bucket")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.configure(
+                name=name,
+                algorithm=algorithm,
+                rate=params.get("rate", 10),
+                capacity=params.get("capacity", 100),
+                window_seconds=params.get("window_seconds", 60)
             )
 
-        limiter = self._adaptive_limiters[name]
-
-        if operation == "allow":
+        elif operation == "check":
+            name = params.get("name", "")
+            key = params.get("key", "default")
             tokens = params.get("tokens", 1)
-            result = limiter.allow(tokens)
-            return ActionResult(
-                success=result.allowed,
-                message="Allowed" if result.allowed else f"Rate limited, retry after {result.retry_after:.2f}s",
-                data={"allowed": result.allowed, "current_rate": limiter.current_rate},
-            )
-        elif operation == "success":
-            limiter.report_success()
-            return ActionResult(success=True, message=f"Rate increased to {limiter.current_rate:.2f}")
-        elif operation == "failure":
-            limiter.report_failure()
-            return ActionResult(success=True, message=f"Rate decreased to {limiter.current_rate:.2f}")
+            if not name:
+                return {"success": False, "message": "name required"}
+            return action.check(name, key, tokens)
+
         else:
-            return ActionResult(success=False, message=f"Unknown sub_operation: {operation}")
+            return {"success": False, "message": f"Unknown operation: {operation}"}
+
+    except Exception as e:
+        return {"success": False, "message": f"Rate limiter error: {str(e)}"}
