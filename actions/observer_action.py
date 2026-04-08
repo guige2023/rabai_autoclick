@@ -1,324 +1,322 @@
-"""observer_action module for rabai_autoclick.
+"""Observer action module for RabAI AutoClick.
 
-Provides observer pattern implementation: subject/observer,
-event notification, and listener management.
+Provides observer pattern implementation:
+- Observer: Abstract observer interface
+- Subject: Observable subject
+- EventObserver: Event-based observer
+- NotificationCenter: Central notification system
 """
 
-from __future__ import annotations
-
-import threading
-from collections import defaultdict
-from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set
-
-__all__ = [
-    "Observer",
-    "Subject",
-    "Event",
-    "EventBus",
-    "Observable",
-    "WeakObserver",
-    "ObserverRegistry",
-    "notify_observers",
-]
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+import uuid
+import threading
 
 
-T = type("T", (), {})
+import sys
+import os
 
-
-class Observer:
-    """Base observer interface."""
-
-    def update(self, event: "Event") -> None:
-        """Called when observed subject changes."""
-        raise NotImplementedError
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
 @dataclass
 class Event:
-    """Event object passed to observers."""
-    type: str
+    """Event data."""
+    event_type: str
     data: Any = None
-    source: Any = None
-    timestamp: float = 0.0
+    source_id: str = ""
+    timestamp: float = field(default_factory=lambda: __import__("time").time())
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        if self.timestamp == 0.0:
-            import time
-            self.timestamp = time.time()
+
+class Observer(ABC):
+    """Abstract observer interface."""
+
+    @abstractmethod
+    def update(self, event: Event) -> None:
+        """Handle event notification."""
+        pass
+
+
+class ConcreteObserver(Observer):
+    """Concrete observer implementation."""
+
+    def __init__(self, observer_id: str, handler: Callable[[Event], None]):
+        self.observer_id = observer_id
+        self._handler = handler
+        self._received_events: List[Event] = []
+
+    def update(self, event: Event) -> None:
+        """Handle event."""
+        self._received_events.append(event)
+        if self._handler:
+            self._handler(event)
+
+    def get_events(self) -> List[Event]:
+        """Get received events."""
+        return self._received_events.copy()
+
+    def clear_events(self) -> None:
+        """Clear received events."""
+        self._received_events.clear()
 
 
 class Subject:
-    """Subject that notifies observers of changes."""
+    """Observable subject."""
 
-    def __init__(self) -> None:
-        self._observers: Dict[str, List[Callable]] = defaultdict(list)
-        self._lock = threading.RLock()
-        self._global_observers: List[Callable] = []
-
-    def attach(
-        self,
-        event_type: str,
-        handler: Callable[[Event], None],
-    ) -> None:
-        """Attach observer handler for event type.
-
-        Args:
-            event_type: Type of events to listen for.
-            handler: Callback function.
-        """
-        with self._lock:
-            self._observers[event_type].append(handler)
-
-    def detach(
-        self,
-        event_type: str,
-        handler: Callable[[Event], None],
-    ) -> bool:
-        """Detach observer handler.
-
-        Returns:
-            True if handler was found and removed.
-        """
-        with self._lock:
-            try:
-                self._observers[event_type].remove(handler)
-                return True
-            except ValueError:
-                return False
-
-    def attach_global(self, handler: Callable[[Event], None]) -> None:
-        """Attach handler for all events."""
-        with self._lock:
-            self._global_observers.append(handler)
-
-    def detach_global(self, handler: Callable[[Event], None]) -> bool:
-        """Detach global handler."""
-        with self._lock:
-            try:
-                self._global_observers.remove(handler)
-                return True
-            except ValueError:
-                return False
-
-    def notify(
-        self,
-        event_type: str,
-        data: Any = None,
-        source: Any = None,
-    ) -> None:
-        """Notify all observers of an event.
-
-        Args:
-            event_type: Type of event.
-            data: Event data.
-            source: Source of event.
-        """
-        event = Event(type=event_type, data=data, source=source)
-
-        with self._lock:
-            handlers = list(self._observers.get(event_type, []))
-            global_handlers = list(self._global_observers)
-
-        for handler in handlers:
-            try:
-                handler(event)
-            except Exception:
-                pass
-
-        for handler in global_handlers:
-            try:
-                handler(event)
-            except Exception:
-                pass
-
-    def clear(self) -> None:
-        """Remove all observers."""
-        with self._lock:
-            self._observers.clear()
-            self._global_observers.clear()
-
-
-class EventBus:
-    """Central event bus for pub/sub."""
-
-    def __init__(self) -> None:
-        self._handlers: Dict[str, List[Callable]] = defaultdict(list)
-        self._global_handlers: List[Callable] = []
+    def __init__(self, subject_id: str):
+        self.subject_id = subject_id
+        self._observers: Dict[str, Observer] = {}
         self._lock = threading.RLock()
 
-    def subscribe(
-        self,
-        event_type: str,
-        handler: Callable[[Event], None],
-    ) -> None:
-        """Subscribe to an event type."""
+    def attach(self, observer: Observer) -> str:
+        """Attach an observer."""
         with self._lock:
-            self._handlers[event_type].append(handler)
+            observer_id = observer.observer_id if hasattr(observer, "observer_id") else str(uuid.uuid4())
+            self._observers[observer_id] = observer
+            return observer_id
 
-    def unsubscribe(
-        self,
-        event_type: str,
-        handler: Callable[[Event], None],
-    ) -> bool:
-        """Unsubscribe from an event type."""
+    def detach(self, observer_id: str) -> bool:
+        """Detach an observer."""
         with self._lock:
-            try:
-                self._handlers[event_type].remove(handler)
+            if observer_id in self._observers:
+                del self._observers[observer_id]
                 return True
-            except ValueError:
-                return False
+            return False
 
-    def subscribe_all(self, handler: Callable[[Event], None]) -> None:
-        """Subscribe to all events."""
+    def notify(self, event: Event) -> None:
+        """Notify all observers."""
         with self._lock:
-            self._global_handlers.append(handler)
+            for observer in self._observers.values():
+                try:
+                    observer.update(event)
+                except Exception:
+                    pass
 
-    def unsubscribe_all(self, handler: Callable[[Event], None]) -> bool:
-        """Unsubscribe from all events."""
+    def get_observer_count(self) -> int:
+        """Get number of observers."""
         with self._lock:
-            try:
-                self._global_handlers.remove(handler)
+            return len(self._observers)
+
+
+class EventChannel:
+    """Event channel for pub/sub."""
+
+    def __init__(self, channel_name: str):
+        self.channel_name = channel_name
+        self._observers: Dict[str, Observer] = {}
+        self._lock = threading.RLock()
+        self._history: List[Event] = []
+        self._max_history = 1000
+
+    def subscribe(self, observer: Observer) -> str:
+        """Subscribe to channel."""
+        with self._lock:
+            observer_id = observer.observer_id if hasattr(observer, "observer_id") else str(uuid.uuid4())
+            self._observers[observer_id] = observer
+            return observer_id
+
+    def unsubscribe(self, observer_id: str) -> bool:
+        """Unsubscribe from channel."""
+        with self._lock:
+            if observer_id in self._observers:
+                del self._observers[observer_id]
                 return True
-            except ValueError:
-                return False
+            return False
 
     def publish(self, event: Event) -> None:
-        """Publish an event to all subscribers."""
+        """Publish event to channel."""
         with self._lock:
-            handlers = list(self._handlers.get(event.type, []))
-            global_handlers = list(self._global_handlers)
+            self._history.append(event)
+            if len(self._history) > self._max_history:
+                self._history.pop(0)
 
-        for handler in handlers:
+        for observer in list(self._observers.values()):
             try:
-                handler(event)
+                observer.update(event)
             except Exception:
                 pass
 
-        for handler in global_handlers:
-            try:
-                handler(event)
-            except Exception:
-                pass
+    def get_history(self, limit: int = 100) -> List[Event]:
+        """Get event history."""
+        return self._history[-limit:]
 
 
-class Observable(Generic[T]):
-    """Observable value that notifies on change."""
+class NotificationCenter:
+    """Central notification system."""
 
-    def __init__(self, initial_value: Optional[T] = None) -> None:
-        self._value = initial_value
-        self._observers: List[Callable[[T, T], None]] = []
-        self._lock = threading.Lock()
+    def __init__(self):
+        self._channels: Dict[str, EventChannel] = {}
+        self._global_channel: EventChannel = EventChannel("_global")
+        self._lock = threading.RLock()
 
-    @property
-    def value(self) -> T:
-        """Get current value."""
+    def create_channel(self, channel_name: str) -> EventChannel:
+        """Create a channel."""
         with self._lock:
-            return self._value
+            if channel_name not in self._channels:
+                self._channels[channel_name] = EventChannel(channel_name)
+            return self._channels[channel_name]
 
-    @value.setter
-    def value(self, new_value: T) -> None:
-        """Set value and notify observers."""
+    def get_channel(self, channel_name: str) -> Optional[EventChannel]:
+        """Get a channel."""
         with self._lock:
-            old_value = self._value
-            if old_value != new_value:
-                self._value = new_value
-                observers = list(self._observers)
-        for observer in observers:
-            try:
-                observer(old_value, new_value)
-            except Exception:
-                pass
+            if channel_name == "_global":
+                return self._global_channel
+            return self._channels.get(channel_name)
 
-    def observe(self, observer: Callable[[T, T], None]) -> None:
-        """Add observer called on value change."""
+    def post(self, channel_name: str, event: Event) -> None:
+        """Post event to channel."""
+        channel = self.get_channel(channel_name)
+        if channel:
+            channel.publish(event)
+        self._global_channel.publish(event)
+
+    def broadcast(self, event: Event) -> None:
+        """Broadcast to all channels."""
         with self._lock:
-            self._observers.append(observer)
+            for channel in self._channels.values():
+                channel.publish(event)
+            self._global_channel.publish(event)
 
-    def unobserve(self, observer: Callable[[T, T], None]) -> bool:
-        """Remove observer."""
+    def list_channels(self) -> List[str]:
+        """List all channels."""
         with self._lock:
-            try:
-                self._observers.remove(observer)
-                return True
-            except ValueError:
-                return False
+            return ["_global"] + list(self._channels.keys())
 
 
-class WeakObserver:
-    """Observer that holds weak reference to handler."""
+class ObserverAction(BaseAction):
+    """Observer pattern action."""
+    action_type = "observer"
+    display_name = "观察者模式"
+    description = "事件订阅通知"
 
-    def __init__(self, handler: Callable[[Event], None]) -> None:
-        import weakref
-        self._ref = weakref.ref(handler)
-        self._handler = handler
+    def __init__(self):
+        super().__init__()
+        self._center = NotificationCenter()
+        self._subjects: Dict[str, Subject] = {}
+        self._observers: Dict[str, ConcreteObserver] = {}
 
-    def __call__(self, event: Event) -> None:
-        handler = self._ref()
-        if handler is not None:
-            handler(event)
-
-
-class ObserverRegistry:
-    """Registry for managing observer lifecycle."""
-
-    def __init__(self) -> None:
-        self._observers: Dict[str, List[Any]] = defaultdict(list)
-        self._lock = threading.Lock()
-
-    def register(
-        self,
-        owner: Any,
-        event_type: str,
-        handler: Callable[[Event], None],
-        weak: bool = False,
-    ) -> None:
-        """Register an observer.
-
-        Args:
-            owner: Owner of this registration.
-            event_type: Event type to listen for.
-            handler: Handler function.
-            weak: Use weak reference.
-        """
-        with self._lock:
-            if weak:
-                observer = WeakObserver(handler)
-            else:
-                observer = handler
-            self._observers[owner].append((event_type, observer))
-
-    def unregister_owner(self, owner: Any) -> int:
-        """Unregister all observers for an owner.
-
-        Returns:
-            Number of observers removed.
-        """
-        with self._lock:
-            if owner in self._observers:
-                count = len(self._observers[owner])
-                del self._observers[owner]
-                return count
-        return 0
-
-    def get_observers(self, owner: Any) -> List[tuple]:
-        """Get all observers for an owner."""
-        with self._lock:
-            return list(self._observers.get(owner, []))
-
-
-def notify_observers(
-    observers: List[Callable],
-    event: Event,
-) -> None:
-    """Notify all observers of an event.
-
-    Args:
-        observers: List of observer callables.
-        event: Event to notify.
-    """
-    for observer in observers:
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            observer(event)
-        except Exception:
-            pass
+            operation = params.get("operation", "observe")
+
+            if operation == "observe":
+                return self._observe(params)
+            elif operation == "notify":
+                return self._notify(params)
+            elif operation == "subscribe":
+                return self._subscribe(params)
+            elif operation == "unsubscribe":
+                return self._unsubscribe(params)
+            elif operation == "post":
+                return self._post(params)
+            elif operation == "history":
+                return self._get_history(params)
+            elif operation == "channels":
+                return self._list_channels()
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Observer error: {str(e)}")
+
+    def _observe(self, params: Dict[str, Any]) -> ActionResult:
+        """Set up observer for subject."""
+        subject_id = params.get("subject_id", str(uuid.uuid4()))
+        observer_id = params.get("observer_id", str(uuid.uuid4()))
+        handler = params.get("handler")
+
+        if subject_id not in self._subjects:
+            self._subjects[subject_id] = Subject(subject_id)
+
+        subject = self._subjects[subject_id]
+
+        if observer_id not in self._observers:
+            self._observers[observer_id] = ConcreteObserver(observer_id, handler)
+
+        subject.attach(self._observers[observer_id])
+
+        return ActionResult(success=True, message=f"Observer attached: {observer_id}", data={"observer_id": observer_id})
+
+    def _notify(self, params: Dict[str, Any]) -> ActionResult:
+        """Notify observers of subject."""
+        subject_id = params.get("subject_id")
+        event_type = params.get("event_type", "notification")
+        data = params.get("data")
+
+        if not subject_id:
+            return ActionResult(success=False, message="subject_id is required")
+
+        subject = self._subjects.get(subject_id)
+        if not subject:
+            return ActionResult(success=False, message=f"Subject not found: {subject_id}")
+
+        event = Event(event_type=event_type, data=data, source_id=subject_id)
+        subject.notify(event)
+
+        return ActionResult(success=True, message="Observers notified", data={"observer_count": subject.get_observer_count()})
+
+    def _subscribe(self, params: Dict[str, Any]) -> ActionResult:
+        """Subscribe to a channel."""
+        channel_name = params.get("channel", "default")
+        observer_id = params.get("observer_id", str(uuid.uuid4()))
+        handler = params.get("handler")
+
+        channel = self._center.create_channel(channel_name)
+
+        observer = ConcreteObserver(observer_id, handler)
+        self._observers[observer_id] = observer
+
+        channel.subscribe(observer)
+
+        return ActionResult(success=True, message=f"Subscribed to {channel_name}", data={"observer_id": observer_id, "channel": channel_name})
+
+    def _unsubscribe(self, params: Dict[str, Any]) -> ActionResult:
+        """Unsubscribe from channel."""
+        channel_name = params.get("channel", "default")
+        observer_id = params.get("observer_id")
+
+        if not observer_id:
+            return ActionResult(success=False, message="observer_id is required")
+
+        channel = self._center.get_channel(channel_name)
+        if not channel:
+            return ActionResult(success=False, message=f"Channel not found: {channel_name}")
+
+        success = channel.unsubscribe(observer_id)
+        if observer_id in self._observers:
+            del self._observers[observer_id]
+
+        return ActionResult(success=success, message="Unsubscribed" if success else "Subscription not found")
+
+    def _post(self, params: Dict[str, Any]) -> ActionResult:
+        """Post event to channel."""
+        channel_name = params.get("channel", "default")
+        event_type = params.get("event_type", "notification")
+        data = params.get("data")
+
+        event = Event(event_type=event_type, data=data)
+        self._center.post(channel_name, event)
+
+        return ActionResult(success=True, message=f"Posted to {channel_name}")
+
+    def _get_history(self, params: Dict[str, Any]) -> ActionResult:
+        """Get channel event history."""
+        channel_name = params.get("channel", "default")
+        limit = params.get("limit", 100)
+
+        channel = self._center.get_channel(channel_name)
+        if not channel:
+            return ActionResult(success=False, message=f"Channel not found: {channel_name}")
+
+        history = channel.get_history(limit)
+
+        return ActionResult(success=True, message=f"{len(history)} events", data={"history": [{"type": e.event_type, "data": e.data, "timestamp": e.timestamp} for e in history]})
+
+    def _list_channels(self) -> ActionResult:
+        """List all channels."""
+        channels = self._center.list_channels()
+        return ActionResult(success=True, message=f"{len(channels)} channels", data={"channels": channels})
