@@ -1,194 +1,120 @@
 """
-Command pattern and builder utilities.
+Command Builder Utilities
 
-Provides command object pattern, command queue,
-and chain of responsibility implementations.
+Provides utilities for building and executing
+system commands in automation workflows.
+
+Author: Agent3
 """
-
 from __future__ import annotations
 
-import threading
-from abc import ABC, abstractmethod
-from typing import Any, Callable, Generic, TypeVar
+from dataclasses import dataclass, field
+from typing import Any, list
+import shlex
 
 
-T = TypeVar("T")
+@dataclass
+class CommandPart:
+    """Represents a single part of a command."""
+    value: str
+    quoted: bool = False
+    escaped: bool = False
 
 
-class Command(ABC, Generic[T]):
-    """Base command interface."""
+@dataclass
+class Command:
+    """Represents a complete command."""
+    program: str
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+    timeout: float | None = None
 
-    @abstractmethod
-    def execute(self) -> T:
-        """Execute the command."""
-        pass
+    def add_arg(self, arg: str, escape: bool = True) -> Command:
+        """Add an argument to the command."""
+        if escape:
+            self.args.append(shlex.quote(arg))
+        else:
+            self.args.append(arg)
+        return self
 
-    def undo(self) -> None:
-        """Undo the command (optional)."""
-        pass
+    def add_flag(self, flag: str, value: str | None = None) -> Command:
+        """Add a flag (option) to the command."""
+        if value is not None:
+            self.args.append(f"{flag}={shlex.quote(value)}")
+        else:
+            self.args.append(flag)
+        return self
 
+    def build(self) -> str:
+        """Build command string."""
+        parts = [self.program] + self.args
+        return " ".join(parts)
 
-class SimpleCommand(Command[T]):
-    """Simple command wrapping a callable."""
-
-    def __init__(self, execute_fn: Callable[[], T]):
-        self._execute = execute_fn
-
-    def execute(self) -> T:
-        return self._execute()
-
-
-class CommandWithUndo(Command[T]):
-    """Command with undo support."""
-
-    def __init__(
-        self,
-        execute_fn: Callable[[], T],
-        undo_fn: Callable[[], None],
-    ):
-        self._execute = execute_fn
-        self._undo = undo_fn
-
-    def execute(self) -> T:
-        return self._execute()
-
-    def undo(self) -> None:
-        self._undo()
-
-
-class MacroCommand(Command[list[Any]]):
-    """Command that executes multiple commands."""
-
-    def __init__(self, commands: list[Command]):
-        self.commands = commands
-        self._results: list[Any] = []
-
-    def execute(self) -> list[Any]:
-        self._results = []
-        for cmd in self.commands:
-            self._results.append(cmd.execute())
-        return self._results
-
-    def undo(self) -> None:
-        for cmd in reversed(self.commands):
-            cmd.undo()
-
-
-class CommandQueue:
-    """Queue of commands for batch execution."""
-
-    def __init__(self):
-        self._queue: list[Command] = []
-        self._lock = threading.Lock()
-
-    def add(self, command: Command) -> None:
-        with self._lock:
-            self._queue.append(command)
-
-    def execute_all(self) -> list[Any]:
-        """Execute all queued commands in order."""
-        results = []
-        with self._lock:
-            queue = list(self._queue)
-            self._queue.clear()
-        for cmd in queue:
-            results.append(cmd.execute())
-        return results
-
-    def clear(self) -> None:
-        with self._lock:
-            self._queue.clear()
-
-    @property
-    def size(self) -> int:
-        return len(self._queue)
-
-
-class AsyncCommand(Command[T]):
-    """Command that executes asynchronously."""
-
-    def __init__(self, coro_fn: Callable[[], Any]):
-        self._coro_fn = coro_fn
-
-    def execute(self) -> Any:
-        import asyncio
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(self._coro_fn())
-        finally:
-            loop.close()
-
-
-class CommandHistory:
-    """Command history with undo/redo support."""
-
-    def __init__(self, max_size: int = 100):
-        self.max_size = max_size
-        self._undo_stack: list[Command] = []
-        self._redo_stack: list[Command] = []
-        self._lock = threading.Lock()
-
-    def execute(self, command: Command) -> Any:
-        """Execute command and add to history."""
-        result = command.execute()
-        with self._lock:
-            self._undo_stack.append(command)
-            self._redo_stack.clear()
-            if len(self._undo_stack) > self.max_size:
-                self._undo_stack.pop(0)
+    def build_list(self) -> list[str]:
+        """Build command as list for subprocess."""
+        result = [self.program]
+        for arg in self.args:
+            unquoted = arg.strip("'\"")
+            result.append(unquoted)
         return result
 
-    def undo(self) -> bool:
-        """Undo last command."""
-        with self._lock:
-            if not self._undo_stack:
-                return False
-            command = self._undo_stack.pop()
-            self._redo_stack.append(command)
-        try:
-            command.undo()
-            return True
-        except NotImplementedError:
-            return False
 
-    def redo(self) -> bool:
-        """Redo last undone command."""
-        with self._lock:
-            if not self._redo_stack:
-                return False
-            command = self._redo_stack.pop()
-            self._undo_stack.append(command)
-        try:
-            command.execute()
-            return True
-        except Exception:
-            return False
+class CommandBuilder:
+    """
+    Builder for constructing commands.
+    
+    Provides fluent interface for building
+    complex commands with arguments and options.
+    """
 
-    @property
-    def can_undo(self) -> bool:
-        return bool(self._undo_stack)
+    def __init__(self, program: str) -> None:
+        self._command = Command(program=program)
 
-    @property
-    def can_redo(self) -> bool:
-        return bool(self._redo_stack)
+    def arg(self, value: str, escape: bool = True) -> CommandBuilder:
+        """Add an argument."""
+        self._command.add_arg(value, escape)
+        return self
 
+    def flag(self, flag: str, value: str | None = None) -> CommandBuilder:
+        """Add a flag."""
+        self._command.add_flag(flag, value)
+        return self
 
-class ChainOfResponsibility(ABC):
-    """Base handler in chain of responsibility pattern."""
+    def env(self, key: str, value: str) -> CommandBuilder:
+        """Set environment variable."""
+        if self._command.env is None:
+            self._command.env = {}
+        self._command.env[key] = value
+        return self
 
-    def __init__(self):
-        self._next_handler: ChainOfResponsibility | None = None
+    def cwd(self, directory: str) -> CommandBuilder:
+        """Set working directory."""
+        self._command.cwd = directory
+        return self
 
-    def set_next(self, handler: "ChainOfResponsibility") -> "ChainOfResponsibility":
-        self._next_handler = handler
-        return handler
+    def timeout(self, seconds: float) -> CommandBuilder:
+        """Set command timeout."""
+        self._command.timeout = seconds
+        return self
 
-    def handle(self, request: Any) -> Any:
-        if self._next_handler:
-            return self._next_handler.handle(request)
-        return None
+    def build(self) -> Command:
+        """Build the command."""
+        return self._command
+
+    def build_string(self) -> str:
+        """Build command as string."""
+        return self._command.build()
 
 
-def create_command(func: Callable[[], T]) -> Command[T]:
-    """Factory to create command from callable."""
-    return SimpleCommand(func)
+def build_command(program: str) -> CommandBuilder:
+    """
+    Create a command builder.
+    
+    Args:
+        program: Program name to run.
+        
+    Returns:
+        CommandBuilder instance.
+    """
+    return CommandBuilder(program)

@@ -1,292 +1,147 @@
 """
-UI element finder utilities for macOS automation.
+Element Finder Utilities
 
-Provides element location via accessibility APIs, coordinate-based
-detection, and visual matching for GUI automation.
+Provides utilities for finding UI elements
+using various strategies in automation workflows.
+
+Author: Agent3
 """
-
 from __future__ import annotations
 
-import subprocess
-from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
-from enum import Enum
+from typing import Any, Callable
+from enum import Enum, auto
 
 
-class ElementRole(Enum):
-    """macOS accessibility element roles."""
-    BUTTON = "AXButton"
-    CHECKBOX = "AXCheckBox"
-    TEXT_FIELD = "AXTextField"
-    TEXT_AREA = "AXTextArea"
-    MENU_ITEM = "AXMenuItem"
-    POP_UP_BUTTON = "AXPopUpButton"
-    TABLE = "AXTable"
-    ROW = "AXRow"
-    CELL = "AXCell"
-    GROUP = "AXGroup"
-    WINDOW = "AXWindow"
-    APPLICATION = "AXApplication"
+class FinderStrategy(Enum):
+    """Strategies for finding elements."""
+    ID = auto()
+    TEXT = auto()
+    CLASS_NAME = auto()
+    TAG_NAME = auto()
+    XPATH = auto()
+    CSS_SELECTOR = auto()
+    ACCESSIBILITY = auto()
+    FUZZY = auto()
 
 
 @dataclass
-class UIElement:
-    """UI element representation."""
-    role: str
-    title: str
+class FinderQuery:
+    """Query for finding an element."""
+    strategy: FinderStrategy
     value: str
-    description: str
-    position: Tuple[int, int]
-    size: Tuple[int, int]
-    enabled: bool
-    focused: bool
-    parent: Optional[str] = None
-    children: List[str] = None
-    identifier: Optional[str] = None
-    subrole: Optional[str] = None
+    index: int = 0
+    parent: FinderQuery | None = None
 
 
 class ElementFinder:
-    """Finder for UI elements using accessibility APIs."""
+    """
+    Finds UI elements using various strategies.
     
-    def __init__(self, app_bundle_id: Optional[str] = None):
+    Supports multiple finder strategies including
+    ID, text, XPath, and accessibility queries.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[str, Any] = {}
+        self._custom_finders: dict[str, Callable[[str], list[Any]]] = {}
+
+    def register_custom_finder(
+        self,
+        name: str,
+        finder: Callable[[str], list[Any]],
+    ) -> None:
+        """Register a custom finder function."""
+        self._custom_finders[name] = finder
+
+    def find(
+        self,
+        strategy: FinderStrategy,
+        value: str,
+        elements: list[dict[str, Any]],
+        index: int = 0,
+    ) -> dict[str, Any] | None:
         """
-        Initialize element finder.
+        Find an element using the given strategy.
         
         Args:
-            app_bundle_id: Optional bundle ID to scope searches.
-        """
-        self.app_bundle_id = app_bundle_id
-        self._cached_app_name: Optional[str] = None
-    
-    def _get_app_script(self) -> str:
-        """Get app targeting script."""
-        if self.app_bundle_id:
-            return f'''
-            tell application "System Events"
-                set targetApp to first process whose bundle identifier is "{self.app_bundle_id}"
-            end tell
-            '''
-        return '''
-        tell application "System Events"
-            set targetApp to first process whose frontmost is true
-        end tell
-        '''
-    
-    def find_element_by_role(self, role: ElementRole,
-                            title: Optional[str] = None) -> Optional[UIElement]:
-        """
-        Find element by role, optionally filtered by title.
-        
-        Args:
-            role: Element role to search for.
-            title: Optional title to filter by.
+            strategy: Finder strategy to use.
+            value: Value to search for.
+            elements: List of element dictionaries to search.
+            index: Index of element if multiple matches.
             
         Returns:
-            UIElement if found, None otherwise.
+            Found element or None.
         """
-        script = f'''
-        {self._get_app_script()}
-        tell targetApp
-            set elemList to every UI element whose role is "{role.value}"
-            if (count of elemList) > 0 then
-                set elem to first item of elemList
-                set elemTitle to title of elem
-                set elemValue to value of elem
-                set elemDesc to description of elem
-                set elemPos to position of elem
-                set elemSize to size of elem
-                set elemEnabled to enabled of elem
-                set elemFocused to focused of elem
-                return {{elemTitle, elemValue, elemDesc, elemPos, elemSize, elemEnabled, elemFocused}}
-            end if
-        end tell
-        '''
-        
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.stdout.strip():
-                return self._parse_element(result.stdout, role.value)
-        except Exception:
-            pass
+        matches = self.find_all(strategy, value, elements)
+        if 0 <= index < len(matches):
+            return matches[index]
         return None
-    
-    def find_all_by_role(self, role: ElementRole) -> List[UIElement]:
+
+    def find_all(
+        self,
+        strategy: FinderStrategy,
+        value: str,
+        elements: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         """
-        Find all elements matching role.
+        Find all elements matching the criteria.
         
         Args:
-            role: Element role to search for.
+            strategy: Finder strategy to use.
+            value: Value to search for.
+            elements: List of element dictionaries to search.
             
         Returns:
-            List of UIElement matching role.
+            List of matching elements.
         """
-        elements = []
-        script = f'''
-        {self._get_app_script()}
-        tell targetApp
-            set elemList to every UI element whose role is "{role.value}"
-            set resultList to {{}}
-            repeat with elem in elemList
-                set elemTitle to title of elem
-                set elemValue to value of elem
-                set elemDesc to description of elem
-                set elemPos to position of elem
-                set elemSize to size of elem
-                set elemEnabled to enabled of elem
-                set elemFocused to focused of elem
-                set end of resultList to {{elemTitle, elemValue, elemDesc, elemPos, elemSize, elemEnabled, elemFocused}}
-            end repeat
-            return resultList
-        end tell
-        '''
-        
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.stdout.strip():
-                for line in result.stdout.strip().split('\n'):
-                    elements.append(self._parse_element(line, role.value))
-        except Exception:
-            pass
-        return elements
-    
-    def find_by_title(self, title: str, role: Optional[ElementRole] = None) -> Optional[UIElement]:
-        """
-        Find element by title.
-        
-        Args:
-            title: Title/subtitle to search for.
-            role: Optional role filter.
-            
-        Returns:
-            UIElement if found, None otherwise.
-        """
-        role_cond = f'and role is "{role.value}"' if role else ''
-        script = f'''
-        {self._get_app_script()}
-        tell targetApp
-            set elemList to every UI element whose title contains "{title}" {role_cond}
-            if (count of elemList) > 0 then
-                set elem to first item of elemList
-                set elemRole to role of elem
-                set elemValue to value of elem
-                set elemDesc to description of elem
-                set elemPos to position of elem
-                set elemSize to size of elem
-                set elemEnabled to enabled of elem
-                set elemFocused to focused of elem
-                return {{elemRole, elemValue, elemDesc, elemPos, elemSize, elemEnabled, elemFocused}}
-            end if
-        end tell
-        '''
-        
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.stdout.strip():
-                parts = result.stdout.strip().split(',')
-                if len(parts) >= 7:
-                    return UIElement(
-                        role=parts[0].strip(),
-                        title=title,
-                        value=parts[1].strip(),
-                        description=parts[2].strip(),
-                        position=self._parse_pos(parts[3]),
-                        size=self._parse_pos(parts[4]),
-                        enabled=parts[5].strip() == 'true',
-                        focused=parts[6].strip() == 'true'
-                    )
-        except Exception:
-            pass
-        return None
-    
-    def _parse_element(self, data: str, role: str) -> UIElement:
-        """Parse element data from AppleScript output."""
-        parts = data.strip().split(',')
-        if len(parts) >= 7:
-            return UIElement(
-                role=role,
-                title=parts[0].strip(),
-                value=parts[1].strip(),
-                description=parts[2].strip(),
-                position=self._parse_pos(parts[3]),
-                size=self._parse_pos(parts[4]),
-                enabled=parts[5].strip() == 'true',
-                focused=parts[6].strip() == 'true'
-            )
-        return UIElement(
-            role=role, title='', value='', description='',
-            position=(0, 0), size=(0, 0), enabled=False, focused=False
-        )
-    
-    def _parse_pos(self, s: str) -> Tuple[int, int]:
-        """Parse position/size from string."""
-        cleaned = s.strip().replace('{', '').replace('}', '')
-        parts = cleaned.split(',')
-        return int(parts[0].strip()), int(parts[1].strip())
-    
-    def get_element_at(self, x: int, y: int) -> Optional[UIElement]:
-        """
-        Get element at screen coordinates.
-        
-        Args:
-            x: X coordinate.
-            y: Y coordinate.
-            
-        Returns:
-            UIElement at position, None if none found.
-        """
-        script = f'''
-        tell application "System Events"
-            set elem to UI element at position {x}, {y}
-            if exists elem then
-                set elemRole to role of elem
-                set elemTitle to title of elem
-                set elemValue to value of elem
-                set elemDesc to description of elem
-                set elemPos to position of elem
-                set elemSize to size of elem
-                set elemEnabled to enabled of elem
-                set elemFocused to focused of elem
-                return {{elemRole, elemTitle, elemValue, elemDesc, elemPos, elemSize, elemEnabled, elemFocused}}
-            end if
-        end tell
-        '''
-        
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.stdout.strip():
-                parts = result.stdout.strip().split(',')
-                if len(parts) >= 8:
-                    return UIElement(
-                        role=parts[0].strip(),
-                        title=parts[1].strip(),
-                        value=parts[2].strip(),
-                        description=parts[3].strip(),
-                        position=self._parse_pos(parts[4]),
-                        size=self._parse_pos(parts[5]),
-                        enabled=parts[6].strip() == 'true',
-                        focused=parts[7].strip() == 'true'
-                    )
-        except Exception:
-            pass
-        return None
+        matches = []
+
+        if strategy == FinderStrategy.ID:
+            matches = [e for e in elements if e.get("id") == value]
+        elif strategy == FinderStrategy.TEXT:
+            matches = [e for e in elements if value in e.get("text", "")]
+        elif strategy == FinderStrategy.CLASS_NAME:
+            matches = [e for e in elements if value in e.get("class", "")]
+        elif strategy == FinderStrategy.TAG_NAME:
+            matches = [e for e in elements if e.get("tag") == value]
+        elif strategy == FinderStrategy.ACCESSIBILITY:
+            matches = [e for e in elements if e.get("accessibility_label") == value]
+        elif strategy == FinderStrategy.FUZZY:
+            matches = self._fuzzy_match(elements, value)
+
+        return matches
+
+    def _fuzzy_match(
+        self,
+        elements: list[dict[str, Any]],
+        query: str,
+    ) -> list[dict[str, Any]]:
+        """Perform fuzzy matching on elements."""
+        query_lower = query.lower()
+        results = []
+        for elem in elements:
+            text = elem.get("text", "").lower()
+            if query_lower in text:
+                results.append(elem)
+        return results
+
+    def find_descendant(
+        self,
+        parent: dict[str, Any],
+        strategy: FinderStrategy,
+        value: str,
+        index: int = 0,
+    ) -> dict[str, Any] | None:
+        """Find a descendant element within a parent."""
+        children = parent.get("children", [])
+        return self.find(strategy, value, children, index)
+
+
+def create_finder_query(
+    strategy: FinderStrategy,
+    value: str,
+    index: int = 0,
+) -> FinderQuery:
+    """Create a finder query."""
+    return FinderQuery(strategy=strategy, value=value, index=index)

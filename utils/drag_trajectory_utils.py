@@ -1,202 +1,137 @@
-"""Drag trajectory utilities.
-
-This module provides utilities for generating and executing
-smooth drag trajectories.
 """
+Drag Trajectory Utilities
 
+Provides utilities for computing and executing
+drag trajectories in UI automation.
+
+Author: Agent3
+"""
 from __future__ import annotations
 
-import math
-from typing import Callable, List, Tuple, Optional
 from dataclasses import dataclass
+from typing import Callable
+import math
 
 
 @dataclass
-class Point2D:
-    """A 2D point."""
+class Point:
+    """2D point for trajectory."""
     x: float
     y: float
 
-    def distance_to(self, other: "Point2D") -> float:
-        dx = self.x - other.x
-        dy = self.y - other.y
-        return math.sqrt(dx * dx + dy * dy)
 
-    def lerp(self, other: "Point2D", t: float) -> "Point2D":
-        return Point2D(
-            x=self.x + (other.x - self.x) * t,
-            y=self.y + (other.y - self.y) * t,
-        )
+class TrajectoryType(Enum):
+    """Types of drag trajectories."""
+    LINEAR = auto()
+    EASE_IN = auto()
+    EASE_OUT = auto()
+    EASE_IN_OUT = auto()
+    BEZIER = auto()
+
+
+from enum import Enum, auto
 
 
 @dataclass
 class TrajectoryConfig:
-    """Configuration for trajectory generation."""
-    points_per_segment: int = 10
-    smoothing_factor: float = 0.5
-    overshoot: float = 0.0
-    snap_to_grid: Optional[Tuple[int, int]] = None
+    """Configuration for a drag trajectory."""
+    trajectory_type: TrajectoryType = TrajectoryType.LINEAR
+    steps: int = 20
+    duration_ms: float = 500.0
 
 
-def linear_trajectory(
-    start: Tuple[float, float],
-    end: Tuple[float, float],
-    num_points: int = 10,
-) -> List[Point2D]:
-    """Generate a linear trajectory between two points.
-
-    Args:
-        start: Start coordinates.
-        end: End coordinates.
-        num_points: Number of points to generate.
-
-    Returns:
-        List of points along the trajectory.
+class DragTrajectory:
     """
-    s = Point2D(start[0], start[1])
-    e = Point2D(end[0], end[1])
-    return [s.lerp(e, t / (num_points - 1)) for t in range(num_points)]
-
-
-def bezier_trajectory(
-    start: Tuple[float, float],
-    control: Tuple[float, float],
-    end: Tuple[float, float],
-    num_points: int = 20,
-) -> List[Point2D]:
-    """Generate a quadratic bezier trajectory.
-
-    Args:
-        start: Start coordinates.
-        control: Control point coordinates.
-        end: End coordinates.
-        num_points: Number of points to generate.
-
-    Returns:
-        List of points along the trajectory.
+    Computes drag trajectories for smooth animations.
+    
+    Supports various trajectory types including
+    linear, ease-in, ease-out, and bezier curves.
     """
-    def bezier(t: float) -> Point2D:
-        t2 = 1 - t
-        return Point2D(
-            x=t2 * t2 * start[0] + 2 * t2 * t * control[0] + t * t * end[0],
-            y=t2 * t2 * start[1] + 2 * t2 * t * control[1] + t * t * end[1],
-        )
-    return [bezier(t / (num_points - 1)) for t in range(num_points)]
+
+    def __init__(
+        self,
+        start: Point,
+        end: Point,
+        config: TrajectoryConfig | None = None,
+    ) -> None:
+        self._start = start
+        self._end = end
+        self._config = config or TrajectoryConfig()
+        self._cached_points: list[Point] | None = None
+
+    def compute(self) -> list[Point]:
+        """Compute all trajectory points."""
+        if self._cached_points is not None:
+            return self._cached_points
+
+        points = []
+        steps = self._config.steps
+
+        for i in range(steps + 1):
+            t = i / steps
+            x, y = self._apply_easing(t)
+            points.append(Point(x, y))
+
+        self._cached_points = points
+        return points
+
+    def _apply_easing(self, t: float) -> tuple[float, float]:
+        """Apply easing function to get point at t."""
+        eased_t = t
+
+        if self._config.trajectory_type == TrajectoryType.EASE_IN:
+            eased_t = t * t
+        elif self._config.trajectory_type == TrajectoryType.EASE_OUT:
+            eased_t = 1 - (1 - t) * (1 - t)
+        elif self._config.trajectory_type == TrajectoryType.EASE_IN_OUT:
+            eased_t = 2 * t * t if t < 0.5 else 1 - pow(-2 * t + 2, 2) / 2
+        elif self._config.trajectory_type == TrajectoryType.BEZIER:
+            eased_t = self._cubic_bezier(t, 0.25, 0.1, 0.25, 1.0)
+
+        x = self._start.x + (self._end.x - self._start.x) * eased_t
+        y = self._start.y + (self._end.y - self._start.y) * eased_t
+        return x, y
+
+    def _cubic_bezier(
+        self,
+        t: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+    ) -> float:
+        """Compute cubic bezier value at t."""
+        cx = 3 * x1
+        bx = 3 * (x2 - x1) - cx
+        ax = 1 - cx - bx
+        cy = 3 * y1
+        by = 3 * (y2 - y1) - cy
+        ay = 1 - cy - by
+
+        def sample(t: float) -> float:
+            return ((ax * t + bx) * t + cx) * t
+
+        return ((ay * t + by) * t + cy) * t
+
+    def get_interpolator(self) -> Callable[[float], Point]:
+        """Get a function that interpolates at t."""
+        def interpolate(t: float) -> Point:
+            t = max(0.0, min(1.0, t))
+            x, y = self._apply_easing(t)
+            return Point(x, y)
+        return interpolate
 
 
-def curved_trajectory(
-    start: Tuple[float, float],
-    end: Tuple[float, float],
-    curve_height: float = 50.0,
-    num_points: int = 20,
-) -> List[Point2D]:
-    """Generate a curved trajectory with automatic control point.
-
-    Args:
-        start: Start coordinates.
-        end: End coordinates.
-        curve_height: Height of the curve perpendicular to the line.
-        num_points: Number of points to generate.
-
-    Returns:
-        List of points along the trajectory.
-    """
-    mx = (start[0] + end[0]) / 2
-    my = (start[1] + end[1]) / 2
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = math.sqrt(dx * dx + dy * dy)
-    if length == 0:
-        length = 1.0
-    cx = mx - (dy / length) * curve_height
-    cy = my + (dx / length) * curve_height
-    return bezier_trajectory(start, (cx, cy), end, num_points)
-
-
-def smooth_trajectory(
-    points: List[Point2D],
-    iterations: int = 3,
-) -> List[Point2D]:
-    """Smooth a trajectory using Chaikin subdivision.
-
-    Args:
-        points: Original trajectory points.
-        iterations: Number of smoothing iterations.
-
-    Returns:
-        Smoothed trajectory points.
-    """
-    result = points[:]
-    for _ in range(iterations):
-        new_points: List[Point2D] = [result[0]]
-        for i in range(len(result) - 1):
-            p0 = result[i]
-            p1 = result[i + 1]
-            new_points.append(Point2D(
-                x=p0.x * 0.75 + p1.x * 0.25,
-                y=p0.y * 0.75 + p1.y * 0.25,
-            ))
-            new_points.append(Point2D(
-                x=p0.x * 0.25 + p1.x * 0.75,
-                y=p0.y * 0.25 + p1.y * 0.75,
-            ))
-        new_points.append(result[-1])
-        result = new_points
-    return result
-
-
-def resample_trajectory(
-    points: List[Point2D],
-    target_count: int,
-) -> List[Point2D]:
-    """Resample trajectory to a specific number of points.
-
-    Args:
-        points: Original trajectory points.
-        target_count: Desired number of points.
-
-    Returns:
-        Resampled trajectory.
-    """
-    if len(points) <= 1:
-        return points[:]
-    if len(points) == target_count:
-        return points[:]
-
-    total_length = sum(
-        points[i].distance_to(points[i + 1])
-        for i in range(len(points) - 1)
+def compute_linear_trajectory(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    steps: int = 20,
+) -> list[tuple[float, float]]:
+    """Compute a linear trajectory between two points."""
+    trajectory = DragTrajectory(
+        Point(start[0], start[1]),
+        Point(end[0], end[1]),
+        TrajectoryConfig(trajectory_type=TrajectoryType.LINEAR, steps=steps),
     )
-    step = total_length / (target_count - 1)
-
-    result = [points[0]]
-    accumulated = 0.0
-    j = 1
-
-    for i in range(1, target_count - 1):
-        target = step * i
-        while j < len(points):
-            seg_len = points[j - 1].distance_to(points[j])
-            if accumulated + seg_len >= target:
-                t = (target - accumulated) / seg_len if seg_len > 0 else 0
-                result.append(Point2D(
-                    x=points[j - 1].x + (points[j].x - points[j - 1].x) * t,
-                    y=points[j - 1].y + (points[j].y - points[j - 1].y) * t,
-                ))
-                break
-            accumulated += seg_len
-            j += 1
-
-    result.append(points[-1])
-    return result
-
-
-__all__ = [
-    "Point2D",
-    "TrajectoryConfig",
-    "linear_trajectory",
-    "bezier_trajectory",
-    "curved_trajectory",
-    "smooth_trajectory",
-    "resample_trajectory",
-]
+    points = trajectory.compute()
+    return [(p.x, p.y) for p in points]

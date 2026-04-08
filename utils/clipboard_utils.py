@@ -1,190 +1,130 @@
-"""Clipboard management utilities for reading and writing system clipboard.
-
-Provides cross-platform clipboard operations for text, images,
-and rich content, with support for clipboard history and
-content type detection.
-
-Example:
-    >>> from utils.clipboard_utils import get_text, set_text, get_image
-    >>> text = get_text()
-    >>> set_text('Hello, clipboard!')
 """
+Clipboard Utilities
 
+Provides utilities for clipboard operations
+in UI automation workflows.
+
+Author: Agent3
+"""
 from __future__ import annotations
 
+from typing import Any
 import subprocess
-from typing import Optional
-
-__all__ = [
-    "get_text",
-    "set_text",
-    "clear_clipboard",
-    "get_image",
-    "set_image",
-    "has_text",
-    "has_image",
-    "ClipboardError",
-]
 
 
-class ClipboardError(Exception):
-    """Raised when a clipboard operation fails."""
-    pass
-
-
-def get_text() -> Optional[str]:
-    """Get the current clipboard text content.
-
-    Returns:
-        Clipboard text as a string, or None if unavailable.
+class ClipboardManager:
     """
-    import sys
-
-    if sys.platform == "darwin":
-        script = "get the clipboard as text"
-    elif sys.platform == "win32":
-        return None  # would use pyperclip
-    else:
-        script = "xclip -selection clipboard -o"
-
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script] if sys.platform == "darwin" else script.split(),
-            capture_output=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.decode().strip()
-    except Exception:
-        pass
-    return None
-
-
-def set_text(text: str) -> bool:
-    """Set the clipboard text content.
-
-    Args:
-        text: Text string to place on the clipboard.
-
-    Returns:
-        True if successful.
+    Manages clipboard operations.
+    
+    Supports reading, writing, and monitoring
+    clipboard content.
     """
-    import sys
 
-    if sys.platform == "darwin":
-        # Escape double quotes for AppleScript
-        escaped = text.replace('"', '\\"').replace('\n', '\\n')
-        script = f'set the clipboard to "{escaped}"'
-        try:
-            subprocess.run(["osascript", "-e", script], timeout=5, check=True)
-            return True
-        except Exception:
-            return False
-    elif sys.platform == "win32":
-        try:
-            subprocess.run(["powershell", "-Command", f"Set-Clipboard -Value '{text}'"], check=True)
-            return True
-        except Exception:
-            return False
-    else:
-        try:
-            subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=text.encode(), check=True)
-            return True
-        except Exception:
-            return False
+    def __init__(self) -> None:
+        self._last_content: str | None = None
+        self._history: list[str] = []
+        self._max_history = 50
 
-
-def clear_clipboard() -> bool:
-    """Clear the clipboard content.
-
-    Returns:
-        True if successful.
-    """
-    return set_text("")
-
-
-def has_text() -> bool:
-    """Check if the clipboard contains text.
-
-    Returns:
-        True if the clipboard has text content.
-    """
-    text = get_text()
-    return text is not None and len(text) > 0
-
-
-def has_image() -> bool:
-    """Check if the clipboard contains image data.
-
-    Returns:
-        True if the clipboard has image content.
-    """
-    import sys
-
-    if sys.platform == "darwin":
-        script = """
-        tell application "System Events"
-            try
-                set clipText to the clipboard as record
-                return "image"
-            on error
-                return "no image"
-            end try
-        end tell
+    def copy(self, text: str) -> bool:
+        """
+        Copy text to clipboard.
+        
+        Args:
+            text: Text to copy.
+            
+        Returns:
+            True if successful.
         """
         try:
-            result = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
-            return "image" in result.stdout.decode().lower()
+            process = subprocess.run(
+                ["pbcopy"],
+                input=text.encode("utf-8"),
+                shell=True,
+                check=False,
+            )
+            if process.returncode == 0:
+                self._last_content = text
+                self._add_to_history(text)
+                return True
+            return False
         except Exception:
             return False
-    return False
 
-
-def get_image() -> Optional[bytes]:
-    """Get image data from the clipboard.
-
-    Returns:
-        Image bytes (PNG format), or None if no image.
-    """
-    import sys
-
-    if sys.platform == "darwin":
-        script = """
-        tell application "System Events"
-            try
-                set img to the clipboard as TIFF picture
-                return img
-            on error
-                return ""
-            end try
-        end tell
+    def paste(self) -> str | None:
+        """
+        Get text from clipboard.
+        
+        Returns:
+            Clipboard text or None.
         """
         try:
-            result = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
-            if result.returncode == 0 and result.stdout:
-                # The result would be a TIFF file path, read it
-                return result.stdout
+            result = subprocess.run(
+                ["pbpaste"],
+                capture_output=True,
+                text=True,
+                shell=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                content = result.stdout
+                self._last_content = content
+                return content
+            return None
         except Exception:
-            pass
-    return None
+            return None
 
+    def clear(self) -> bool:
+        """
+        Clear clipboard content.
+        
+        Returns:
+            True if successful.
+        """
+        return self.copy("")
 
-def set_image(image_path: str) -> bool:
-    """Set an image on the clipboard from a file path.
+    def get_last_content(self) -> str | None:
+        """Get the last known clipboard content."""
+        return self._last_content
 
-    Args:
-        image_path: Path to the image file.
+    def get_history(self) -> list[str]:
+        """Get clipboard history."""
+        return list(self._history)
 
-    Returns:
-        True if successful.
-    """
-    import sys
+    def _add_to_history(self, text: str) -> None:
+        """Add text to history."""
+        if text and text not in self._history:
+            self._history.append(text)
+            if len(self._history) > self._max_history:
+                self._history.pop(0)
 
-    if sys.platform == "darwin":
-        script = f'set the clipboard to (read (POSIX file "{image_path}") as TIFF picture)'
-        try:
-            subprocess.run(["osascript", "-e", script], timeout=5, check=True)
+    def has_changed(self) -> bool:
+        """Check if clipboard content has changed."""
+        current = self.paste()
+        if current != self._last_content:
+            self._last_content = current
             return True
-        except Exception:
-            return False
-    return False
+        return False
+
+
+# Global clipboard manager instance
+_clipboard = ClipboardManager()
+
+
+def copy(text: str) -> bool:
+    """Copy text to clipboard."""
+    return _clipboard.copy(text)
+
+
+def paste() -> str | None:
+    """Get text from clipboard."""
+    return _clipboard.paste()
+
+
+def clear() -> bool:
+    """Clear clipboard."""
+    return _clipboard.clear()
+
+
+def clipboard_has_changed() -> bool:
+    """Check if clipboard changed since last access."""
+    return _clipboard.has_changed()
