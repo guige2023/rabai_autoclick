@@ -1,7 +1,7 @@
 """Rate Limit Token Bucket Action Module.
 
-Provides token bucket rate limiting implementation
-with configurable bucket parameters.
+Provides token bucket algorithm for
+rate limiting.
 """
 
 import time
@@ -18,67 +18,79 @@ from core.base_action import BaseAction, ActionResult
 @dataclass
 class TokenBucket:
     """Token bucket implementation."""
+    bucket_id: str
     capacity: float
-    tokens: float
     refill_rate: float
+    tokens: float
     last_refill: float = field(default_factory=time.time)
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    locked: bool = False
 
 
-class TokenBucketManager:
-    """Manages token bucket rate limiters."""
+class RateLimitManager:
+    """Manages rate limiting."""
 
     def __init__(self):
         self._buckets: Dict[str, TokenBucket] = {}
+        self._lock = threading.RLock()
 
     def create_bucket(
         self,
-        name: str,
+        bucket_id: str,
         capacity: float,
         refill_rate: float
-    ) -> None:
+    ) -> bool:
         """Create a token bucket."""
-        self._buckets[name] = TokenBucket(
-            capacity=capacity,
-            tokens=capacity,
-            refill_rate=refill_rate
-        )
+        with self._lock:
+            if bucket_id in self._buckets:
+                return False
 
-    def consume(self, name: str, tokens: float = 1.0) -> tuple[bool, float]:
-        """Consume tokens from bucket."""
-        bucket = self._buckets.get(name)
-        if not bucket:
-            return True, float('inf')
-
-        with bucket.lock:
-            now = time.time()
-            elapsed = now - bucket.last_refill
-            bucket.tokens = min(
-                bucket.capacity,
-                bucket.tokens + elapsed * bucket.refill_rate
+            self._buckets[bucket_id] = TokenBucket(
+                bucket_id=bucket_id,
+                capacity=capacity,
+                refill_rate=refill_rate,
+                tokens=capacity
             )
-            bucket.last_refill = now
+            return True
+
+    def consume(self, bucket_id: str, tokens: float = 1.0) -> bool:
+        """Try to consume tokens."""
+        with self._lock:
+            bucket = self._buckets.get(bucket_id)
+            if not bucket:
+                return False
+
+            self._refill(bucket)
 
             if bucket.tokens >= tokens:
                 bucket.tokens -= tokens
-                return True, bucket.tokens
+                return True
 
-            return False, bucket.tokens
+            return False
 
-    def get_available(self, name: str) -> Optional[float]:
-        """Get available tokens."""
-        bucket = self._buckets.get(name)
-        if not bucket:
-            return None
+    def _refill(self, bucket: TokenBucket) -> None:
+        """Refill bucket based on time elapsed."""
+        now = time.time()
+        elapsed = now - bucket.last_refill
 
-        with bucket.lock:
-            now = time.time()
-            elapsed = now - bucket.last_refill
-            tokens = min(
-                bucket.capacity,
-                bucket.tokens + elapsed * bucket.refill_rate
-            )
-            return tokens
+        tokens_to_add = elapsed * bucket.refill_rate
+        bucket.tokens = min(bucket.capacity, bucket.tokens + tokens_to_add)
+        bucket.last_refill = now
+
+    def get_bucket_info(self, bucket_id: str) -> Optional[Dict]:
+        """Get bucket info."""
+        with self._lock:
+            bucket = self._buckets.get(bucket_id)
+            if not bucket:
+                return None
+
+            self._refill(bucket)
+
+            return {
+                "bucket_id": bucket.bucket_id,
+                "capacity": bucket.capacity,
+                "refill_rate": bucket.refill_rate,
+                "tokens": bucket.tokens
+            }
 
 
 class RateLimitTokenBucketAction(BaseAction):
@@ -86,10 +98,10 @@ class RateLimitTokenBucketAction(BaseAction):
 
     def __init__(self):
         super().__init__("rate_limit_token_bucket")
-        self._manager = TokenBucketManager()
+        self._manager = RateLimitManager()
 
     def execute(self, params: Dict) -> ActionResult:
-        """Execute token bucket action."""
+        """Execute rate limit action."""
         try:
             operation = params.get("operation", "create")
 
@@ -97,8 +109,8 @@ class RateLimitTokenBucketAction(BaseAction):
                 return self._create(params)
             elif operation == "consume":
                 return self._consume(params)
-            elif operation == "available":
-                return self._available(params)
+            elif operation == "info":
+                return self._info(params)
             else:
                 return ActionResult(success=False, message=f"Unknown: {operation}")
 
@@ -107,25 +119,24 @@ class RateLimitTokenBucketAction(BaseAction):
 
     def _create(self, params: Dict) -> ActionResult:
         """Create bucket."""
-        self._manager.create_bucket(
-            name=params.get("name", ""),
+        success = self._manager.create_bucket(
+            bucket_id=params.get("bucket_id", ""),
             capacity=params.get("capacity", 100),
             refill_rate=params.get("refill_rate", 10)
         )
-        return ActionResult(success=True)
+        return ActionResult(success=success)
 
     def _consume(self, params: Dict) -> ActionResult:
         """Consume tokens."""
-        allowed, remaining = self._manager.consume(
-            params.get("name", ""),
+        allowed = self._manager.consume(
+            params.get("bucket_id", ""),
             params.get("tokens", 1)
         )
-        return ActionResult(success=True, data={
-            "allowed": allowed,
-            "remaining": remaining
-        })
+        return ActionResult(success=True, data={"allowed": allowed})
 
-    def _available(self, params: Dict) -> ActionResult:
-        """Get available tokens."""
-        available = self._manager.get_available(params.get("name", ""))
-        return ActionResult(success=True, data={"available": available})
+    def _info(self, params: Dict) -> ActionResult:
+        """Get bucket info."""
+        info = self._manager.get_bucket_info(params.get("bucket_id", ""))
+        if info is None:
+            return ActionResult(success=False, message="Bucket not found")
+        return ActionResult(success=True, data=info)
