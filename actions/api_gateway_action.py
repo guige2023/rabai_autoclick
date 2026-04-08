@@ -1,436 +1,485 @@
-"""API gateway action module for RabAI AutoClick.
+"""
+API Gateway Action.
 
-Provides API gateway operations:
-- APIGateway: Simple API gateway
-- RequestRouter: Route requests to backends
-- RequestValidator: Validate API requests
-- ResponseFormatter: Format API responses
-- MiddlewareChain: API middleware chain
-- RateLimitMiddleware: Rate limiting middleware
+Provides API gateway functionality.
+Supports:
+- Request routing
+- Protocol translation
+- Rate limiting
+- Request/response transformation
+- Circuit breaker
 """
 
-import time
-import json
-import hashlib
-import hmac
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Any, Callable, Awaitable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
+import asyncio
+import logging
+import json
+import time
+import hashlib
+import threading
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class HTTPMethod(Enum):
-    """HTTP methods."""
-    GET = "GET"
-    POST = "POST"
-    PUT = "PUT"
-    DELETE = "DELETE"
-    PATCH = "PATCH"
-    OPTIONS = "OPTIONS"
-    HEAD = "HEAD"
+class CircuitState(Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
 
 
 @dataclass
 class Route:
-    """API route definition."""
-    path: str
-    method: HTTPMethod
-    handler: Callable
-    middleware: List[Callable] = field(default_factory=list)
-    auth_required: bool = False
-    rate_limit: Optional[float] = None
-    validators: List[Callable] = None
+    """Route configuration."""
+    path_pattern: str
+    upstream_url: str
+    methods: List[str] = field(default_factory=lambda: ["GET"])
+    timeout: float = 30.0
+    retry_count: int = 0
+    strip_path: bool = False
+    headers: Dict[str, str] = field(default_factory=dict)
+    rate_limit: Optional[int] = None
 
 
 @dataclass
-class APIRequest:
-    """API request."""
+class CircuitBreakerConfig:
+    """Circuit breaker configuration."""
+    failure_threshold: int = 5
+    success_threshold: int = 2
+    timeout: float = 60.0
+    half_open_requests: int = 3
+
+
+@dataclass
+class GatewayRequest:
+    """Gateway request context."""
     method: str
     path: str
     headers: Dict[str, str]
     query_params: Dict[str, str]
-    body: Any
-    source_ip: str = ""
-    user_agent: str = ""
+    body: Optional[bytes] = None
+    client_ip: str = ""
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    request_id: str = ""
+    
+    def get_header(self, name: str, default: str = "") -> str:
+        """Get header value."""
+        return self.headers.get(name.lower(), default)
 
 
 @dataclass
-class APIResponse:
-    """API response."""
+class GatewayResponse:
+    """Gateway response context."""
     status_code: int
     headers: Dict[str, str] = field(default_factory=dict)
-    body: Any = None
+    body: Optional[bytes] = None
     error: Optional[str] = None
+    from_cache: bool = False
+    duration_ms: float = 0.0
 
 
-class RequestValidator:
-    """Validate API requests."""
-
-    def __init__(self):
-        self._validators: Dict[str, Callable] = {}
-
-    def register(self, name: str, validator: Callable[[APIRequest], Tuple[bool, str]]):
-        """Register a validator."""
-        self._validators[name] = validator
-
-    def validate(self, request: APIRequest, validator_names: List[str]) -> Tuple[bool, str]:
-        """Validate request with validators."""
-        for name in validator_names:
-            if name not in self._validators:
-                continue
-            valid, message = self._validators[name](request)
-            if not valid:
-                return False, message
-        return True, ""
+@dataclass
+class RateLimitEntry:
+    """Rate limit tracking entry."""
+    count: int = 0
+    window_start: datetime = field(default_factory=datetime.utcnow)
 
 
-class ResponseFormatter:
-    """Format API responses."""
-
-    @staticmethod
-    def format_success(
-        data: Any,
-        message: str = "Success",
-        meta: Optional[Dict] = None,
-        status_code: int = 200,
-    ) -> APIResponse:
-        """Format success response."""
-        body = {
-            "success": True,
-            "message": message,
-            "data": data,
-        }
-        if meta:
-            body["meta"] = meta
-
-        return APIResponse(
-            status_code=status_code,
-            headers={"Content-Type": "application/json"},
-            body=body,
-        )
-
-    @staticmethod
-    def format_error(
-        error: str,
-        status_code: int = 400,
-        details: Optional[Dict] = None,
-    ) -> APIResponse:
-        """Format error response."""
-        body = {
-            "success": False,
-            "error": error,
-        }
-        if details:
-            body["details"] = details
-
-        return APIResponse(
-            status_code=status_code,
-            headers={"Content-Type": "application/json"},
-            body=body,
-        )
-
-    @staticmethod
-    def format_paginated(
-        data: List,
-        page: int,
-        page_size: int,
-        total: int,
-    ) -> APIResponse:
-        """Format paginated response."""
-        total_pages = (total + page_size - 1) // page_size
-
-        return APIResponse(
-            status_code=200,
-            headers={"Content-Type": "application/json"},
-            body={
-                "success": True,
-                "data": data,
-                "pagination": {
-                    "page": page,
-                    "page_size": page_size,
-                    "total": total,
-                    "total_pages": total_pages,
-                    "has_next": page < total_pages,
-                    "has_prev": page > 1,
-                },
-            },
-        )
+class CircuitBreaker:
+    """Circuit breaker for upstream services."""
+    
+    def __init__(self, name: str, config: CircuitBreakerConfig):
+        self.name = name
+        self.config = config
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.next_attempt_time: Optional[datetime] = None
+        self._lock = threading.RLock()
+    
+    def record_success(self) -> None:
+        """Record a successful request."""
+        with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.config.success_threshold:
+                    self._transition_to(CircuitState.CLOSED)
+            else:
+                self.failure_count = 0
+    
+    def record_failure(self) -> None:
+        """Record a failed request."""
+        with self._lock:
+            self.failure_count += 1
+            
+            if self.state == CircuitState.HALF_OPEN:
+                self._transition_to(CircuitState.OPEN)
+            elif self.failure_count >= self.config.failure_threshold:
+                self._transition_to(CircuitState.OPEN)
+    
+    def can_attempt(self) -> bool:
+        """Check if a request can be attempted."""
+        with self._lock:
+            if self.state == CircuitState.CLOSED:
+                return True
+            
+            if self.state == CircuitState.OPEN:
+                if self.next_attempt_time and datetime.utcnow() >= self.next_attempt_time:
+                    self._transition_to(CircuitState.HALF_OPEN)
+                    return True
+                return False
+            
+            return True  # HALF_OPEN
+    
+    def _transition_to(self, new_state: CircuitState) -> None:
+        """Transition to a new state."""
+        logger.info(f"Circuit breaker '{self.name}': {self.state.value} -> {new_state.value}")
+        self.state = new_state
+        
+        if new_state == CircuitState.OPEN:
+            self.next_attempt_time = datetime.utcnow() + timedelta(seconds=self.config.timeout)
+            self.failure_count = 0
+        elif new_state == CircuitState.HALF_OPEN:
+            self.success_count = 0
+        elif new_state == CircuitState.CLOSED:
+            self.failure_count = 0
+            self.success_count = 0
+            self.next_attempt_time = None
 
 
-class MiddlewareChain:
-    """Middleware chain for request processing."""
-
-    def __init__(self):
-        self._middleware: List[Callable] = []
-
-    def use(self, middleware: Callable) -> "MiddlewareChain":
-        """Add middleware to chain."""
-        self._middleware.append(middleware)
-        return self
-
-    def process(self, request: APIRequest, handler: Callable) -> APIResponse:
-        """Process request through middleware chain."""
-        def chain(index: int) -> APIResponse:
-            if index >= len(self._middleware):
-                return handler(request)
-
-            middleware = self._middleware[index]
-
-            def next_handler(req: APIRequest) -> APIResponse:
-                return chain(index + 1)
-
-            return middleware(req, next_handler)
-
-        return chain(0)
-
-
-class RequestRouter:
-    """Route requests to handlers."""
-
-    def __init__(self):
-        self._routes: Dict[Tuple[str, str], Route] = {}
-        self._wildcard_routes: List[Route] = []
-
-    def register(
+class ApiGatewayAction:
+    """
+    API Gateway Action.
+    
+    Provides API gateway functionality with support for:
+    - Request routing
+    - Circuit breaker pattern
+    - Rate limiting
+    - Request/response transformation
+    - Caching
+    """
+    
+    def __init__(
         self,
-        path: str,
-        method: str,
-        handler: Callable,
-        middleware: Optional[List[Callable]] = None,
-        auth_required: bool = False,
-        rate_limit: Optional[float] = None,
-    ) -> bool:
-        """Register a route."""
-        try:
-            method_enum = HTTPMethod[method.upper()]
-        except KeyError:
-            return False
-
+        circuit_breaker_config: Optional[CircuitBreakerConfig] = None
+    ):
+        """
+        Initialize the API Gateway Action.
+        
+        Args:
+            circuit_breaker_config: Circuit breaker configuration
+        """
+        self.circuit_breaker_config = circuit_breaker_config or CircuitBreakerConfig()
+        self.routes: List[Route] = []
+        self.circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self.rate_limits: Dict[str, RateLimitEntry] = {}
+        self.cache: Dict[str, tuple] = {}  # (response, expiry)
+        self._cache_lock = threading.RLock()
+        self._rate_limit_lock = threading.RLock()
+        self.request_transformers: List[Callable[[GatewayRequest], GatewayRequest]] = []
+        self.response_transformers: List[Callable[[GatewayResponse], GatewayResponse]] = []
+    
+    def add_route(
+        self,
+        path_pattern: str,
+        upstream_url: str,
+        methods: Optional[List[str]] = None,
+        timeout: float = 30.0,
+        retry_count: int = 0,
+        strip_path: bool = False,
+        headers: Optional[Dict[str, str]] = None,
+        rate_limit: Optional[int] = None
+    ) -> "ApiGatewayAction":
+        """
+        Add a route.
+        
+        Args:
+            path_pattern: URL path pattern to match
+            upstream_url: Upstream service URL
+            methods: Allowed HTTP methods
+            timeout: Request timeout in seconds
+            retry_count: Number of retries
+            strip_path: Whether to strip the matched path prefix
+            headers: Headers to add/modify
+            rate_limit: Rate limit per window
+        
+        Returns:
+            Self for chaining
+        """
         route = Route(
-            path=path,
-            method=method_enum,
-            handler=handler,
-            middleware=middleware or [],
-            auth_required=auth_required,
-            rate_limit=rate_limit,
+            path_pattern=path_pattern,
+            upstream_url=upstream_url,
+            methods=methods or ["GET"],
+            timeout=timeout,
+            retry_count=retry_count,
+            strip_path=strip_path,
+            headers=headers or {},
+            rate_limit=rate_limit
         )
-
-        if "*" in path:
-            self._wildcard_routes.append(route)
-        else:
-            self._routes[(path, method.upper())] = route
-
-        return True
-
-    def route(self, request: APIRequest) -> Optional[Route]:
-        """Find route for request."""
-        key = (request.path, request.method.upper())
-        if key in self._routes:
-            return self._routes[key]
-
-        for route in self._wildcard_routes:
-            if self._match_path(route.path, request.path):
+        self.routes.append(route)
+        
+        # Create circuit breaker for this upstream
+        cb_name = self._get_upstream_name(upstream_url)
+        self.circuit_breakers[cb_name] = CircuitBreaker(cb_name, self.circuit_breaker_config)
+        
+        logger.info(f"Added route: {path_pattern} -> {upstream_url}")
+        return self
+    
+    def add_request_transformer(
+        self,
+        transformer: Callable[[GatewayRequest], GatewayRequest]
+    ) -> "ApiGatewayAction":
+        """Add a request transformer."""
+        self.request_transformers.append(transformer)
+        return self
+    
+    def add_response_transformer(
+        self,
+        transformer: Callable[[GatewayResponse], GatewayResponse]
+    ) -> "ApiGatewayAction":
+        """Add a response transformer."""
+        self.response_transformers.append(transformer)
+        return self
+    
+    async def handle_request(self, request: GatewayRequest) -> GatewayResponse:
+        """
+        Handle an incoming request.
+        
+        Args:
+            request: Gateway request
+        
+        Returns:
+            Gateway response
+        """
+        start_time = time.time()
+        request.request_id = request.request_id or self._generate_request_id()
+        
+        # Find matching route
+        route = self._match_route(request)
+        if not route:
+            return GatewayResponse(
+                status_code=404,
+                body=b'{"error": "Route not found"}',
+                duration_ms=(time.time() - start_time) * 1000
+            )
+        
+        # Check rate limit
+        if route.rate_limit:
+            rate_result = self._check_rate_limit(request, route.rate_limit)
+            if not rate_result:
+                return GatewayResponse(
+                    status_code=429,
+                    body=b'{"error": "Rate limit exceeded"}',
+                    duration_ms=(time.time() - start_time) * 1000
+                )
+        
+        # Apply request transformers
+        for transformer in self.request_transformers:
+            request = transformer(request)
+        
+        # Get circuit breaker
+        cb_name = self._get_upstream_name(route.upstream_url)
+        cb = self.circuit_breakers.get(cb_name)
+        
+        # Check circuit breaker
+        if cb and not cb.can_attempt():
+            return GatewayResponse(
+                status_code=503,
+                body=b'{"error": "Service unavailable"}',
+                duration_ms=(time.time() - start_time) * 1000
+            )
+        
+        # Check cache
+        cache_key = self._get_cache_key(request, route)
+        cached_response = self._get_from_cache(cache_key)
+        if cached_response:
+            cached_response.from_cache = True
+            return cached_response
+        
+        # Forward request
+        try:
+            response = await self._forward_request(request, route)
+            
+            if cb:
+                cb.record_success()
+            
+            # Cache response
+            if response.status_code == 200:
+                self._put_in_cache(cache_key, response)
+            
+            # Apply response transformers
+            for transformer in self.response_transformers:
+                response = transformer(response)
+            
+            return response
+        
+        except Exception as e:
+            logger.error(f"Request failed: {e}")
+            
+            if cb:
+                cb.record_failure()
+            
+            return GatewayResponse(
+                status_code=502,
+                body=json.dumps({"error": str(e)}).encode(),
+                error=str(e),
+                duration_ms=(time.time() - start_time) * 1000
+            )
+    
+    async def _forward_request(
+        self,
+        request: GatewayRequest,
+        route: Route
+    ) -> GatewayResponse:
+        """Forward request to upstream."""
+        # This is a placeholder - would use httpx/aiohttp in production
+        await asyncio.sleep(0.01)  # Simulate network delay
+        
+        return GatewayResponse(
+            status_code=200,
+            body=b'{"message": "OK"}',
+            duration_ms=10.0
+        )
+    
+    def _match_route(self, request: GatewayRequest) -> Optional[Route]:
+        """Match request to a route."""
+        for route in self.routes:
+            if request.method not in route.methods:
+                continue
+            
+            # Simple path matching (would use proper regex in production)
+            if self._path_matches(request.path, route.path_pattern):
                 return route
-
+        
         return None
-
-    def _match_path(self, pattern: str, path: str) -> bool:
-        """Match path against pattern."""
+    
+    def _path_matches(self, path: str, pattern: str) -> bool:
+        """Check if path matches pattern."""
+        # Simplified - would support wildcards and regex in production
         if pattern.endswith("*"):
             return path.startswith(pattern[:-1])
-        return pattern == path
-
-
-class APIGateway:
-    """Simple API gateway."""
-
-    def __init__(self):
-        self.router = RequestRouter()
-        self.validator = RequestValidator()
-        self.middleware_chain = MiddlewareChain()
-        self._rate_limiters: Dict[str, List[float]] = {}
-
-    def handle(self, request: APIRequest) -> APIResponse:
-        """Handle incoming request."""
-        route = self.router.route(request)
-
-        if not route:
-            return ResponseFormatter.format_error("Not Found", 404)
-
-        if route.auth_required:
-            if not self._check_auth(request):
-                return ResponseFormatter.format_error("Unauthorized", 401)
-
-        if route.rate_limit:
-            if not self._check_rate_limit(request.source_ip, route.rate_limit):
-                return ResponseFormatter.format_error("Rate Limited", 429)
-
-        def handler(req: APIRequest) -> APIResponse:
-            try:
-                result = route.handler(req)
-                if isinstance(result, APIResponse):
-                    return result
-                return ResponseFormatter.format_success(result)
-            except Exception as e:
-                return ResponseFormatter.format_error(str(e), 500)
-
-        if route.middleware:
-            def final_handler(req: APIRequest) -> APIResponse:
-                return handler(req)
-
-            current_handler = final_handler
-            for mw in reversed(route.middleware):
-                next_h = current_handler
-                def wrapped(req, next_handler=next_h):
-                    return mw(req, next_handler)
-                current_handler = wrapped
-
-            return current_handler(request)
-        else:
-            return handler(request)
-
-    def _check_auth(self, request: APIRequest) -> bool:
-        """Check request authentication."""
-        auth_header = request.headers.get("Authorization", "")
-        return bool(auth_header)
-
-    def _check_rate_limit(self, ip: str, limit: float) -> bool:
-        """Check rate limit for IP."""
-        now = time.time()
-        if ip not in self._rate_limiters:
-            self._rate_limiters[ip] = []
-
-        self._rate_limiters[ip] = [t for t in self._rate_limiters[ip] if now - t < 1.0]
-
-        if len(self._rate_limiters[ip]) >= limit:
-            return False
-
-        self._rate_limiters[ip].append(now)
-        return True
-
-
-class APIGatewayAction(BaseAction):
-    """API gateway action."""
-    action_type = "api_gateway"
-    display_name = "API网关"
-    description = "API网关和路由"
-
-    def __init__(self):
-        super().__init__()
-        self._gateways: Dict[str, APIGateway] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "route")
-            gateway_name = params.get("gateway", "default")
-
-            if gateway_name not in self._gateways:
-                self._gateways[gateway_name] = APIGateway()
-
-            gateway = self._gateways[gateway_name]
-
-            if operation == "register":
-                return self._register_route(gateway, params)
-            elif operation == "route":
-                return self._route_request(gateway, params)
-            elif operation == "validate":
-                return self._validate_request(gateway, params)
-            elif operation == "list":
-                return self._list_routes(gateway)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Gateway error: {str(e)}")
-
-    def _register_route(self, gateway: APIGateway, params: Dict) -> ActionResult:
-        """Register a route."""
-        path = params.get("path")
-        method = params.get("method", "GET")
-        handler = params.get("handler")
-        middleware = params.get("middleware", [])
-        auth_required = params.get("auth_required", False)
-        rate_limit = params.get("rate_limit")
-
-        if not path or not handler:
-            return ActionResult(success=False, message="path and handler are required")
-
-        success = gateway.router.register(
-            path=path,
-            method=method,
-            handler=handler,
-            middleware=middleware,
-            auth_required=auth_required,
-            rate_limit=rate_limit,
-        )
-
-        return ActionResult(
-            success=success,
-            message=f"Route {method} {path} registered" if success else "Failed to register route",
-        )
-
-    def _route_request(self, gateway: APIGateway, params: Dict) -> ActionResult:
-        """Route a request."""
-        request = APIRequest(
-            method=params.get("method", "GET"),
-            path=params.get("path", "/"),
-            headers=params.get("headers", {}),
-            query_params=params.get("query_params", {}),
-            body=params.get("body"),
-            source_ip=params.get("source_ip", "127.0.0.1"),
-            user_agent=params.get("user_agent", ""),
-        )
-
-        response = gateway.handle(request)
-
-        return ActionResult(
-            success=response.status_code < 400,
-            message=f"HTTP {response.status_code}",
-            data={
-                "status_code": response.status_code,
-                "headers": response.headers,
-                "body": response.body,
-                "error": response.error,
+        return path == pattern or path.startswith(pattern.rstrip("/") + "/")
+    
+    def _check_rate_limit(self, request: GatewayRequest, limit: int) -> bool:
+        """Check rate limit for request."""
+        key = f"{request.client_ip}:{request.get_header('authorization', 'anonymous')}"
+        
+        with self._rate_limit_lock:
+            now = datetime.utcnow()
+            window = timedelta(seconds=60)
+            
+            if key not in self.rate_limits:
+                self.rate_limits[key] = RateLimitEntry()
+            
+            entry = self.rate_limits[key]
+            
+            # Reset window if expired
+            if now - entry.window_start > window:
+                entry.count = 0
+                entry.window_start = now
+            
+            # Check limit
+            if entry.count >= limit:
+                return False
+            
+            entry.count += 1
+            return True
+    
+    def _get_cache_key(self, request: GatewayRequest, route: Route) -> str:
+        """Generate cache key for request."""
+        data = f"{route.path_pattern}:{request.path}:{request.query_params}"
+        return hashlib.md5(data.encode()).hexdigest()
+    
+    def _get_from_cache(self, key: str) -> Optional[GatewayResponse]:
+        """Get response from cache."""
+        with self._cache_lock:
+            if key in self.cache:
+                response, expiry = self.cache[key]
+                if datetime.utcnow() < expiry:
+                    return response
+                del self.cache[key]
+        return None
+    
+    def _put_in_cache(self, key: str, response: GatewayResponse, ttl: int = 60) -> None:
+        """Put response in cache."""
+        with self._cache_lock:
+            self.cache[key] = (
+                response,
+                datetime.utcnow() + timedelta(seconds=ttl)
+            )
+    
+    def _get_upstream_name(self, url: str) -> str:
+        """Get upstream name from URL."""
+        return url.split("://")[1].split("/")[0] if "://" in url else url
+    
+    def _generate_request_id(self) -> str:
+        """Generate unique request ID."""
+        return f"req-{int(time.time() * 1000)}-{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get gateway statistics."""
+        with self._cache_lock:
+            cache_size = len(self.cache)
+        
+        return {
+            "routes_count": len(self.routes),
+            "circuit_breakers": {
+                name: {
+                    "state": cb.state.value,
+                    "failure_count": cb.failure_count
+                }
+                for name, cb in self.circuit_breakers.items()
             },
-        )
+            "cache_size": cache_size,
+            "rate_limits_active": len(self.rate_limits)
+        }
 
-    def _validate_request(self, gateway: APIGateway, params: Dict) -> ActionResult:
-        """Validate a request."""
-        request = APIRequest(
-            method=params.get("method", "GET"),
-            path=params.get("path", "/"),
-            headers=params.get("headers", {}),
-            query_params=params.get("query_params", {}),
-            body=params.get("body"),
-        )
 
-        validators = params.get("validators", [])
-        valid, message = gateway.validator.validate(request, validators)
-
-        return ActionResult(
-            success=valid,
-            message=message if not valid else "Valid",
-        )
-
-    def _list_routes(self, gateway: APIGateway) -> ActionResult:
-        """List all routes."""
-        routes = []
-        for (path, method), route in gateway.router._routes.items():
-            routes.append({
-                "path": path,
-                "method": method,
-                "auth_required": route.auth_required,
-                "rate_limit": route.rate_limit,
-            })
-
-        return ActionResult(
-            success=True,
-            message=f"{len(routes)} routes",
-            data={"routes": routes},
-        )
+# Standalone execution
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    
+    # Create gateway
+    gateway = ApiGatewayAction()
+    
+    # Add routes
+    gateway.add_route(
+        "/api/users/*",
+        "http://user-service:8001",
+        methods=["GET", "POST"],
+        timeout=10.0,
+        rate_limit=100
+    )
+    gateway.add_route(
+        "/api/orders/*",
+        "http://order-service:8002",
+        methods=["GET", "POST", "PUT", "DELETE"],
+        timeout=30.0,
+        rate_limit=50
+    )
+    
+    # Add transformers
+    gateway.add_request_transformer(
+        lambda req: req  # Add auth headers, etc.
+    )
+    
+    async def main():
+        # Simulate requests
+        for i in range(5):
+            request = GatewayRequest(
+                method="GET",
+                path="/api/users/123",
+                headers={"host": "api.example.com"},
+                query_params={},
+                client_ip="192.168.1.1"
+            )
+            
+            response = await gateway.handle_request(request)
+            print(f"Request {i}: {response.status_code} ({response.duration_ms:.1f}ms)")
+        
+        print(f"\nStats: {json.dumps(gateway.get_stats(), indent=2)}")
+    
+    asyncio.run(main())
