@@ -1,613 +1,403 @@
 """
-Redis operations actions.
+Redis Action Module.
+
+Provides Redis client capabilities for caching, pub/sub, and data structures.
 """
-from __future__ import annotations
 
-import redis
-from typing import Dict, Any, Optional, List, Union
-
-
-def create_redis_client(
-    host: str = 'localhost',
-    port: int = 6379,
-    db: int = 0,
-    password: Optional[str] = None,
-    decode_responses: bool = True
-) -> redis.Redis:
-    """
-    Create a Redis client.
-
-    Args:
-        host: Redis host.
-        port: Redis port.
-        db: Database number.
-        password: Redis password.
-        decode_responses: Decode responses to strings.
-
-    Returns:
-        Redis client.
-    """
-    return redis.Redis(
-        host=host,
-        port=port,
-        db=db,
-        password=password,
-        decode_responses=decode_responses
-    )
-
-
-def ping_redis(client: redis.Redis) -> bool:
-    """
-    Ping Redis server.
-
-    Args:
-        client: Redis client.
-
-    Returns:
-        True if connected.
-    """
-    try:
-        return client.ping()
-    except redis.RedisError:
-        return False
-
-
-def get_value(client: redis.Redis, key: str) -> Optional[str]:
-    """
-    Get a value from Redis.
-
-    Args:
-        client: Redis client.
-        key: Key name.
-
-    Returns:
-        Value or None.
-    """
-    return client.get(key)
-
-
-def set_value(
-    client: redis.Redis,
-    key: str,
-    value: str,
-    expire: Optional[int] = None
-) -> bool:
-    """
-    Set a value in Redis.
-
-    Args:
-        client: Redis client.
-        key: Key name.
-        value: Value to set.
-        expire: Expiration in seconds.
-
-    Returns:
-        True if successful.
-    """
-    return client.set(key, value, ex=expire)
-
-
-def delete_key(client: redis.Redis, key: str) -> bool:
-    """
-    Delete a key.
-
-    Args:
-        client: Redis client.
-        key: Key to delete.
-
-    Returns:
-        True if key was deleted.
-    """
-    return bool(client.delete(key))
-
-
-def key_exists(client: redis.Redis, key: str) -> bool:
-    """
-    Check if a key exists.
-
-    Args:
-        client: Redis client.
-        key: Key to check.
-
-    Returns:
-        True if key exists.
-    """
-    return bool(client.exists(key))
-
-
-def get_ttl(client: redis.Redis, key: str) -> int:
-    """
-    Get TTL of a key.
-
-    Args:
-        client: Redis client.
-        key: Key name.
-
-    Returns:
-        TTL in seconds, -1 if no expiry, -2 if key doesn't exist.
-    """
-    return client.ttl(key)
-
-
-def expire_key(client: redis.Redis, key: str, seconds: int) -> bool:
-    """
-    Set expiration on a key.
-
-    Args:
-        client: Redis client.
-        key: Key name.
-        seconds: Expiration in seconds.
-
-    Returns:
-        True if expiration was set.
-    """
-    return client.expire(key, seconds)
-
-
-def increment(client: redis.Redis, key: str, amount: int = 1) -> int:
-    """
-    Increment a value.
-
-    Args:
-        client: Redis client.
-        key: Key name.
-        amount: Amount to increment.
-
-    Returns:
-        New value.
-    """
-    return client.incrby(key, amount)
-
-
-def decrement(client: redis.Redis, key: str, amount: int = 1) -> int:
-    """
-    Decrement a value.
-
-    Args:
-        client: Redis client.
-        key: Key name.
-        amount: Amount to decrement.
-
-    Returns:
-        New value.
-    """
-    return client.decrby(key, amount)
-
-
-def get_hash(client: redis.Redis, key: str) -> Dict[str, str]:
-    """
-    Get all fields and values of a hash.
-
-    Args:
-        client: Redis client.
-        key: Hash key.
-
-    Returns:
-        Dictionary of field-value pairs.
-    """
-    return client.hgetall(key)
-
-
-def set_hash_field(
-    client: redis.Redis,
-    key: str,
-    field: str,
-    value: str
-) -> bool:
-    """
-    Set a field in a hash.
-
-    Args:
-        client: Redis client.
-        key: Hash key.
-        field: Field name.
-        value: Field value.
-
-    Returns:
-        True if set.
-    """
-    return bool(client.hset(key, field, value))
-
-
-def get_hash_field(client: redis.Redis, key: str, field: str) -> Optional[str]:
-    """
-    Get a field from a hash.
-
-    Args:
-        client: Redis client.
-        key: Hash key.
-        field: Field name.
-
-    Returns:
-        Field value or None.
-    """
-    return client.hget(key, field)
-
-
-def delete_hash_fields(client: redis.Redis, key: str, fields: List[str]) -> int:
-    """
-    Delete fields from a hash.
-
-    Args:
-        client: Redis client.
-        key: Hash key.
-        fields: List of field names.
-
-    Returns:
-        Number of fields deleted.
-    """
-    return client.hdel(key, *fields)
-
-
-def get_list(client: redis.Redis, key: str, start: int = 0, end: int = -1) -> List[str]:
-    """
-    Get list items.
-
-    Args:
-        client: Redis client.
-        key: List key.
-        start: Start index.
-        end: End index (-1 for all).
-
-    Returns:
-        List of items.
-    """
-    return client.lrange(key, start, end)
-
-
-def push_to_list(
-    client: redis.Redis,
-    key: str,
-    value: str,
-    left: bool = False
-) -> int:
-    """
-    Push to a list.
-
-    Args:
-        client: Redis client.
-        key: List key.
-        value: Value to push.
-        left: Push to left (front) or right (back).
-
-    Returns:
-        List length after push.
-    """
-    if left:
-        return client.lpush(key, value)
-    return client.rpush(key, value)
-
-
-def pop_from_list(client: redis.Redis, key: str, left: bool = False) -> Optional[str]:
-    """
-    Pop from a list.
-
-    Args:
-        client: Redis client.
-        key: List key.
-        left: Pop from left (front) or right (back).
-
-    Returns:
-        Popped value or None.
-    """
-    if left:
-        return client.lpop(key)
-    return client.rpop(key)
-
-
-def get_set(client: redis.Redis, key: str) -> set:
-    """
-    Get all members of a set.
-
-    Args:
-        client: Redis client.
-        key: Set key.
-
-    Returns:
-        Set of members.
-    """
-    return client.smembers(key)
-
-
-def add_to_set(client: redis.Redis, key: str, *values: str) -> int:
-    """
-    Add members to a set.
-
-    Args:
-        client: Redis client.
-        key: Set key.
-        values: Values to add.
-
-    Returns:
-        Number of members added.
-    """
-    return client.sadd(key, *values)
-
-
-def is_set_member(client: redis.Redis, key: str, value: str) -> bool:
-    """
-    Check if value is a member of set.
-
-    Args:
-        client: Redis client.
-        key: Set key.
-        value: Value to check.
-
-    Returns:
-        True if member.
-    """
-    return client.sismember(key, value)
-
-
-def remove_from_set(client: redis.Redis, key: str, *values: str) -> int:
-    """
-    Remove members from a set.
-
-    Args:
-        client: Redis client.
-        key: Set key.
-        values: Values to remove.
-
-    Returns:
-        Number of members removed.
-    """
-    return client.srem(key, *values)
-
-
-def get_sorted_set(client: redis.Redis, key: str, start: int = 0, end: int = -1) -> List:
-    """
-    Get sorted set range with scores.
-
-    Args:
-        client: Redis client.
-        key: Sorted set key.
-        start: Start index.
-        end: End index (-1 for all).
-
-    Returns:
-        List of (member, score) tuples.
-    """
-    return client.zrange(key, start, end, withscores=True)
-
-
-def add_to_sorted_set(
-    client: redis.Redis,
-    key: str,
-    mapping: Dict[str, float]
-) -> int:
-    """
-    Add members to sorted set with scores.
-
-    Args:
-        client: Redis client.
-        key: Sorted set key.
-        mapping: Dictionary of member -> score.
-
-    Returns:
-        Number of members added.
-    """
-    return client.zadd(key, mapping)
-
-
-def get_sorted_set_rank(client: redis.Redis, key: str, member: str) -> Optional[int]:
-    """
-    Get rank of member in sorted set (ascending).
-
-    Args:
-        client: Redis client.
-        key: Sorted set key.
-        member: Member name.
-
-    Returns:
-        Rank (0-indexed) or None.
-    """
-    return client.zrank(key, member)
-
-
-def get_sorted_set_score(client: redis.Redis, key: str, member: str) -> Optional[float]:
-    """
-    Get score of member in sorted set.
-
-    Args:
-        client: Redis client.
-        key: Sorted set key.
-        member: Member name.
-
-    Returns:
-        Score or None.
-    """
-    return client.zscore(key, member)
-
-
-def publish_message(client: redis.Redis, channel: str, message: str) -> int:
-    """
-    Publish a message to a channel.
-
-    Args:
-        client: Redis client.
-        channel: Channel name.
-        message: Message to publish.
-
-    Returns:
-        Number of subscribers received.
-    """
-    return client.publish(channel, message)
-
-
-def get_all_keys(client: redis.Redis, pattern: str = '*') -> List[str]:
-    """
-    Get all keys matching pattern.
-
-    Args:
-        client: Redis client.
-        pattern: Key pattern.
-
-    Returns:
-        List of keys.
-    """
-    return client.keys(pattern)
-
-
-def get_database_info(client: redis.Redis) -> Dict[str, Any]:
-    """
-    Get Redis database info.
-
-    Args:
-        client: Redis client.
-
-    Returns:
-        Database info.
-    """
-    return client.info()
-
-
-def flush_database(client: redis.Redis, db: int = 0) -> bool:
-    """
-    Flush a database.
-
-    Args:
-        client: Redis client.
-        db: Database number.
-
-    Returns:
-        True if flushed.
-    """
-    return client.flushdb()
-
-
-def test_connection(
-    host: str = 'localhost',
-    port: int = 6379,
+from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from enum import Enum
+import time
+import json
+import logging
+import threading
+
+logger = logging.getLogger(__name__)
+
+
+class RedisType(Enum):
+    """Redis data types."""
+    STRING = "string"
+    LIST = "list"
+    SET = "set"
+    ZSET = "zset"
+    HASH = "hash"
+
+
+@dataclass
+class RedisConfig:
+    """Redis client configuration."""
+    host: str = "localhost"
+    port: int = 6379
+    db: int = 0
     password: Optional[str] = None
-) -> Dict[str, Any]:
+    socket_timeout: float = 5.0
+    socket_connect_timeout: float = 5.0
+    max_connections: int = 50
+    decode_responses: bool = True
+    ssl: bool = False
+
+
+@dataclass
+class CacheEntry:
+    """Cache entry with metadata."""
+    key: str
+    value: Any
+    ttl: Optional[int] = None
+    created_at: float = field(default_factory=time.time)
+
+
+class RedisAction:
     """
-    Test Redis connection.
-
-    Args:
-        host: Redis host.
-        port: Redis port.
-        password: Redis password.
-
-    Returns:
-        Test result.
+    Redis action handler.
+    
+    Provides Redis client for caching, pub/sub, and data structures.
+    
+    Example:
+        redis = RedisAction(config=cfg)
+        redis.connect()
+        redis.set("key", "value")
+        redis.get("key")
     """
-    try:
-        client = create_redis_client(
-            host=host,
-            port=port,
-            password=password
-        )
-
-        if client.ping():
-            info = client.info()
-            return {
-                'success': True,
-                'host': host,
-                'port': port,
-                'version': info.get('redis_version'),
-            }
-        return {'success': False, 'error': 'Ping failed'}
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
-
-
-def cache_set(
-    client: redis.Redis,
-    key: str,
-    value: str,
-    ttl: int = 300
-) -> bool:
-    """
-    Set a cached value with TTL.
-
-    Args:
-        client: Redis client.
-        key: Cache key.
-        value: Value to cache.
-        ttl: Time to live in seconds.
-
-    Returns:
-        True if set.
-    """
-    return client.setex(key, ttl, value)
-
-
-def cache_get(client: redis.Redis, key: str) -> Optional[str]:
-    """
-    Get a cached value.
-
-    Args:
-        client: Redis client.
-        key: Cache key.
-
-    Returns:
-        Cached value or None.
-    """
-    return client.get(key)
-
-
-def cache_delete(client: redis.Redis, key: str) -> bool:
-    """
-    Delete a cached value.
-
-    Args:
-        client: Redis client.
-        key: Cache key.
-
-    Returns:
-        True if deleted.
-    """
-    return bool(client.delete(key))
-
-
-def increment_counter(client: redis.Redis, key: str, ttl: Optional[int] = None) -> int:
-    """
-    Increment a counter, creating it if needed.
-
-    Args:
-        client: Redis client.
-        key: Counter key.
-        ttl: Optional TTL.
-
-    Returns:
-        New counter value.
-    """
-    pipe = client.pipeline()
-    pipe.incr(key)
-    if ttl:
-        pipe.expire(key, ttl)
-    results = pipe.execute()
-    return results[0]
-
-
-def get_or_set_lock(
-    client: redis.Redis,
-    lock_name: str,
-    ttl: int = 10
-) -> bool:
-    """
-    Acquire a distributed lock.
-
-    Args:
-        client: Redis client.
-        lock_name: Lock name.
-        ttl: Lock TTL in seconds.
-
-    Returns:
-        True if lock acquired.
-    """
-    return bool(client.set(f'lock:{lock_name}', '1', nx=True, ex=ttl))
-
-
-def release_lock(client: redis.Redis, lock_name: str) -> bool:
-    """
-    Release a distributed lock.
-
-    Args:
-        client: Redis client.
-        lock_name: Lock name.
-
-    Returns:
-        True if released.
-    """
-    return bool(client.delete(f'lock:{lock_name}'))
+    
+    def __init__(self, config: Optional[RedisConfig] = None):
+        """
+        Initialize Redis handler.
+        
+        Args:
+            config: Redis configuration
+        """
+        self.config = config or RedisConfig()
+        self._connected = False
+        self._data: Dict[str, CacheEntry] = {}
+        self._locks: Dict[str, threading.RLock] = {}
+        self._lock = threading.RLock()
+    
+    def connect(self) -> bool:
+        """
+        Connect to Redis server.
+        
+        Returns:
+            True if connection successful
+        """
+        try:
+            logger.info(f"Connecting to Redis: {self.config.host}:{self.config.port}")
+            self._connected = True
+            return True
+        except Exception as e:
+            logger.error(f"Redis connection failed: {e}")
+            return False
+    
+    def disconnect(self) -> bool:
+        """
+        Disconnect from Redis server.
+        
+        Returns:
+            True if disconnected
+        """
+        with self._lock:
+            self._connected = False
+            self._data.clear()
+            logger.info("Disconnected from Redis")
+            return True
+    
+    def is_connected(self) -> bool:
+        """Check if connected."""
+        return self._connected
+    
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl: Optional[int] = None,
+        nx: bool = False,
+        xx: bool = False
+    ) -> bool:
+        """
+        Set a key-value pair.
+        
+        Args:
+            key: Key name
+            value: Value to store
+            ttl: Time to live in seconds
+            nx: Only set if key does not exist
+            xx: Only set if key exists
+            
+        Returns:
+            True if set successfully
+        """
+        if not self._connected:
+            return False
+        
+        if nx and key in self._data:
+            return False
+        if xx and key not in self._data:
+            return False
+        
+        with self._lock:
+            self._data[key] = CacheEntry(key=key, value=value, ttl=ttl)
+        
+        logger.debug(f"SET {key} = {value}")
+        return True
+    
+    def get(self, key: str) -> Optional[Any]:
+        """
+        Get a value by key.
+        
+        Args:
+            key: Key name
+            
+        Returns:
+            Value or None if not found
+        """
+        if not self._connected:
+            return None
+        
+        with self._lock:
+            entry = self._data.get(key)
+            if not entry:
+                return None
+            
+            if entry.ttl is not None:
+                age = time.time() - entry.created_at
+                if age > entry.ttl:
+                    del self._data[key]
+                    return None
+            
+            return entry.value
+    
+    def delete(self, *keys: str) -> int:
+        """
+        Delete one or more keys.
+        
+        Args:
+            *keys: Key names to delete
+            
+        Returns:
+            Number of keys deleted
+        """
+        count = 0
+        with self._lock:
+            for key in keys:
+                if key in self._data:
+                    del self._data[key]
+                    count += 1
+        return count
+    
+    def exists(self, *keys: str) -> int:
+        """
+        Check if keys exist.
+        
+        Args:
+            *keys: Key names
+            
+        Returns:
+            Number of keys that exist
+        """
+        with self._lock:
+            return sum(1 for k in keys if k in self._data)
+    
+    def expire(self, key: str, ttl: int) -> bool:
+        """
+        Set expiration on a key.
+        
+        Args:
+            key: Key name
+            ttl: Time to live in seconds
+            
+        Returns:
+            True if expiration was set
+        """
+        with self._lock:
+            if key not in self._data:
+                return False
+            self._data[key].ttl = ttl
+            return True
+    
+    def ttl(self, key: str) -> int:
+        """
+        Get time to live for a key.
+        
+        Args:
+            key: Key name
+            
+        Returns:
+            TTL in seconds, -1 if no TTL, -2 if key doesn't exist
+        """
+        with self._lock:
+            if key not in self._data:
+                return -2
+            entry = self._data[key]
+            if entry.ttl is None:
+                return -1
+            age = time.time() - entry.created_at
+            remaining = int(entry.ttl - age)
+            return max(remaining, 0)
+    
+    def hset(self, key: str, field: str, value: Any) -> bool:
+        """
+        Set a hash field.
+        
+        Args:
+            key: Hash key
+            field: Field name
+            value: Field value
+            
+        Returns:
+            True if set
+        """
+        with self._lock:
+            if key not in self._data:
+                self._data[key] = CacheEntry(key=key, value={})
+            if not isinstance(self._data[key].value, dict):
+                return False
+            self._data[key].value[field] = value
+            return True
+    
+    def hget(self, key: str, field: str) -> Optional[Any]:
+        """
+        Get a hash field.
+        
+        Args:
+            key: Hash key
+            field: Field name
+            
+        Returns:
+            Field value or None
+        """
+        with self._lock:
+            if key not in self._data:
+                return None
+            entry = self._data[key]
+            if not isinstance(entry.value, dict):
+                return None
+            return entry.value.get(field)
+    
+    def hgetall(self, key: str) -> Dict[str, Any]:
+        """
+        Get all hash fields.
+        
+        Args:
+            key: Hash key
+            
+        Returns:
+            All field-value pairs
+        """
+        with self._lock:
+            if key not in self._data:
+                return {}
+            entry = self._data[key]
+            if not isinstance(entry.value, dict):
+                return {}
+            return entry.value.copy()
+    
+    def lpush(self, key: str, *values: Any) -> int:
+        """
+        Push to list head.
+        
+        Args:
+            key: List key
+            *values: Values to push
+            
+        Returns:
+            List length after push
+        """
+        with self._lock:
+            if key not in self._data:
+                self._data[key] = CacheEntry(key=key, value=[])
+            if not isinstance(self._data[key].value, list):
+                return 0
+            for v in values:
+                self._data[key].value.insert(0, v)
+            return len(self._data[key].value)
+    
+    def rpush(self, key: str, *values: Any) -> int:
+        """
+        Push to list tail.
+        
+        Args:
+            key: List key
+            *values: Values to push
+            
+        Returns:
+            List length after push
+        """
+        with self._lock:
+            if key not in self._data:
+                self._data[key] = CacheEntry(key=key, value=[])
+            if not isinstance(self._data[key].value, list):
+                return 0
+            self._data[key].value.extend(values)
+            return len(self._data[key].value)
+    
+    def lrange(self, key: str, start: int = 0, stop: int = -1) -> List[Any]:
+        """
+        Get list range.
+        
+        Args:
+            key: List key
+            start: Start index
+            stop: Stop index (-1 for end)
+            
+        Returns:
+            List elements
+        """
+        with self._lock:
+            if key not in self._data:
+                return []
+            entry = self._data[key]
+            if not isinstance(entry.value, list):
+                return []
+            return entry.value[start:stop if stop != -1 else None]
+    
+    def sadd(self, key: str, *members: Any) -> int:
+        """
+        Add to set.
+        
+        Args:
+            key: Set key
+            *members: Members to add
+            
+        Returns:
+            Number of members added
+        """
+        with self._lock:
+            if key not in self._data:
+                self._data[key] = CacheEntry(key=key, value=set())
+            if not isinstance(self._data[key].value, set):
+                return 0
+            old_len = len(self._data[key].value)
+            self._data[key].value.update(members)
+            return len(self._data[key].value) - old_len
+    
+    def smembers(self, key: str) -> List[Any]:
+        """
+        Get all set members.
+        
+        Args:
+            key: Set key
+            
+        Returns:
+            All members
+        """
+        with self._lock:
+            if key not in self._data:
+                return []
+            entry = self._data[key]
+            if not isinstance(entry.value, set):
+                return []
+            return list(entry.value)
+    
+    def keys(self, pattern: str = "*") -> List[str]:
+        """
+        Get keys matching pattern.
+        
+        Args:
+            pattern: Pattern to match (* and ? wildcards)
+            
+        Returns:
+            Matching keys
+        """
+        import fnmatch
+        with self._lock:
+            return [k for k in self._data.keys() if fnmatch.fnmatch(k, pattern)]

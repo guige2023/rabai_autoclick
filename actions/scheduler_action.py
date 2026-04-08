@@ -1,165 +1,309 @@
+"""Scheduler action module for RabAI AutoClick.
+
+Provides scheduling operations:
+- ScheduleTaskAction: Schedule a task
+- ScheduleCronAction: Schedule via cron
+- ScheduleIntervalAction: Schedule by interval
+- ScheduleDelayAction: Delay execution
+- ScheduleCancelAction: Cancel scheduled task
+- ScheduleListAction: List scheduled tasks
+- SchedulePauseAction: Pause scheduled task
+- ScheduleResumeAction: Resume scheduled task
 """
-Scheduler utilities - cron parsing, interval calculation, task scheduling simulation.
-"""
-from typing import Any, Dict, List, Optional, Callable
+
+import os
+import sys
 import time
-import logging
 from datetime import datetime, timedelta
-from collections import deque
+from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
-
-
-class BaseAction:
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        raise NotImplementedError
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-def _parse_cron(cron_str: str) -> Dict[str, List[int]]:
-    parts = cron_str.split()
-    if len(parts) != 5:
-        return {}
-    names = ["minute", "hour", "day", "month", "weekday"]
-    result = {}
-    for i, (name, part) in enumerate(zip(names, parts)):
-        if part == "*":
-            result[name] = list(range(60 if i == 0 else 24 if i == 1 else 31 if i == 2 else 12))
-        elif "," in part:
-            result[name] = [int(x) for x in part.split(",")]
-        elif "/" in part:
-            base, step = part.split("/")
-            start = 0 if base == "*" else int(base)
-            step_val = int(step)
-            max_val = 60 if i == 0 else 24 if i == 1 else 31 if i == 2 else 12
-            result[name] = list(range(start, max_val, step_val))
-        elif "-" in part:
-            start, end = part.split("-")
-            result[name] = list(range(int(start), int(end) + 1))
-        else:
-            result[name] = [int(part)]
-    return result
+class SchedulerStore:
+    """In-memory scheduler storage."""
+    
+    _tasks: Dict[str, Dict[str, Any]] = {}
+    _task_id = 1
+    
+    @classmethod
+    def add(cls, task: Dict[str, Any]) -> str:
+        task["id"] = cls._task_id
+        cls._task_id += 1
+        cls._tasks[task["id"]] = task
+        return str(task["id"])
+    
+    @classmethod
+    def get(cls, task_id: str) -> Optional[Dict[str, Any]]:
+        return cls._tasks.get(int(task_id))
+    
+    @classmethod
+    def list_all(cls) -> List[Dict[str, Any]]:
+        return list(cls._tasks.values())
+    
+    @classmethod
+    def cancel(cls, task_id: str) -> bool:
+        tid = int(task_id)
+        if tid in cls._tasks:
+            cls._tasks[tid]["status"] = "cancelled"
+            return True
+        return False
+    
+    @classmethod
+    def pause(cls, task_id: str) -> bool:
+        tid = int(task_id)
+        if tid in cls._tasks:
+            cls._tasks[tid]["status"] = "paused"
+            return True
+        return False
+    
+    @classmethod
+    def resume(cls, task_id: str) -> bool:
+        tid = int(task_id)
+        if tid in cls._tasks:
+            cls._tasks[tid]["status"] = "scheduled"
+            return True
+        return False
 
 
-def _next_run(cron_str: str, from_time: Optional[datetime] = None) -> Optional[datetime]:
-    cron = _parse_cron(cron_str)
-    if not cron:
-        return None
-    current = from_time or datetime.now()
-    for _ in range(366 * 24 * 60):
-        minute_match = current.minute in cron.get("minute", [current.minute])
-        hour_match = current.hour in cron.get("hour", [current.hour])
-        day_match = current.day in cron.get("day", [current.day])
-        month_match = current.month in cron.get("month", [current.month])
-        dow_match = current.weekday() in cron.get("weekday", [current.weekday()])
-        if minute_match and hour_match and day_match and month_match and dow_match:
-            return current
-        current += timedelta(minutes=1)
-    return None
+class ScheduleTaskAction(BaseAction):
+    """Schedule a task."""
+    action_type = "schedule_task"
+    display_name = "计划任务"
+    description = "安排计划任务"
 
-
-class SchedulerAction(BaseAction):
-    """Scheduler operations.
-
-    Provides cron parsing, next run calculation, interval scheduling, task queue.
-    """
-
-    def __init__(self) -> None:
-        self._tasks: deque = deque()
-
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        operation = params.get("operation", "parse_cron")
-        cron_str = params.get("cron", "")
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            if operation == "parse_cron":
-                if not cron_str:
-                    return {"success": False, "error": "cron string required"}
-                result = _parse_cron(cron_str)
-                return {"success": True, "cron": result, "expression": cron_str}
-
-            elif operation == "next_run":
-                if not cron_str:
-                    return {"success": False, "error": "cron string required"}
-                from_str = params.get("from")
-                from_time = datetime.fromisoformat(from_str) if from_str else None
-                next_time = _next_run(cron_str, from_time)
-                if next_time:
-                    return {"success": True, "next_run": next_time.isoformat(), "timestamp": next_time.timestamp()}
-                return {"success": False, "error": "Could not calculate next run"}
-
-            elif operation == "is_due":
-                if not cron_str:
-                    return {"success": False, "error": "cron string required"}
-                now = datetime.now()
-                cron = _parse_cron(cron_str)
-                if not cron:
-                    return {"success": False, "error": "Invalid cron expression"}
-                minute_match = now.minute in cron.get("minute", [now.minute])
-                hour_match = now.hour in cron.get("hour", [now.hour])
-                day_match = now.day in cron.get("day", [now.day])
-                month_match = now.month in cron.get("month", [now.month])
-                dow_match = now.weekday() in cron.get("weekday", [now.weekday()])
-                is_due = minute_match and hour_match and day_match and month_match and dow_match
-                return {"success": True, "is_due": is_due, "checked_at": now.isoformat()}
-
-            elif operation == "schedule_interval":
-                interval_seconds = int(params.get("interval_seconds", 60))
-                last_run = params.get("last_run")
-                last_ts = datetime.fromisoformat(last_run).timestamp() if last_run else 0.0
-                elapsed = time.time() - last_ts
-                is_due = elapsed >= interval_seconds
-                next_in = max(0, interval_seconds - elapsed) if not is_due else 0
-                return {"success": True, "is_due": is_due, "elapsed_seconds": round(elapsed, 2), "next_in_seconds": round(next_in, 2)}
-
-            elif operation == "add_task":
-                task_name = params.get("name", "unnamed")
-                interval = int(params.get("interval_seconds", 60))
-                self._tasks.append({"name": task_name, "interval": interval, "added_at": time.time()})
-                return {"success": True, "tasks_queued": len(self._tasks), "task": task_name}
-
-            elif operation == "list_tasks":
-                return {"success": True, "tasks": list(self._tasks), "count": len(self._tasks)}
-
-            elif operation == "due_tasks":
-                now = time.time()
-                due = []
-                remaining = deque()
-                for task in self._tasks:
-                    elapsed = now - task["added_at"]
-                    if elapsed >= task["interval"]:
-                        due.append(task)
-                    else:
-                        remaining.append(task)
-                self._tasks = remaining
-                return {"success": True, "due": due, "count": len(due)}
-
-            elif operation == "human_interval":
-                seconds = int(params.get("seconds", 60))
-                if seconds < 60:
-                    return {"success": True, "human": f"{seconds} seconds"}
-                elif seconds < 3600:
-                    return {"success": True, "human": f"{seconds // 60} minutes"}
-                elif seconds < 86400:
-                    return {"success": True, "human": f"{seconds // 3600} hours"}
-                else:
-                    return {"success": True, "human": f"{seconds // 86400} days"}
-
-            elif operation == "parse_interval":
-                interval_str = params.get("interval", "")
-                units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-                for unit, multiplier in units.items():
-                    if interval_str.endswith(unit):
-                        num = interval_str[:-1]
-                        return {"success": True, "seconds": int(num) * multiplier, "original": interval_str}
-                return {"success": True, "seconds": int(interval_str), "original": interval_str}
-
-            else:
-                return {"success": False, "error": f"Unknown operation: {operation}"}
-
+            task_name = params.get("name", "")
+            execute_at = params.get("execute_at", time.time() + 60)
+            payload = params.get("payload", {})
+            repeat = params.get("repeat", False)
+            interval = params.get("interval", 0)
+            
+            if not task_name:
+                return ActionResult(success=False, message="name required")
+            
+            task = {
+                "name": task_name,
+                "execute_at": execute_at if isinstance(execute_at, float) else datetime.fromisoformat(execute_at).timestamp(),
+                "payload": payload,
+                "status": "scheduled",
+                "repeat": repeat,
+                "interval": interval,
+                "created_at": time.time()
+            }
+            
+            task_id = SchedulerStore.add(task)
+            
+            return ActionResult(
+                success=True,
+                message=f"Scheduled task: {task_name} (ID: {task_id})",
+                data={"task_id": task_id, "task": task}
+            )
         except Exception as e:
-            logger.error(f"SchedulerAction error: {e}")
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"Schedule task failed: {str(e)}")
 
 
-def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-    return SchedulerAction().execute(context, params)
+class ScheduleCronAction(BaseAction):
+    """Schedule via cron expression."""
+    action_type = "schedule_cron"
+    display_name = "Cron调度"
+    description = "Cron表达式调度"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            cron_expr = params.get("cron", "* * * * *")
+            task_name = params.get("name", "")
+            payload = params.get("payload", {})
+            
+            parts = cron_expr.split()
+            if len(parts) != 5:
+                return ActionResult(success=False, message="Invalid cron expression (need 5 fields)")
+            
+            task = {
+                "name": task_name or f"cron-{int(time.time())}",
+                "cron": cron_expr,
+                "payload": payload,
+                "status": "scheduled",
+                "type": "cron",
+                "created_at": time.time()
+            }
+            
+            task_id = SchedulerStore.add(task)
+            
+            return ActionResult(
+                success=True,
+                message=f"Scheduled cron task: {cron_expr} (ID: {task_id})",
+                data={"task_id": task_id, "cron": cron_expr}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Schedule cron failed: {str(e)}")
+
+
+class ScheduleIntervalAction(BaseAction):
+    """Schedule by interval."""
+    action_type = "schedule_interval"
+    display_name = "间隔调度"
+    description = "间隔调度"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            interval = params.get("interval", 60)
+            task_name = params.get("name", "")
+            payload = params.get("payload", {})
+            start_now = params.get("start_now", True)
+            
+            if interval < 1:
+                return ActionResult(success=False, message="Interval must be >= 1 second")
+            
+            task = {
+                "name": task_name or f"interval-{int(time.time())}",
+                "interval": interval,
+                "payload": payload,
+                "status": "scheduled",
+                "type": "interval",
+                "start_now": start_now,
+                "created_at": time.time()
+            }
+            
+            task_id = SchedulerStore.add(task)
+            
+            return ActionResult(
+                success=True,
+                message=f"Scheduled interval task every {interval}s (ID: {task_id})",
+                data={"task_id": task_id, "interval": interval}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Schedule interval failed: {str(e)}")
+
+
+class ScheduleDelayAction(BaseAction):
+    """Delay execution."""
+    action_type = "schedule_delay"
+    display_name = "延迟执行"
+    description = "延迟执行"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            delay_seconds = params.get("delay", 60)
+            task_name = params.get("name", "")
+            payload = params.get("payload", {})
+            
+            execute_at = time.time() + delay_seconds
+            
+            task = {
+                "name": task_name or f"delayed-{int(time.time())}",
+                "execute_at": execute_at,
+                "payload": payload,
+                "status": "scheduled",
+                "type": "delay",
+                "created_at": time.time()
+            }
+            
+            task_id = SchedulerStore.add(task)
+            
+            return ActionResult(
+                success=True,
+                message=f"Delayed task scheduled for {delay_seconds}s later (ID: {task_id})",
+                data={"task_id": task_id, "execute_at": execute_at, "delay": delay_seconds}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Schedule delay failed: {str(e)}")
+
+
+class ScheduleCancelAction(BaseAction):
+    """Cancel scheduled task."""
+    action_type = "schedule_cancel"
+    display_name = "取消计划"
+    description = "取消计划任务"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            task_id = params.get("task_id", "")
+            
+            if not task_id:
+                return ActionResult(success=False, message="task_id required")
+            
+            cancelled = SchedulerStore.cancel(task_id)
+            
+            return ActionResult(
+                success=cancelled,
+                message=f"Cancelled task: {task_id}" if cancelled else f"Task not found: {task_id}",
+                data={"task_id": task_id, "cancelled": cancelled}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Schedule cancel failed: {str(e)}")
+
+
+class ScheduleListAction(BaseAction):
+    """List scheduled tasks."""
+    action_type = "schedule_list"
+    display_name = "计划列表"
+    description = "列出计划任务"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            status = params.get("status", "")
+            
+            tasks = SchedulerStore.list_all()
+            
+            if status:
+                tasks = [t for t in tasks if t.get("status") == status]
+            
+            return ActionResult(
+                success=True,
+                message=f"Found {len(tasks)} scheduled tasks",
+                data={"tasks": tasks, "count": len(tasks)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Schedule list failed: {str(e)}")
+
+
+class SchedulePauseAction(BaseAction):
+    """Pause scheduled task."""
+    action_type = "schedule_pause"
+    display_name = "暂停计划"
+    description = "暂停计划任务"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            task_id = params.get("task_id", "")
+            
+            if not task_id:
+                return ActionResult(success=False, message="task_id required")
+            
+            paused = SchedulerStore.pause(task_id)
+            
+            return ActionResult(
+                success=paused,
+                message=f"Paused task: {task_id}" if paused else f"Task not found: {task_id}",
+                data={"task_id": task_id, "paused": paused}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Schedule pause failed: {str(e)}")
+
+
+class ScheduleResumeAction(BaseAction):
+    """Resume scheduled task."""
+    action_type = "schedule_resume"
+    display_name = "恢复计划"
+    description = "恢复计划任务"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            task_id = params.get("task_id", "")
+            
+            if not task_id:
+                return ActionResult(success=False, message="task_id required")
+            
+            resumed = SchedulerStore.resume(task_id)
+            
+            return ActionResult(
+                success=resumed,
+                message=f"Resumed task: {task_id}" if resumed else f"Task not found: {task_id}",
+                data={"task_id": task_id, "resumed": resumed}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Schedule resume failed: {str(e)}")
