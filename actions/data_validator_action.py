@@ -1,392 +1,386 @@
-"""
-Data Validator Action Module.
+"""Data validator action module for RabAI AutoClick.
 
-Validates data against schemas, business rules, and constraints with
-comprehensive error reporting and auto-correction capabilities.
-
-Author: RabAi Team
+Provides comprehensive data validation with support for
+schemas, type checking, range validation, and custom rules.
 """
 
-from __future__ import annotations
-
+import sys
+import os
 import re
+from typing import Any, Dict, List, Optional, Callable, Union
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-class ValidationSeverity(Enum):
-    """Severity levels for validation errors."""
-    ERROR = "error"
-    WARNING = "warning"
-    INFO = "info"
+class ValidationError(Exception):
+    """Validation error exception."""
+    def __init__(self, field: str, message: str):
+        self.field = field
+        self.message = message
+        super().__init__(f"{field}: {message}")
 
 
 @dataclass
-class ValidationError:
-    """A single validation error."""
+class ValidationRule:
+    """A single validation rule."""
     field: str
-    message: str
-    severity: ValidationSeverity
-    value: Any = None
-    rule: str = ""
-    suggested_fix: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "field": self.field,
-            "message": self.message,
-            "severity": self.severity.value,
-            "value": str(self.value) if self.value is not None else None,
-            "rule": self.rule,
-            "suggested_fix": self.suggested_fix,
-        }
+    rule_type: str
+    params: Dict[str, Any] = field(default_factory=dict)
+    message: Optional[str] = None
 
 
 @dataclass
 class ValidationResult:
-    """Result of validating data against a schema."""
+    """Result of validation."""
     valid: bool
-    errors: List[ValidationError] = field(default_factory=list)
-    warnings: List[ValidationError] = field(default_factory=list)
-    validated_at: datetime = field(default_factory=datetime.now)
-    record_count: int = 0
-    field_count: int = 0
-
-    @property
-    def error_count(self) -> int:
-        return len(self.errors)
-
-    @property
-    def warning_count(self) -> int:
-        return len(self.warnings)
-
-    @property
-    def is_valid(self) -> bool:
-        return self.valid and len(self.errors) == 0
-
-    def get_errors(self, field: Optional[str] = None) -> List[ValidationError]:
-        if field is None:
-            return self.errors
-        return [e for e in self.errors if e.field == field]
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "valid": self.is_valid,
-            "error_count": self.error_count,
-            "warning_count": self.warning_count,
-            "errors": [e.to_dict() for e in self.errors],
-            "warnings": [e.to_dict() for e in self.warnings],
-            "validated_at": self.validated_at.isoformat(),
-            "record_count": self.record_count,
-            "field_count": self.field_count,
-        }
+    errors: List[Dict[str, str]]
+    warnings: List[Dict[str, str]]
 
 
-class Validator:
-    """Base validator interface."""
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Optional[ValidationError]:
-        raise NotImplementedError
-
-
-class RequiredValidator(Validator):
-    """Validates that a field is present and not null."""
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Optional[ValidationError]:
-        if value is None:
-            return ValidationError(
-                field=context.get("field", ""),
-                message="Field is required",
-                severity=ValidationSeverity.ERROR,
-                value=value,
-                rule="required",
-            )
-        return None
-
-
-class TypeValidator(Validator):
-    """Validates field type."""
-
-    def __init__(self, expected_type: type):
-        self.expected_type = expected_type
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Optional[ValidationError]:
-        if value is None:
-            return None
-        if not isinstance(value, self.expected_type):
-            return ValidationError(
-                field=context.get("field", ""),
-                message=f"Expected {self.expected_type.__name__}, got {type(value).__name__}",
-                severity=ValidationSeverity.ERROR,
-                value=value,
-                rule="type_check",
-            )
-        return None
-
-
-class RangeValidator(Validator):
-    """Validates numeric or string length within a range."""
-
-    def __init__(
-        self,
-        min_val: Optional[float] = None,
-        max_val: Optional[float] = None,
-        min_length: Optional[int] = None,
-        max_length: Optional[int] = None,
-    ):
-        self.min_val = min_val
-        self.max_val = max_val
-        self.min_length = min_length
-        self.max_length = max_length
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Optional[ValidationError]:
-        if value is None:
-            return None
-        field_name = context.get("field", "")
-
-        if isinstance(value, (int, float)):
-            if self.min_val is not None and value < self.min_val:
-                return ValidationError(
-                    field=field_name,
-                    message=f"Value {value} is below minimum {self.min_val}",
-                    severity=ValidationSeverity.ERROR,
-                    value=value,
-                    rule="range_min",
-                )
-            if self.max_val is not None and value > self.max_val:
-                return ValidationError(
-                    field=field_name,
-                    message=f"Value {value} exceeds maximum {self.max_val}",
-                    severity=ValidationSeverity.ERROR,
-                    value=value,
-                    rule="range_max",
-                )
-
-        if isinstance(value, str):
-            if self.min_length is not None and len(value) < self.min_length:
-                return ValidationError(
-                    field=field_name,
-                    message=f"Length {len(value)} is below minimum {self.min_length}",
-                    severity=ValidationSeverity.ERROR,
-                    value=value,
-                    rule="length_min",
-                )
-            if self.max_length is not None and len(value) > self.max_length:
-                return ValidationError(
-                    field=field_name,
-                    message=f"Length {len(value)} exceeds maximum {self.max_length}",
-                    severity=ValidationSeverity.ERROR,
-                    value=value,
-                    rule="length_max",
-                )
-
-        return None
-
-
-class PatternValidator(Validator):
-    """Validates string against regex pattern."""
-
-    def __init__(self, pattern: str, flags: int = 0):
-        self.pattern = re.compile(pattern, flags)
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Optional[ValidationError]:
-        if value is None:
-            return None
-        field_name = context.get("field", "")
-        if not isinstance(value, str):
-            return ValidationError(
-                field=field_name,
-                message=f"Expected string for pattern validation, got {type(value).__name__}",
-                severity=ValidationSeverity.ERROR,
-                value=value,
-                rule="pattern_type",
-            )
-        if not self.pattern.match(value):
-            return ValidationError(
-                field=field_name,
-                message=f"Value does not match pattern {self.pattern.pattern}",
-                severity=ValidationSeverity.ERROR,
-                value=value,
-                rule="pattern_match",
-            )
-        return None
-
-
-class EnumValidator(Validator):
-    """Validates value is in allowed set."""
-
-    def __init__(self, allowed_values: List[Any]):
-        self.allowed_values = allowed_values
-
-    def validate(self, value: Any, context: Dict[str, Any]) -> Optional[ValidationError]:
-        if value is None:
-            return None
-        field_name = context.get("field", "")
-        if value not in self.allowed_values:
-            return ValidationError(
-                field=field_name,
-                message=f"Value '{value}' not in allowed set {self.allowed_values}",
-                severity=ValidationSeverity.ERROR,
-                value=value,
-                rule="enum_check",
-                suggested_fix=f"Use one of: {self.allowed_values[0]}",
-            )
-        return None
-
-
-class EmailValidator(PatternValidator):
-    """Validates email format."""
-
-    def __init__(self):
-        super().__init__(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-
-
-class URLValidator(PatternValidator):
-    """Validates URL format."""
-
-    def __init__(self):
-        super().__init__(r"^https?://[^\s/$.?#].[^\s]*$")
-
-
-class DataValidator:
+class DataValidatorAction(BaseAction):
+    """Data validator action for validating data against rules.
+    
+    Supports type checking, range validation, pattern matching,
+    custom validators, and schema-based validation.
     """
-    Data validation engine with schema and rule support.
-
-    Validates structured data against defined schemas and business rules
-    with comprehensive error reporting.
-
-    Example:
-        >>> validator = DataValidator()
-        >>> validator.add_field("email", RequiredValidator(), EmailValidator())
-        >>> validator.add_field("age", TypeValidator(int), RangeValidator(min_val=0, max_val=150))
-        >>> result = validator.validate({"email": "test@example.com", "age": 25})
-    """
-
-    def __init__(self):
-        self._field_validators: Dict[str, List[Validator]] = {}
-        self._record_validators: List[Callable] = []
-
-    def add_field(self, field_name: str, *validators: Validator) -> "DataValidator":
-        """Add validators for a field."""
-        if field_name not in self._field_validators:
-            self._field_validators[field_name] = []
-        self._field_validators[field_name].extend(validators)
-        return self
-
-    def add_record_validator(
+    action_type = "data_validator"
+    display_name = "数据校验"
+    description = "数据验证与规则校验"
+    
+    def execute(
         self,
-        validator_fn: Callable[[Dict[str, Any]], Optional[ValidationError]],
-    ) -> "DataValidator":
-        """Add a record-level validator function."""
-        self._record_validators.append(validator_fn)
-        return self
-
-    def validate(self, data: Union[Dict, List[Dict]]) -> ValidationResult:
-        """Validate data against defined schema."""
-        if isinstance(data, dict):
-            return self._validate_single(data)
-        elif isinstance(data, list):
-            return self._validate_batch(data)
-        else:
-            return ValidationResult(
-                valid=False,
-                errors=[
-                    ValidationError(
-                        field="",
-                        message=f"Unsupported data type: {type(data).__name__}",
-                        severity=ValidationSeverity.ERROR,
-                        rule="type_check",
-                    )
-                ],
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data validation.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                data: Data to validate
+                rules: List of validation rules
+                schema: Schema definition (alternative to rules)
+                stop_on_first_error: Stop at first error (default False).
+        
+        Returns:
+            ActionResult with validation result.
+        """
+        data = params.get('data')
+        rules = params.get('rules', [])
+        schema = params.get('schema')
+        stop_on_first = params.get('stop_on_first_error', False)
+        
+        if data is None:
+            return ActionResult(success=False, message="No data provided")
+        
+        if schema:
+            rules = self._schema_to_rules(schema)
+        
+        validation_rules = [self._parse_rule(r) for r in rules]
+        
+        result = self._validate(data, validation_rules, stop_on_first)
+        
+        return ActionResult(
+            success=result.valid,
+            message=f"{'Valid' if result.valid else 'Invalid'}: {len(result.errors)} errors",
+            data={
+                'valid': result.valid,
+                'errors': result.errors,
+                'warnings': result.warnings,
+                'error_count': len(result.errors),
+                'warning_count': len(result.warnings)
+            }
+        )
+    
+    def _schema_to_rules(self, schema: Dict[str, Any]) -> List[Dict]:
+        """Convert schema to validation rules."""
+        rules = []
+        
+        for field_name, field_def in schema.items():
+            if isinstance(field_def, dict):
+                if 'type' in field_def:
+                    rules.append({
+                        'field': field_name,
+                        'rule_type': 'type',
+                        'params': {'expected': field_def['type']}
+                    })
+                if 'required' in field_def:
+                    rules.append({
+                        'field': field_name,
+                        'rule_type': 'required',
+                        'params': {}
+                    })
+                if 'min' in field_def:
+                    rules.append({
+                        'field': field_name,
+                        'rule_type': 'min',
+                        'params': {'value': field_def['min']}
+                    })
+                if 'max' in field_def:
+                    rules.append({
+                        'field': field_name,
+                        'rule_type': 'max',
+                        'params': {'value': field_def['max']}
+                    })
+                if 'pattern' in field_def:
+                    rules.append({
+                        'field': field_name,
+                        'rule_type': 'pattern',
+                        'params': {'pattern': field_def['pattern']}
+                    })
+                if 'enum' in field_def:
+                    rules.append({
+                        'field': field_name,
+                        'rule_type': 'enum',
+                        'params': {'values': field_def['enum']}
+                    })
+            else:
+                rules.append({
+                    'field': field_name,
+                    'rule_type': 'type',
+                    'params': {'expected': field_def}
+                })
+        
+        return rules
+    
+    def _parse_rule(self, rule_def: Union[Dict, str]) -> ValidationRule:
+        """Parse rule definition."""
+        if isinstance(rule_def, str):
+            parts = rule_def.split(':', 1)
+            return ValidationRule(
+                field=parts[0],
+                rule_type=parts[1] if len(parts) > 1 else 'required',
+                params={}
             )
-
-    def _validate_single(self, record: Dict[str, Any]) -> ValidationResult:
-        """Validate a single record."""
-        errors: List[ValidationError] = []
-        warnings: List[ValidationError] = []
-        validated_fields: Set[str] = set()
-
-        for field_name, validators in self._field_validators.items():
-            value = record.get(field_name)
-            validated_fields.add(field_name)
-            context = {"field": field_name, "record": record}
-
-            for validator in validators:
-                error = validator.validate(value, context)
+        
+        return ValidationRule(
+            field=rule_def.get('field', ''),
+            rule_type=rule_def.get('rule_type', 'required'),
+            params=rule_def.get('params', {}),
+            message=rule_def.get('message')
+        )
+    
+    def _validate(
+        self,
+        data: Any,
+        rules: List[ValidationRule],
+        stop_on_first: bool
+    ) -> ValidationResult:
+        """Validate data against rules."""
+        errors = []
+        warnings = []
+        
+        items = data if isinstance(data, list) else [data]
+        
+        for item_idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            
+            for rule in rules:
+                error = self._validate_rule(item, rule, item_idx)
+                
                 if error:
-                    if error.severity == ValidationSeverity.WARNING:
+                    if rule.rule_type == 'warning':
                         warnings.append(error)
                     else:
                         errors.append(error)
-
-        # Record-level validators
-        for validator_fn in self._record_validators:
-            error = validator_fn(record)
-            if error:
-                if error.severity == ValidationSeverity.WARNING:
-                    warnings.append(error)
-                else:
-                    errors.append(error)
-
+                        if stop_on_first:
+                            return ValidationResult(
+                                valid=False,
+                                errors=errors,
+                                warnings=warnings
+                            )
+        
         return ValidationResult(
             valid=len(errors) == 0,
             errors=errors,
-            warnings=warnings,
-            record_count=1,
-            field_count=len(validated_fields),
+            warnings=warnings
         )
-
-    def _validate_batch(self, records: List[Dict]) -> ValidationResult:
-        """Validate a batch of records."""
-        all_errors: List[ValidationError] = []
-        all_warnings: List[ValidationError] = []
-
-        for record in records:
-            result = self._validate_single(record)
-            all_errors.extend(result.errors)
-            all_warnings.extend(result.warnings)
-
-        return ValidationResult(
-            valid=len(all_errors) == 0,
-            errors=all_errors,
-            warnings=all_warnings,
-            record_count=len(records),
-            field_count=len(self._field_validators),
-        )
-
-
-def create_validator(config: Optional[Dict[str, Any]] = None) -> DataValidator:
-    """Factory to create a configured validator from schema dict."""
-    validator = DataValidator()
-    if not config:
-        return validator
-
-    for field_name, rules in config.items():
-        validators = []
-        for rule in rules:
-            rule_type = rule.get("type")
-            if rule_type == "required":
-                validators.append(RequiredValidator())
-            elif rule_type == "type":
-                validators.append(TypeValidator(eval(rule["expected"])))
-            elif rule_type == "range":
-                validators.append(RangeValidator(
-                    min_val=rule.get("min"),
-                    max_val=rule.get("max"),
-                    min_length=rule.get("min_length"),
-                    max_length=rule.get("max_length"),
-                ))
-            elif rule_type == "pattern":
-                validators.append(PatternValidator(rule["pattern"]))
-            elif rule_type == "enum":
-                validators.append(EnumValidator(rule["values"]))
-            elif rule_type == "email":
-                validators.append(EmailValidator())
-            elif rule_type == "url":
-                validators.append(URLValidator())
-
-        validator.add_field(field_name, *validators)
-
-    return validator
+    
+    def _validate_rule(
+        self,
+        item: Dict,
+        rule: ValidationRule,
+        item_idx: int
+    ) -> Optional[Dict[str, str]]:
+        """Validate single rule against item."""
+        field_path = rule.field
+        value = self._get_nested(item, field_path)
+        prefix = f"[{item_idx}]." if len([item_idx]) > 1 else ""
+        
+        if rule.rule_type == 'required':
+            if value is None or value == '':
+                return {
+                    'field': prefix + field_path,
+                    'rule': 'required',
+                    'message': rule.message or f"Field is required"
+                }
+        
+        elif rule.rule_type == 'type':
+            expected = rule.params.get('expected')
+            if value is not None and not self._check_type(value, expected):
+                return {
+                    'field': prefix + field_path,
+                    'rule': 'type',
+                    'message': rule.message or f"Expected {expected}, got {type(value).__name__}"
+                }
+        
+        elif rule.rule_type == 'min':
+            min_val = rule.params.get('value')
+            if value is not None and value < min_val:
+                return {
+                    'field': prefix + field_path,
+                    'rule': 'min',
+                    'message': rule.message or f"Value {value} is less than minimum {min_val}"
+                }
+        
+        elif rule.rule_type == 'max':
+            max_val = rule.params.get('value')
+            if value is not None and value > max_val:
+                return {
+                    'field': prefix + field_path,
+                    'rule': 'max',
+                    'message': rule.message or f"Value {value} exceeds maximum {max_val}"
+                }
+        
+        elif rule.rule_type == 'min_length':
+            min_len = rule.params.get('value')
+            if value is not None and len(value) < min_len:
+                return {
+                    'field': prefix + field_path,
+                    'rule': 'min_length',
+                    'message': rule.message or f"Length {len(value)} is less than minimum {min_len}"
+                }
+        
+        elif rule.rule_type == 'max_length':
+            max_len = rule.params.get('value')
+            if value is not None and len(value) > max_len:
+                return {
+                    'field': prefix + field_path,
+                    'rule': 'max_length',
+                    'message': rule.message or f"Length {len(value)} exceeds maximum {max_len}"
+                }
+        
+        elif rule.rule_type == 'pattern':
+            pattern = rule.params.get('pattern')
+            if value is not None and pattern:
+                if not re.match(pattern, str(value)):
+                    return {
+                        'field': prefix + field_path,
+                        'rule': 'pattern',
+                        'message': rule.message or f"Value does not match pattern {pattern}"
+                    }
+        
+        elif rule.rule_type == 'enum':
+            allowed = rule.params.get('values', [])
+            if value is not None and value not in allowed:
+                return {
+                    'field': prefix + field_path,
+                    'rule': 'enum',
+                    'message': rule.message or f"Value must be one of {allowed}"
+                }
+        
+        elif rule.rule_type == 'email':
+            if value is not None:
+                email_pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+                if not re.match(email_pattern, str(value)):
+                    return {
+                        'field': prefix + field_path,
+                        'rule': 'email',
+                        'message': rule.message or "Invalid email format"
+                    }
+        
+        elif rule.rule_type == 'url':
+            if value is not None:
+                url_pattern = r'^https?://[\w\.-]+\.\w+'
+                if not re.match(url_pattern, str(value)):
+                    return {
+                        'field': prefix + field_path,
+                        'rule': 'url',
+                        'message': rule.message or "Invalid URL format"
+                    }
+        
+        elif rule.rule_type == 'uuid':
+            if value is not None:
+                uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                if not re.match(uuid_pattern, str(value).lower()):
+                    return {
+                        'field': prefix + field_path,
+                        'rule': 'uuid',
+                        'message': rule.message or "Invalid UUID format"
+                    }
+        
+        elif rule.rule_type == 'range':
+            min_val = rule.params.get('min')
+            max_val = rule.params.get('max')
+            if value is not None:
+                if min_val is not None and value < min_val:
+                    return {
+                        'field': prefix + field_path,
+                        'rule': 'range',
+                        'message': rule.message or f"Value {value} below range"
+                    }
+                if max_val is not None and value > max_val:
+                    return {
+                        'field': prefix + field_path,
+                        'rule': 'range',
+                        'message': rule.message or f"Value {value} above range"
+                    }
+        
+        elif rule.rule_type == 'custom':
+            validator_func = rule.params.get('func')
+            if validator_func and value is not None:
+                try:
+                    if not validator_func(value):
+                        return {
+                            'field': prefix + field_path,
+                            'rule': 'custom',
+                            'message': rule.message or "Custom validation failed"
+                        }
+                except Exception as e:
+                    return {
+                        'field': prefix + field_path,
+                        'rule': 'custom',
+                        'message': rule.message or f"Validation error: {str(e)}"
+                    }
+        
+        return None
+    
+    def _get_nested(self, data: Dict, path: str) -> Any:
+        """Get nested value using dot notation."""
+        parts = path.split('.')
+        current = data
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+        return current
+    
+    def _check_type(self, value: Any, expected: str) -> bool:
+        """Check if value matches expected type."""
+        type_map = {
+            'str': str,
+            'string': str,
+            'int': int,
+            'integer': int,
+            'float': float,
+            'number': (int, float),
+            'bool': bool,
+            'boolean': bool,
+            'list': list,
+            'array': list,
+            'dict': dict,
+            'object': dict,
+            'null': type(None)
+        }
+        
+        expected_type = type_map.get(expected, object)
+        
+        if expected == 'number':
+            return isinstance(value, expected_type)
+        
+        return isinstance(value, expected_type)
