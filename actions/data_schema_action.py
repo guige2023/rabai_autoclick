@@ -1,211 +1,128 @@
-"""Data schema action module for RabAI AutoClick.
+# Copyright (c) 2024. coded by claude
+"""Data Schema Action Module.
 
-Provides data schema operations:
-- SchemaDefineAction: Define a data schema
-- SchemaValidateAction: Validate data against schema
-- SchemaInferAction: Infer schema from data
-- SchemaMergeAction: Merge two schemas
-- SchemaEvolveAction: Evolve schema with backward compatibility
+Provides schema validation and enforcement for API data structures
+with support for JSON Schema-like validation rules.
 """
+from typing import Optional, Dict, Any, List, Callable, Type
+from dataclasses import dataclass, field
+from enum import Enum
+import logging
 
-import hashlib
-import time
-import uuid
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class SchemaDefineAction(BaseAction):
-    """Define a data schema."""
-    action_type = "schema_define"
-    display_name = "定义Schema"
-    description = "定义数据Schema"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            fields = params.get("fields", [])
-            version = params.get("version", "1.0.0")
-
-            if not name:
-                return ActionResult(success=False, message="name is required")
-            if not fields:
-                return ActionResult(success=False, message="fields are required")
-
-            schema_id = hashlib.md5(f"{name}:{version}".encode()).hexdigest()[:12]
-
-            if not hasattr(context, "data_schemas"):
-                context.data_schemas = {}
-            context.data_schemas[schema_id] = {
-                "schema_id": schema_id,
-                "name": name,
-                "version": version,
-                "fields": fields,
-                "defined_at": time.time(),
-            }
-
-            return ActionResult(
-                success=True,
-                data={"schema_id": schema_id, "name": name, "version": version, "field_count": len(fields)},
-                message=f"Schema {schema_id} defined: {name} v{version} with {len(fields)} fields",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Schema define failed: {e}")
+class SchemaType(Enum):
+    STRING = "string"
+    NUMBER = "number"
+    INTEGER = "integer"
+    BOOLEAN = "boolean"
+    ARRAY = "array"
+    OBJECT = "object"
+    NULL = "null"
 
 
-class SchemaValidateAction(BaseAction):
-    """Validate data against schema."""
-    action_type = "schema_validate"
-    display_name = "Schema验证"
-    description = "验证数据是否符合Schema"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            schema_id = params.get("schema_id", "")
-            data = params.get("data", {})
-
-            if not schema_id:
-                return ActionResult(success=False, message="schema_id is required")
-
-            schemas = getattr(context, "data_schemas", {})
-            if schema_id not in schemas:
-                return ActionResult(success=False, message=f"Schema {schema_id} not found")
-
-            schema = schemas[schema_id]
-            errors = []
-            for field in schema.get("fields", []):
-                field_name = field.get("name")
-                required = field.get("required", False)
-                field_type = field.get("type", "string")
-
-                if required and field_name not in data:
-                    errors.append(f"Missing required field: {field_name}")
-                elif field_name in data and not isinstance(data[field_name], (str, int, float, bool, list, dict)):
-                    errors.append(f"Field {field_name} type mismatch: expected {field_type}")
-
-            return ActionResult(
-                success=len(errors) == 0,
-                data={"schema_id": schema_id, "valid": len(errors) == 0, "errors": errors},
-                message=f"Schema validation: {'PASSED' if not errors else f'{len(errors)} errors'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Schema validate failed: {e}")
+@dataclass
+class SchemaField:
+    name: str
+    field_type: SchemaType
+    required: bool = False
+    default: Any = None
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    pattern: Optional[str] = None
+    enum_values: Optional[List[Any]] = None
+    items: Optional["SchemaField"] = None
+    properties: Optional[Dict[str, "SchemaField"]] = None
 
 
-class SchemaInferAction(BaseAction):
-    """Infer schema from data."""
-    action_type = "schema_infer"
-    display_name = "推断Schema"
-    description = "从数据推断Schema"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", {})
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            inferred_fields = []
-            for key, value in data.items():
-                inferred_type = type(value).__name__
-                inferred_fields.append({
-                    "name": key,
-                    "type": inferred_type,
-                    "required": False,
-                    "inferred": True,
-                })
-
-            schema_id = hashlib.md5(str(data).encode()).hexdigest()[:12]
-
-            return ActionResult(
-                success=True,
-                data={"schema_id": schema_id, "inferred_fields": inferred_fields, "field_count": len(inferred_fields)},
-                message=f"Inferred schema with {len(inferred_fields)} fields",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Schema infer failed: {e}")
+@dataclass
+class SchemaValidationError:
+    field: str
+    message: str
+    value: Any
 
 
-class SchemaMergeAction(BaseAction):
-    """Merge two schemas."""
-    action_type = "schema_merge"
-    display_name = "合并Schema"
-    description = "合并两个Schema"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            schema_id_a = params.get("schema_id_a", "")
-            schema_id_b = params.get("schema_id_b", "")
-
-            if not schema_id_a or not schema_id_b:
-                return ActionResult(success=False, message="schema_id_a and schema_id_b are required")
-
-            schemas = getattr(context, "data_schemas", {})
-            schema_a = schemas.get(schema_id_a, {})
-            schema_b = schemas.get(schema_id_b, {})
-
-            fields_a = {f["name"]: f for f in schema_a.get("fields", [])}
-            fields_b = {f["name"]: f for f in schema_b.get("fields", [])}
-
-            merged_fields = list(fields_a.values())
-            added = []
-            for name, field in fields_b.items():
-                if name not in fields_a:
-                    merged_fields.append(field)
-                    added.append(name)
-
-            merged_id = str(uuid.uuid4())[:8]
-
-            return ActionResult(
-                success=True,
-                data={"merged_id": merged_id, "field_count": len(merged_fields), "added_from_b": added},
-                message=f"Merged schemas: {len(merged_fields)} total, {len(added)} added",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Schema merge failed: {e}")
+@dataclass
+class SchemaValidationResult:
+    valid: bool
+    errors: List[SchemaValidationError] = field(default_factory=list)
 
 
-class SchemaEvolveAction(BaseAction):
-    """Evolve schema with backward compatibility."""
-    action_type = "schema_evolve"
-    display_name = "演进Schema"
-    description = "演进Schema保持向后兼容"
+class DataSchema:
+    def __init__(self, name: str, fields: Optional[List[SchemaField]] = None):
+        self.name = name
+        self.fields: Dict[str, SchemaField] = {}
+        if fields:
+            for field in fields:
+                self.fields[field.name] = field
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            schema_id = params.get("schema_id", "")
-            new_fields = params.get("new_fields", [])
-            breaking = params.get("breaking_changes", False)
+    def add_field(self, field: SchemaField) -> None:
+        self.fields[field.name] = field
 
-            if not schema_id:
-                return ActionResult(success=False, message="schema_id is required")
+    def validate(self, data: Dict[str, Any]) -> SchemaValidationResult:
+        errors: List[SchemaValidationError] = []
+        for field_name, field_def in self.fields.items():
+            value = data.get(field_name)
+            if value is None:
+                if field_def.required:
+                    errors.append(SchemaValidationError(
+                        field=field_name,
+                        message=f"Field '{field_name}' is required",
+                        value=None,
+                    ))
+                continue
+            field_errors = self._validate_field(field_name, value, field_def)
+            errors.extend(field_errors)
+        return SchemaValidationResult(valid=len(errors) == 0, errors=errors)
 
-            schemas = getattr(context, "data_schemas", {})
-            if schema_id not in schemas:
-                return ActionResult(success=False, message=f"Schema {schema_id} not found")
-
-            schema = schemas[schema_id]
-            current_version = schema.get("version", "1.0.0")
-            parts = current_version.split(".")
-            if breaking:
-                parts[0] = str(int(parts[0]) + 1)
-                parts[1] = "0"
+    def _validate_field(self, field_name: str, value: Any, field_def: SchemaField) -> List[SchemaValidationError]:
+        errors: List[SchemaValidationError] = []
+        if field_def.field_type == SchemaType.STRING:
+            if not isinstance(value, str):
+                errors.append(SchemaValidationError(field=field_name, message="Must be a string", value=value))
             else:
-                parts[-1] = str(int(parts[-1]) + 1)
-            new_version = ".".join(parts)
+                if field_def.min_length and len(value) < field_def.min_length:
+                    errors.append(SchemaValidationError(field=field_name, message=f"Min length is {field_def.min_length}", value=value))
+                if field_def.max_length and len(value) > field_def.max_length:
+                    errors.append(SchemaValidationError(field=field_name, message=f"Max length is {field_def.max_length}", value=value))
+                if field_def.pattern and not self._match_pattern(field_def.pattern, value):
+                    errors.append(SchemaValidationError(field=field_name, message=f"Does not match pattern {field_def.pattern}", value=value))
+        elif field_def.field_type in (SchemaType.NUMBER, SchemaType.INTEGER):
+            if not isinstance(value, (int, float)):
+                errors.append(SchemaValidationError(field=field_name, message="Must be a number", value=value))
+            else:
+                if field_def.minimum is not None and value < field_def.minimum:
+                    errors.append(SchemaValidationError(field=field_name, message=f"Min value is {field_def.minimum}", value=value))
+                if field_def.maximum is not None and value > field_def.maximum:
+                    errors.append(SchemaValidationError(field=field_name, message=f"Max value is {field_def.maximum}", value=value))
+        elif field_def.field_type == SchemaType.BOOLEAN:
+            if not isinstance(value, bool):
+                errors.append(SchemaValidationError(field=field_name, message="Must be a boolean", value=value))
+        elif field_def.field_type == SchemaType.ARRAY:
+            if not isinstance(value, list):
+                errors.append(SchemaValidationError(field=field_name, message="Must be an array", value=value))
+            elif field_def.items:
+                for i, item in enumerate(value):
+                    item_errors = self._validate_field(f"{field_name}[{i}]", item, field_def.items)
+                    errors.extend(item_errors)
+        elif field_def.field_type == SchemaType.OBJECT:
+            if not isinstance(value, dict):
+                errors.append(SchemaValidationError(field=field_name, message="Must be an object", value=value))
+            elif field_def.properties:
+                schema = DataSchema("temp", list(field_def.properties.values()))
+                obj_errors = schema.validate(value)
+                for err in obj_errors.errors:
+                    errors.append(SchemaValidationError(field=f"{field_name}.{err.field}", message=err.message, value=err.value))
+        if field_def.enum_values and value not in field_def.enum_values:
+            errors.append(SchemaValidationError(field=field_name, message=f"Must be one of {field_def.enum_values}", value=value))
+        return errors
 
-            schema["version"] = new_version
-            schema["fields"].extend(new_fields)
-
-            return ActionResult(
-                success=True,
-                data={"schema_id": schema_id, "old_version": current_version, "new_version": new_version, "breaking": breaking},
-                message=f"Schema {schema_id} evolved: {current_version} -> {new_version}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Schema evolve failed: {e}")
+    def _match_pattern(self, pattern: str, value: str) -> bool:
+        import re
+        try:
+            return bool(re.match(pattern, value))
+        except Exception:
+            return pattern in value
