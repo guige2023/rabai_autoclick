@@ -1,101 +1,98 @@
+"""Data Sort Action.
+
+Sorts data by single or multiple fields with ascending/descending order,
+case sensitivity options, and null handling.
 """
-Data Sort Action - Sorts data by multiple fields and orders.
 
-This module provides data sorting capabilities including
-multi-field sorting, custom comparators, and stable sorting.
-"""
+import sys
+import os
+from typing import Any, Dict, List, Optional, Callable
 
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from typing import Any, Callable, TypeVar
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-T = TypeVar("T")
-
-
-class SortOrder(Enum) if False: pass
-
-from enum import Enum
-
-
-class SortOrder(Enum):
-    """Sort order direction."""
-    ASC = "asc"
-    DESC = "desc"
-
-
-@dataclass
-class SortSpec:
-    """Specification for sorting."""
-    field: str
-    order: SortOrder = SortOrder.ASC
-
-
-@dataclass
-class SortResult:
-    """Result of sort operation."""
-    data: list[dict[str, Any]]
-    sort_specs: list[SortSpec]
-    duration_ms: float = 0.0
-
-
-class DataSorter:
-    """Sorts data records."""
+class DataSortAction(BaseAction):
+    """Sort data by field(s).
     
-    def __init__(self) -> None:
-        pass
-    
-    def sort(
-        self,
-        data: list[dict[str, Any]],
-        specs: list[SortSpec],
-    ) -> list[dict[str, Any]]:
-        """Sort data by specifications."""
-        def get_compare_key(record: dict[str, Any]) -> tuple:
-            keys = []
-            for spec in specs:
-                value = self._get_nested(record, spec.field)
-                if spec.order == SortOrder.DESC:
-                    keys.append((value is not None, -1 if value is None else -value if isinstance(value, (int, float)) else value))
-                else:
-                    keys.append((value is None, value if value is not None else "", value is None))
-            return tuple(keys)
+    Supports multi-field sorting with ascending/descending order,
+    case sensitivity, and null value positioning.
+    """
+    action_type = "data_sort"
+    display_name = "数据排序"
+    description = "数据排序，支持多字段升序/降序排列"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Sort data.
         
-        return sorted(data, key=get_compare_key)
-    
-    def _get_nested(self, data: dict[str, Any], path: str) -> Any:
-        """Get nested value."""
-        keys = path.split(".")
-        current = data
-        for key in keys:
-            if isinstance(current, dict):
-                current = current.get(key)
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: Data to sort.
+                - sort_by: Field(s) to sort by.
+                - order: 'asc' or 'desc' (default: asc).
+                - nulls_first: Place null values first (default: False).
+                - case_sensitive: Case sensitive for strings (default: False).
+                - custom_sort_fn: Custom comparison function.
+                - save_to_var: Variable name for result.
+        
+        Returns:
+            ActionResult with sorted data.
+        """
+        try:
+            data = params.get('data')
+            sort_by = params.get('sort_by')
+            order = params.get('order', 'asc').lower()
+            nulls_first = params.get('nulls_first', False)
+            case_sensitive = params.get('case_sensitive', False)
+            custom_sort_fn = params.get('custom_sort_fn')
+            save_to_var = params.get('save_to_var', 'sorted_data')
+
+            if data is None:
+                data = context.get_variable(params.get('use_var', 'input_data'))
+
+            if not data:
+                return ActionResult(success=False, message="No data provided")
+
+            if not sort_by:
+                return ActionResult(success=False, message="sort_by is required")
+
+            if isinstance(sort_by, str):
+                sort_by = [sort_by]
+
+            reverse = order == 'desc'
+
+            if custom_sort_fn:
+                result = sorted(data, key=lambda x: eval(custom_sort_fn)(x), reverse=reverse)
             else:
-                return None
-        return current
+                result = self._sort_data(data, sort_by, reverse, nulls_first, case_sensitive)
 
+            context.set_variable(save_to_var, result)
+            return ActionResult(success=True, data={'count': len(result)},
+                             message=f"Sorted {len(result)} items by {sort_by}")
 
-class DataSortAction:
-    """Data sort action for automation workflows."""
-    
-    def __init__(self) -> None:
-        self.sorter = DataSorter()
-    
-    async def sort(
-        self,
-        data: list[dict[str, Any]],
-        fields: list[str],
-        orders: list[str] | None = None,
-    ) -> SortResult:
-        """Sort data by fields."""
-        specs = []
-        for i, field_name in enumerate(fields):
-            order = SortOrder.DESC if orders and orders[i].lower() == "desc" else SortOrder.ASC
-            specs.append(SortSpec(field=field_name, order=order))
-        
-        sorted_data = self.sorter.sort(data, specs)
-        return SortResult(data=sorted_data, sort_specs=specs)
+        except Exception as e:
+            return ActionResult(success=False, message=f"Sort error: {e}")
 
+    def _sort_data(self, data: List, sort_by: List[str], reverse: bool,
+                  nulls_first: bool, case_sensitive: bool) -> List:
+        """Sort data by multiple fields."""
+        def get_sort_key(item):
+            keys = []
+            for field in sort_by:
+                value = item.get(field) if isinstance(item, dict) else None
+                
+                # Handle None/null values
+                if value is None:
+                    keys.append((0 if nulls_first else 2, ''))
+                elif isinstance(value, str):
+                    if case_sensitive:
+                        keys.append((1, value))
+                    else:
+                        keys.append((1, value.lower()))
+                else:
+                    keys.append((1, value))
+            
+            return tuple(keys)
 
-__all__ = ["SortOrder", "SortSpec", "SortResult", "DataSorter", "DataSortAction"]
+        return sorted(data, key=get_sort_key, reverse=reverse)
