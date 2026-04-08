@@ -1,7 +1,7 @@
-"""Automation Monitor Action Module.
+"""Automation Monitor Action.
 
-Provides automation monitoring and observability capabilities including
-health checks, metrics collection, and alerting.
+Monitors automation execution health with metrics collection, anomaly
+detection, performance tracking, and alerting integration.
 """
 
 import sys
@@ -9,489 +9,257 @@ import os
 import time
 import threading
 from typing import Any, Dict, List, Optional, Callable
-from datetime import datetime, timedelta
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
 @dataclass
-class HealthStatus:
-    """Health check status."""
-    healthy: bool
-    component: str
-    message: str
-    timestamp: str
-    details: Dict = None
+class MetricSample:
+    """A single metric sample."""
+    name: str
+    value: float
+    timestamp: float
+    tags: Dict[str, str] = field(default_factory=dict)
 
 
 class AutomationMonitorAction(BaseAction):
-    """Monitor automation health and performance.
+    """Monitor automation execution health and performance.
     
-    Supports health checks, metrics collection, and anomaly detection.
+    Collects metrics, detects anomalies, tracks performance,
+    and integrates with alerting systems.
     """
     action_type = "automation_monitor"
     display_name = "自动化监控"
-    description = "监控自动化运行状况和性能"
+    description = "监控自动化执行健康状态，支持指标收集和异常检测"
 
     def __init__(self):
         super().__init__()
         self._metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
-        self._health_checks: Dict[str, Callable] = {}
+        self._counters: Dict[str, int] = defaultdict(int)
+        self._gauges: Dict[str, float] = {}
+        self._lock = threading.RLock()
+        self._alert_callbacks: List[Callable] = []
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Monitor automation.
+        """Monitor automation execution.
         
         Args:
             context: Execution context.
             params: Dict with keys:
-                - operation: 'check_health', 'record_metric', 'get_metrics', 'alert'.
-                - component: Component name to monitor.
-                - metric_name: Metric to record.
-                - metric_value: Value to record.
-                - threshold: Alert threshold.
-                - output_var: Variable name to store result.
+                - action: 'record', 'get', 'alert', 'status', 'reset'.
+                - metric_name: Name of metric to record/get.
+                - value: Value to record (for record action).
+                - tags: Tags for metric (for record action).
+                - time_window: Time window in seconds (for anomaly detection).
+                - threshold: Threshold for alerting.
+                - operator: 'gt', 'lt', 'eq', 'stddev' (for anomaly detection).
+                - save_to_var: Variable name for results.
         
         Returns:
-            ActionResult with monitoring result or error.
+            ActionResult with monitoring data.
         """
-        operation = params.get('operation', 'check_health')
-        component = params.get('component', 'system')
-        metric_name = params.get('metric_name', '')
-        metric_value = params.get('metric_value', 0)
-        threshold = params.get('threshold', None)
-        labels = params.get('labels', {})
-        output_var = params.get('output_var', 'monitor_result')
-
         try:
-            if operation == 'check_health':
-                return self._check_health(component, output_var)
-            elif operation == 'record_metric':
-                return self._record_metric(component, metric_name, metric_value, labels, output_var)
-            elif operation == 'get_metrics':
-                return self._get_metrics(component, metric_name, output_var)
-            elif operation == 'alert':
-                return self._check_alert(component, metric_name, threshold, metric_value, output_var)
+            action = params.get('action', 'record')
+            save_to_var = params.get('save_to_var', 'monitor_data')
+
+            if action == 'record':
+                return self._record_metric(params, save_to_var)
+            elif action == 'get':
+                return self._get_metrics(params, save_to_var)
+            elif action == 'alert':
+                return self._check_alert(params, save_to_var)
+            elif action == 'status':
+                return self._get_status(save_to_var)
+            elif action == 'reset':
+                return self._reset(params, save_to_var)
             else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}"
-                )
+                return ActionResult(success=False, message=f"Unknown monitor action: {action}")
 
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Automation monitor failed: {str(e)}"
-            )
+            return ActionResult(success=False, message=f"Monitor error: {e}")
 
-    def _check_health(self, component: str, output_var: str) -> ActionResult:
-        """Check health of a component."""
-        health = HealthStatus(
-            healthy=True,
-            component=component,
-            message="OK",
-            timestamp=datetime.now().isoformat(),
-            details={}
-        )
+    def _record_metric(self, params: Dict, save_to_var: str) -> ActionResult:
+        """Record a metric sample."""
+        metric_name = params.get('metric_name')
+        value = params.get('value')
+        tags = params.get('tags', {})
+        
+        if not metric_name:
+            return ActionResult(success=False, message="metric_name is required")
 
-        context.variables[output_var] = {
-            'healthy': health.healthy,
-            'component': health.component,
-            'message': health.message,
-            'timestamp': health.timestamp
-        }
+        sample = MetricSample(name=metric_name, value=value, timestamp=time.time(), tags=tags)
+        
+        with self._lock:
+            self._metrics[metric_name].append(sample)
+            self._gauges[metric_name] = value
 
-        return ActionResult(
-            success=True,
-            data=context.variables[output_var],
-            message=f"Health check for '{component}': {'healthy' if health.healthy else 'unhealthy'}"
-        )
+        context.set_variable(save_to_var, {'recorded': True, 'metric': metric_name, 'value': value})
+        return ActionResult(success=True, message=f"Recorded {metric_name}={value}")
 
-    def _record_metric(
-        self,
-        component: str,
-        metric_name: str,
-        metric_value: float,
-        labels: Dict,
-        output_var: str
-    ) -> ActionResult:
-        """Record a metric value."""
-        key = f"{component}.{metric_name}"
-        self._metrics[key].append({
-            'value': metric_value,
-            'timestamp': time.time(),
-            'labels': labels
-        })
+    def _get_metrics(self, params: Dict, save_to_var: str) -> ActionResult:
+        """Get metric data."""
+        metric_name = params.get('metric_name')
+        time_window = params.get('time_window', 60)
+        stats = params.get('stats', ['avg', 'min', 'max', 'count'])
 
-        result = {
-            'recorded': True,
-            'metric': key,
-            'value': metric_value,
-            'count': len(self._metrics[key])
-        }
+        with self._lock:
+            if metric_name:
+                samples = list(self._metrics.get(metric_name, []))
+                cutoff = time.time() - time_window
+                samples = [s for s in samples if s.timestamp >= cutoff]
+                values = [s.value for s in samples]
+                
+                result = self._calculate_stats(values, stats)
+                result['samples'] = len(values)
+                result['metric_name'] = metric_name
+                result['time_window'] = time_window
+            else:
+                # Get all metrics
+                result = {
+                    'metrics': {
+                        name: self._calculate_stats([s.value for s in samples[-100:]], stats)
+                        for name, samples in self._metrics.items()
+                    },
+                    'counters': dict(self._counters),
+                    'gauges': dict(self._gauges)
+                }
 
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Metric '{key}' recorded: {metric_value}"
-        )
+        context.set_variable(save_to_var, result)
+        return ActionResult(success=True, data=result)
 
-    def _get_metrics(
-        self,
-        component: str,
-        metric_name: str,
-        output_var: str
-    ) -> ActionResult:
-        """Get recorded metrics."""
-        key = f"{component}.{metric_name}" if metric_name else component
-        metrics = list(self._metrics.get(key, []))
+    def _calculate_stats(self, values: List[float], stats: List[str]) -> Dict:
+        """Calculate statistics for values."""
+        if not values:
+            return {stat: None for stat in stats}
 
-        if not metrics:
-            return ActionResult(
-                success=False,
-                message=f"No metrics found for '{key}'"
-            )
+        import statistics
+        result = {}
+        
+        for stat in stats:
+            if stat == 'avg' or stat == 'mean':
+                result['avg'] = statistics.mean(values)
+            elif stat == 'min':
+                result['min'] = min(values)
+            elif stat == 'max':
+                result['max'] = max(values)
+            elif stat == 'count':
+                result['count'] = len(values)
+            elif stat == 'sum':
+                result['sum'] = sum(values)
+            elif stat == 'stddev':
+                result['stddev'] = statistics.stdev(values) if len(values) > 1 else 0
+            elif stat == 'median':
+                result['median'] = statistics.median(values)
+            elif stat == 'p95':
+                sorted_vals = sorted(values)
+                idx = int(len(sorted_vals) * 0.95)
+                result['p95'] = sorted_vals[min(idx, len(sorted_vals) - 1)]
+            elif stat == 'p99':
+                sorted_vals = sorted(values)
+                idx = int(len(sorted_vals) * 0.99)
+                result['p99'] = sorted_vals[min(idx, len(sorted_vals) - 1)]
 
-        # Calculate statistics
-        values = [m['value'] for m in metrics]
-        stats = {
-            'count': len(values),
-            'min': min(values) if values else 0,
-            'max': max(values) if values else 0,
-            'avg': sum(values) / len(values) if values else 0,
-            'latest': values[-1] if values else 0
-        }
+        return result
 
-        result = {
-            'metric': key,
-            'stats': stats,
-            'data_points': len(metrics)
-        }
+    def _check_alert(self, params: Dict, save_to_var: str) -> ActionResult:
+        """Check for alert conditions."""
+        metric_name = params.get('metric_name')
+        threshold = params.get('threshold')
+        operator = params.get('operator', 'gt')
+        time_window = params.get('time_window', 60)
 
-        context.variables[output_var] = result
-        return ActionResult(
-            success=True,
-            data=result,
-            message=f"Retrieved {len(metrics)} data points for '{key}'"
-        )
+        if not metric_name or threshold is None:
+            return ActionResult(success=False, message="metric_name and threshold are required")
 
-    def _check_alert(
-        self,
-        component: str,
-        metric_name: str,
-        threshold: float,
-        current_value: float,
-        output_var: str
-    ) -> ActionResult:
-        """Check if alert threshold is exceeded."""
-        key = f"{component}.{metric_name}"
-        triggered = current_value >= threshold if threshold else False
+        with self._lock:
+            samples = list(self._metrics.get(metric_name, []))
+            cutoff = time.time() - time_window
+            samples = [s for s in samples if s.timestamp >= cutoff]
+            values = [s.value for s in samples]
+            
+            if not values:
+                return ActionResult(success=True, data={'alert': False, 'reason': 'no_data'})
+            
+            current_value = values[-1] if values else None
+            avg_value = statistics.mean(values) if values else 0
+
+        triggered = False
+        reason = ""
+
+        if operator == 'gt':
+            triggered = current_value > threshold
+            reason = f"{current_value} > {threshold}"
+        elif operator == 'lt':
+            triggered = current_value < threshold
+            reason = f"{current_value} < {threshold}"
+        elif operator == 'eq':
+            triggered = current_value == threshold
+            reason = f"{current_value} == {threshold}"
+        elif operator == 'stddev':
+            if len(values) > 1:
+                import statistics
+                stddev = statistics.stdev(values)
+                triggered = stddev > threshold
+                reason = f"stddev={stddev} > {threshold}"
+        elif operator == 'anomaly':
+            # Simple anomaly: value is > 2 stddev from mean
+            if len(values) > 2:
+                import statistics
+                mean = statistics.mean(values)
+                stddev = statistics.stdev(values)
+                triggered = abs(current_value - mean) > (threshold * stddev)
+                reason = f"|{current_value} - {mean}| > {threshold} * {stddev}"
 
         result = {
             'alert': triggered,
-            'component': component,
-            'metric': metric_name,
-            'value': current_value,
+            'metric_name': metric_name,
             'threshold': threshold,
-            'timestamp': datetime.now().isoformat()
+            'operator': operator,
+            'current_value': current_value,
+            'reason': reason
         }
 
-        context.variables[output_var] = result
-        return ActionResult(
-            success=not triggered,
-            data=result,
-            message=f"Alert {'triggered' if triggered else 'not triggered'} for '{key}'"
-        )
+        if triggered:
+            for callback in self._alert_callbacks:
+                try:
+                    callback(result)
+                except Exception:
+                    pass
 
+        context.set_variable(save_to_var, result)
+        return ActionResult(success=True, data=result, 
+                          message=f"Alert {'triggered' if triggered else 'not triggered'}")
 
-class AutomationLoggerAction(BaseAction):
-    """Structured logging for automation workflows.
-    
-    Supports log levels, structured fields, and log aggregation.
-    """
-    action_type = "automation_logger"
-    display_name = "自动化日志"
-    description = "自动化工作流的结构化日志"
+    def _get_status(self, save_to_var: str) -> ActionResult:
+        """Get overall monitoring status."""
+        with self._lock:
+            total_samples = sum(len(samples) for samples in self._metrics.values())
+            result = {
+                'total_metrics': len(self._metrics),
+                'total_samples': total_samples,
+                'counters': dict(self._counters),
+                'gauges': dict(self._gauges),
+                'metric_names': list(self._metrics.keys())
+            }
 
-    LOG_LEVELS = {
-        'DEBUG': 10,
-        'INFO': 20,
-        'WARNING': 30,
-        'ERROR': 40,
-        'CRITICAL': 50
-    }
+        context.set_variable(save_to_var, result)
+        return ActionResult(success=True, data=result)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Log automation events.
+    def _reset(self, params: Dict, save_to_var: str) -> ActionResult:
+        """Reset monitoring data."""
+        metric_name = params.get('metric_name')
         
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: 'log', 'get_logs', 'clear_logs'.
-                - level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-                - message: Log message.
-                - fields: Additional structured fields.
-                - logger_id: Logger identifier.
-                - output_var: Variable name to store result.
-        
-        Returns:
-            ActionResult with logging result or error.
-        """
-        operation = params.get('operation', 'log')
-        level = params.get('level', 'INFO')
-        message = params.get('message', '')
-        fields = params.get('fields', {})
-        logger_id = params.get('logger_id', 'default')
-        output_var = params.get('output_var', 'log_result')
-
-        try:
-            if operation == 'log':
-                return self._log_message(level, message, fields, logger_id, output_var)
-            elif operation == 'get_logs':
-                return self._get_logs(logger_id, params.get('level'), output_var)
-            elif operation == 'clear_logs':
-                return self._clear_logs(logger_id, output_var)
+        with self._lock:
+            if metric_name and metric_name in self._metrics:
+                self._metrics[metric_name].clear()
+                if metric_name in self._gauges:
+                    del self._gauges[metric_name]
             else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}"
-                )
+                self._metrics.clear()
+                self._counters.clear()
+                self._gauges.clear()
 
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Automation logger failed: {str(e)}"
-            )
-
-    def _log_message(
-        self,
-        level: str,
-        message: str,
-        fields: Dict,
-        logger_id: str,
-        output_var: str
-    ) -> ActionResult:
-        """Log a message."""
-        if not hasattr(self, '_log_buffers'):
-            self._log_buffers = {}
-
-        if logger_id not in self._log_buffers:
-            self._log_buffers[logger_id] = deque(maxlen=1000)
-
-        log_entry = {
-            'timestamp': datetime.now().isoformat(),
-            'level': level,
-            'message': message,
-            'fields': fields,
-            'level_value': self.LOG_LEVELS.get(level, 20)
-        }
-
-        self._log_buffers[logger_id].append(log_entry)
-
-        context.variables[output_var] = log_entry
-        return ActionResult(
-            success=True,
-            data=log_entry,
-            message=f"[{level}] {message}"
-        )
-
-    def _get_logs(
-        self,
-        logger_id: str,
-        min_level: str,
-        output_var: str
-    ) -> ActionResult:
-        """Get stored logs."""
-        if not hasattr(self, '_log_buffers') or logger_id not in self._log_buffers:
-            return ActionResult(
-                success=False,
-                message=f"No logs found for logger '{logger_id}'"
-            )
-
-        logs = list(self._log_buffers[logger_id])
-
-        # Filter by level
-        if min_level:
-            min_level_value = self.LOG_LEVELS.get(min_level, 20)
-            logs = [l for l in logs if l['level_value'] >= min_level_value]
-
-        context.variables[output_var] = logs
-        return ActionResult(
-            success=True,
-            data={'logs': logs, 'count': len(logs)},
-            message=f"Retrieved {len(logs)} logs for '{logger_id}'"
-        )
-
-    def _clear_logs(self, logger_id: str, output_var: str) -> ActionResult:
-        """Clear stored logs."""
-        if hasattr(self, '_log_buffers') and logger_id in self._log_buffers:
-            cleared = len(self._log_buffers[logger_id])
-            self._log_buffers[logger_id].clear()
-        else:
-            cleared = 0
-
-        context.variables[output_var] = {'cleared': cleared}
-        return ActionResult(
-            success=True,
-            data={'cleared': cleared},
-            message=f"Cleared {cleared} logs for '{logger_id}'"
-        )
-
-
-class AutomationReporterAction(BaseAction):
-    """Generate automation execution reports.
-    
-    Supports summary reports, detailed logs, and metrics dashboards.
-    """
-    action_type = "automation_reporter"
-    display_name = "自动化报告"
-    description = "生成自动化执行报告"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Generate automation reports.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - report_type: 'summary', 'detailed', 'metrics'.
-                - execution_log: Log data from execution.
-                - metrics: Metrics data.
-                - format: 'json', 'markdown', 'html'.
-                - output_var: Variable name to store result.
-        
-        Returns:
-            ActionResult with generated report or error.
-        """
-        report_type = params.get('report_type', 'summary')
-        execution_log = params.get('execution_log', [])
-        metrics = params.get('metrics', {})
-        format_type = params.get('format', 'json')
-        output_var = params.get('output_var', 'report')
-
-        try:
-            if report_type == 'summary':
-                report = self._generate_summary_report(execution_log, format_type)
-            elif report_type == 'detailed':
-                report = self._generate_detailed_report(execution_log, format_type)
-            elif report_type == 'metrics':
-                report = self._generate_metrics_report(metrics, format_type)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown report type: {report_type}"
-                )
-
-            context.variables[output_var] = report
-            return ActionResult(
-                success=True,
-                data=report,
-                message=f"Generated {report_type} report"
-            )
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Report generation failed: {str(e)}"
-            )
-
-    def _generate_summary_report(self, log: List, format_type: str) -> Dict:
-        """Generate summary report."""
-        total = len(log)
-        success = len([e for e in log if e.get('success', False)])
-        failed = total - success
-
-        duration = sum(e.get('duration', 0) for e in log)
-
-        report = {
-            'type': 'summary',
-            'generated_at': datetime.now().isoformat(),
-            'total_executions': total,
-            'successful': success,
-            'failed': failed,
-            'success_rate': f"{(success/total*100):.1f}%" if total > 0 else "0%",
-            'total_duration': duration,
-            'avg_duration': duration / total if total > 0 else 0
-        }
-
-        if format_type == 'markdown':
-            report['markdown'] = self._format_summary_markdown(report)
-        elif format_type == 'html':
-            report['html'] = self._format_summary_html(report)
-
-        return report
-
-    def _generate_detailed_report(self, log: List, format_type: str) -> Dict:
-        """Generate detailed report."""
-        report = {
-            'type': 'detailed',
-            'generated_at': datetime.now().isoformat(),
-            'total_executions': len(log),
-            'executions': log
-        }
-
-        if format_type == 'markdown':
-            report['markdown'] = self._format_detailed_markdown(log)
-        elif format_type == 'html':
-            report['html'] = self._format_detailed_html(log)
-
-        return report
-
-    def _generate_metrics_report(self, metrics: Dict, format_type: str) -> Dict:
-        """Generate metrics report."""
-        report = {
-            'type': 'metrics',
-            'generated_at': datetime.now().isoformat(),
-            'metrics': metrics
-        }
-
-        if format_type == 'markdown':
-            report['markdown'] = self._format_metrics_markdown(metrics)
-        elif format_type == 'html':
-            report['html'] = self._format_metrics_html(metrics)
-
-        return report
-
-    def _format_summary_markdown(self, report: Dict) -> str:
-        """Format summary as markdown."""
-        return f"""# Automation Summary Report
-
-Generated: {report['generated_at']}
-
-## Statistics
-- Total Executions: {report['total_executions']}
-- Successful: {report['successful']}
-- Failed: {report['failed']}
-- Success Rate: {report['success_rate']}
-- Total Duration: {report['total_duration']:.3f}s
-- Avg Duration: {report['avg_duration']:.3f}s
-"""
-
-    def _format_summary_html(self, report: Dict) -> str:
-        """Format summary as HTML."""
-        return f"<html><body><h1>Automation Summary</h1><p>Total: {report['total_executions']}</p></body></html>"
-
-    def _format_detailed_markdown(self, log: List) -> str:
-        """Format detailed log as markdown."""
-        lines = ["# Detailed Execution Log\n"]
-        for i, entry in enumerate(log):
-            status = "✅" if entry.get('success') else "❌"
-            lines.append(f"{status} Step {i+1}: {entry.get('node', 'unknown')} ({entry.get('duration', 0):.3f}s)")
-        return "\n".join(lines)
-
-    def _format_detailed_html(self, log: List) -> str:
-        """Format detailed log as HTML."""
-        return "<html><body><h1>Detailed Log</h1></body></html>"
-
-    def _format_metrics_markdown(self, metrics: Dict) -> str:
-        """Format metrics as markdown."""
-        lines = ["# Metrics Report\n"]
-        for key, value in metrics.items():
-            lines.append(f"- {key}: {value}")
-        return "\n".join(lines)
-
-    def _format_metrics_html(self, metrics: Dict) -> str:
-        """Format metrics as HTML."""
-        return "<html><body><h1>Metrics</h1></body></html>"
+        return ActionResult(success=True, message="Monitoring data reset")
