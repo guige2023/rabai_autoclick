@@ -1,231 +1,196 @@
-"""Element finder utilities for UI automation.
+"""
+Element Finder Utility
 
-Provides pattern-based element finding with fuzzy matching
-and ranking for ambiguous element lookups.
+Provides flexible element finding with multiple strategies.
+Supports fallback chains when primary finding method fails.
+
+Example:
+    >>> finder = ElementFinder(accessibility_tree)
+    >>> element = finder.find_one(role="button", name="Submit")
+    >>> elements = finder.find_all(role="textfield")
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Optional, Sequence
-
-
-class MatchMode(Enum):
-    """Element matching modes."""
-    EXACT = auto()
-    CONTAINS = auto()
-    STARTS_WITH = auto()
-    ENDS_WITH = auto()
-    FUZZY = auto()
-    REGEX = auto()
-
-
-@dataclass
-class ElementMatch:
-    """A match result for element finding.
-
-    Attributes:
-        element_id: ID of matched element.
-        score: Match confidence score (0.0-1.0).
-        matched_on: The property/attribute that matched.
-        matched_value: The value that was matched against.
-    """
-    element_id: str
-    score: float = 0.0
-    matched_on: str = ""
-    matched_value: str = ""
-
-
-@dataclass
-class ElementQuery:
-    """A query for finding elements.
-
-    Attributes:
-        role: Element role to match.
-        name: Element name to match.
-        label: Element label to match.
-        value: Element value to match.
-        match_mode: How to match string values.
-        timeout: Maximum time to search.
-        rank_by: Property to rank results by.
-    """
-    role: str = ""
-    name: str = ""
-    label: str = ""
-    value: str = ""
-    match_mode: MatchMode = MatchMode.CONTAINS
-    timeout: float = 10.0
-    rank_by: str = "score"
+from typing import Any, Callable, Optional
 
 
 class ElementFinder:
-    """Finds UI elements using flexible matching criteria.
+    """
+    Flexible element finder with strategy chaining.
 
-    Supports multiple match modes, ranking, and fuzzy matching
-    for robust element lookup in dynamic UIs.
+    Args:
+        elements: List of accessibility elements to search.
     """
 
-    def __init__(self) -> None:
-        """Initialize element finder."""
-        self._elements: dict[str, dict[str, Any]] = {}
-        self._match_callbacks: list[Callable[[ElementQuery], list[dict]]] = []
+    def __init__(self, elements: Optional[list[dict]] = None) -> None:
+        self.elements: list[dict] = elements or []
 
-    def register_element(
+    def set_elements(self, elements: list[dict]) -> None:
+        """Replace the element list."""
+        self.elements = elements
+
+    def find_one(
         self,
-        element_id: str,
-        role: str = "",
-        name: str = "",
-        label: str = "",
-        value: Any = None,
-        **attrs: Any,
-    ) -> None:
-        """Register an element for lookup."""
-        self._elements[element_id] = {
-            "id": element_id,
-            "role": role,
-            "name": name,
-            "label": label,
-            "value": value,
-            **attrs,
-        }
-
-    def unregister_element(self, element_id: str) -> bool:
-        """Remove an element. Returns True if found."""
-        if element_id in self._elements:
-            del self._elements[element_id]
-            return True
-        return False
-
-    def find_one(self, query: ElementQuery) -> Optional[str]:
-        """Find the best matching element ID.
-
-        Returns the ID of the best match, or None if no match.
+        role: Optional[str] = None,
+        name: Optional[str] = None,
+        value: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        focused: Optional[bool] = None,
+        index: Optional[int] = None,
+        predicate: Optional[Callable[[dict], bool]] = None,
+    ) -> Optional[dict]:
         """
-        matches = self.find(query)
-        return matches[0].element_id if matches else None
+        Find a single element matching criteria.
 
-    def find(self, query: ElementQuery) -> list[ElementMatch]:
-        """Find all elements matching the query.
+        Args:
+            role: Element role to match.
+            name: Element name to match (partial match).
+            value: Element value to match.
+            enabled: Element enabled state.
+            focused: Element focused state.
+            index: Return nth matching element (0-indexed).
+            predicate: Custom predicate function.
 
-        Returns list sorted by match score.
+        Returns:
+            First matching element dict, or None.
         """
-        results: list[ElementMatch] = []
+        results = self._filter(
+            role=role,
+            name=name,
+            value=value,
+            enabled=enabled,
+            focused=focused,
+            predicate=predicate,
+        )
 
-        for elem_id, elem in self._elements.items():
-            score = self._compute_match_score(elem, query)
-            if score > 0:
-                results.append(ElementMatch(
-                    element_id=elem_id,
-                    score=score,
-                    matched_on=self._best_match_property(elem, query),
-                    matched_value=self._best_match_value(elem, query),
-                ))
+        if index is not None and 0 <= index < len(results):
+            return results[index]
 
-        results.sort(key=lambda m: m.score, reverse=True)
+        return results[0] if results else None
+
+    def find_all(
+        self,
+        role: Optional[str] = None,
+        name: Optional[str] = None,
+        value: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        focused: Optional[bool] = None,
+        predicate: Optional[Callable[[dict], bool]] = None,
+        limit: Optional[int] = None,
+    ) -> list[dict]:
+        """
+        Find all elements matching criteria.
+
+        Args:
+            role: Element role to match.
+            name: Element name to match (partial match).
+            value: Element value to match.
+            enabled: Element enabled state.
+            focused: Element focused state.
+            predicate: Custom predicate function.
+            limit: Maximum number of results.
+
+        Returns:
+            List of matching element dicts.
+        """
+        results = self._filter(
+            role=role,
+            name=name,
+            value=value,
+            enabled=enabled,
+            focused=focused,
+            predicate=predicate,
+        )
+
+        if limit:
+            return results[:limit]
         return results
 
-    def _compute_match_score(
+    def _filter(
         self,
-        elem: dict[str, Any],
-        query: ElementQuery,
-    ) -> float:
-        """Compute match score for an element."""
-        score = 0.0
-        total_weight = 0.0
+        role: Optional[str] = None,
+        name: Optional[str] = None,
+        value: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        focused: Optional[bool] = None,
+        predicate: Optional[Callable[[dict], bool]] = None,
+    ) -> list[dict]:
+        """Internal filter implementation."""
+        results: list[dict] = []
 
-        if query.role:
-            total_weight += 3.0
-            if elem.get("role", "").lower() == query.role.lower():
-                score += 3.0
+        for element in self.elements:
+            # Role filter
+            if role is not None:
+                if element.get("role", "").lower() != role.lower():
+                    continue
 
-        if query.name:
-            total_weight += 2.0
-            score += self._string_score(
-                elem.get("name", ""), query.name, query.match_mode
-            ) * 2.0
+            # Name filter (partial match)
+            if name is not None:
+                el_name = element.get("name", "") or ""
+                if name.lower() not in el_name.lower():
+                    continue
 
-        if query.label:
-            total_weight += 1.5
-            score += self._string_score(
-                elem.get("label", ""), query.label, query.match_mode
-            ) * 1.5
+            # Value filter
+            if value is not None:
+                el_value = element.get("value", "") or ""
+                if value.lower() not in el_value.lower():
+                    continue
 
-        if total_weight == 0:
-            return 0.0
-        return score / total_weight
+            # Enabled filter
+            if enabled is not None:
+                if element.get("enabled", True) != enabled:
+                    continue
 
-    def _string_score(
+            # Focused filter
+            if focused is not None:
+                if element.get("focused", False) != focused:
+                    continue
+
+            # Custom predicate
+            if predicate is not None and not predicate(element):
+                continue
+
+            results.append(element)
+
+        return results
+
+    def find_by_role(self, role: str) -> list[dict]:
+        """Find all elements with given role."""
+        return self.find_all(role=role)
+
+    def find_by_name(self, name: str) -> list[dict]:
+        """Find all elements whose name contains given string."""
+        return self.find_all(name=name)
+
+    def find_focused(self) -> Optional[dict]:
+        """Find the currently focused element."""
+        return self.find_one(focused=True)
+
+    def find_enabled(self) -> list[dict]:
+        """Find all enabled elements."""
+        return self.find_all(enabled=True)
+
+    def find_in_bounds(
         self,
-        text: str,
-        pattern: str,
-        mode: MatchMode,
-    ) -> float:
-        """Compute string match score (0.0-1.0)."""
-        if not text or not pattern:
-            return 0.0
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> list[dict]:
+        """Find elements within given bounds."""
+        def in_bounds(el: dict) -> bool:
+            bounds = el.get("bounds", [0, 0, 0, 0])
+            if len(bounds) < 4:
+                return False
+            bx, by, bw, bh = bounds
 
-        text_lower = text.lower()
-        pattern_lower = pattern.lower()
+            # Check if element center is within bounds
+            cx, cy = bx + bw // 2, by + bh // 2
+            return (x <= cx <= x + width) and (y <= cy <= y + height)
 
-        if mode == MatchMode.EXACT:
-            return 1.0 if text_lower == pattern_lower else 0.0
+        return self.find_all(predicate=in_bounds)
 
-        if mode == MatchMode.CONTAINS:
-            return 1.0 if pattern_lower in text_lower else 0.0
-
-        if mode == MatchMode.STARTS_WITH:
-            return 1.0 if text_lower.startswith(pattern_lower) else 0.0
-
-        if mode == MatchMode.ENDS_WITH:
-            return 1.0 if text_lower.endswith(pattern_lower) else 0.0
-
-        if mode == MatchMode.REGEX:
-            try:
-                return 1.0 if re.search(pattern, text, re.I) else 0.0
-            except Exception:
-                return 0.0
-
-        if mode == MatchMode.FUZZY:
-            return self._fuzzy_score(text_lower, pattern_lower)
-
-        return 0.0
-
-    def _fuzzy_score(self, text: str, pattern: str) -> float:
-        """Simple fuzzy matching score."""
-        if pattern in text:
-            return 1.0
-        if all(c in text for c in pattern):
-            return 0.7
-        if any(c in text for c in pattern):
-            return 0.3
-        return 0.0
-
-    def _best_match_property(
-        self,
-        elem: dict[str, Any],
-        query: ElementQuery,
-    ) -> str:
-        """Return the property that matched best."""
-        if query.role and elem.get("role", "").lower() == query.role.lower():
-            return "role"
-        if query.name and query.name.lower() in elem.get("name", "").lower():
-            return "name"
-        if query.label and query.label.lower() in elem.get("label", "").lower():
-            return "label"
-        return ""
-
-    def _best_match_value(
-        self,
-        elem: dict[str, Any],
-        query: ElementQuery,
-    ) -> str:
-        """Return the value that was matched against."""
-        prop = self._best_match_property(elem, query)
-        return str(elem.get(prop, ""))
-
-    @property
-    def element_count(self) -> int:
-        """Return number of registered elements."""
-        return len(self._elements)
+    def count(self, role: Optional[str] = None) -> int:
+        """Count elements matching criteria."""
+        return len(self.find_all(role=role))
