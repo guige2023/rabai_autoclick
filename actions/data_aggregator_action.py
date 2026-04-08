@@ -1,56 +1,228 @@
-"""Data Aggregator Action Module. Aggregates data using various operations."""
-import sys, os, statistics
-from typing import Any
+"""
+Data Aggregator Action Module.
+
+Collects and aggregates data from multiple sources with configurable
+ grouping, filtering, and transformation pipelines.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Optional, TypeVar, Union
 from dataclasses import dataclass, field
 from collections import defaultdict
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+import logging
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+U = TypeVar("U")
+
+
+class AggregationFunc(Enum):
+    """Built-in aggregation functions."""
+    SUM = "sum"
+    AVG = "avg"
+    MIN = "min"
+    MAX = "max"
+    COUNT = "count"
+    FIRST = "first"
+    LAST = "last"
+    LIST = "list"
+    DICT = "dict"
+    CUSTOM = "custom"
+
 
 @dataclass
-class AggregationResult:
-    operation: str; field: str; value: Any; group_by: str = ""
-    group_values: dict = field(default_factory=dict)
+class AggregationConfig:
+    """Configuration for a single aggregation."""
+    group_by: Optional[str] = None
+    field: Optional[str] = None
+    agg_func: AggregationFunc = AggregationFunc.COUNT
+    custom_func: Optional[Callable[[list], Any]] = None
+    alias: Optional[str] = None
 
-class DataAggregatorAction(BaseAction):
-    action_type = "data_aggregator"; display_name = "数据聚合"
-    description = "聚合数据"
-    def __init__(self) -> None: super().__init__()
-    def _agg_simple(self, records: list, field_name: str, operation: str) -> Any:
-        values = [r.get(field_name) for r in records if r.get(field_name) is not None]
-        if not values: return None
-        if operation == "sum": return sum(values)
-        elif operation in ("avg","mean"): return statistics.mean(values)
-        elif operation == "count": return len(values)
-        elif operation == "min": return min(values)
-        elif operation == "max": return max(values)
-        elif operation == "median": return statistics.median(values)
-        elif operation == "stddev": return statistics.stdev(values) if len(values)>1 else 0
-        elif operation == "p50":
-            sv = sorted(values); idx = int(len(sv)*0.50)
-            return sv[min(idx, len(sv)-1)]
-        elif operation == "p95":
-            sv = sorted(values); idx = int(len(sv)*0.95)
-            return sv[min(idx, len(sv)-1)]
+
+@dataclass
+class AggregatedResult:
+    """Result of an aggregation operation."""
+    groups: dict[Any, dict[str, Any]]
+    total_count: int
+    fields_aggregated: list[str]
+
+
+class DataAggregatorAction:
+    """
+    Multi-source data aggregation with flexible pipelines.
+
+    Collects data from multiple sources, groups by keys, applies
+    aggregations, and returns consolidated results.
+
+    Example:
+        aggregator = DataAggregatorAction()
+        aggregator.add_source(users_list, name="users")
+        aggregator.add_source(orders_list, name="orders")
+        result = aggregator.aggregate([
+            AggregationConfig(group_by="region", field="revenue", agg_func=AggregationFunc.SUM),
+        ])
+    """
+
+    def __init__(self) -> None:
+        self._sources: dict[str, list[dict[str, Any]]] = {}
+        self._source_names: list[str] = []
+        self._filters: list[Callable[[dict[str, Any]], bool]] = []
+
+    def add_source(
+        self,
+        data: list[dict[str, Any]],
+        name: str,
+        key_field: Optional[str] = None,
+    ) -> "DataAggregatorAction":
+        """Add a data source to aggregate."""
+        self._sources[name] = data
+        self._source_names.append(name)
+        return self
+
+    def add_filter(
+        self,
+        filter_func: Callable[[dict[str, Any]], bool],
+    ) -> "DataAggregatorAction":
+        """Add a filter function applied to each record."""
+        self._filters.append(filter_func)
+        return self
+
+    def filter_by_field(
+        self,
+        field: str,
+        value: Any,
+        op: str = "eq",
+    ) -> "DataAggregatorAction":
+        """Add a simple field-based filter."""
+        def make_filter(f: str, v: Any, op: str) -> Callable[[dict[str, Any]], bool]:
+            ops = {
+                "eq": lambda r: r.get(f) == v,
+                "ne": lambda r: r.get(f) != v,
+                "gt": lambda r: r.get(f, 0) > v,
+                "ge": lambda r: r.get(f, 0) >= v,
+                "lt": lambda r: r.get(f, 0) < v,
+                "le": lambda r: r.get(f, 0) <= v,
+                "in": lambda r: r.get(f) in v,
+                "contains": lambda r: v in str(r.get(f, "")),
+            }
+            return ops.get(op, ops["eq"])
+
+        self._filters.append(make_filter(field, value, op))
+        return self
+
+    def aggregate(
+        self,
+        configs: list[AggregationConfig],
+    ) -> AggregatedResult:
+        """Execute aggregation on all sources."""
+        all_records = self._collect_records()
+        filtered_records = self._apply_filters(all_records)
+
+        groups: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+
+        for record in filtered_records:
+            if configs:
+                key = self._extract_group_key(record, configs[0].group_by)
+            else:
+                key = "_global"
+            groups[key].append(record)
+
+        results: dict[Any, dict[str, Any]] = {}
+        for group_key, group_records in groups.items():
+            results[group_key] = self._aggregate_group(group_records, configs)
+
+        return AggregatedResult(
+            groups=results,
+            total_count=len(filtered_records),
+            fields_aggregated=[c.alias or c.field or str(c.agg_func.value) for c in configs],
+        )
+
+    def _collect_records(self) -> list[dict[str, Any]]:
+        """Collect and merge records from all sources."""
+        records = []
+        for source_name in self._source_names:
+            for record in self._sources.get(source_name, []):
+                record["_source"] = source_name
+                records.append(record)
+        return records
+
+    def _apply_filters(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Apply all filters to records."""
+        filtered = records
+        for f in self._filters:
+            filtered = [r for r in filtered if f(r)]
+        return filtered
+
+    def _extract_group_key(self, record: dict[str, Any], group_by: Optional[str]) -> Any:
+        """Extract grouping key from record."""
+        if not group_by:
+            return "_global"
+        return record.get(group_by, "_none")
+
+    def _aggregate_group(
+        self,
+        records: list[dict[str, Any]],
+        configs: list[AggregationConfig],
+    ) -> dict[str, Any]:
+        """Aggregate a group of records."""
+        result: dict[str, Any] = {"_count": len(records)}
+
+        for config in configs:
+            alias = config.alias or config.field or config.agg_func.value
+            if config.field:
+                values = [r.get(config.field) for r in records if config.field in r]
+            else:
+                values = list(records)
+
+            result[alias] = self._apply_aggregation(
+                values, config.agg_func, config.custom_func
+            )
+
+        return result
+
+    def _apply_aggregation(
+        self,
+        values: list[Any],
+        func: AggregationFunc,
+        custom_func: Optional[Callable[[list], Any]] = None,
+    ) -> Any:
+        """Apply an aggregation function to values."""
+        if not values:
+            return None
+
+        numeric_values = [v for v in values if isinstance(v, (int, float))]
+
+        if func == AggregationFunc.SUM:
+            return sum(numeric_values) if numeric_values else None
+        elif func == AggregationFunc.AVG:
+            return sum(numeric_values) / len(numeric_values) if numeric_values else None
+        elif func == AggregationFunc.MIN:
+            return min(numeric_values) if numeric_values else None
+        elif func == AggregationFunc.MAX:
+            return max(numeric_values) if numeric_values else None
+        elif func == AggregationFunc.COUNT:
+            return len(values)
+        elif func == AggregationFunc.FIRST:
+            return values[0]
+        elif func == AggregationFunc.LAST:
+            return values[-1]
+        elif func == AggregationFunc.LIST:
+            return values
+        elif func == AggregationFunc.DICT:
+            return {str(i): v for i, v in enumerate(values)}
+        elif func == AggregationFunc.CUSTOM and custom_func:
+            return custom_func(values)
+
         return None
-    def execute(self, context: Any, params: dict) -> ActionResult:
-        data = params.get("data",[]); operation = params.get("operation","count")
-        field_name = params.get("field"); group_by = params.get("group_by")
-        operations = params.get("operations",[])
-        if not data: return ActionResult(success=False, message="No data")
-        if operations:
-            results = {}
-            for spec in operations:
-                op = spec.get("operation","count"); fld = spec.get("field")
-                results[f"{op}_{fld}"] = self._agg_simple(data, fld, op) if fld else len(data)
-            return ActionResult(success=True, message=f"Multi-agg: {len(results)} ops", data={"results": results})
-        if group_by:
-            groups = defaultdict(list)
-            for record in data: groups[str(record.get(group_by,"unknown"))].append(record)
-            group_results = {}
-            for key, group_records in groups.items():
-                group_results[key] = self._agg_simple(group_records, field_name, operation) if field_name else len(group_records)
-            result = AggregationResult(operation=operation, field=field_name or "count", value=group_results, group_by=group_by, group_values=group_results)
-        else:
-            value = self._agg_simple(data, field_name, operation)
-            result = AggregationResult(operation=operation, field=field_name or "count", value=value)
-        return ActionResult(success=True, message=f"{operation.upper()} of {field_name or 'count'}: {result.value}", data=vars(result))
+
+    def clear_sources(self) -> None:
+        """Clear all data sources."""
+        self._sources.clear()
+        self._source_names.clear()
+
+    def get_source(self, name: str) -> Optional[list[dict[str, Any]]]:
+        """Get records from a specific source."""
+        return self._sources.get(name)
