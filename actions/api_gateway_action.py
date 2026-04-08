@@ -1,224 +1,386 @@
-"""API Gateway action module for RabAI AutoClick.
+"""
+API Gateway Action Module.
 
-Provides API gateway operations:
-- GatewayRouteAction: Define API routes
-- GatewayAuthAction: API authentication middleware
-- GatewayRateLimitAction: Rate limiting
-- GatewayTransformAction: Request/response transformation
+Provides API gateway capabilities: routing, authentication, rate limiting,
+request/response transforms, and backend service orchestration.
 """
 
-from __future__ import annotations
-
-import sys
-import os
+from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from enum import Enum
 import time
-from typing import Any, Dict, List, Optional
-from collections import defaultdict
+import hashlib
+import json
+import logging
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class GatewayRouteAction(BaseAction):
-    """Define API routes."""
-    action_type = "gateway_route"
-    display_name = "API路由"
-    description = "定义API路由"
-    version = "1.0"
+class RateLimitUnit(Enum):
+    """Rate limit time units."""
+    SECOND = "second"
+    MINUTE = "minute"
+    HOUR = "hour"
+    DAY = "day"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute route definition."""
-        routes = params.get('routes', [])
-        path = params.get('path', '')
-        method = params.get('method', 'get').upper()
-        output_var = params.get('output_var', 'route_result')
 
-        if not path or not routes:
-            return ActionResult(success=False, message="path and routes are required")
+@dataclass
+class RouteConfig:
+    """API route configuration."""
+    path: str
+    method: str
+    handler: Callable
+    auth_required: bool = True
+    rate_limit: Optional[int] = None
+    rate_unit: RateLimitUnit = RateLimitUnit.MINUTE
+    timeout: float = 30.0
+    retries: int = 0
+    backend_url: Optional[str] = None
+    transforms: List[Callable] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-        try:
-            resolved_routes = context.resolve_value(routes) if context else routes
 
-            matched = None
-            for route in resolved_routes:
-                if route.get('path') == path and route.get('method', 'GET').upper() == method:
-                    matched = route
-                    break
+@dataclass
+class RateLimitRecord:
+    """Tracks rate limit usage per client."""
+    client_id: str
+    requests: List[float] = field(default_factory=list)
+    blocked: bool = False
 
-            if matched:
-                result = {
-                    'matched': True,
-                    'handler': matched.get('handler', ''),
-                    'middleware': matched.get('middleware', []),
-                    'path': path,
-                    'method': method,
-                }
-            else:
-                result = {
-                    'matched': False,
-                    'path': path,
-                    'method': method,
-                    'available_routes': [{'path': r.get('path'), 'method': r.get('method')} for r in resolved_routes],
-                }
 
-            return ActionResult(
-                success=matched is not None,
-                data={output_var: result},
-                message=f"Route {'matched' if matched else 'not found'}"
+@dataclass
+class GatewayConfig:
+    """API Gateway configuration."""
+    routes: Dict[str, RouteConfig] = field(default_factory=dict)
+    global_rate_limit: Optional[int] = None
+    global_rate_unit: RateLimitUnit = RateLimitUnit.MINUTE
+    default_timeout: float = 30.0
+    enable_metrics: bool = True
+    enable_logging: bool = True
+    cors_origins: List[str] = field(default_factory=list)
+    api_keys: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+class APIGatewayAction:
+    """
+    API Gateway action handler.
+    
+    Provides routing, authentication, rate limiting, and orchestration
+    for backend API services.
+    
+    Example:
+        gateway = APIGatewayAction()
+        gateway.register_route("/users", "GET", handler)
+        result = gateway.handle_request("/users", "GET", headers={})
+    """
+    
+    def __init__(self, config: Optional[GatewayConfig] = None):
+        """Initialize the API gateway."""
+        self.config = config or GatewayConfig()
+        self._routes: Dict[str, RouteConfig] = self.config.routes.copy()
+        self._rate_limits: Dict[str, RateLimitRecord] = {}
+        self._metrics: Dict[str, List[float]] = {}
+        self._request_counts: Dict[str, int] = {}
+    
+    def register_route(
+        self,
+        path: str,
+        method: str,
+        handler: Callable,
+        **kwargs
+    ) -> None:
+        """
+        Register a new route with the gateway.
+        
+        Args:
+            path: URL path pattern
+            method: HTTP method
+            handler: Function to handle requests
+            **kwargs: Additional route configuration
+        """
+        route_key = f"{method.upper()}:{path}"
+        self._routes[route_key] = RouteConfig(
+            path=path,
+            method=method.upper(),
+            handler=handler,
+            **kwargs
+        )
+        logger.info(f"Registered route: {route_key}")
+    
+    def unregister_route(self, path: str, method: str) -> bool:
+        """
+        Unregister a route from the gateway.
+        
+        Args:
+            path: URL path
+            method: HTTP method
+            
+        Returns:
+            True if route was removed, False if not found
+        """
+        route_key = f"{method.upper()}:{path}"
+        if route_key in self._routes:
+            del self._routes[route_key]
+            logger.info(f"Unregistered route: {route_key}")
+            return True
+        return False
+    
+    def authenticate_request(
+        self,
+        headers: Dict[str, str],
+        route: RouteConfig
+    ) -> Union[str, None]:
+        """
+        Authenticate an incoming request.
+        
+        Args:
+            headers: Request headers
+            route: Route configuration
+            
+        Returns:
+            Client ID if authenticated, None otherwise
+        """
+        if not route.auth_required:
+            return "anonymous"
+        
+        auth_header = headers.get("Authorization", "")
+        api_key = headers.get("X-API-Key", "")
+        
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            return self._validate_token(token)
+        
+        if api_key and api_key in self.config.api_keys:
+            key_info = self.config.api_keys[api_key]
+            if self._check_key_scopes(api_key, route):
+                return key_info.get("client_id", api_key)
+        
+        return None
+    
+    def _validate_token(self, token: str) -> Optional[str]:
+        """Validate a bearer token."""
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        if hasattr(self, "_token_cache"):
+            if token_hash in self._token_cache:
+                return self._token_cache[token_hash]
+        return None
+    
+    def _check_key_scopes(self, api_key: str, route: RouteConfig) -> bool:
+        """Check if API key has required scopes."""
+        key_info = self.config.api_keys.get(api_key, {})
+        scopes = key_info.get("scopes", [])
+        required = route.metadata.get("required_scopes", [])
+        
+        if not required:
+            return True
+        
+        return all(s in scopes for s in required)
+    
+    def check_rate_limit(
+        self,
+        client_id: str,
+        route: Optional[RouteConfig] = None
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Check if request is within rate limits.
+        
+        Args:
+            client_id: Client identifier
+            route: Optional route-specific rate limit
+            
+        Returns:
+            Tuple of (allowed, reason)
+        """
+        limit = route.rate_limit if route else self.config.global_rate_limit
+        unit = (route.rate_unit if route 
+                else self.config.global_rate_unit)
+        
+        if limit is None:
+            return True, None
+        
+        now = time.time()
+        window = self._get_window_seconds(unit)
+        
+        if client_id not in self._rate_limits:
+            self._rate_limits[client_id] = RateLimitRecord(
+                client_id=client_id
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Route error: {e}")
-
-
-class GatewayAuthAction(BaseAction):
-    """API authentication middleware."""
-    action_type = "gateway_auth"
-    display_name = "API认证"
-    description = "API认证中间件"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute authentication."""
-        auth_type = params.get('auth_type', 'bearer')
-        token = params.get('token', '')
-        api_key = params.get('api_key', '')
-        secret = params.get('secret', '')
-        output_var = params.get('output_var', 'auth_result')
-
-        try:
-            resolved_token = context.resolve_value(token) if context else token
-            resolved_api_key = context.resolve_value(api_key) if context else api_key
-            resolved_secret = context.resolve_value(secret) if context else secret
-
-            result = {'auth_type': auth_type, 'authenticated': False}
-
-            if auth_type == 'bearer' and resolved_token:
-                result['authenticated'] = len(resolved_token) > 10
-            elif auth_type == 'api_key' and resolved_api_key:
-                result['authenticated'] = len(resolved_api_key) > 5
-            elif auth_type == 'hmac':
-                result['authenticated'] = bool(resolved_secret)
-            elif auth_type == 'basic':
-                result['authenticated'] = bool(resolved_api_key)
-
-            return ActionResult(
-                success=result['authenticated'],
-                data={output_var: result},
-                message="Authenticated" if result['authenticated'] else "Authentication failed"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Auth error: {e}")
-
-
-class GatewayRateLimitAction(BaseAction):
-    """Rate limiting middleware."""
-    action_type = "gateway_rate_limit"
-    display_name = "API限流"
-    description = "API限流中间件"
-    version = "1.0"
-
-    def __init__(self):
-        super().__init__()
-        self._buckets = defaultdict(lambda: {'tokens': 100, 'last_refill': time.time()})
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute rate limit check."""
-        key = params.get('key', 'default')
-        rate = params.get('rate', 100)
-        period = params.get('period', 60)
-        cost = params.get('cost', 1)
-        output_var = params.get('output_var', 'rate_limit_result')
-
-        try:
-            bucket = self._buckets[key]
-            now = time.time()
-            elapsed = now - bucket['last_refill']
-            tokens_to_add = (elapsed / period) * rate
-            bucket['tokens'] = min(rate, bucket['tokens'] + tokens_to_add)
-            bucket['last_refill'] = now
-
-            allowed = bucket['tokens'] >= cost
-            if allowed:
-                bucket['tokens'] -= cost
-
-            result = {
-                'allowed': allowed,
-                'key': key,
-                'remaining': int(bucket['tokens']),
-                'limit': rate,
-                'reset_in': int(period * (1 - bucket['tokens'] / rate)) if bucket['tokens'] < rate else 0,
+        
+        record = self._rate_limits[client_id]
+        record.requests = [t for t in record.requests if now - t < window]
+        
+        if len(record.requests) >= limit:
+            return False, f"Rate limit exceeded: {limit} per {unit.value}"
+        
+        record.requests.append(now)
+        return True, None
+    
+    def _get_window_seconds(self, unit: RateLimitUnit) -> float:
+        """Convert rate limit unit to seconds."""
+        return {
+            RateLimitUnit.SECOND: 1,
+            RateLimitUnit.MINUTE: 60,
+            RateLimitUnit.HOUR: 3600,
+            RateLimitUnit.DAY: 86400,
+        }[unit]
+    
+    def apply_transforms(
+        self,
+        data: Any,
+        transforms: List[Callable],
+        direction: str = "request"
+    ) -> Any:
+        """
+        Apply transforms to request/response data.
+        
+        Args:
+            data: Data to transform
+            transforms: List of transform functions
+            direction: "request" or "response"
+            
+        Returns:
+            Transformed data
+        """
+        result = data
+        for transform in transforms:
+            try:
+                if direction == "request":
+                    result = transform(result)
+                else:
+                    result = transform(result)
+            except Exception as e:
+                logger.warning(
+                    f"Transform failed ({direction}): {e}"
+                )
+        return result
+    
+    def route_request(
+        self,
+        path: str,
+        method: str,
+        headers: Optional[Dict[str, str]] = None,
+        body: Optional[Any] = None,
+        params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Route and handle an API request.
+        
+        Args:
+            path: Request path
+            method: HTTP method
+            headers: Request headers
+            body: Request body
+            params: Query/path parameters
+            
+        Returns:
+            Response dictionary with status, body, headers
+        """
+        headers = headers or {}
+        route_key = f"{method.upper()}:{path}"
+        route = self._routes.get(route_key)
+        
+        if not route:
+            return {
+                "status": 404,
+                "body": {"error": "Route not found"},
+                "headers": {}
             }
-
-            return ActionResult(
-                success=allowed,
-                data={output_var: result},
-                message=f"{'Allowed' if allowed else 'Rate limited'}, remaining: {result['remaining']}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Rate limit error: {e}")
-
-
-class GatewayTransformAction(BaseAction):
-    """Request/response transformation."""
-    action_type = "gateway_transform"
-    display_name = "API转换"
-    description = "请求/响应转换"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute transformation."""
-        data = params.get('data', {})
-        transforms = params.get('transforms', [])
-        output_var = params.get('output_var', 'transformed_data')
-
-        if not data:
-            return ActionResult(success=False, message="data is required")
-
-        try:
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_transforms = context.resolve_value(transforms) if context else transforms
-
-            transformed = resolved_data.copy()
-
-            for transform in resolved_transforms:
-                transform_type = transform.get('type', '')
-                field = transform.get('field', '')
-                config = transform.get('config', {})
-
-                if transform_type == 'rename' and field in transformed:
-                    new_name = config.get('to', field)
-                    transformed[new_name] = transformed.pop(field)
-                elif transform_type == 'remove' and field in transformed:
-                    del transformed[field]
-                elif transform_type == 'map' and field in transformed:
-                    mapping = config.get('mapping', {})
-                    transformed[field] = mapping.get(transformed[field], transformed[field])
-                elif transform_type == 'default' and field not in transformed:
-                    transformed[field] = config.get('value', None)
-                elif transform_type == 'uppercase' and field in transformed:
-                    transformed[field] = str(transformed[field]).upper()
-                elif transform_type == 'lowercase' and field in transformed:
-                    transformed[field] = str(transformed[field]).lower()
-                elif transform_type == 'cast' and field in transformed:
-                    cast_type = config.get('to', 'string')
-                    if cast_type == 'int':
-                        transformed[field] = int(transformed[field])
-                    elif cast_type == 'float':
-                        transformed[field] = float(transformed[field])
-                    elif cast_type == 'bool':
-                        transformed[field] = bool(transformed[field])
-
-            result = {
-                'transformed': transformed,
-                'applied': len(resolved_transforms),
+        
+        client_id = self.authenticate_request(headers, route)
+        if client_id is None:
+            return {
+                "status": 401,
+                "body": {"error": "Authentication required"},
+                "headers": {}
             }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Applied {len(resolved_transforms)} transforms"
+        
+        allowed, reason = self.check_rate_limit(client_id, route)
+        if not allowed:
+            return {
+                "status": 429,
+                "body": {"error": reason},
+                "headers": {"Retry-After": "60"}
+            }
+        
+        if self.config.enable_metrics:
+            self._record_metric(route_key)
+        
+        try:
+            if route.transforms and body:
+                body = self.apply_transforms(
+                    body, route.transforms, "request"
+                )
+            
+            result = route.handler(
+                headers=headers,
+                body=body,
+                params=params
             )
+            
+            if route.transforms and result:
+                result = self.apply_transforms(
+                    result, route.transforms, "response"
+                )
+            
+            return {
+                "status": 200,
+                "body": result,
+                "headers": self._build_response_headers(route)
+            }
+            
         except Exception as e:
-            return ActionResult(success=False, message=f"Transform error: {e}")
+            logger.error(f"Request handling failed: {e}")
+            return {
+                "status": 500,
+                "body": {"error": str(e)},
+                "headers": {}
+            }
+    
+    def _record_metric(self, route_key: str) -> None:
+        """Record request metric."""
+        if route_key not in self._metrics:
+            self._metrics[route_key] = []
+        self._metrics[route_key].append(time.time())
+    
+    def _build_response_headers(self, route: RouteConfig) -> Dict[str, str]:
+        """Build response headers."""
+        headers = {
+            "Content-Type": "application/json",
+            "X-Content-Type-Options": "nosniff",
+        }
+        
+        if self.config.cors_origins:
+            headers["Access-Control-Allow-Origin"] = (
+                self.config.cors_origins[0]
+            )
+        
+        return headers
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get gateway metrics."""
+        now = time.time()
+        metrics = {}
+        
+        for route_key, times in self._metrics.items():
+            recent = [t for t in times if now - t < 3600]
+            self._metrics[route_key] = recent
+            metrics[route_key] = {
+                "requests_last_hour": len(recent),
+                "requests_per_minute": len(recent) / 60
+            }
+        
+        return metrics
+    
+    def get_rate_limit_status(self, client_id: str) -> Dict[str, Any]:
+        """Get rate limit status for a client."""
+        if client_id not in self._rate_limits:
+            return {"status": "unknown"}
+        
+        record = self._rate_limits[client_id]
+        now = time.time()
+        
+        return {
+            "client_id": client_id,
+            "blocked": record.blocked,
+            "request_count": len(record.requests)
+        }
