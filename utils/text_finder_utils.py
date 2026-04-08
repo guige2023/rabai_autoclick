@@ -1,205 +1,190 @@
-"""Text finding on screen using OCR and image analysis.
+"""Text finder utilities.
 
-Provides utilities for locating text regions on screen using OCR,
-computing match confidence, and handling fuzzy text matching for
-automation targets that may have slight visual variations.
-
-Example:
-    >>> from utils.text_finder_utils import TextFinder, FuzzyMatch
-    >>> finder = TextFinder()
-    >>> results = finder.find_all("Submit")
-    >>> if results:
-    ...     print(f"Found at {results[0].center}")
+This module provides utilities for finding text within UI elements,
+OCR results, and screen regions.
 """
+
 from __future__ import annotations
 
 import re
+from typing import Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from typing import Sequence
-
-__all__ = [
-    "TextMatch",
-    "FuzzyMatch",
-    "TextFinder",
-]
 
 
 @dataclass
 class TextMatch:
-    """Represents a text match found on screen.
-
-    Attributes:
-        text: The matched text string.
-        bounds: (x, y, x2, y2) bounding box coordinates.
-        confidence: Match confidence score (0.0 to 1.0).
-    """
-
+    """A text match result."""
     text: str
-    bounds: tuple[int, int, int, int]
-    confidence: float
-
-    @property
-    def center(self) -> tuple[int, int]:
-        """Return the center point of the match."""
-        x, y, x2, y2 = self.bounds
-        return ((x + x2) // 2, (y + y2) // 2)
-
-    @property
-    def width(self) -> int:
-        """Return the width of the match region."""
-        x, _, x2, _ = self.bounds
-        return x2 - x
-
-    @property
-    def height(self) -> int:
-        """Return the height of the match region."""
-        _, y, _, y2 = self.bounds
-        return y2 - y
+    start: int
+    end: int
+    confidence: float = 1.0
+    bounds: Optional[Tuple[int, int, int, int]] = None  # x, y, width, height
 
 
-class FuzzyMatch:
-    """Fuzzy string matching with configurable similarity threshold.
-
-    Example:
-        >>> fm = FuzzyMatch(threshold=0.8)
-        >>> score = fm.score("Submit", "Submil")  # typo
-        >>> print(f"Similarity: {score:.2%}")
-    """
-
-    def __init__(self, threshold: float = 0.8) -> None:
-        self.threshold = threshold
-
-    @staticmethod
-    def levenshtein(s: str, t: str) -> int:
-        """Compute Levenshtein edit distance between two strings."""
-        if len(s) < len(t):
-            return FuzzyMatch.levenshtein(t, s)
-        if len(t) == 0:
-            return len(s)
-        prev_row = list(range(len(t) + 1))
-        for i, cs in enumerate(s):
-            curr_row = [i + 1]
-            for j, ct in enumerate(t):
-                insertions = prev_row[j + 1] + 1
-                deletions = curr_row[j] + 1
-                substitutions = prev_row[j] + (cs != ct)
-                curr_row.append(min(insertions, deletions, substitutions))
-            prev_row = curr_row
-        return prev_row[-1]
-
-    def score(self, s: str, t: str) -> float:
-        """Compute similarity score between two strings.
-
-        Args:
-            s: First string.
-            t: Second string.
-
-        Returns:
-            Similarity score from 0.0 (completely different) to 1.0 (identical).
-        """
-        if s == t:
-            return 1.0
-        if not s or not t:
-            return 0.0
-        distance = self.levenshtein(s.lower(), t.lower())
-        max_len = max(len(s), len(t))
-        return 1.0 - distance / max_len
-
-    def match(self, s: str, t: str) -> bool:
-        """Return True if similarity score meets the threshold."""
-        return self.score(s, t) >= self.threshold
+@dataclass
+class TextSearchOptions:
+    """Options for text search."""
+    case_sensitive: bool = False
+    whole_word: bool = False
+    regex: bool = False
+    fuzzy: bool = False
+    fuzzy_threshold: float = 0.8
 
 
 class TextFinder:
-    """Finds text on screen using OCR.
+    """Finds text within text sources."""
 
-    This is a placeholder implementation that returns mock results.
-    In production, integrate with pytesseract, macOS Vision framework,
-    or another OCR backend.
+    def __init__(self) -> None:
+        self._sources: Dict[str, str] = {}
 
-    Example:
-        >>> finder = TextFinder()
-        >>> matches = finder.find("OK", confidence_threshold=0.9)
-    """
+    def add_source(self, name: str, text: str) -> None:
+        self._sources[name] = text
 
-    def __init__(
-        self,
-        confidence_threshold: float = 0.7,
-    ) -> None:
-        self.confidence_threshold = confidence_threshold
-        self._fuzzy = FuzzyMatch()
-
-    def find(
-        self,
-        text: str,
-        confidence_threshold: float | None = None,
-    ) -> TextMatch | None:
-        """Find the first occurrence of text on screen.
-
-        Args:
-            text: The text to search for.
-            confidence_threshold: Minimum confidence to accept a match.
-
-        Returns:
-            TextMatch if found, else None.
-        """
-        threshold = confidence_threshold or self.confidence_threshold
-        results = self.find_all(text, confidence_threshold=threshold)
-        return results[0] if results else None
+    def remove_source(self, name: str) -> bool:
+        if name in self._sources:
+            del self._sources[name]
+            return True
+        return False
 
     def find_all(
         self,
-        text: str,
-        confidence_threshold: float | None = None,
-    ) -> list[TextMatch]:
-        """Find all occurrences of text on screen.
+        pattern: str,
+        options: Optional[TextSearchOptions] = None,
+    ) -> Dict[str, List[TextMatch]]:
+        results: Dict[str, List[TextMatch]] = {}
+        opts = options or TextSearchOptions()
 
-        Args:
-            text: The text to search for.
-            confidence_threshold: Minimum confidence to accept.
+        for name, text in self._sources.items():
+            matches = self._find_in_text(pattern, text, opts)
+            if matches:
+                results[name] = matches
 
-        Returns:
-            List of all TextMatch objects found.
-        """
-        threshold = confidence_threshold or self.confidence_threshold
-        # Placeholder: in production, run OCR on screen capture
-        # and filter results using FuzzyMatch
-        return []
+        return results
 
-    def find_fuzzy(
+    def find_first(
         self,
-        text: str,
-        threshold: float = 0.8,
-    ) -> list[TextMatch]:
-        """Find text with fuzzy matching.
+        pattern: str,
+        options: Optional[TextSearchOptions] = None,
+    ) -> Optional[Tuple[str, TextMatch]]:
+        opts = options or TextSearchOptions()
+        for name, text in self._sources.items():
+            matches = self._find_in_text(pattern, text, opts)
+            if matches:
+                return (name, matches[0])
+        return None
 
-        Args:
-            text: The text to search for.
-            threshold: Minimum fuzzy similarity score.
-
-        Returns:
-            List of matches with similarity >= threshold.
-        """
-        # Placeholder: run OCR, apply fuzzy matching to results
-        return []
-
-    def ocr_region(
+    def _find_in_text(
         self,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-    ) -> list[TextMatch]:
-        """Run OCR on a specific screen region.
+        pattern: str,
+        text: str,
+        options: TextSearchOptions,
+    ) -> List[TextMatch]:
+        matches: List[TextMatch] = []
 
-        Args:
-            x: Left edge X coordinate.
-            y: Top edge Y coordinate.
-            width: Width of the region.
-            height: Height of the region.
+        if options.regex:
+            flags = 0 if options.case_sensitive else re.IGNORECASE
+            regex = re.compile(pattern, flags)
+            for m in regex.finditer(text):
+                matches.append(TextMatch(
+                    text=m.group(),
+                    start=m.start(),
+                    end=m.end(),
+                    confidence=1.0,
+                ))
+        elif options.fuzzy:
+            matches = self._fuzzy_find(pattern, text, options)
+        else:
+            search_text = text if options.case_sensitive else text.lower()
+            search_pattern = pattern if options.case_sensitive else pattern.lower()
+            if options.whole_word:
+                search_pattern = r'\b' + re.escape(search_pattern) + r'\b'
+                for m in re.finditer(search_pattern, search_text):
+                    original = text[m.start():m.end()]
+                    matches.append(TextMatch(
+                        text=original,
+                        start=m.start(),
+                        end=m.end(),
+                    ))
+            else:
+                start = 0
+                while True:
+                    idx = search_text.find(search_pattern, start)
+                    if idx == -1:
+                        break
+                    original = text[idx:idx + len(pattern)]
+                    matches.append(TextMatch(
+                        text=original,
+                        start=idx,
+                        end=idx + len(pattern),
+                    ))
+                    start = idx + 1
 
-        Returns:
-            List of TextMatch objects found in the region.
-        """
-        # Placeholder: crop screen capture to region, run OCR
-        return []
+        return matches
+
+    def _fuzzy_find(
+        self,
+        pattern: str,
+        text: str,
+        options: TextSearchOptions,
+    ) -> List[TextMatch]:
+        import difflib
+        matches: List[TextMatch] = []
+        pattern_lower = pattern.lower()
+        text_lower = text.lower()
+
+        words = text.split()
+        for i, word in enumerate(words):
+            word_start_in_text = text_lower.find(word.lower(), 0 if i == 0 else sum(len(w) + 1 for w in words[:i]))
+            ratio = difflib.SequenceMatcher(None, pattern_lower, word.lower()).ratio()
+            if ratio >= options.fuzzy_threshold:
+                matches.append(TextMatch(
+                    text=word,
+                    start=word_start_in_text,
+                    end=word_start_in_text + len(word),
+                    confidence=ratio,
+                ))
+
+        return matches
+
+
+def highlight_matches(
+    text: str,
+    matches: List[TextMatch],
+    prefix: str = "【",
+    suffix: str = "】",
+) -> str:
+    """Insert highlight markers around matches in text.
+
+    Args:
+        text: Original text.
+        matches: List of matches to highlight.
+        prefix: Prefix marker.
+        suffix: Suffix marker.
+
+    Returns:
+        Text with highlights.
+    """
+    if not matches:
+        return text
+
+    sorted_matches = sorted(matches, key=lambda m: m.start)
+    result_parts = []
+    last_end = 0
+
+    for m in sorted_matches:
+        result_parts.append(text[last_end:m.start])
+        result_parts.append(prefix)
+        result_parts.append(m.text)
+        result_parts.append(suffix)
+        last_end = m.end
+
+    result_parts.append(text[last_end:])
+    return "".join(result_parts)
+
+
+__all__ = [
+    "TextMatch",
+    "TextSearchOptions",
+    "TextFinder",
+    "highlight_matches",
+]
