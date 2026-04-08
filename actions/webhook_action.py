@@ -1,13 +1,13 @@
 """Webhook action module for RabAI AutoClick.
 
-Provides webhook handling actions for receiving and
-processing incoming webhooks from external services.
+Provides webhook handling including signature verification,
+event parsing, and routing to handlers.
 """
 
-import hashlib
-import hmac
-import json
 import time
+import hmac
+import hashlib
+import json
 import sys
 import os
 from typing import Any, Dict, List, Optional
@@ -16,439 +16,253 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class WebhookReceiveAction(BaseAction):
-    """Receive and validate incoming webhooks.
+class WebhookReceiverAction(BaseAction):
+    """Receive and parse incoming webhooks.
     
-    Handles webhook verification and parsing.
+    Parses webhook payloads, validates signatures,
+    extracts event metadata, and routes to handlers.
     """
-    action_type = "webhook_receive"
-    display_name = "接收Webhook"
-    description = "接收和处理Webhook请求"
+    action_type = "webhook_receiver"
+    display_name = "Webhook接收器"
+    description = "接收并解析Webhook请求"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Receive webhook.
+        """Receive and parse webhook.
         
         Args:
             context: Execution context.
-            params: Dict with keys: payload, headers, signature_header,
-                   secret, algorithm, verify_signature.
+            params: Dict with keys: request, secret, signature_header,
+                   event_type_field, required_fields.
         
         Returns:
-            ActionResult with validated webhook data.
+            ActionResult with parsed webhook data.
         """
-        payload = params.get('payload', {})
-        headers = params.get('headers', {})
+        request = params.get('request', {})
+        secret = params.get('secret', '')
         signature_header = params.get('signature_header', 'X-Signature')
-        secret = params.get('secret', '')
-        algorithm = params.get('algorithm', 'sha256')
-        verify_signature = params.get('verify_signature', True)
+        event_type_field = params.get('event_type_field', 'event')
+        required_fields = params.get('required_fields', [])
+        start_time = time.time()
 
-        if isinstance(payload, str):
+        headers = request.get('headers', {})
+        body = request.get('body', {})
+
+        if not isinstance(body, dict):
             try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                return ActionResult(success=False, message="Invalid JSON payload")
+                body = json.loads(body) if isinstance(body, str) else {}
+            except:
+                return ActionResult(
+                    success=False,
+                    message="Failed to parse webhook body as JSON"
+                )
 
-        is_valid = True
-        if verify_signature and secret:
+        if secret:
             signature = headers.get(signature_header, '')
-            if not signature:
-                is_valid = False
-            else:
-                expected = self._compute_signature(str(payload), secret, algorithm)
-                is_valid = hmac.compare_digest(signature, expected)
+            if not self._verify_signature(body, secret, signature):
+                return ActionResult(
+                    success=False,
+                    message="Webhook signature verification failed",
+                    data={'error': 'invalid_signature'}
+                )
 
-        event_type = headers.get('X-Event-Type', headers.get('X-GitHub-Event', 'generic'))
-        delivery_id = headers.get('X-Delivery-ID', headers.get('X-GitHub-Delivery', ''))
-
-        return ActionResult(
-            success=is_valid,
-            message=f"Webhook received: {'valid' if is_valid else 'invalid signature'}",
-            data={
-                'valid': is_valid,
-                'event_type': event_type,
-                'delivery_id': delivery_id,
-                'payload': payload,
-                'headers': headers
-            }
-        )
-
-    def _compute_signature(self, payload: str, secret: str, algorithm: str) -> str:
-        """Compute webhook signature."""
-        if algorithm == 'sha256':
-            return hmac.new(
-                secret.encode('utf-8'),
-                payload.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
-        elif algorithm == 'sha1':
-            return hmac.new(
-                secret.encode('utf-8'),
-                payload.encode('utf-8'),
-                hashlib.sha1
-            ).hexdigest()
-        return ''
-
-
-class WebhookParseAction(BaseAction):
-    """Parse webhook payload based on provider.
-    
-    Normalizes payloads from different webhook providers.
-    """
-    action_type = "webhook_parse"
-    display_name = "Webhook解析"
-    description = "解析Webhook提供商数据"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Parse webhook payload.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: payload, provider, normalize.
-                   providers: github, gitlab, slack, stripe, generic.
-        
-        Returns:
-            ActionResult with parsed data.
-        """
-        payload = params.get('payload', {})
-        provider = params.get('provider', 'generic')
-        normalize = params.get('normalize', True)
-
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                return ActionResult(success=False, message="Invalid JSON payload")
-
-        parsed = {}
-
-        if provider == 'github':
-            parsed = self._parse_github(payload)
-        elif provider == 'gitlab':
-            parsed = self._parse_gitlab(payload)
-        elif provider == 'slack':
-            parsed = self._parse_slack(payload)
-        elif provider == 'stripe':
-            parsed = self._parse_stripe(payload)
-        else:
-            parsed = payload
-
-        if normalize:
-            normalized = {
-                'event': parsed.get('event', 'unknown'),
-                'action': parsed.get('action', ''),
-                'data': parsed.get('data', parsed),
-                'timestamp': parsed.get('timestamp', time.time())
-            }
-            parsed = normalized
-
-        return ActionResult(
-            success=True,
-            message=f"Parsed {provider} webhook",
-            data={'parsed': parsed, 'provider': provider}
-        )
-
-    def _parse_github(self, payload: Dict) -> Dict:
-        """Parse GitHub webhook payload."""
-        return {
-            'event': 'github',
-            'action': payload.get('action', ''),
-            'data': {
-                'repository': payload.get('repository', {}).get('full_name'),
-                'sender': payload.get('sender', {}).get('login'),
-                'ref': payload.get('ref'),
-                'commits': len(payload.get('commits', []))
-            }
-        }
-
-    def _parse_gitlab(self, payload: Dict) -> Dict:
-        """Parse GitLab webhook payload."""
-        return {
-            'event': 'gitlab',
-            'action': payload.get('object_kind', 'unknown'),
-            'data': {
-                'project': payload.get('project', {}).get('path_with_namespace'),
-                'user': payload.get('user', {}).get('name')
-            }
-        }
-
-    def _parse_slack(self, payload: Dict) -> Dict:
-        """Parse Slack webhook payload."""
-        return {
-            'event': 'slack',
-            'action': payload.get('type', 'event_callback'),
-            'data': {
-                'team': payload.get('team_id'),
-                'user': payload.get('event', {}).get('user'),
-                'text': payload.get('event', {}).get('text')
-            }
-        }
-
-    def _parse_stripe(self, payload: Dict) -> Dict:
-        """Parse Stripe webhook payload."""
-        return {
-            'event': 'stripe',
-            'action': payload.get('type', 'unknown'),
-            'data': {
-                'id': payload.get('data', {}).get('object', {}).get('id'),
-                'amount': payload.get('data', {}).get('object', {}).get('amount'),
-                'currency': payload.get('data', {}).get('object', {}).get('currency')
-            }
-        }
-
-
-class WebhookRespondAction(BaseAction):
-    """Send webhook response.
-    
-    Generates webhook acknowledgement responses.
-    """
-    action_type = "webhook_respond"
-    display_name = "Webhook响应"
-    description = "发送Webhook响应"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Send webhook response.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: status_code, body, headers.
-        
-        Returns:
-            ActionResult with response data.
-        """
-        status_code = params.get('status_code', 200)
-        body = params.get('body', '')
-        headers = params.get('headers', {})
-
-        response = {
-            'status_code': status_code,
-            'body': body,
-            'headers': headers,
-            'timestamp': time.time()
-        }
-
-        return ActionResult(
-            success=status_code < 400,
-            message=f"Webhook response: {status_code}",
-            data=response
-        )
-
-
-class WebhookRetryAction(BaseAction):
-    """Retry failed webhook deliveries.
-    
-    Implements webhook retry logic with backoff.
-    """
-    action_type = "webhook_retry"
-    display_name = "Webhook重试"
-    description = "Webhook失败重试"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Retry webhook.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: webhook_url, payload, headers,
-                   max_retries, backoff_base, secret.
-        
-        Returns:
-            ActionResult with retry result.
-        """
-        webhook_url = params.get('webhook_url', '')
-        payload = params.get('payload', {})
-        headers = params.get('headers', {})
-        max_retries = params.get('max_retries', 3)
-        backoff_base = params.get('backoff_base', 2)
-        secret = params.get('secret', '')
-
-        if not webhook_url:
-            return ActionResult(success=False, message="webhook_url is required")
-
-        try:
-            import urllib.request
-            import urllib.error
-
-            payload_str = json.dumps(payload) if isinstance(payload, dict) else str(payload)
-            
-            if secret:
-                signature = hmac.new(
-                    secret.encode('utf-8'),
-                    payload_str.encode('utf-8'),
-                    hashlib.sha256
-                ).hexdigest()
-                headers['X-Signature'] = signature
-
-            headers['Content-Type'] = headers.get('Content-Type', 'application/json')
-
-            for attempt in range(max_retries):
-                try:
-                    data = payload_str.encode('utf-8')
-                    req = urllib.request.Request(
-                        webhook_url,
-                        data=data,
-                        headers=headers,
-                        method='POST'
-                    )
-
-                    with urllib.request.urlopen(req, timeout=30) as response:
-                        status = response.status
-                        
-                        if status < 400:
-                            return ActionResult(
-                                success=True,
-                                message=f"Webhook delivered on attempt {attempt + 1}",
-                                data={'attempts': attempt + 1, 'status': status}
-                            )
-                
-                except urllib.error.HTTPError as e:
-                    last_error = f"HTTP {e.code}"
-                    if e.code >= 500:
-                        continue
-                    return ActionResult(
-                        success=False,
-                        message=f"Webhook failed: {last_error}",
-                        data={'attempts': attempt + 1, 'error': last_error}
-                    )
-                
-                except Exception as e:
-                    last_error = str(e)
-
-                if attempt < max_retries - 1:
-                    wait_time = backoff_base ** attempt
-                    time.sleep(wait_time)
-
+        missing_fields = [f for f in required_fields if f not in body]
+        if missing_fields:
             return ActionResult(
                 success=False,
-                message=f"Webhook failed after {max_retries} attempts: {last_error}",
-                data={'attempts': max_retries, 'error': last_error}
+                message=f"Missing required fields: {missing_fields}",
+                data={'missing_fields': missing_fields}
             )
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Webhook retry failed: {str(e)}")
+        event_type = body.get(event_type_field, 'unknown')
+        return ActionResult(
+            success=True,
+            message=f"Webhook received: {event_type}",
+            data={
+                'event_type': event_type,
+                'payload': body,
+                'headers': headers,
+                'verified': bool(secret)
+            },
+            duration=time.time() - start_time
+        )
+
+    def _verify_signature(self, body: Any, secret: str, signature: str) -> bool:
+        """Verify webhook signature."""
+        if not signature:
+            return False
+        try:
+            body_str = json.dumps(body, sort_keys=True) if isinstance(body, dict) else str(body)
+            expected = hmac.new(secret.encode(), body_str.encode(), hashlib.sha256).hexdigest()
+            return hmac.compare_digest(f"sha256={expected}", signature)
+        except:
+            return False
 
 
-class WebhookFilterAction(BaseAction):
-    """Filter webhooks based on conditions.
+class WebhookSenderAction(BaseAction):
+    """Send webhook notifications to external endpoints.
     
-    Applies filtering rules to webhook events.
+    Sends HTTP POST requests with JSON payloads
+    and optional HMAC signatures.
     """
-    action_type = "webhook_filter"
-    display_name = "Webhook过滤"
-    description = "Webhook条件过滤"
+    action_type = "webhook_sender"
+    display_name = "Webhook发送器"
+    description = "发送Webhook通知"
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Filter webhook.
+        """Send webhook.
         
         Args:
             context: Execution context.
-            params: Dict with keys: payload, rules, filter_action.
-                   rules: list of {field, operator, value}.
+            params: Dict with keys: url, payload, secret, headers,
+                   timeout, retry_count.
         
         Returns:
-            ActionResult with filter result.
+            ActionResult with send result.
         """
+        import urllib.request
+        import urllib.parse
+
+        url = params.get('url', '')
         payload = params.get('payload', {})
-        rules = params.get('rules', [])
-        filter_action = params.get('filter_action', 'include')
+        secret = params.get('secret', '')
+        headers = params.get('headers', {})
+        timeout = params.get('timeout', 30)
+        retry_count = params.get('retry_count', 0)
+        start_time = time.time()
 
-        if isinstance(payload, str):
+        if not url:
+            return ActionResult(success=False, message="url is required")
+
+        body = json.dumps(payload).encode() if isinstance(payload, (dict, list)) else str(payload).encode()
+        req_headers = {'Content-Type': 'application/json', **headers}
+
+        if secret:
+            signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+            req_headers['X-Signature'] = f"sha256={signature}"
+
+        last_error = None
+        for attempt in range(retry_count + 1):
             try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                return ActionResult(success=False, message="Invalid JSON payload")
+                req = urllib.request.Request(url, data=body, headers=req_headers, method='POST')
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    response_body = resp.read().decode()
+                    return ActionResult(
+                        success=True,
+                        message=f"Webhook sent successfully (attempt {attempt + 1})",
+                        data={
+                            'status_code': resp.status,
+                            'response': response_body,
+                            'attempt': attempt + 1
+                        },
+                        duration=time.time() - start_time
+                    )
+            except Exception as e:
+                last_error = str(e)
+                if attempt < retry_count:
+                    time.sleep(2 ** attempt)
 
-        if not rules:
+        return ActionResult(
+            success=False,
+            message=f"Webhook send failed after {retry_count + 1} attempts: {last_error}",
+            data={'error': last_error, 'attempts': retry_count + 1}
+        )
+
+
+class WebhookRouterAction(BaseAction):
+    """Route webhook events to appropriate handlers.
+    
+    Matches incoming event types to registered handlers
+    and dispatches to the appropriate action.
+    """
+    action_type = "webhook_router"
+    display_name = "Webhook路由"
+    description = "路由Webhook事件到处理器"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Route webhook to handler.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: event_type, payload, routes (list
+                   of {event_pattern, handler_action, handler_params}).
+        
+        Returns:
+            ActionResult with routing result.
+        """
+        event_type = params.get('event_type', '')
+        payload = params.get('payload', {})
+        routes = params.get('routes', [])
+        start_time = time.time()
+
+        if not routes:
             return ActionResult(
                 success=True,
-                message="No rules, passing through",
-                data={'passed': True, 'payload': payload}
+                message=f"No routes defined for event: {event_type}",
+                data={'routed': False, 'event_type': event_type}
             )
 
-        matched = True
-        for rule in rules:
-            field = rule.get('field', '')
-            operator = rule.get('operator', '==')
-            value = rule.get('value')
+        for route in routes:
+            pattern = route.get('event_pattern', '*')
+            if self._matches_pattern(event_type, pattern):
+                handler_action = route.get('handler_action', '')
+                handler_params = route.get('handler_params', {})
+                merged_params = {**handler_params, 'payload': payload}
 
-            actual_value = self._get_nested_value(payload, field)
-            
-            rule_matched = self._evaluate_condition(actual_value, operator, value)
-            
-            if not rule_matched:
-                matched = False
-                break
-
-        passes = matched if filter_action == 'include' else not matched
+                result = self._execute_handler(handler_action, merged_params)
+                return ActionResult(
+                    success=result.success,
+                    message=f"Routed to '{handler_action}' for event '{event_type}'",
+                    data={
+                        'routed': True,
+                        'event_type': event_type,
+                        'handler': handler_action,
+                        'result': result.data
+                    },
+                    duration=time.time() - start_time
+                )
 
         return ActionResult(
             success=True,
-            message=f"Webhook {'passed' if passes else 'filtered'}: {rules[0] if rules else 'no rules'}",
-            data={
-                'passed': passes,
-                'matched': matched,
-                'payload': payload if passes else None
-            }
+            message=f"No route matched for event: {event_type}",
+            data={'routed': False, 'event_type': event_type}
         )
 
-    def _get_nested_value(self, obj: Any, path: str) -> Any:
-        """Get nested value from object using dot notation."""
-        if not path:
-            return obj
-        
-        for key in path.split('.'):
-            if isinstance(obj, dict):
-                obj = obj.get(key)
-            else:
-                return None
-            if obj is None:
-                return None
-        return obj
+    def _matches_pattern(self, event_type: str, pattern: str) -> bool:
+        """Check if event type matches route pattern."""
+        if pattern == '*':
+            return True
+        if pattern.startswith('*') and pattern.endswith('*'):
+            return pattern[1:-1] in event_type
+        if pattern.startswith('*'):
+            return event_type.endswith(pattern[1:])
+        if pattern.endswith('*'):
+            return event_type.startswith(pattern[:-1])
+        return event_type == pattern
 
-    def _evaluate_condition(self, actual: Any, operator: str, expected: Any) -> bool:
-        """Evaluate condition."""
-        if operator == '==':
-            return actual == expected
-        elif operator == '!=':
-            return actual != expected
-        elif operator == '>':
-            return float(actual) > float(expected)
-        elif operator == '<':
-            return float(actual) < float(expected)
-        elif operator == '>=':
-            return float(actual) >= float(expected)
-        elif operator == '<=':
-            return float(actual) <= float(expected)
-        elif operator == 'in':
-            return expected in str(actual)
-        elif operator == 'contains':
-            return str(expected) in str(actual)
-        elif operator == 'startswith':
-            return str(actual).startswith(str(expected))
-        elif operator == 'endswith':
-            return str(actual).endswith(str(expected))
-        elif operator == 'exists':
-            return actual is not None
-        elif operator == 'empty':
-            return actual is None or actual == ''
-        
-        return False
+    def _execute_handler(
+        self,
+        action_name: str,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute a handler action."""
+        try:
+            from core.action_registry import ActionRegistry
+            registry = ActionRegistry()
+            action = registry.get_action(action_name)
+            if action:
+                return action.execute(None, params)
+        except ImportError:
+            pass
+        return ActionResult(success=False, message=f"Handler '{action_name}' not found")
