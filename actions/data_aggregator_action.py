@@ -1,176 +1,249 @@
-"""
-Data Aggregator Action Module.
+"""Data aggregator action module for RabAI AutoClick.
 
-Provides multi-dimensional data aggregation with rolling windows,
-cumulative sums, and advanced grouping operations.
-
-Author: RabAi Team
+Provides data aggregation capabilities including grouping,
+summing, averaging, and statistical operations.
 """
 
-from __future__ import annotations
+import sys
+import os
+from typing import Any, Dict, List, Optional, Callable
+from dataclasses import dataclass
+from collections import defaultdict
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
-import pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
 class AggregationType(Enum):
-    """Types of aggregation."""
-    SUM = "sum"
-    MEAN = "mean"
-    MEDIAN = "median"
-    MODE = "mode"
-    MIN = "min"
-    MAX = "max"
-    COUNT = "count"
-    STD = "std"
-    VAR = "var"
-    FIRST = "first"
-    LAST = "last"
-    RANK = "rank"
-    PERCENTILE = "percentile"
-    CUMULATIVE_SUM = "cumsum"
-    CUMULATIVE_MAX = "cummax"
-    ROLLING_SUM = "rolling_sum"
-    ROLLING_MEAN = "rolling_mean"
+    """Aggregation types."""
+    pass
+
+
+from enum import Enum
 
 
 @dataclass
-class AggregationConfig:
-    """Configuration for an aggregation operation."""
-    column: str
-    agg_type: AggregationType
-    window: Optional[int] = None
-    min_periods: int = 1
-    quantile: Optional[float] = None
+class Aggregation:
+    """Single aggregation definition."""
+    field: str
+    function: str
+    alias: Optional[str] = None
 
 
-@dataclass
-class AggregationResult:
-    """Result of an aggregation operation."""
-    aggregations: Dict[str, Any]
-    group_keys: Optional[Tuple] = None
-    timestamp: datetime = field(default_factory=datetime.now)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "aggregations": self.aggregations,
-            "group_keys": str(self.group_keys) if self.group_keys else None,
-            "timestamp": self.timestamp.isoformat(),
-        }
-
-
-class DataAggregator:
+class DataAggregatorAction(BaseAction):
+    """Data aggregator action for grouping and aggregating data.
+    
+    Supports GROUP BY aggregation with sum, count, avg, min, max,
+    and custom aggregation functions.
     """
-    Multi-dimensional data aggregation engine.
-
-    Supports group-by, rolling windows, cumulative operations,
-    and complex multi-column aggregations.
-
-    Example:
-        >>> aggregator = DataAggregator()
-        >>> result = aggregator.groupby(df, ["category"], {"amount": AggregationType.SUM})
-    """
-
-    def groupby(
+    action_type = "data_aggregator"
+    display_name = "数据聚合"
+    description = "数据分组聚合与统计"
+    
+    def execute(
         self,
-        df: pd.DataFrame,
-        group_columns: List[str],
-        agg_specs: Dict[str, AggregationType],
-    ) -> pd.DataFrame:
-        """Group by columns and apply aggregations."""
-        agg_dict = {}
-        for col, agg_type in agg_specs.items():
-            if agg_type == AggregationType.SUM:
-                agg_dict[col] = "sum"
-            elif agg_type == AggregationType.MEAN:
-                agg_dict[col] = "mean"
-            elif agg_type == AggregationType.MEDIAN:
-                agg_dict[col] = "median"
-            elif agg_type == AggregationType.MIN:
-                agg_dict[col] = "min"
-            elif agg_type == AggregationType.MAX:
-                agg_dict[col] = "max"
-            elif agg_type == AggregationType.COUNT:
-                agg_dict[col] = "count"
-            elif agg_type == AggregationType.STD:
-                agg_dict[col] = "std"
-            elif agg_type == AggregationType.FIRST:
-                agg_dict[col] = "first"
-            elif agg_type == AggregationType.LAST:
-                agg_dict[col] = "last"
-
-        return df.groupby(group_columns).agg(agg_dict).reset_index()
-
-    def rolling_aggregate(
-        self,
-        df: pd.DataFrame,
-        column: str,
-        window: int,
-        agg_type: AggregationType,
-        min_periods: int = 1,
-    ) -> pd.Series:
-        """Apply rolling window aggregation."""
-        if agg_type == AggregationType.ROLLING_SUM:
-            return df[column].rolling(window=window, min_periods=min_periods).sum()
-        elif agg_type == AggregationType.ROLLING_MEAN:
-            return df[column].rolling(window=window, min_periods=min_periods).mean()
-        elif agg_type == AggregationType.CUMULATIVE_SUM:
-            return df[column].cumsum()
-        elif agg_type == AggregationType.CUMULATIVE_MAX:
-            return df[column].cummax()
-        elif agg_type == AggregationType.RANK:
-            return df[column].rolling(window=window, min_periods=min_periods).rank()
-        else:
-            return df[column].rolling(window=window, min_periods=min_periods).mean()
-
-    def multi_level_aggregate(
-        self,
-        df: pd.DataFrame,
-        group_columns: List[str],
-        agg_specs: Dict[str, List[AggregationType]],
-    ) -> pd.DataFrame:
-        """Apply multiple aggregations per column."""
-        agg_dict = {}
-        for col, agg_types in agg_specs.items():
-            col_aggs = []
-            for agg_type in agg_types:
-                if agg_type == AggregationType.SUM:
-                    col_aggs.append("sum")
-                elif agg_type == AggregationType.MEAN:
-                    col_aggs.append("mean")
-                elif agg_type == AggregationType.COUNT:
-                    col_aggs.append("count")
-                elif agg_type == AggregationType.MIN:
-                    col_aggs.append("min")
-                elif agg_type == AggregationType.MAX:
-                    col_aggs.append("max")
-            if col_aggs:
-                agg_dict[col] = col_aggs
-
-        return df.groupby(group_columns).agg(agg_dict)
-
-    def pivot_aggregate(
-        self,
-        df: pd.DataFrame,
-        index: str,
-        columns: str,
-        values: str,
-        agg_func: str = "sum",
-    ) -> pd.DataFrame:
-        """Aggregate and pivot data."""
-        return df.pivot_table(
-            index=index,
-            columns=columns,
-            values=values,
-            aggfunc=agg_func,
-            fill_value=0,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data aggregation.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                data: List of items to aggregate
+                group_by: Field(s) to group by
+                aggregations: List of aggregation definitions
+                having: Having clause for filtering groups
+                order_by: Field to order results by
+                limit: Maximum number of results.
+        
+        Returns:
+            ActionResult with aggregated results.
+        """
+        data = params.get('data', [])
+        group_by = params.get('group_by')
+        aggregations = params.get('aggregations', [])
+        having = params.get('having')
+        order_by = params.get('order_by')
+        limit = params.get('limit')
+        
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="Data must be a list")
+        
+        if not group_by:
+            return self._aggregate_all(data, aggregations)
+        
+        return self._aggregate_grouped(
+            data, group_by, aggregations, having, order_by, limit
         )
-
-
-def create_aggregator() -> DataAggregator:
-    """Factory to create a data aggregator."""
-    return DataAggregator()
+    
+    def _aggregate_all(
+        self,
+        data: List[Any],
+        aggregations: List[Dict[str, str]]
+    ) -> ActionResult:
+        """Aggregate entire dataset without grouping."""
+        if not aggregations:
+            return ActionResult(
+                success=True,
+                message="No aggregations specified",
+                data={'items': data, 'count': len(data)}
+            )
+        
+        result = {}
+        
+        for agg in aggregations:
+            field = agg['field']
+            func = agg.get('function', 'count')
+            alias = agg.get('alias', f"{func}_{field}")
+            
+            values = [item.get(field) for item in data if item.get(field) is not None]
+            
+            if func == 'count':
+                result[alias] = len(values) if values else 0
+            elif func == 'sum':
+                result[alias] = sum(values) if values else 0
+            elif func == 'avg':
+                result[alias] = sum(values) / len(values) if values else None
+            elif func == 'min':
+                result[alias] = min(values) if values else None
+            elif func == 'max':
+                result[alias] = max(values) if values else None
+            elif func == 'first':
+                result[alias] = values[0] if values else None
+            elif func == 'last':
+                result[alias] = values[-1] if values else None
+            elif func == 'array':
+                result[alias] = values
+        
+        return ActionResult(
+            success=True,
+            message="Aggregated all data",
+            data={'result': result}
+        )
+    
+    def _aggregate_grouped(
+        self,
+        data: List[Any],
+        group_by: str,
+        aggregations: List[Dict[str, str]],
+        having: Optional[Dict],
+        order_by: Optional[str],
+        limit: Optional[int]
+    ) -> ActionResult:
+        """Aggregate data with grouping."""
+        groups: Dict[Any, List[Any]] = defaultdict(list)
+        
+        group_fields = group_by.split(',') if isinstance(group_by, str) else group_by
+        
+        for item in data:
+            if isinstance(item, dict):
+                key = tuple(item.get(f.strip()) for f in group_fields)
+                groups[key].append(item)
+        
+        results = []
+        
+        for key, group_items in groups.items():
+            result = {}
+            
+            if len(group_fields) == 1:
+                result[group_fields[0].strip()] = key[0]
+            else:
+                for i, field in enumerate(group_fields):
+                    result[field.strip()] = key[i]
+            
+            for agg in aggregations:
+                field = agg['field']
+                func = agg.get('function', 'count')
+                alias = agg.get('alias', f"{func}_{field}")
+                
+                values = [item.get(field) for item in group_items if item.get(field) is not None]
+                
+                if func == 'count':
+                    result[alias] = len(group_items)
+                elif func == 'count_distinct':
+                    result[alias] = len(set(values))
+                elif func == 'sum':
+                    result[alias] = sum(values) if values else 0
+                elif func == 'avg':
+                    result[alias] = round(sum(values) / len(values), 2) if values else None
+                elif func == 'min':
+                    result[alias] = min(values) if values else None
+                elif func == 'max':
+                    result[alias] = max(values) if values else None
+                elif func == 'first':
+                    result[alias] = values[0] if values else None
+                elif func == 'last':
+                    result[alias] = values[-1] if values else None
+                elif func == 'array':
+                    result[alias] = values
+                elif func == 'stddev':
+                    if len(values) > 1:
+                        import statistics
+                        result[alias] = statistics.stdev(values)
+                    else:
+                        result[alias] = 0
+                elif func == 'median':
+                    if values:
+                        import statistics
+                        result[alias] = statistics.median(values)
+                    else:
+                        result[alias] = None
+            
+            results.append(result)
+        
+        if having:
+            results = self._apply_having(results, having)
+        
+        if order_by:
+            ascending = params.get('order_ascending', True)
+            results = sorted(results, key=lambda x: x.get(order_by, 0), reverse=not ascending)
+        
+        if limit:
+            results = results[:limit]
+        
+        return ActionResult(
+            success=True,
+            message=f"Aggregated into {len(results)} groups",
+            data={
+                'items': results,
+                'group_count': len(results),
+                'total_records': len(data)
+            }
+        )
+    
+    def _apply_having(self, results: List[Dict], having: Dict) -> List[Dict]:
+        """Apply having clause to filter groups."""
+        filtered = []
+        
+        for result in results:
+            passes = True
+            
+            for field, condition in having.items():
+                if isinstance(condition, dict):
+                    op = condition.get('op', '==')
+                    value = condition.get('value')
+                    
+                    if op == '>' and not result.get(field, 0) > value:
+                        passes = False
+                    elif op == '>=' and not result.get(field, 0) >= value:
+                        passes = False
+                    elif op == '<' and not result.get(field, 0) < value:
+                        passes = False
+                    elif op == '<=' and not result.get(field, 0) <= value:
+                        passes = False
+                    elif op == '!=' and not result.get(field) != value:
+                        passes = False
+                    elif op == '==' and not result.get(field) == value:
+                        passes = False
+                else:
+                    if result.get(field) != condition:
+                        passes = False
+                
+                if not passes:
+                    break
+            
+            if passes:
+                filtered.append(result)
+        
+        return filtered
