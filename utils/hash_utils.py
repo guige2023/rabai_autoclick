@@ -1,264 +1,298 @@
-"""
-Hashing algorithms and utilities.
+"""Hash utilities for RabAI AutoClick.
 
-Provides MD5, SHA-1, SHA-256, murmurhash, and consistent hashing.
+Provides:
+- Hash computation for various types
+- Consistent hashing helpers
+- Bloom filter implementation
+- Hash-based data structures
 """
 
 from __future__ import annotations
 
-import math
+import hashlib
+import hmac
+import json
+from typing import (
+    Any,
+    Callable,
+    List,
+    Optional,
+    Union,
+)
 
 
-def md5_hash(data: str) -> str:
-    """
-    Compute MD5 hash of a string (simplified pure-Python implementation).
-
-    For production use, prefer the hashlib module.
-    This is a reference implementation demonstrating the algorithm.
-
-    Args:
-        data: Input string
-
-    Returns:
-        32-character hexadecimal MD5 hash.
-    """
-    # Use built-in hashlib for actual use
-    import hashlib
-    return hashlib.md5(data.encode()).hexdigest()
-
-
-def sha256_hash(data: str) -> str:
-    """Compute SHA-256 hash of a string."""
-    import hashlib
-    return hashlib.sha256(data.encode()).hexdigest()
-
-
-def sha1_hash(data: str) -> str:
-    """Compute SHA-1 hash of a string."""
-    import hashlib
-    return hashlib.sha1(data.encode()).hexdigest()
-
-
-def murmurhash3_32(data: str, seed: int = 0) -> int:
-    """
-    MurmurHash3 32-bit.
+def hash_bytes(
+    data: bytes,
+    algorithm: str = "sha256",
+) -> str:
+    """Compute hash of bytes.
 
     Args:
-        data: Input string
-        seed: Random seed
+        data: Bytes to hash.
+        algorithm: Hash algorithm name.
 
     Returns:
-        32-bit unsigned hash value.
+        Hex digest string.
     """
-    import struct
+    hasher = hashlib.new(algorithm)
+    hasher.update(data)
+    return hasher.hexdigest()
 
-    def rotl32(x: int, r: int) -> int:
-        return ((x << r) | (x >> (32 - r))) & 0xFFFFFFFF
 
-    def fmix32(h: int) -> int:
-        h ^= h >> 16
-        h = (h * 0x85EBCA6B) & 0xFFFFFFFF
-        h ^= h >> 13
-        h = (h * 0xC2B2AE35) & 0xFFFFFFFF
-        h ^= h >> 16
-        return h
+def hash_string(
+    text: str,
+    algorithm: str = "sha256",
+    encoding: str = "utf-8",
+) -> str:
+    """Compute hash of a string.
 
-    data_bytes = data.encode("utf-8")
-    length = len(data_bytes)
-    nblocks = length // 4
+    Args:
+        text: String to hash.
+        algorithm: Hash algorithm name.
+        encoding: Text encoding.
 
-    h1 = seed & 0xFFFFFFFF
+    Returns:
+        Hex digest string.
+    """
+    return hash_bytes(text.encode(encoding), algorithm)
 
+
+def hash_file(
+    path: str,
+    algorithm: str = "sha256",
+    chunk_size: int = 8192,
+) -> str:
+    """Compute hash of a file.
+
+    Args:
+        path: File path.
+        algorithm: Hash algorithm name.
+        chunk_size: Read chunk size.
+
+    Returns:
+        Hex digest string.
+    """
+    hasher = hashlib.new(algorithm)
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def hash_json(
+    obj: Any,
+    algorithm: str = "sha256",
+) -> str:
+    """Compute hash of a JSON-serializable object.
+
+    Args:
+        obj: Object to hash.
+        algorithm: Hash algorithm name.
+
+    Returns:
+        Hex digest string.
+    """
+    serialized = json.dumps(obj, sort_keys=True, default=str)
+    return hash_string(serialized, algorithm)
+
+
+def hmac_hash(
+    key: bytes,
+    message: bytes,
+    algorithm: str = "sha256",
+) -> str:
+    """Compute HMAC of a message.
+
+    Args:
+        key: Secret key.
+        message: Message bytes.
+        algorithm: Hash algorithm name.
+
+    Returns:
+        Hex digest string.
+    """
+    return hmac.new(key, message, algorithm).hexdigest()
+
+
+def md5_quick(data: Union[str, bytes]) -> str:
+    """Compute MD5 hash quickly.
+
+    Args:
+        data: String or bytes.
+
+    Returns:
+        MD5 hex digest.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.md5(data).hexdigest()
+
+
+def sha1_quick(data: Union[str, bytes]) -> str:
+    """Compute SHA1 hash quickly.
+
+    Args:
+        data: String or bytes.
+
+    Returns:
+        SHA1 hex digest.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.sha1(data).hexdigest()
+
+
+def sha256_quick(data: Union[str, bytes]) -> str:
+    """Compute SHA256 hash quickly.
+
+    Args:
+        data: String or bytes.
+
+    Returns:
+        SHA256 hex digest.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
+def consistent_hash(
+    key: str,
+    nodes: List[str],
+    hash_func: Optional[Callable[[str], int]] = None,
+) -> str:
+    """Map a key to a node using consistent hashing.
+
+    Args:
+        key: Key to hash.
+        nodes: List of node identifiers.
+        hash_func: Custom hash function. Defaults to hash().
+
+    Returns:
+        Node identifier the key maps to.
+    """
+    if not nodes:
+        raise ValueError("nodes cannot be empty")
+    if hash_func is None:
+        hash_func = hash
+
+    positions: List[Tuple[int, str]] = [
+        (hash_func(f"{key}:{node}"), node) for node in nodes
+    ]
+    positions.sort()
+    return positions[0][1]
+
+
+class BloomFilter:
+    """Simple Bloom filter for set membership testing.
+
+    Args:
+        size: Expected number of items.
+        false_positive_rate: Desired false positive rate.
+    """
+
+    def __init__(
+        self,
+        size: int = 100000,
+        false_positive_rate: float = 0.01,
+    ) -> None:
+        import math
+
+        self._size = size
+        self._hash_count = int(
+            -math.log(false_positive_rate) / math.log(2)
+        )
+        self._bit_array = [False] * size
+
+    def add(self, item: str) -> None:
+        """Add an item to the filter."""
+        for seed in range(self._hash_count):
+            idx = hash(f"{seed}:{item}") % self._size
+            self._bit_array[idx] = True
+
+    def might_contain(self, item: str) -> bool:
+        """Check if an item might be in the filter."""
+        for seed in range(self._hash_count):
+            idx = hash(f"{seed}:{item}") % self._size
+            if not self._bit_array[idx]:
+                return False
+        return True
+
+    def __contains__(self, item: str) -> bool:
+        return self.might_contain(item)
+
+
+def murmur3_hash(data: bytes, seed: int = 0) -> int:
+    """Compute MurmurHash3 (simplified 32-bit version).
+
+    Args:
+        data: Bytes to hash.
+        seed: Random seed.
+
+    Returns:
+        32-bit hash integer.
+    """
     c1 = 0xCC9E2D51
     c2 = 0x1B873593
 
-    for i in range(nblocks):
-        k1 = struct.unpack("<I", data_bytes[i * 4 : i * 4 + 4])[0]
-        k1 = (k1 * c1) & 0xFFFFFFFF
-        k1 = rotl32(k1, 15)
-        k1 = (k1 * c2) & 0xFFFFFFFF
-        h1 ^= k1
-        h1 = rotl32(h1, 13)
+    length = len(data)
+    h1 = seed
+    rounded_end = (length & 0xFFFFFFFC)
+
+    for i in range(0, rounded_end, 4):
+        k = (
+            data[i]
+            | (data[i + 1] << 8)
+            | (data[i + 2] << 16)
+            | (data[i + 3] << 24)
+        )
+        k = (k * c1) & 0xFFFFFFFF
+        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+        k = (k * c2) & 0xFFFFFFFF
+        h1 = (h1 ^ k) & 0xFFFFFFFF
+        h1 = ((h1 << 13) | (h1 >> 19)) & 0xFFFFFFFF
         h1 = ((h1 * 5) + 0xE6546B64) & 0xFFFFFFFF
 
-    tail = data_bytes[nblocks * 4:]
-    k1 = 0
-    for i, byte in enumerate(tail):
-        k1 ^= byte << (i * 8)
-    if tail:
-        k1 = (k1 * c1) & 0xFFFFFFFF
-        k1 = rotl32(k1, 15)
-        k1 = (k1 * c2) & 0xFFFFFFFF
-        h1 ^= k1
+    k = 0
+    tail = length & 0x03
+    if tail >= 1:
+        k ^= data[rounded_end]
+    if tail >= 2:
+        k ^= data[rounded_end + 1] << 8
+    if tail >= 3:
+        k ^= data[rounded_end + 2] << 16
+    if tail > 0:
+        k = (k * c1) & 0xFFFFFFFF
+        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+        k = (k * c2) & 0xFFFFFFFF
+        h1 ^= k
+        h1 ^= length
 
-    h1 ^= length
-    h1 = fmix32(h1)
+    h1 ^= h1 >> 16
+    h1 = (h1 * 0x85EBCA6B) & 0xFFFFFFFF
+    h1 ^= h1 >> 13
+    h1 = (h1 * 0xC2B2AE35) & 0xFFFFFFFF
+    h1 ^= h1 >> 16
+
     return h1
 
 
-def hash_ring(nodes: list[str], key: str, replicas: int = 100) -> str:
-    """
-    Consistent hashing - find which node a key belongs to.
-
-    Args:
-        nodes: List of node identifiers
-        key: Key to hash
-        replicas: Number of virtual nodes per physical node
-
-    Returns:
-        Selected node identifier.
-    """
-    if not nodes:
-        raise ValueError("No nodes provided")
-
-    positions: dict[int, str] = {}
-    for node in nodes:
-        for i in range(replicas):
-            pos = murmurhash3_32(f"{node}::{i}", seed=0) & 0xFFFFFFFF
-            positions[pos] = node
-
-    key_hash = murmurhash3_32(key, seed=0) & 0xFFFFFFFF
-    sorted_positions = sorted(positions.keys())
-    for pos in sorted_positions:
-        if key_hash <= pos:
-            return positions[pos]
-    return positions[sorted_positions[0]]
+__all__ = [
+    "hash_bytes",
+    "hash_string",
+    "hash_file",
+    "hash_json",
+    "hmac_hash",
+    "md5_quick",
+    "sha1_quick",
+    "sha256_quick",
+    "consistent_hash",
+    "BloomFilter",
+    "murmur3_hash",
+]
 
 
-def hash_distribution(
-    keys: list[str],
-    nodes: list[str],
-    replicas: int = 100,
-) -> dict[str, int]:
-    """
-    Compute hash distribution across nodes.
-
-    Args:
-        keys: List of keys to distribute
-        nodes: List of nodes
-        replicas: Virtual nodes per physical node
-
-    Returns:
-        Dictionary mapping node to key count.
-    """
-    dist: dict[str, int] = {n: 0 for n in nodes}
-    for key in keys:
-        node = hash_ring(nodes, key, replicas)
-        dist[node] = dist.get(node, 0) + 1
-    return dist
-
-
-def hash_bucket(key: str, num_buckets: int) -> int:
-    """
-    Map key to bucket index using hash.
-
-    Args:
-        key: Key string
-        num_buckets: Number of buckets
-
-    Returns:
-        Bucket index [0, num_buckets).
-    """
-    import hashlib
-    h = hashlib.md5(key.encode()).hexdigest()
-    return int(h, 16) % num_buckets
-
-
-def string_fingerprint(s: str, num_bits: int = 64) -> int:
-    """
-    Create a fingerprint hash for string deduplication.
-
-    Args:
-        s: Input string
-        num_bits: Fingerprint size (64 or 128 recommended)
-
-    Returns:
-        Fingerprint as integer.
-    """
-    import hashlib
-    if num_bits <= 64:
-        return int(hashlib.md5(s.encode()).hexdigest(), 16) % (2 ** num_bits)
-    return int(hashlib.sha256(s.encode()).hexdigest(), 16) % (2 ** num_bits)
-
-
-def locality_sensitive_hash(
-    vector: list[float],
-    num_hashes: int = 16,
-    dim: int | None = None,
-) -> list[int]:
-    """
-    Simhash-style locality-sensitive hashing for vectors.
-
-    Args:
-        vector: Feature vector
-        num_hashes: Number of hash bits to generate
-        dim: Embedding dimension
-
-    Returns:
-        LSH fingerprint.
-    """
-    import hashlib
-
-    dim = dim or len(vector)
-    fingerprint = 0
-    for i in range(num_hashes):
-        hash_input = f"{i}:{vector}".encode()
-        h = int(hashlib.md5(hash_input).hexdigest(), 16)
-        bit = h & 1
-        fingerprint |= (bit << i)
-
-    # Convert to list of bits
-    bits = [(fingerprint >> i) & 1 for i in range(num_hashes)]
-    # Group into integers
-    groups = []
-    for i in range(0, num_hashes, 8):
-        group_bits = bits[i:i+8]
-        val = sum(b << j for j, b in enumerate(group_bits))
-        groups.append(val)
-    return groups
-
-
-def minhash_signature(
-    items: list[str],
-    num_hashes: int = 100,
-) -> list[int]:
-    """
-    MinHash signature for set similarity estimation.
-
-    Args:
-        items: List of items in the set
-        num_hashes: Number of hash functions
-
-    Returns:
-        MinHash signature (list of minimum hash values).
-    """
-    if not items:
-        return [0] * num_hashes
-
-    signature: list[int] = []
-    for i in range(num_hashes):
-        min_hash = min(
-            murmurhash3_32(item, seed=i) & 0xFFFFFFFF
-            for item in items
-        )
-        signature.append(min_hash)
-    return signature
-
-
-def minhash_estimate_similarity(sig1: list[int], sig2: list[int]) -> float:
-    """
-    Estimate Jaccard similarity from MinHash signatures.
-
-    Args:
-        sig1: First MinHash signature
-        sig2: Second MinHash signature
-
-    Returns:
-        Estimated Jaccard similarity.
-    """
-    if len(sig1) != len(sig2):
-        raise ValueError("Signatures must have same length")
-    if not sig1:
-        return 0.0
-    matches = sum(1 for a, b in zip(sig1, sig2) if a == b)
-    return matches / len(sig1)
+from typing import Tuple  # noqa: E402

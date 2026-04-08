@@ -1,204 +1,182 @@
-"""Generator and iterator utilities for RabAI AutoClick.
+"""Generator utilities for RabAI AutoClick.
 
 Provides:
-- Infinite sequence generators
-- Batched/chunked iteration
-- Windowed iteration (sliding window)
-- Filtered iteration
-- Generator combinators
-- Async generators
+- Generator helpers and transformations
+- Batching and chunking
+- Pipeline utilities
+- Infinite generator constructors
 """
 
 from __future__ import annotations
 
-import asyncio
-import itertools
 from typing import (
     Any,
-    Awaitable,
     Callable,
     Generic,
     Iterator,
     List,
     Optional,
+    Tuple,
     TypeVar,
-    Union,
 )
+
+import itertools
+import random
 
 
 T = TypeVar("T")
 U = TypeVar("U")
+K = TypeVar("K")
 
 
-def chunk(iterable: Iterator[T], size: int) -> Iterator[List[T]]:
-    """Split iterable into chunks of specified size.
-
-    Args:
-        iterable: Input iterable.
-        size: Chunk size (must be > 0).
-
-    Yields:
-        Lists of up to size elements.
-
-    Example:
-        list(chunk(range(10), 3))
-        # [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9]]
-    """
-    if size <= 0:
-        raise ValueError(f"Chunk size must be positive, got {size}")
-
-    iterator = iter(iterable)
-    while True:
-        chunk_list = list(itertools.islice(iterator, size))
-        if not chunk_list:
-            break
-        yield chunk_list
-
-
-def window(
-    iterable: Iterator[T],
-    size: int,
-    fill: Optional[T] = None,
-) -> Iterator[List[T]]:
-    """Sliding window over iterable.
-
-    Args:
-        iterable: Input iterable.
-        size: Window size (must be > 0).
-        fill: Optional value to fill incomplete windows at the end.
-
-    Yields:
-        Lists of size elements (last may be shorter with fill=None).
-
-    Example:
-        list(window(range(5), 3))
-        # [[0, 1, 2], [1, 2, 3], [2, 3, 4]]
-    """
-    if size <= 0:
-        raise ValueError(f"Window size must be positive, got {size}")
-
-    window_list: List[T] = []
-
-    for item in iterable:
-        window_list.append(item)
-        if len(window_list) == size:
-            yield window_list[:]
-            window_list.pop(0)
-        elif len(window_list) < size and fill is None:
-            pass
-        elif len(window_list) < size and fill is not None:
-            while len(window_list) < size:
-                window_list.append(fill)
-
-    if window_list and fill is not None:
-        while len(window_list) < size:
-            window_list.append(fill)
-        if len(window_list) == size:
-            yield window_list
-
-
-def batch(
+def batched(
     iterable: Iterator[T],
     batch_size: int,
-    allow_partial: bool = True,
 ) -> Iterator[List[T]]:
-    """Batch items into groups.
+    """Yield successive batches from an iterable.
 
     Args:
-        iterable: Input iterable.
-        batch_size: Number of items per batch.
-        allow_partial: If True, yield partial last batch.
+        iterable: Source iterator.
+        batch_size: Size of each batch.
 
     Yields:
-        Lists of batch_size elements.
-
-    Example:
-        list(batch(range(7), 3))
-        # [[0, 1, 2], [3, 4, 5], [6]]
+        Lists of up to batch_size items.
     """
-    batch_list: List[T] = []
-    for item in iterable:
-        batch_list.append(item)
-        if len(batch_list) == batch_size:
-            yield batch_list
-            batch_list = []
-    if allow_partial and batch_list:
-        yield batch_list
+    iterator = iter(iterable)
+    while True:
+        batch = list(itertools.islice(iterator, batch_size))
+        if not batch:
+            return
+        yield batch
 
 
-def filter_none(iterable: Iterator[Optional[T]]) -> Iterator[T]:
-    """Filter out None values from iterable.
+def chunked(
+    items: List[T],
+    size: int,
+) -> Iterator[List[T]]:
+    """Split a list into chunks of specified size.
 
     Args:
-        iterable: Input iterable that may contain None.
+        items: Source list.
+        size: Chunk size.
 
     Yields:
-        Non-None values.
-
-    Example:
-        list(filter_none([1, None, 2, None, 3]))
-        # [1, 2, 3]
+        Chunks.
     """
-    for item in iterable:
-        if item is not None:
-            yield item
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
 
 
-def filter_falsy(iterable: Iterator[T]) -> Iterator[T]:
-    """Filter out falsy values from iterable.
+def take(
+    iterable: Iterator[T],
+    n: int,
+) -> List[T]:
+    """Take the first n items from an iterable.
 
     Args:
-        iterable: Input iterable.
+        iterable: Source iterator.
+        n: Number of items.
+
+    Returns:
+        List of first n items.
+    """
+    return list(itertools.islice(iterable, n))
+
+
+def drop(
+    iterable: Iterator[T],
+    n: int,
+) -> Iterator[T]:
+    """Skip the first n items from an iterable.
+
+    Args:
+        iterable: Source iterator.
+        n: Number of items to skip.
 
     Yields:
-        Truthy values.
-
-    Example:
-        list(filter_falsy([0, 1, False, 2, '', 3]))
-        # [1, 2, 3]
+        Remaining items after skipping.
     """
-    for item in iterable:
-        if item:
-            yield item
+    return itertools.islice(iterable, n, None)
 
 
-def map_partial(
+def flatten(
+    nested: Iterator[Iterator[T]],
+) -> Iterator[T]:
+    """Flatten a nested iterable of iterables.
+
+    Args:
+        nested: Iterable of iterables.
+
+    Yields:
+        Flattened items.
+    """
+    for inner in nested:
+        yield from inner
+
+
+def map_gen(
     func: Callable[[T], U],
     iterable: Iterator[T],
-    error_handler: Optional[Callable[[T, Exception], U]] = None,
 ) -> Iterator[U]:
-    """Map function over iterable, handling errors gracefully.
+    """Map a function over an iterable (generator version).
 
     Args:
-        func: Function to apply.
-        iterable: Input iterable.
-        error_handler: Optional (item, error) -> replacement.
+        func: Transformation function.
+        iterable: Source iterator.
 
     Yields:
-        Transformed values.
+        Transformed items.
     """
     for item in iterable:
-        try:
-            yield func(item)
-        except Exception as e:
-            if error_handler is not None:
-                yield error_handler(item, e)
-            else:
-                raise
+        yield func(item)
 
 
-def interleave(*iterables: Iterator[T]) -> Iterator[T]:
-    """Interleave elements from multiple iterables.
+def filter_gen(
+    predicate: Callable[[T], bool],
+    iterable: Iterator[T],
+) -> Iterator[T]:
+    """Filter an iterable by predicate (generator version).
+
+    Args:
+        predicate: Keep items that return True.
+        iterable: Source iterator.
+
+    Yields:
+        Filtered items.
+    """
+    for item in iterable:
+        if predicate(item):
+            yield item
+
+
+def unique_gen(
+    iterable: Iterator[T],
+) -> Iterator[T]:
+    """Yield unique items from an iterable preserving order.
+
+    Args:
+        iterable: Source iterator.
+
+    Yields:
+        Unique items.
+    """
+    seen: set = set()
+    for item in iterable:
+        if item not in seen:
+            seen.add(item)
+            yield item
+
+
+def interleave(
+    *iterables: Iterator[T],
+) -> Iterator[T]:
+    """Interleave multiple iterables round-robin.
 
     Args:
         *iterables: Iterables to interleave.
 
     Yields:
-        Elements in round-robin fashion.
-
-    Example:
-        list(interleave([1, 2, 3], [4, 5, 6]))
-        # [1, 4, 2, 5, 3, 6]
+        Items interleaved.
     """
     iterators = [iter(it) for it in iterables]
     while iterators:
@@ -212,298 +190,144 @@ def interleave(*iterables: Iterator[T]) -> Iterator[T]:
         iterators = next_iterators
 
 
-def flatten(nested: Iterator[Iterator[T]]) -> Iterator[T]:
-    """Flatten nested iterables.
-
-    Args:
-        nested: Iterable of iterables.
-
-    Yields:
-        Individual elements.
-
-    Example:
-        list(flatten([[1, 2], [3, 4], [5]]))
-        # [1, 2, 3, 4, 5]
-    """
-    for item in nested:
-        for sub_item in item:
-            yield sub_item
-
-
-def take(n: int, iterable: Iterator[T]) -> List[T]:
-    """Take first n elements from iterable.
-
-    Args:
-        n: Number of elements to take.
-        iterable: Input iterable.
-
-    Returns:
-        List of up to n elements.
-    """
-    return list(itertools.islice(iterable, n))
-
-
-def drop(n: int, iterable: Iterator[T]) -> Iterator[T]:
-    """Skip first n elements of iterable.
-
-    Args:
-        n: Number of elements to skip.
-        iterable: Input iterable.
-
-    Yields:
-        Elements after first n.
-    """
-    return itertools.islice(iterable, n, None)
-
-
-def unique(
+def interpose(
+    separator: T,
     iterable: Iterator[T],
-    key: Optional[Callable[[T], Any]] = None,
 ) -> Iterator[T]:
-    """Yield unique elements preserving order.
+    """Yield items with a separator between each.
 
     Args:
-        iterable: Input iterable.
-        key: Optional function to extract comparison key.
+        separator: Value to insert between items.
+        iterable: Source iterator.
 
     Yields:
-        Unique elements.
+        Items with separators.
     """
-    seen: set = set()
-    seen_add = seen.add
-    for item in iterable:
-        k = key(item) if key else item
-        if k not in seen:
-            seen_add(k)
-            yield item
+    iterator = iter(iterable)
+    try:
+        yield next(iterator)
+    except StopIteration:
+        return
+    for item in iterator:
+        yield separator
+        yield item
 
 
-def unique_by(
-    iterable: Iterator[T],
-    key: Callable[[T], Any],
-) -> Iterator[T]:
-    """Yield elements unique by some key, preserving order.
-
-    Args:
-        iterable: Input iterable.
-        key: Function to extract key.
-
-    Yields:
-        First occurrence of each unique key.
-    """
-    seen: set = set()
-    for item in iterable:
-        k = key(item)
-        if k not in seen:
-            seen.add(k)
-            yield item
-
-
-def frequencies(iterable: Iterator[T]) -> dict[T, int]:
-    """Count frequency of each element.
-
-    Args:
-        iterable: Input iterable.
-
-    Returns:
-        Dictionary mapping element to count.
-    """
-    freq: dict[T, int] = {}
-    for item in iterable:
-        freq[item] = freq.get(item, 0) + 1
-    return freq
-
-
-def partition(
+def partition_gen(
     iterable: Iterator[T],
     predicate: Callable[[T], bool],
-) -> tuple[List[T], List[T]]:
-    """Partition iterable into two lists by predicate.
+) -> Tuple[Iterator[T], Iterator[T]]:
+    """Partition an iterable into (matching, non-matching) iterators.
 
     Args:
-        iterable: Input iterable.
-        predicate: Function that returns True for kept elements.
+        iterable: Source iterator.
+        predicate: Function that returns True for first group.
 
     Returns:
-        Tuple of (matching, non-matching).
+        Tuple of (yes_iterator, no_iterator).
     """
-    matching: List[T] = []
-    non_matching: List[T] = []
-    for item in iterable:
-        if predicate(item):
-            matching.append(item)
-        else:
-            non_matching.append(item)
-    return matching, non_matching
+    def yes_gen() -> Iterator[T]:
+        for item in iterable:
+            if predicate(item):
+                yield item
+
+    def no_gen() -> Iterator[T]:
+        for item in iterable:
+            if not predicate(item):
+                yield item
+
+    return yes_gen(), no_gen()
 
 
-def first(
-    iterable: Iterator[T],
-    default: Optional[T] = None,
-) -> Optional[T]:
-    """Get first element from iterable.
-
-    Args:
-        iterable: Input iterable.
-        default: Value to return if iterable is empty.
-
-    Returns:
-        First element or default.
-    """
-    return next(iter(iterable), default)
-
-
-def last(
-    iterable: Iterator[T],
-    default: Optional[T] = None,
-) -> Optional[T]:
-    """Get last element from iterable.
-
-    Args:
-        iterable: Input iterable.
-        default: Value to return if iterable is empty.
-
-    Returns:
-        Last element or default.
-    """
-    item = default
-    for item in iterable:
-        pass
-    return item
-
-
-def nth(n: int, iterable: Iterator[T], default: Optional[T] = None) -> Optional[T]:
-    """Get nth element from iterable.
-
-    Args:
-        n: Zero-based index.
-        iterable: Input iterable.
-        default: Value to return if index out of bounds.
-
-    Returns:
-        Nth element or default.
-    """
-    return next(itertools.islice(iterable, n, n + 1), default)
-
-
-def grouper(
+def sliding_window_gen(
     iterable: Iterator[T],
     n: int,
-    fillvalue: Optional[T] = None,
 ) -> Iterator[List[T]]:
-    """Group items into tuples of size n.
+    """Yield sliding windows of size n.
 
     Args:
-        iterable: Input iterable.
-        n: Tuple size.
-        fillvalue: Value to fill incomplete tuples.
+        iterable: Source iterator.
+        n: Window size.
 
     Yields:
-        Tuples of n elements.
+        Lists of n consecutive items.
     """
-    return itertools.zip_longest(
-        *[iter(iterable)] * n,
-        fillvalue=fillvalue,  # type: ignore
-    )
+    window: List[T] = []
+    for item in iterable:
+        window.append(item)
+        if len(window) == n:
+            yield window.copy()
+            window.pop(0)
 
 
-def sliding_window(
-    iterable: Iterator[T],
-    size: int,
-) -> Iterator[tuple[T, ...]]:
-    """Sliding window as tuples.
+def repeat_gen(
+    value: T,
+    times: Optional[int] = None,
+) -> Iterator[T]:
+    """Generate a value repeatedly.
 
     Args:
-        iterable: Input iterable.
-        size: Window size.
+        value: Value to repeat.
+        times: Number of times. None for infinite.
 
     Yields:
-        Tuples of size elements.
+        Repeated values.
     """
-    it = iter(iterable)
-    window = tuple(itertools.islice(it, size))
-    if len(window) == size:
-        yield window
-    for item in it:
-        window = window[1:] + (item,)
-        yield window
-
-
-def iterate(func: Callable[[T], T], initial: T) -> Iterator[T]:
-    """Generate infinite sequence by repeated application.
-
-    Args:
-        func: Function to apply repeatedly.
-        initial: Starting value.
-
-    Yields:
-        initial, func(initial), func(func(initial)), ...
-
-    Example:
-        list(iterate(lambda x: x * 2, 1))[:5]
-        # [1, 2, 4, 8, 16]
-    """
-    current = initial
-    while True:
-        yield current
-        current = func(current)
-
-
-def cycle(iterable: Iterator[T], count: Optional[int] = None) -> Iterator[T]:
-    """Cycle through iterable infinitely or count times.
-
-    Args:
-        iterable: Input iterable.
-        count: Optional number of cycles.
-
-    Yields:
-        Elements in cycles.
-    """
-    if count is None:
-        yield from itertools.cycle(iterable)
+    if times is None:
+        while True:
+            yield value
     else:
-        for _ in range(count):
-            yield from iterable
+        for _ in range(times):
+            yield value
 
 
-async def async_map(
-    func: Callable[[T], Awaitable[U]],
-    items: List[T],
-    max_concurrency: int = 10,
-) -> List[U]:
-    """Map async function over items with concurrency limit.
+def cycle_gen(
+    iterable: Iterator[T],
+) -> Iterator[T]:
+    """Cycle through an iterable indefinitely.
 
     Args:
-        func: Async function to apply.
-        items: Items to process.
-        max_concurrency: Maximum concurrent tasks.
-
-    Returns:
-        List of results in same order as items.
-    """
-    semaphore = asyncio.Semaphore(max_concurrency)
-
-    async def process(item: T) -> U:
-        async with semaphore:
-            return await func(item)
-
-    return await asyncio.gather(*(process(item) for item in items))
-
-
-def range_infinite(
-    start: float = 0,
-    step: float = 1,
-) -> Iterator[float]:
-    """Infinite range-like sequence.
-
-    Args:
-        start: Starting value.
-        step: Step size.
+        iterable: Source iterator.
 
     Yields:
-        start, start+step, start+2*step, ...
+        Cycled items.
     """
-    current = start
-    while True:
-        yield current
-        current += step
+    for item in itertools.cycle(iterable):
+        yield item
+
+
+def random_sample_gen(
+    population: List[T],
+    k: int,
+) -> Iterator[T]:
+    """Yield a random sample of k items from population.
+
+    Args:
+        population: Source list.
+        k: Sample size.
+
+    Yields:
+        Randomly sampled items.
+    """
+    pool = random.sample(population, min(k, len(population)))
+    for item in pool:
+        yield item
+
+
+__all__ = [
+    "batched",
+    "chunked",
+    "take",
+    "drop",
+    "flatten",
+    "map_gen",
+    "filter_gen",
+    "unique_gen",
+    "interleave",
+    "interpose",
+    "partition_gen",
+    "sliding_window_gen",
+    "repeat_gen",
+    "cycle_gen",
+    "random_sample_gen",
+]

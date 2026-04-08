@@ -1,149 +1,189 @@
-"""
-Interval arithmetic utilities.
+"""Interval utilities for RabAI AutoClick.
 
-Provides interval operations, interval intersection,
-and interval-based root finding.
+Provides:
+- Interval arithmetic (union, intersection, difference)
+- Interval containment checks
+- Numeric interval creation and manipulation
 """
 
 from __future__ import annotations
 
+from typing import (
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Union,
+)
 
-class Interval:
-    """Represents a closed interval [lower, upper]."""
 
-    def __init__(self, lower: float, upper: float) -> None:
-        if lower > upper:
-            raise ValueError(f"Invalid interval: [{lower}, {upper}]")
-        self.lower = lower
-        self.upper = upper
+class Interval(NamedTuple):
+    """A numeric interval [start, end] (inclusive)."""
+    start: float
+    end: float
 
-    def __repr__(self) -> str:
-        return f"[{self.lower}, {self.upper}]"
+    def __post_init__(self) -> None:
+        if self.start > self.end:
+            raise ValueError(
+                f"Invalid interval: start ({self.start}) > end ({self.end})"
+            )
 
-    def __contains__(self, x: float) -> bool:
-        return self.lower <= x <= self.upper
+    def __contains__(self, value: float) -> bool:
+        return self.start <= value <= self.end
 
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Interval):
-            return False
-        return self.lower == other.lower and self.upper == other.upper
-
-    def __add__(self, other: Interval | float) -> Interval:
-        if isinstance(other, Interval):
-            return Interval(self.lower + other.lower, self.upper + other.upper)
-        return Interval(self.lower + other, self.upper + other)
-
-    def __sub__(self, other: Interval | float) -> Interval:
-        if isinstance(other, Interval):
-            return Interval(self.lower - other.upper, self.upper - other.lower)
-        return Interval(self.lower - other, self.upper - other)
-
-    def __mul__(self, other: Interval | float) -> Interval:
-        if isinstance(other, Interval):
-            candidates = [
-                self.lower * other.lower, self.lower * other.upper,
-                self.upper * other.lower, self.upper * other.upper,
-            ]
-            return Interval(min(candidates), max(candidates))
-        return Interval(self.lower * other, self.upper * other)
-
-    def __truediv__(self, other: Interval | float) -> Interval:
-        if isinstance(other, Interval):
-            if 0 in other:
-                raise ZeroDivisionError("Interval contains zero")
-            candidates = [
-                self.lower / other.lower, self.lower / other.upper,
-                self.upper / other.lower, self.upper / other.upper,
-            ]
-            return Interval(min(candidates), max(candidates))
-        return Interval(self.lower / other, self.upper / other)
-
-    def width(self) -> float:
-        """Return the width of the interval."""
-        return self.upper - self.lower
-
-    def midpoint(self) -> float:
-        """Return the midpoint of the interval."""
-        return (self.lower + self.upper) / 2
+    def __len__(self) -> float:
+        return self.end - self.start
 
     def overlaps(self, other: Interval) -> bool:
-        """Check if two intervals overlap."""
-        return self.lower <= other.upper and other.lower <= self.upper
+        """Check if this interval overlaps with another."""
+        return self.start <= other.end and other.start <= self.end
 
-    def intersection(self, other: Interval) -> Interval | None:
-        """Return intersection of two intervals, or None if no overlap."""
+    def contains_interval(self, other: Interval) -> bool:
+        """Check if this interval fully contains another."""
+        return self.start <= other.start and self.end >= other.end
+
+    def intersection(self, other: Interval) -> Optional[Interval]:
+        """Get the intersection with another interval."""
         if not self.overlaps(other):
             return None
-        return Interval(max(self.lower, other.lower), min(self.upper, other.upper))
+        return Interval(max(self.start, other.start), min(self.end, other.end))
 
-    def union(self, other: Interval) -> list[Interval]:
-        """Return union of two intervals (may be one or two intervals)."""
-        if self.overlaps(other) or self.upper == other.lower or other.upper == self.lower:
-            return [Interval(min(self.lower, other.lower), max(self.upper, other.upper))]
-        return [self, other] if self.lower < other.lower else [other, self]
-
-
-def bisect(interval: Interval) -> tuple[Interval, Interval]:
-    """Split interval into two halves."""
-    mid = interval.midpoint()
-    return Interval(interval.lower, mid), Interval(mid, interval.upper)
+    def union(self, other: Interval) -> List[Interval]:
+        """Get the union with another interval."""
+        if not self.overlaps(other) and not self.end == other.start:
+            return [self, other]
+        return [Interval(min(self.start, other.start), max(self.end, other.end))]
 
 
-def interval_function_eval(
-    f: callable,
-    interval: Interval,
-) -> Interval:
-    """
-    Evaluate a function over an interval using simple bounds.
-
-    For monotonic functions, this gives exact bounds.
-    For non-monotonic, it over-approximates.
-    """
-    try:
-        return Interval(f(interval.lower), f(interval.upper))
-    except Exception:
-        mid = interval.midpoint()
-        vals = [f(interval.lower), f(mid), f(interval.upper)]
-        return Interval(min(vals), max(vals))
-
-
-def find_roots_bisection(
-    f: callable,
-    a: float,
-    b: float,
-    tol: float = 1e-8,
-    max_iter: int = 100,
-) -> list[float]:
-    """
-    Find roots using bisection method.
+def merge_intervals(intervals: List[Interval]) -> List[Interval]:
+    """Merge a list of overlapping intervals.
 
     Args:
-        f: Function to find roots of
-        a: Left endpoint
-        b: Right endpoint
-        tol: Convergence tolerance
-        max_iter: Maximum iterations
+        intervals: List of intervals to merge.
 
     Returns:
-        List of root values
+        List of merged non-overlapping intervals.
     """
-    roots = []
-    stack = [(a, b)]
-    while stack:
-        lo, hi = stack.pop()
-        f_lo, f_hi = f(lo), f(hi)
-        if f_lo * f_hi > 0:
-            continue
-        if hi - lo < tol:
-            roots.append((lo + hi) / 2)
-            continue
-        mid = (lo + hi) / 2
-        f_mid = f(mid)
-        if abs(f_mid) < tol:
-            roots.append(mid)
+    if not intervals:
+        return []
+
+    sorted_ints = sorted(intervals, key=lambda x: x.start)
+    merged: List[Interval] = [sorted_ints[0]]
+
+    for current in sorted_ints[1:]:
+        last = merged[-1]
+        if current.start <= last.end:
+            merged[-1] = Interval(last.start, max(last.end, current.end))
         else:
-            if f_lo * f_mid < 0:
-                stack.append((lo, mid))
-            if f_mid * f_hi < 0:
-                stack.append((mid, hi))
-    return roots
+            merged.append(current)
+
+    return merged
+
+
+def subtract_interval(
+    interval: Interval,
+    other: Interval,
+) -> List[Interval]:
+    """Subtract another interval from an interval.
+
+    Args:
+        interval: Source interval.
+        other: Interval to subtract.
+
+    Returns:
+        List of resulting intervals (0, 1, or 2).
+    """
+    if not interval.overlaps(other):
+        return [interval]
+
+    result: List[Interval] = []
+
+    if interval.start < other.start:
+        result.append(Interval(interval.start, other.start))
+
+    if interval.end > other.end:
+        result.append(Interval(other.end, interval.end))
+
+    return result
+
+
+def interval_gaps(intervals: List[Interval]) -> List[Interval]:
+    """Find gaps between intervals.
+
+    Args:
+        intervals: List of intervals.
+
+    Returns:
+        List of gaps (intervals not covered).
+    """
+    if not intervals:
+        return []
+
+    merged = merge_intervals(intervals)
+    gaps: List[Interval] = []
+
+    for i in range(len(merged) - 1):
+        a = merged[i]
+        b = merged[i + 1]
+        if a.end < b.start:
+            gaps.append(Interval(a.end, b.start))
+
+    return gaps
+
+
+def is_disjoint(intervals: List[Interval]) -> bool:
+    """Check if intervals are all disjoint (no overlaps).
+
+    Args:
+        intervals: List of intervals.
+
+    Returns:
+        True if no two intervals overlap.
+    """
+    if not intervals:
+        return True
+    merged = merge_intervals(intervals)
+    return len(merged) == len(intervals)
+
+
+def point_coverage(
+    intervals: List[Interval],
+    point: float,
+) -> bool:
+    """Check if a point is covered by any interval.
+
+    Args:
+        intervals: List of intervals.
+        point: Point to check.
+
+    Returns:
+        True if point is in any interval.
+    """
+    return any(point in interval for interval in intervals)
+
+
+def total_length(intervals: List[Interval]) -> float:
+    """Compute total covered length of intervals.
+
+    Args:
+        intervals: List of intervals.
+
+    Returns:
+        Sum of interval lengths (accounting for overlaps).
+    """
+    if not intervals:
+        return 0.0
+    merged = merge_intervals(intervals)
+    return sum(len(i) for i in merged)
+
+
+__all__ = [
+    "Interval",
+    "merge_intervals",
+    "subtract_interval",
+    "interval_gaps",
+    "is_disjoint",
+    "point_coverage",
+    "total_length",
+]

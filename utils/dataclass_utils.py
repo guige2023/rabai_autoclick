@@ -1,266 +1,290 @@
 """Dataclass utilities for RabAI AutoClick.
 
 Provides:
-- Dataclass helpers
-- Field validators
-- Serialization helpers
+- Field metadata extraction and validation
+- Dataclass to dict/JSON conversion
+- Default factory helpers
+- Field comparators and equality
+- Copy and replace utilities
 """
 
-from dataclasses import dataclass, field, fields, is_dataclass, MISSING
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
+from __future__ import annotations
+
+import dataclasses
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    get_type_hints,
+)
 
 
 T = TypeVar("T")
 
 
-def is_dataclass_instance(obj: Any) -> bool:
-    """Check if object is a dataclass instance.
+def fields_with_meta(
+    dataclass: Type[object],
+) -> List[Tuple[str, Any, type]]:
+    """Extract fields that have metadata attached.
 
     Args:
-        obj: Object to check.
+        dataclass: A dataclass type or instance.
 
     Returns:
-        True if obj is a dataclass instance.
+        List of (field_name, metadata, field_type) tuples.
     """
-    return is_dataclass(obj) and not isinstance(obj, type)
+    cls = dataclass if isinstance(dataclass, type) else type(dataclass)
+    result = []
+    for field in dataclasses.fields(cls):
+        if field.metadata:
+            result.append((field.name, field.metadata, field.type))
+    return result
 
 
-def to_dict(obj: Any) -> Dict[str, Any]:
-    """Convert dataclass to dictionary.
+def required_fields(
+    dataclass: Type[object],
+) -> List[str]:
+    """Get field names that have no default value.
+
+    Args:
+        dataclass: A dataclass type or instance.
+
+    Returns:
+        List of field names without defaults.
+    """
+    cls = dataclass if isinstance(dataclass, type) else type(dataclass)
+    return [
+        f.name
+        for f in dataclasses.fields(cls)
+        if f.default is dataclasses.MISSING
+        and f.default_factory is dataclasses.MISSING
+    ]
+
+
+def optional_fields(
+    dataclass: Type[object],
+) -> List[str]:
+    """Get field names that have default values.
+
+    Args:
+        dataclass: A dataclass type or instance.
+
+    Returns:
+        List of field names with defaults.
+    """
+    cls = dataclass if isinstance(dataclass, type) else type(dataclass)
+    return [
+        f.name
+        for f in dataclasses.fields(cls)
+        if f.default is not dataclasses.MISSING
+        or f.default_factory is not dataclasses.MISSING
+    ]
+
+
+def dataclass_to_dict(
+    obj: Any,
+    *,
+    exclude: Optional[FrozenSet[str]] = None,
+    rename: bool = False,
+) -> Dict[str, Any]:
+    """Convert a dataclass instance to a dictionary.
 
     Args:
         obj: Dataclass instance.
+        exclude: Field names to exclude.
+        rename: Whether to use field metadata 'alias' as key.
 
     Returns:
-        Dictionary representation.
+        Dictionary representation of the dataclass.
     """
-    if not is_dataclass_instance(obj):
-        raise TypeError(f"Expected dataclass instance, got {type(obj)}")
-
+    exclude = exclude or frozenset()
     result = {}
-    for fld in fields(obj):
-        value = getattr(obj, fld.name)
-        result[fld.name] = _serialize_value(value)
+    for field in dataclasses.fields(obj):
+        if field.name in exclude:
+            continue
+        value = getattr(obj, field.name)
+        key = field.metadata.get("alias", field.name) if rename else field.name
+        result[key] = _serialize_value(value)
     return result
 
 
 def _serialize_value(value: Any) -> Any:
-    """Serialize a value to JSON-compatible format."""
-    if is_dataclass_instance(value):
-        return to_dict(value)
-    if isinstance(value, (list, tuple)):
+    """Recursively serialize a value for dict conversion."""
+    if dataclasses.is_dataclass(value):
+        return dataclass_to_dict(value)
+    elif isinstance(value, list):
         return [_serialize_value(v) for v in value]
-    if isinstance(value, dict):
+    elif isinstance(value, dict):
         return {k: _serialize_value(v) for k, v in value.items()}
-    if hasattr(value, "__dict__"):
-        return str(value)
+    elif isinstance(value, tuple):
+        return tuple(_serialize_value(v) for v in value)
+    elif isinstance(value, set):
+        return {_serialize_value(v) for v in value}
     return value
 
 
-def from_dict(cls: Type[T], data: Dict[str, Any]) -> T:
-    """Create dataclass instance from dictionary.
-
-    Args:
-        cls: Dataclass type.
-        data: Dictionary data.
-
-    Returns:
-        Dataclass instance.
-    """
-    if not is_dataclass(cls):
-        raise TypeError(f"Expected dataclass type, got {type(cls)}")
-
-    valid_fields = {f.name for f in fields(cls)}
-    filtered_data = {k: v for k, v in data.items() if k in valid_fields}
-    return cls(**filtered_data)
-
-
-def merge_dataclasses(
-    base: T,
-    override: Dict[str, Any],
-    inplace: bool = False,
+def dataclass_from_dict(
+    dataclass: Type[T],
+    data: Dict[str, Any],
+    *,
+    strict: bool = False,
 ) -> T:
-    """Merge dataclass with dictionary overrides.
+    """Create a dataclass instance from a dictionary.
 
     Args:
-        base: Base dataclass instance.
-        override: Dictionary with override values.
-        inplace: If True, modify base in place.
+        dataclass: Target dataclass type.
+        data: Dictionary with field values.
+        strict: Raise on unknown fields if True.
 
     Returns:
-        Merged dataclass instance.
+        Instance of the dataclass.
     """
-    if not is_dataclass_instance(base):
-        raise TypeError(f"Expected dataclass instance, got {type(base)}")
+    if strict:
+        valid = {f.name for f in dataclasses.fields(dataclass)}
+        unknown = set(data.keys()) - valid
+        if unknown:
+            raise ValueError(f"Unknown fields: {unknown}")
 
-    if not inplace:
-        base = from_dict(type(base), to_dict(base))
-
-    for key, value in override.items():
-        if hasattr(base, key):
-            setattr(base, key, value)
-
-    return base
-
-
-def dataclass_with_defaults(cls: Type[T]) -> Type[T]:
-    """Decorator to add default values to dataclass fields.
-
-    Can be used standalone or after @dataclass.
-    When used standalone, it wraps the class with @dataclass first.
-
-    Args:
-        cls: Dataclass to decorate.
-
-    Returns:
-        Modified dataclass type.
-    """
-    # If not already a dataclass, wrap with @dataclass first
-    if not is_dataclass(cls):
-        cls = dataclass(cls)
-
-    for fld in fields(cls):
-        if fld.default is MISSING:
-            if fld.default_factory is MISSING:
-                fld.default = None
-
-    return cls
+    kwargs = {}
+    for field in dataclasses.fields(dataclass):
+        if field.name in data:
+            kwargs[field.name] = _deserialize_value(
+                data[field.name], field.type
+            )
+    return dataclass(**kwargs)
 
 
-class FieldValidator:
-    """Validator for dataclass fields.
-
-    Usage:
-        @dataclass
-        class Person:
-            name: str = field(metadata={"validator": [str_validator]})
-    """
-
-    @staticmethod
-    def validate_int(value: Any, min_val: Optional[int] = None, max_val: Optional[int] = None) -> bool:
-        """Validate integer is within range."""
-        if not isinstance(value, int):
-            return False
-        if min_val is not None and value < min_val:
-            return False
-        if max_val is not None and value > max_val:
-            return False
-        return True
-
-    @staticmethod
-    def validate_str(value: Any, min_len: int = 0, max_len: int = 0, pattern: Optional[str] = None) -> bool:
-        """Validate string meets requirements."""
-        if not isinstance(value, str):
-            return False
-        if min_len > 0 and len(value) < min_len:
-            return False
-        if max_len > 0 and len(value) > max_len:
-            return False
-        if pattern and not __import__('re').search(pattern, value):
-            return False
-        return True
-
-    @staticmethod
-    def validate_list(value: Any, item_type: Optional[Type] = None, min_len: int = 0) -> bool:
-        """Validate list meets requirements."""
-        if not isinstance(value, (list, tuple)):
-            return False
-        if len(value) < min_len:
-            return False
-        if item_type and not all(isinstance(v, item_type) for v in value):
-            return False
-        return True
+def _deserialize_value(value: Any, target_type: type) -> Any:
+    """Recursively deserialize a value to the target type."""
+    if value is None:
+        return None
+    if dataclasses.is_dataclass(target_type) and isinstance(value, dict):
+        return dataclass_from_dict(target_type, value)
+    if hasattr(target_type, "__origin__"):
+        origin = getattr(target_type, "__origin__")
+        if origin is list and isinstance(value, list):
+            item_type = getattr(target_type, "__args__", (Any,))[0]
+            return [_deserialize_value(v, item_type) for v in value]
+        if origin is dict and isinstance(value, dict):
+            key_type, val_type = getattr(target_type, "__args__", (str, Any))
+            return {
+                _deserialize_value(k, key_type): _deserialize_value(v, val_type)
+                for k, v in value.items()
+            }
+    return value
 
 
-def validate_fields(obj: Any, validators: Dict[str, Callable[[Any], bool]]) -> List[str]:
-    """Validate dataclass fields using validators.
+def replace_with(
+    obj: T,
+    **changes: Any,
+) -> T:
+    """Create a copy of a dataclass with updated fields.
 
     Args:
         obj: Dataclass instance.
-        validators: Dict mapping field names to validator functions.
+        **changes: Fields to update.
 
     Returns:
-        List of validation error messages (empty if all valid).
+        New dataclass instance with changes applied.
     """
-    if not is_dataclass_instance(obj):
-        raise TypeError(f"Expected dataclass instance, got {type(obj)}")
-
-    errors = []
-    for field_name, validator in validators.items():
-        if not hasattr(obj, field_name):
-            errors.append(f"Unknown field: {field_name}")
-            continue
-
-        value = getattr(obj, field_name)
-        try:
-            if not validator(value):
-                errors.append(f"Invalid value for field '{field_name}': {value}")
-        except Exception as e:
-            errors.append(f"Validation error for field '{field_name}': {e}")
-
-    return errors
+    return dataclasses.replace(obj, **changes)
 
 
-@dataclass
-class DataclassEncoder:
-    """Encoder for dataclass instances to various formats.
-
-    Supports encoding to dict, JSON string, and URL query params.
-    """
-
-    @staticmethod
-    def to_dict(obj: Any) -> Dict[str, Any]:
-        """Encode dataclass to dictionary."""
-        return to_dict(obj)
-
-    @staticmethod
-    def to_json(obj: Any, indent: Optional[int] = None) -> str:
-        """Encode dataclass to JSON string."""
-        import json
-        return json.dumps(to_dict(obj), indent=indent, ensure_ascii=False)
-
-    @staticmethod
-    def to_query_params(obj: Any) -> str:
-        """Encode dataclass to URL query parameters."""
-        from urllib.parse import urlencode
-        return urlencode(to_dict(obj))
-
-
-def compare_dataclasses(a: Any, b: Any, ignore_fields: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Compare two dataclass instances.
+def compare_dataclasses(
+    a: Any,
+    b: Any,
+    fields: Optional[List[str]] = None,
+) -> Dict[str, Tuple[Any, Any]]:
+    """Compare two dataclass instances field by field.
 
     Args:
         a: First dataclass instance.
         b: Second dataclass instance.
-        ignore_fields: Fields to ignore in comparison.
+        fields: Specific fields to compare. None means all.
 
     Returns:
-        Dict with 'equal' bool and 'differences' list.
+        Dict of {field_name: (value_a, value_b)} for differing fields.
     """
-    if not is_dataclass_instance(a) or not is_dataclass_instance(b):
-        raise TypeError("Both arguments must be dataclass instances")
+    if not dataclasses.is_dataclass(a) or not dataclasses.is_dataclass(b):
+        raise TypeError("Both arguments must be dataclasses")
 
-    if type(a) != type(b):
-        return {"equal": False, "differences": ["Different types"]}
+    diff: Dict[str, Tuple[Any, Any]] = {}
+    cls_fields = dataclasses.fields(a)
 
-    ignore_fields = ignore_fields or []
-    differences = []
+    if fields is not None:
+        field_names = fields
+        cls_fields = [f for f in cls_fields if f.name in fields]
+    else:
+        field_names = [f.name for f in cls_fields]
 
-    for fld in fields(a):
-        if fld.name in ignore_fields:
-            continue
-
-        val_a = getattr(a, fld.name)
-        val_b = getattr(b, fld.name)
-
+    for name in field_names:
+        val_a = getattr(a, name)
+        val_b = getattr(b, name)
         if val_a != val_b:
-            differences.append({
-                "field": fld.name,
-                "value_a": val_a,
-                "value_b": val_b,
-            })
+            diff[name] = (val_a, val_b)
 
-    return {
-        "equal": len(differences) == 0,
-        "differences": differences,
-    }
+    return diff
+
+
+def validate_dataclass(obj: Any) -> List[str]:
+    """Run field validators on a dataclass instance.
+
+    Args:
+        obj: Dataclass instance.
+
+    Returns:
+        List of error messages (empty if all pass).
+    """
+    errors: List[str] = []
+    for field in dataclasses.fields(obj):
+        value = getattr(obj, field.name)
+        for validator in field.metadata.get("validators", []):
+            try:
+                validator(value)
+            except Exception as e:
+                errors.append(f"{field.name}: {e}")
+    return errors
+
+
+def field_hash(obj: Any, fields: Optional[List[str]] = None) -> int:
+    """Compute a hash from specific fields of a dataclass.
+
+    Args:
+        obj: Dataclass instance.
+        fields: Fields to include. None means all fields.
+
+    Returns:
+        Hash integer.
+    """
+    if fields is None:
+        values = tuple(getattr(obj, f.name) for f in dataclasses.fields(obj))
+    else:
+        values = tuple(getattr(obj, name) for name in fields)
+    return hash(values)
+
+
+def defaults_dict(
+    dataclass: Type[object],
+) -> Dict[str, Any]:
+    """Get default values for all fields as a dict.
+
+    Args:
+        dataclass: A dataclass type.
+
+    Returns:
+        Dict mapping field names to their default values.
+    """
+    result = {}
+    for field in dataclasses.fields(dataclass):
+        if field.default is not dataclasses.MISSING:
+            result[field.name] = field.default
+        elif field.default_factory is not dataclasses.MISSING:
+            result[field.name] = field.default_factory()
+    return result
