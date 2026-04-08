@@ -1,322 +1,243 @@
-"""Feature Flag action module for RabAI AutoClick.
+"""Feature Flag Action Module.
 
-Provides feature flag evaluation with support for boolean, percentage,
-user targeting, and multi-variant flags. Integrates with common
-feature flag providers.
+Provides feature flag management with targeting rules,
+percentage rollouts, and flag toggling.
 """
 
+import time
+import random
+import hashlib
+from typing import Any, Dict, List, Optional, Callable
+from dataclasses import dataclass, field
+from enum import Enum
 import sys
 import os
-import hashlib
-import json
-import time
-from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
+class FlagStatus(Enum):
+    """Feature flag status."""
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    ROLLOUT = "rollout"
+
+
+@dataclass
+class TargetingRule:
+    """Targeting rule for flag."""
+    attribute: str
+    operator: str
+    value: Any
+
+
 @dataclass
 class FeatureFlag:
-    """Represents a feature flag configuration."""
+    """Feature flag definition."""
+    flag_id: str
     name: str
-    flag_type: str = "boolean"  # boolean, percentage, variant, user_targeting
-    enabled: bool = False
-    default_value: Any = False
-    percentage: float = 0.0  # 0.0 to 100.0
-    variants: Dict[str, Any] = field(default_factory=dict)
-    target_users: List[str] = field(default_factory=list)
-    target_attributes: Dict[str, Any] = field(default_factory=dict)
-    rollout_rules: List[Dict[str, Any]] = field(default_factory=list)
-    description: str = ""
+    description: Optional[str]
+    status: FlagStatus
+    rollout_percentage: float = 100.0
+    targeting_rules: List[TargetingRule] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
 
 
-class FeatureFlagStore:
-    """In-memory feature flag store with optional persistence."""
-    
-    def __init__(self, persistence_path: Optional[str] = None):
+class FeatureFlagManager:
+    """Manages feature flags."""
+
+    def __init__(self):
         self._flags: Dict[str, FeatureFlag] = {}
-        self._evaluation_cache: Dict[str, tuple[Any, float]] = {}
-        self._cache_ttl: float = 60.0  # seconds
-        self._persistence_path = persistence_path
-        self._load()
-    
-    def _load(self) -> None:
-        """Load flags from persistence file if available."""
-        if self._persistence_path and os.path.exists(self._persistence_path):
-            try:
-                with open(self._persistence_path, 'r') as f:
-                    data = json.load(f)
-                    for name, flag_data in data.items():
-                        self._flags[name] = FeatureFlag(**flag_data)
-            except (json.JSONDecodeError, TypeError):
-                pass
-    
-    def _persist(self) -> None:
-        """Save flags to persistence file."""
-        if self._persistence_path:
-            try:
-                data = {name: vars(flag) for name, flag in self._flags.items()}
-                with open(self._persistence_path, 'w') as f:
-                    json.dump(data, f, indent=2)
-            except OSError:
-                pass
-    
-    def add_flag(self, flag: FeatureFlag) -> None:
-        """Add or update a feature flag."""
-        self._flags[flag.name] = flag
-        self._evaluation_cache.clear()
-        self._persist()
-    
-    def remove_flag(self, name: str) -> bool:
-        """Remove a feature flag by name."""
-        if name in self._flags:
-            del self._flags[name]
-            self._evaluation_cache.clear()
-            self._persist()
+        self._history: List[Dict] = []
+
+    def create_flag(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        status: FlagStatus = FlagStatus.DISABLED,
+        rollout_percentage: float = 100.0
+    ) -> str:
+        """Create a feature flag."""
+        flag_id = hashlib.md5(
+            f"{name}{time.time()}".encode()
+        ).hexdigest()[:8]
+
+        flag = FeatureFlag(
+            flag_id=flag_id,
+            name=name,
+            description=description,
+            status=status,
+            rollout_percentage=rollout_percentage
+        )
+
+        self._flags[flag_id] = flag
+        self._log_change(flag_id, "created")
+
+        return flag_id
+
+    def get_flag(self, flag_id: str) -> Optional[FeatureFlag]:
+        """Get flag by ID."""
+        return self._flags.get(flag_id)
+
+    def is_enabled(
+        self,
+        flag_id: str,
+        user_context: Optional[Dict] = None
+    ) -> bool:
+        """Check if flag is enabled for user."""
+        flag = self._flags.get(flag_id)
+        if not flag:
+            return False
+
+        if flag.status == FlagStatus.DISABLED:
+            return False
+
+        if flag.status == FlagStatus.ENABLED:
+            return True
+
+        if flag.status == FlagStatus.ROLLOUT:
+            return self._check_rollout(flag, user_context)
+
+        return False
+
+    def _check_rollout(
+        self,
+        flag: FeatureFlag,
+        user_context: Optional[Dict]
+    ) -> bool:
+        """Check rollout percentage."""
+        if user_context:
+            user_id = user_context.get("user_id", "")
+            hash_input = f"{flag.flag_id}:{user_id}"
+            hash_val = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
+            percentage = (hash_val % 100) + 1
+            return percentage <= flag.rollout_percentage
+        else:
+            return random.random() * 100 <= flag.rollout_percentage
+
+    def update_flag(
+        self,
+        flag_id: str,
+        status: Optional[FlagStatus] = None,
+        rollout_percentage: Optional[float] = None
+    ) -> bool:
+        """Update flag."""
+        flag = self._flags.get(flag_id)
+        if not flag:
+            return False
+
+        if status is not None:
+            flag.status = status
+        if rollout_percentage is not None:
+            flag.rollout_percentage = rollout_percentage
+
+        flag.updated_at = time.time()
+        self._log_change(flag_id, "updated")
+
+        return True
+
+    def delete_flag(self, flag_id: str) -> bool:
+        """Delete flag."""
+        if flag_id in self._flags:
+            del self._flags[flag_id]
+            self._log_change(flag_id, "deleted")
             return True
         return False
-    
-    def get_flag(self, name: str) -> Optional[FeatureFlag]:
-        """Get a feature flag by name."""
-        return self._flags.get(name)
-    
-    def list_flags(self) -> List[str]:
-        """List all feature flag names."""
-        return list(self._flags.keys())
-    
-    def _get_cache_key(self, flag_name: str, user_id: Optional[str], 
-                       context: Dict[str, Any]) -> str:
-        """Generate cache key for evaluation result."""
-        key_parts = [flag_name]
-        if user_id:
-            key_parts.append(user_id)
-        context_str = json.dumps(context, sort_keys=True)
-        key_parts.append(hashlib.md5(context_str.encode()).hexdigest()[:8])
-        return "|".join(key_parts)
-    
-    def _hash_variation(self, flag_name: str, user_id: str, 
-                        variation_index: int) -> float:
-        """Generate a deterministic hash for percentage rollout."""
-        hash_input = f"{flag_name}:{user_id}:{variation_index}"
-        hash_value = hashlib.md5(hash_input.encode()).hexdigest()
-        return int(hash_value[:8], 16) / 0xFFFFFFFFFFFFF
-    
-    def evaluate(self, flag_name: str, user_id: Optional[str] = None,
-                 context: Optional[Dict[str, Any]] = None) -> Any:
-        """Evaluate a feature flag for a given user and context.
-        
-        Args:
-            flag_name: Name of the feature flag.
-            user_id: Optional user identifier for targeting.
-            context: Additional context attributes for evaluation.
-        
-        Returns:
-            The evaluated flag value (bool, str, or any configured value).
-        """
-        context = context or {}
-        cache_key = self._get_cache_key(flag_name, user_id, context)
-        
-        # Check cache
-        if cache_key in self._evaluation_cache:
-            cached_value, cached_time = self._evaluation_cache[cache_key]
-            if time.time() - cached_time < self._cache_ttl:
-                return cached_value
-        
-        # Get flag
-        flag = self._flags.get(flag_name)
-        if not flag:
-            return flag.default_value if flag else False
-        
-        # Evaluate based on flag type
-        result = self._evaluate_flag(flag, user_id, context)
-        
-        # Cache result
-        self._evaluation_cache[cache_key] = (result, time.time())
-        return result
-    
-    def _evaluate_flag(self, flag: FeatureFlag, user_id: Optional[str],
-                      context: Dict[str, Any]) -> Any:
-        """Internal flag evaluation logic."""
-        # Check if flag is globally disabled
-        if not flag.enabled:
-            return flag.default_value
-        
-        # User targeting check
-        if flag.target_users and user_id in flag.target_users:
-            return True
-        
-        # Attribute-based targeting
-        if flag.target_attributes:
-            match = all(
-                context.get(k) == v 
-                for k, v in flag.target_attributes.items()
-            )
-            if match:
-                return True
-        
-        # Rollout rules evaluation
-        for rule in flag.rollout_rules:
-            if self._matches_rule(rule, user_id, context):
-                return rule.get("value", flag.default_value)
-        
-        # Percentage-based rollout
-        if flag.flag_type == "percentage" and user_id:
-            hash_val = self._hash_variation(flag.name, user_id, 0)
-            threshold = flag.percentage / 100.0
-            return hash_val < threshold
-        
-        # Variant flag
-        if flag.flag_type == "variant" and flag.variants:
-            if user_id:
-                hash_val = self._hash_variation(flag.name, user_id, 0)
-                variant_names = list(flag.variants.keys())
-                index = int(hash_val * len(variant_names)) % len(variant_names)
-                return variant_names[index]
-            return list(flag.variants.keys())[0] if flag.variants else None
-        
-        # Default boolean evaluation
-        return True
-    
-    def _matches_rule(self, rule: Dict[str, Any], user_id: Optional[str],
-                     context: Dict[str, Any]) -> bool:
-        """Check if a rollout rule matches the given context."""
-        rule_context = rule.get("context", {})
-        operator = rule.get("operator", "equals")
-        
-        for key, expected in rule_context.items():
-            actual = context.get(key)
-            if operator == "equals" and actual != expected:
-                return False
-            elif operator == "not_equals" and actual == expected:
-                return False
-            elif operator == "contains" and expected not in str(actual):
-                return False
-            elif operator == "in" and actual not in expected:
-                return False
-        return True
-    
-    def clear_cache(self) -> None:
-        """Clear the evaluation cache."""
-        self._evaluation_cache.clear()
+
+    def _log_change(self, flag_id: str, action: str) -> None:
+        """Log flag change."""
+        self._history.append({
+            "flag_id": flag_id,
+            "action": action,
+            "timestamp": time.time()
+        })
+
+    def get_history(self, limit: int = 100) -> List[Dict]:
+        """Get flag change history."""
+        return self._history[-limit:]
 
 
 class FeatureFlagAction(BaseAction):
-    """Evaluate and manage feature flags.
-    
-    Supports boolean, percentage, variant, and user-targeted flags.
-    Provides flag management (add, remove, list) and evaluation.
-    """
-    action_type = "feature_flag"
-    display_name = "功能开关"
-    description = "评估和管理功能开关，支持多种开关类型"
-    
+    """Action for feature flag operations."""
+
     def __init__(self):
-        super().__init__()
-        self._store: Optional[FeatureFlagStore] = None
-    
-    def _get_store(self, params: Dict[str, Any]) -> FeatureFlagStore:
-        """Get or create the feature flag store."""
-        if self._store is None:
-            persistence_path = params.get("persistence_path")
-            self._store = FeatureFlagStore(persistence_path)
-        return self._store
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute feature flag operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: "evaluate", "add", "remove", "list", "clear_cache"
-                - For evaluate: flag_name, user_id, context
-                - For add: flag (FeatureFlag dict)
-                - For remove: flag_name
-                - For list: none
-        
-        Returns:
-            ActionResult with evaluation result or operation status.
-        """
-        operation = params.get("operation", "evaluate")
-        
+        super().__init__("feature_flag")
+        self._manager = FeatureFlagManager()
+
+    def execute(self, params: Dict) -> ActionResult:
+        """Execute feature flag action."""
         try:
-            if operation == "evaluate":
-                return self._evaluate(params)
-            elif operation == "add":
-                return self._add_flag(params)
-            elif operation == "remove":
-                return self._remove_flag(params)
-            elif operation == "list":
-                return self._list_flags(params)
-            elif operation == "clear_cache":
-                return self._clear_cache(params)
+            operation = params.get("operation", "create")
+
+            if operation == "create":
+                return self._create(params)
+            elif operation == "get":
+                return self._get(params)
+            elif operation == "check":
+                return self._check(params)
+            elif operation == "update":
+                return self._update(params)
+            elif operation == "delete":
+                return self._delete(params)
+            elif operation == "history":
+                return self._history(params)
             else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}"
-                )
+                return ActionResult(success=False, message=f"Unknown: {operation}")
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Feature flag error: {str(e)}")
-    
-    def _evaluate(self, params: Dict[str, Any]) -> ActionResult:
-        """Evaluate a feature flag."""
-        store = self._get_store(params)
-        flag_name = params.get("flag_name", "")
-        user_id = params.get("user_id")
-        eval_context = params.get("context", {})
-        
-        if not flag_name:
-            return ActionResult(success=False, message="flag_name is required")
-        
-        result = store.evaluate(flag_name, user_id, eval_context)
-        return ActionResult(
-            success=True,
-            message=f"Flag '{flag_name}' evaluated",
-            data={"flag_name": flag_name, "value": result}
+            return ActionResult(success=False, message=str(e))
+
+    def _create(self, params: Dict) -> ActionResult:
+        """Create a flag."""
+        flag_id = self._manager.create_flag(
+            name=params.get("name", ""),
+            description=params.get("description"),
+            status=FlagStatus(params.get("status", "disabled")),
+            rollout_percentage=params.get("rollout_percentage", 100)
         )
-    
-    def _add_flag(self, params: Dict[str, Any]) -> ActionResult:
-        """Add a new feature flag."""
-        store = self._get_store(params)
-        flag_data = params.get("flag", {})
-        
-        if not flag_data or "name" not in flag_data:
-            return ActionResult(success=False, message="flag with name is required")
-        
-        flag = FeatureFlag(**flag_data)
-        store.add_flag(flag)
-        return ActionResult(
-            success=True,
-            message=f"Flag '{flag.name}' added",
-            data={"name": flag.name, "type": flag.flag_type}
+        return ActionResult(success=True, data={"flag_id": flag_id})
+
+    def _get(self, params: Dict) -> ActionResult:
+        """Get flag."""
+        flag = self._manager.get_flag(params.get("flag_id", ""))
+        if not flag:
+            return ActionResult(success=False, message="Flag not found")
+        return ActionResult(success=True, data={
+            "flag_id": flag.flag_id,
+            "name": flag.name,
+            "status": flag.status.value,
+            "rollout_percentage": flag.rollout_percentage
+        })
+
+    def _check(self, params: Dict) -> ActionResult:
+        """Check if flag is enabled."""
+        enabled = self._manager.is_enabled(
+            params.get("flag_id", ""),
+            params.get("user_context")
         )
-    
-    def _remove_flag(self, params: Dict[str, Any]) -> ActionResult:
-        """Remove a feature flag."""
-        store = self._get_store(params)
-        flag_name = params.get("flag_name", "")
-        
-        if not flag_name:
-            return ActionResult(success=False, message="flag_name is required")
-        
-        removed = store.remove_flag(flag_name)
-        if removed:
-            return ActionResult(success=True, message=f"Flag '{flag_name}' removed")
-        return ActionResult(success=False, message=f"Flag '{flag_name}' not found")
-    
-    def _list_flags(self, params: Dict[str, Any]) -> ActionResult:
-        """List all feature flags."""
-        store = self._get_store(params)
-        flags = store.list_flags()
-        return ActionResult(
-            success=True,
-            message=f"Found {len(flags)} flags",
-            data={"flags": flags, "count": len(flags)}
+        return ActionResult(success=True, data={"enabled": enabled})
+
+    def _update(self, params: Dict) -> ActionResult:
+        """Update flag."""
+        status = params.get("status")
+        if status:
+            status = FlagStatus(status)
+
+        success = self._manager.update_flag(
+            params.get("flag_id", ""),
+            status=status,
+            rollout_percentage=params.get("rollout_percentage")
         )
-    
-    def _clear_cache(self, params: Dict[str, Any]) -> ActionResult:
-        """Clear the evaluation cache."""
-        store = self._get_store(params)
-        store.clear_cache()
-        return ActionResult(success=True, message="Cache cleared")
+        return ActionResult(success=success)
+
+    def _delete(self, params: Dict) -> ActionResult:
+        """Delete flag."""
+        success = self._manager.delete_flag(params.get("flag_id", ""))
+        return ActionResult(success=success)
+
+    def _history(self, params: Dict) -> ActionResult:
+        """Get change history."""
+        history = self._manager.get_history(params.get("limit", 100))
+        return ActionResult(success=True, data={"history": history})
