@@ -1,283 +1,227 @@
 """
 Data Comparator Action Module.
 
-Compares datasets, objects, and records with configurable
- fuzzy matching and difference reporting.
+Compares data structures with detailed diff reports,
+supports nested structures and custom comparators.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 from dataclasses import dataclass, field
 from enum import Enum
-import difflib
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 class DiffType(Enum):
-    """Type of difference detected."""
+    """Type of difference found."""
     ADDED = "added"
     REMOVED = "removed"
     MODIFIED = "modified"
-    UNCHANGED = "unchanged"
+    TYPE_CHANGED = "type_changed"
 
 
 @dataclass
-class FieldDiff:
-    """Difference in a single field."""
-    field: str
+class DiffEntry:
+    """Single difference entry."""
+    path: str
     diff_type: DiffType
     old_value: Any = None
     new_value: Any = None
-    similarity: float = 1.0
-
-
-@dataclass
-class RecordDiff:
-    """Difference between two records."""
-    record_id: Any
-    diff_type: DiffType
-    field_diffs: list[FieldDiff] = field(default_factory=list)
-    score: float = 1.0
 
 
 @dataclass
 class ComparisonResult:
-    """Result of a comparison operation."""
-    total_records: int = 0
-    added: int = 0
-    removed: int = 0
-    modified: int = 0
-    unchanged: int = 0
-    record_diffs: list[RecordDiff] = field(default_factory=list)
-    similarity_score: float = 0.0
+    """Result of data comparison."""
+    equal: bool
+    diffs: list[DiffEntry]
+    added_count: int = 0
+    removed_count: int = 0
+    modified_count: int = 0
 
 
 class DataComparatorAction:
     """
-    Data comparison engine with fuzzy matching support.
+    Data comparison with detailed diff reporting.
 
-    Compares datasets, detects additions, removals, modifications,
-    and provides detailed diff reports.
+    Compares nested data structures with
+    configurable comparison strategies.
 
     Example:
         comparator = DataComparatorAction()
-        result = comparator.compare(dataset_a, dataset_b, key_field="id")
+        result = comparator.compare(data_a, data_b)
+        print(f"Equal: {result.equal}")
     """
 
     def __init__(
         self,
-        fuzzy_threshold: float = 0.8,
-        ignore_fields: Optional[list[str]] = None,
+        ignore_keys: Optional[set[str]] = None,
+        case_sensitive: bool = True,
+        float_tolerance: float = 0.0,
     ) -> None:
-        self.fuzzy_threshold = fuzzy_threshold
-        self.ignore_fields = ignore_fields or ["_updated_at", "_version"]
+        self.ignore_keys = ignore_keys or set()
+        self.case_sensitive = case_sensitive
+        self.float_tolerance = float_tolerance
 
     def compare(
         self,
-        left: list[dict[str, Any]],
-        right: list[dict[str, Any]],
-        key_field: str = "id",
-        ignore_fields: Optional[list[str]] = None,
+        a: Any,
+        b: Any,
+        path: str = "",
     ) -> ComparisonResult:
-        """Compare two datasets and return detailed differences."""
-        ignore = set(self.ignore_fields + (ignore_fields or []))
+        """Compare two data structures."""
+        diffs: list[DiffEntry] = []
 
-        left_index = {r.get(key_field): r for r in left}
-        right_index = {r.get(key_field): r for r in right}
+        self._compare_recursive(a, b, path, diffs)
 
-        left_keys = set(left_index.keys())
-        right_keys = set(right_index.keys())
-
-        added_keys = right_keys - left_keys
-        removed_keys = left_keys - right_keys
-        common_keys = left_keys & right_keys
-
-        record_diffs: list[RecordDiff] = []
-        total_similarity = 0.0
-
-        for key in common_keys:
-            left_record = left_index[key]
-            right_record = right_index[key]
-            record_diff = self._compare_records(
-                key, left_record, right_record, ignore
-            )
-            record_diffs.append(record_diff)
-            total_similarity += record_diff.score
-
-        similarity_score = (
-            total_similarity / len(record_diffs) if record_diffs else 1.0
-        )
-
-        added = len(added_keys)
-        removed = len(removed_keys)
-        modified = sum(1 for d in record_diffs if d.diff_type == DiffType.MODIFIED)
-        unchanged = sum(1 for d in record_diffs if d.diff_type == DiffType.UNCHANGED)
+        added = sum(1 for d in diffs if d.diff_type == DiffType.ADDED)
+        removed = sum(1 for d in diffs if d.diff_type == DiffType.REMOVED)
+        modified = sum(1 for d in diffs if d.diff_type in (DiffType.MODIFIED, DiffType.TYPE_CHANGED))
 
         return ComparisonResult(
-            total_records=len(left) + len(right),
-            added=added,
-            removed=removed,
-            modified=modified,
-            unchanged=unchanged,
-            record_diffs=record_diffs,
-            similarity_score=similarity_score,
+            equal=len(diffs) == 0,
+            diffs=diffs,
+            added_count=added,
+            removed_count=removed,
+            modified_count=modified,
         )
 
-    def _compare_records(
+    def _compare_recursive(
         self,
-        record_id: Any,
-        left: dict[str, Any],
-        right: dict[str, Any],
-        ignore_fields: set[str],
-    ) -> RecordDiff:
-        """Compare two individual records."""
-        all_fields = set(left.keys()) | set(right.keys())
-        filtered_fields = [f for f in all_fields if f not in ignore_fields]
+        a: Any,
+        b: Any,
+        path: str,
+        diffs: list[DiffEntry],
+    ) -> None:
+        """Recursively compare values."""
+        key = path.split(".")[-1] if path else ""
 
-        field_diffs: list[FieldDiff] = []
-        modifications = 0
+        if key in self.ignore_keys:
+            return
 
-        for field_name in filtered_fields:
-            left_val = left.get(field_name)
-            right_val = right.get(field_name)
+        if self._values_equal(a, b):
+            return
 
-            if left_val == right_val:
-                continue
+        type_a = type(a)
+        type_b = type(b)
 
-            diff_type = DiffType.MODIFIED
-            similarity = self._calculate_similarity(left_val, right_val)
+        if type_a != type_b:
+            diffs.append(DiffEntry(
+                path=path or "root",
+                diff_type=DiffType.TYPE_CHANGED,
+                old_value=a,
+                new_value=b,
+            ))
+            return
 
-            if similarity < self.fuzzy_threshold:
-                modifications += 1
-
-            field_diffs.append(FieldDiff(
-                field=field_name,
-                diff_type=diff_type,
-                old_value=left_val,
-                new_value=right_val,
-                similarity=similarity,
+        if isinstance(a, dict):
+            self._compare_dicts(a, b, path, diffs)
+        elif isinstance(a, (list, tuple)):
+            self._compare_lists(a, b, path, diffs)
+        else:
+            diffs.append(DiffEntry(
+                path=path or "root",
+                diff_type=DiffType.MODIFIED,
+                old_value=a,
+                new_value=b,
             ))
 
-        if modifications == 0 and not field_diffs:
-            diff_type = DiffType.UNCHANGED
-            score = 1.0
-        else:
-            diff_type = DiffType.MODIFIED
-            score = 1.0 - (modifications / max(len(field_diffs), 1))
-
-        return RecordDiff(
-            record_id=record_id,
-            diff_type=diff_type,
-            field_diffs=field_diffs,
-            score=score,
-        )
-
-    def _calculate_similarity(self, left: Any, right: Any) -> float:
-        """Calculate similarity between two values."""
-        if left is None or right is None:
-            return 0.0
-
-        if isinstance(left, str) and isinstance(right, str):
-            return difflib.SequenceMatcher(None, left, right).ratio()
-
-        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-            if left == right:
-                return 1.0
-            max_val = max(abs(left), abs(right))
-            if max_val == 0:
-                return 1.0
-            return 1.0 - min(abs(left - right) / max_val, 1.0)
-
-        if type(left) != type(right):
-            return 0.0
-
-        return 1.0 if left == right else 0.0
-
-    def compare_objects(
+    def _compare_dicts(
         self,
-        left: dict[str, Any],
-        right: dict[str, Any],
-        ignore_fields: Optional[list[str]] = None,
-    ) -> RecordDiff:
-        """Compare two objects/records."""
-        ignore = set(self.ignore_fields + (ignore_fields or []))
-        return self._compare_records(None, left, right, ignore)
+        a: dict,
+        b: dict,
+        path: str,
+        diffs: list[DiffEntry],
+    ) -> None:
+        """Compare two dictionaries."""
+        all_keys = set(a.keys()) | set(b.keys())
 
-    def generate_diff_report(
+        for key in all_keys:
+            if key in self.ignore_keys:
+                continue
+
+            new_path = f"{path}.{key}" if path else key
+
+            if key not in b:
+                diffs.append(DiffEntry(
+                    path=new_path,
+                    diff_type=DiffType.REMOVED,
+                    old_value=a[key],
+                ))
+            elif key not in a:
+                diffs.append(DiffEntry(
+                    path=new_path,
+                    diff_type=DiffType.ADDED,
+                    new_value=b[key],
+                ))
+            else:
+                self._compare_recursive(a[key], b[key], new_path, diffs)
+
+    def _compare_lists(
+        self,
+        a: list,
+        b: list,
+        path: str,
+        diffs: list[DiffEntry],
+    ) -> None:
+        """Compare two lists."""
+        max_len = max(len(a), len(len))
+
+        for i in range(max_len):
+            new_path = f"{path}[{i}]"
+
+            if i >= len(a):
+                diffs.append(DiffEntry(
+                    path=new_path,
+                    diff_type=DiffType.ADDED,
+                    new_value=b[i],
+                ))
+            elif i >= len(b):
+                diffs.append(DiffEntry(
+                    path=new_path,
+                    diff_type=DiffType.REMOVED,
+                    old_value=a[i],
+                ))
+            else:
+                self._compare_recursive(a[i], b[i], new_path, diffs)
+
+    def _values_equal(self, a: Any, b: Any) -> bool:
+        """Check if two values are equal."""
+        if self.float_tolerance > 0:
+            if isinstance(a, float) and isinstance(b, float):
+                return abs(a - b) <= self.float_tolerance
+
+        if not self.case_sensitive and isinstance(a, str) and isinstance(b, str):
+            return a.lower() == b.lower()
+
+        return a == b
+
+    def get_diff_summary(
         self,
         result: ComparisonResult,
-        format: str = "text",
     ) -> str:
-        """Generate a human-readable diff report."""
-        if format == "json":
-            return self._generate_json_report(result)
-        return self._generate_text_report(result)
+        """Get human-readable diff summary."""
+        if result.equal:
+            return "Data structures are equal"
 
-    def _generate_text_report(self, result: ComparisonResult) -> str:
-        """Generate plain text diff report."""
         lines = [
-            "=" * 60,
-            "DATA COMPARISON REPORT",
-            "=" * 60,
-            f"Total Records: {result.total_records}",
-            f"Similarity Score: {result.similarity_score:.2%}",
-            "",
-            f"  Added:    {result.added}",
-            f"  Removed:  {result.removed}",
-            f"  Modified: {result.modified}",
-            f"  Unchanged: {result.unchanged}",
+            f"Differences found: {len(result.diffs)}",
+            f"  Added: {result.added_count}",
+            f"  Removed: {result.removed_count}",
+            f"  Modified: {result.modified_count}",
             "",
         ]
 
-        if result.record_diffs:
-            lines.append("-" * 60)
-            lines.append("DETAILED DIFFERENCES")
-            lines.append("-" * 60)
+        for diff in result.diffs[:10]:
+            lines.append(f"  {diff.diff_type.name}: {diff.path}")
+            if diff.old_value is not None:
+                lines.append(f"    old: {diff.old_value}")
+            if diff.new_value is not None:
+                lines.append(f"    new: {diff.new_value}")
 
-            for diff in result.record_diffs:
-                if diff.diff_type == DiffType.UNCHANGED:
-                    continue
-
-                lines.append(f"\n[{diff.diff_type.value.upper()}] Record: {diff.record_id}")
-                for field_diff in diff.field_diffs:
-                    lines.append(
-                        f"  {field_diff.field}: {field_diff.old_value} -> {field_diff.new_value}"
-                    )
+        if len(result.diffs) > 10:
+            lines.append(f"  ... and {len(result.diffs) - 10} more")
 
         return "\n".join(lines)
-
-    def _generate_json_report(self, result: ComparisonResult) -> str:
-        """Generate JSON diff report."""
-        import json
-        data = {
-            "summary": {
-                "total_records": result.total_records,
-                "added": result.added,
-                "removed": result.removed,
-                "modified": result.modified,
-                "unchanged": result.unchanged,
-                "similarity_score": result.similarity_score,
-            },
-            "diffs": [
-                {
-                    "record_id": d.record_id,
-                    "type": d.diff_type.value,
-                    "score": d.score,
-                    "field_diffs": [
-                        {
-                            "field": f.field,
-                            "type": f.diff_type.value,
-                            "old": f.old_value,
-                            "new": f.new_value,
-                            "similarity": f.similarity,
-                        }
-                        for f in d.field_diffs
-                    ],
-                }
-                for d in result.record_diffs
-            ],
-        }
-        return json.dumps(data, indent=2)
