@@ -1,21 +1,65 @@
-"""API documentation action module for RabAI AutoClick.
-
-Provides API documentation:
-- APIDocGenerator: Generate API documentation
-- OpenAPIGenerator: Generate OpenAPI specs
-- MarkdownDocGenerator: Generate Markdown docs
-- EndpointAnalyzer: Analyze endpoints
 """
+API documentation generator module for auto-generating OpenAPI/Swagger specs.
 
-from typing import Any, Callable, Dict, List, Optional
+Supports endpoint documentation, schema generation, and interactive API explorers.
+"""
+from __future__ import annotations
+
+import json
+import time
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Optional
 
-import sys
-import os
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+class ParamType(Enum):
+    """Parameter types."""
+    STRING = "string"
+    NUMBER = "number"
+    INTEGER = "integer"
+    BOOLEAN = "boolean"
+    ARRAY = "array"
+    OBJECT = "object"
+
+
+class ParamLocation(Enum):
+    """Parameter locations."""
+    QUERY = "query"
+    PATH = "path"
+    HEADER = "header"
+    COOKIE = "cookie"
+
+
+@dataclass
+class Schema:
+    """OpenAPI schema definition."""
+    type: str
+    format: Optional[str] = None
+    description: Optional[str] = None
+    enum: Optional[list] = None
+    default: Optional[Any] = None
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
+    pattern: Optional[str] = None
+    items: Optional[Schema] = None
+    properties: Optional[dict[str, Schema]] = None
+    required: Optional[list[str]] = None
+
+
+@dataclass
+class Parameter:
+    """API parameter definition."""
+    name: str
+    param_type: ParamType
+    location: ParamLocation
+    required: bool = False
+    description: str = ""
+    schema: Optional[Schema] = None
+    example: Optional[Any] = None
 
 
 @dataclass
@@ -24,157 +68,70 @@ class Endpoint:
     path: str
     method: str
     summary: str
-    description: Optional[str] = None
-    parameters: List[Dict] = field(default_factory=list)
-    request_body: Optional[Dict] = None
-    responses: Dict[str, Dict] = field(default_factory=dict)
-    tags: List[str] = field(default_factory=list)
+    description: str = ""
+    parameters: list[Parameter] = field(default_factory=list)
+    request_body: Optional[Schema] = None
+    responses: dict = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    deprecated: bool = False
+    security: list[str] = field(default_factory=list)
 
 
 @dataclass
 class APISpec:
-    """API specification."""
+    """Complete API specification."""
     title: str
     version: str
-    description: Optional[str] = None
-    endpoints: List[Endpoint] = field(default_factory=list)
-    schemas: Dict[str, Dict] = field(default_factory=dict)
+    description: str = ""
+    endpoints: list[Endpoint] = field(default_factory=list)
+    schemas: dict[str, Schema] = field(default_factory=dict)
+    servers: list[str] = field(default_factory=list)
+    contact: dict = field(default_factory=dict)
+    license: dict = field(default_factory=dict)
 
 
-class OpenAPIGenerator:
-    """Generate OpenAPI specifications."""
+class APIDocumentationGenerator:
+    """
+    API documentation generator for auto-generating OpenAPI specs.
 
-    def __init__(self, spec: Optional[APISpec] = None):
-        self.spec = spec
+    Supports endpoint documentation, schema generation,
+    and interactive API explorers.
+    """
 
-    def generate(self) -> Dict:
-        """Generate OpenAPI spec."""
-        if not self.spec:
-            return {}
+    def __init__(self, title: str = "API", version: str = "1.0.0"):
+        self._spec = APISpec(title=title, version=version)
+        self._endpoints: dict[str, Endpoint] = {}
 
-        paths = {}
-        for endpoint in self.spec.endpoints:
-            path_item = paths.get(endpoint.path, {})
-            path_item[endpoint.method.lower()] = {
-                "summary": endpoint.summary,
-                "description": endpoint.description,
-                "parameters": endpoint.parameters,
-                "requestBody": endpoint.request_body,
-                "responses": endpoint.responses,
-                "tags": endpoint.tags,
-            }
-            paths[endpoint.path] = path_item
-
-        return {
-            "openapi": "3.0.0",
-            "info": {
-                "title": self.spec.title,
-                "version": self.spec.version,
-                "description": self.spec.description,
-            },
-            "paths": paths,
-            "components": {
-                "schemas": self.spec.schemas,
-            },
-        }
-
-
-class MarkdownDocGenerator:
-    """Generate Markdown documentation."""
-
-    def __init__(self, spec: Optional[APISpec] = None):
-        self.spec = spec
-
-    def generate(self) -> str:
-        """Generate Markdown docs."""
-        if not self.spec:
-            return ""
-
-        lines = []
-        lines.append(f"# {self.spec.title}")
-        lines.append(f"\n**Version:** {self.spec.version}\n")
-
-        if self.spec.description:
-            lines.append(f"\n{self.spec.description}\n")
-
-        lines.append("\n## Endpoints\n")
-
-        by_tag: Dict[str, List[Endpoint]] = {}
-        for endpoint in self.spec.endpoints:
-            tag = endpoint.tags[0] if endpoint.tags else "General"
-            if tag not in by_tag:
-                by_tag[tag] = []
-            by_tag[tag].append(endpoint)
-
-        for tag, endpoints in by_tag.items():
-            lines.append(f"\n### {tag}\n")
-
-            for endpoint in endpoints:
-                lines.append(f"\n#### {endpoint.method.upper()} {endpoint.path}")
-                lines.append(f"\n{endpoint.summary}")
-
-                if endpoint.description:
-                    lines.append(f"\n{endpoint.description}")
-
-                if endpoint.parameters:
-                    lines.append("\n**Parameters:**\n")
-                    lines.append("| Name | Type | Required | Description |")
-                    lines.append("|------|------|----------|-------------|")
-                    for p in endpoint.parameters:
-                        lines.append(
-                            f"| {p.get('name')} | {p.get('type')} | {p.get('required', False)} | {p.get('description', '')} |"
-                        )
-
-                if endpoint.request_body:
-                    lines.append("\n**Request Body:**\n")
-                    lines.append("```json")
-                    import json
-                    lines.append(json.dumps(endpoint.request_body, indent=2))
-                    lines.append("```")
-
-                if endpoint.responses:
-                    lines.append("\n**Responses:**\n")
-                    for code, response in endpoint.responses.items():
-                        lines.append(f"- `{code}`: {response.get('description', '')}")
-
-        return "\n".join(lines)
-
-
-class APIDocGenerator:
-    """Generate API documentation."""
-
-    def __init__(self):
-        self.spec = None
-
-    def create_spec(
+    def set_info(
         self,
-        title: str,
-        version: str,
-        description: Optional[str] = None,
-    ) -> APISpec:
-        """Create API spec."""
-        self.spec = APISpec(
-            title=title,
-            version=version,
-            description=description,
-        )
-        return self.spec
+        description: str = "",
+        servers: Optional[list[str]] = None,
+        contact: Optional[dict] = None,
+        license: Optional[dict] = None,
+    ) -> None:
+        """Set API metadata."""
+        self._spec.description = description
+        if servers:
+            self._spec.servers = servers
+        if contact:
+            self._spec.contact = contact
+        if license:
+            self._spec.license = license
 
     def add_endpoint(
         self,
         path: str,
         method: str,
         summary: str,
-        description: Optional[str] = None,
-        parameters: Optional[List[Dict]] = None,
-        request_body: Optional[Dict] = None,
-        responses: Optional[Dict[str, Dict]] = None,
-        tags: Optional[List[str]] = None,
-    ) -> "APIDocGenerator":
-        """Add endpoint to spec."""
-        if not self.spec:
-            return self
-
+        description: str = "",
+        parameters: Optional[list[Parameter]] = None,
+        request_body: Optional[Schema] = None,
+        responses: Optional[dict] = None,
+        tags: Optional[list[str]] = None,
+        deprecated: bool = False,
+        security: Optional[list[str]] = None,
+    ) -> Endpoint:
+        """Add an API endpoint."""
         endpoint = Endpoint(
             path=path,
             method=method.upper(),
@@ -182,122 +139,235 @@ class APIDocGenerator:
             description=description,
             parameters=parameters or [],
             request_body=request_body,
-            responses=responses or {},
+            responses=responses or {"200": {"description": "Success"}},
             tags=tags or [],
-        )
-        self.spec.endpoints.append(endpoint)
-        return self
-
-    def add_schema(self, name: str, schema: Dict) -> "APIDocGenerator":
-        """Add schema to spec."""
-        if self.spec:
-            self.spec.schemas[name] = schema
-        return self
-
-    def to_openapi(self) -> Dict:
-        """Generate OpenAPI spec."""
-        generator = OpenAPIGenerator(self.spec)
-        return generator.generate()
-
-    def to_markdown(self) -> str:
-        """Generate Markdown docs."""
-        generator = MarkdownDocGenerator(self.spec)
-        return generator.generate()
-
-
-class APIDocumentationAction(BaseAction):
-    """API documentation action."""
-    action_type = "api_documentation"
-    display_name = "API文档"
-    description = "API文档生成"
-
-    def __init__(self):
-        super().__init__()
-        self._generator = APIDocGenerator()
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "generate")
-
-            if operation == "create_spec":
-                return self._create_spec(params)
-            elif operation == "add_endpoint":
-                return self._add_endpoint(params)
-            elif operation == "add_schema":
-                return self._add_schema(params)
-            elif operation == "generate":
-                return self._generate(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Documentation error: {str(e)}")
-
-    def _create_spec(self, params: Dict) -> ActionResult:
-        """Create API spec."""
-        title = params.get("title", "API")
-        version = params.get("version", "1.0.0")
-        description = params.get("description")
-
-        spec = self._generator.create_spec(title, version, description)
-
-        return ActionResult(
-            success=True,
-            message=f"API spec '{title}' created",
-            data={"title": spec.title, "version": spec.version},
+            deprecated=deprecated,
+            security=security or [],
         )
 
-    def _add_endpoint(self, params: Dict) -> ActionResult:
-        """Add endpoint."""
-        path = params.get("path")
-        method = params.get("method", "GET")
-        summary = params.get("summary", "")
+        key = f"{method.upper()}:{path}"
+        self._endpoints[key] = endpoint
+        self._spec.endpoints.append(endpoint)
 
-        if not path:
-            return ActionResult(success=False, message="path is required")
+        return endpoint
 
-        self._generator.add_endpoint(
-            path=path,
-            method=method,
-            summary=summary,
-            description=params.get("description"),
-            parameters=params.get("parameters"),
-            request_body=params.get("request_body"),
-            responses=params.get("responses"),
-            tags=params.get("tags"),
+    def add_parameter(
+        self,
+        path: str,
+        method: str,
+        name: str,
+        param_type: ParamType,
+        location: ParamLocation,
+        required: bool = False,
+        description: str = "",
+        schema: Optional[Schema] = None,
+        example: Optional[Any] = None,
+    ) -> None:
+        """Add a parameter to an endpoint."""
+        key = f"{method.upper()}:{path}"
+        endpoint = self._endpoints.get(key)
+
+        if not endpoint:
+            raise ValueError(f"Endpoint not found: {key}")
+
+        param = Parameter(
+            name=name,
+            param_type=param_type,
+            location=location,
+            required=required,
+            description=description,
+            schema=schema,
+            example=example,
         )
 
-        return ActionResult(success=True, message=f"Endpoint {method.upper()} {path} added")
+        endpoint.parameters.append(param)
 
-    def _add_schema(self, params: Dict) -> ActionResult:
-        """Add schema."""
-        name = params.get("name")
-        schema = params.get("schema", {})
+    def add_schema(
+        self,
+        name: str,
+        schema: Schema,
+    ) -> None:
+        """Add a reusable schema."""
+        self._spec.schemas[name] = schema
 
-        if not name:
-            return ActionResult(success=False, message="name is required")
+    def add_response(
+        self,
+        path: str,
+        method: str,
+        status_code: str,
+        description: str,
+        schema: Optional[Schema] = None,
+    ) -> None:
+        """Add a response to an endpoint."""
+        key = f"{method.upper()}:{path}"
+        endpoint = self._endpoints.get(key)
 
-        self._generator.add_schema(name, schema)
+        if not endpoint:
+            raise ValueError(f"Endpoint not found: {key}")
 
-        return ActionResult(success=True, message=f"Schema '{name}' added")
+        response = {"description": description}
+        if schema:
+            response["content"] = {
+                "application/json": {
+                    "schema": self._schema_to_dict(schema)
+                }
+            }
 
-    def _generate(self, params: Dict) -> ActionResult:
-        """Generate documentation."""
-        format_type = params.get("format", "openapi").lower()
+        endpoint.responses[status_code] = response
 
-        if format_type == "openapi":
-            result = self._generator.to_openapi()
-            return ActionResult(
-                success=True,
-                message="OpenAPI spec generated",
-                data={"spec": result},
-            )
-        elif format_type == "markdown":
-            result = self._generator.to_markdown()
-            return ActionResult(
-                success=True,
-                message="Markdown docs generated",
-                data={"markdown": result},
-            )
+    def _schema_to_dict(self, schema: Schema) -> dict:
+        """Convert a Schema to a dictionary."""
+        result = {"type": schema.type}
+
+        if schema.format:
+            result["format"] = schema.format
+        if schema.description:
+            result["description"] = schema.description
+        if schema.enum:
+            result["enum"] = schema.enum
+        if schema.default is not None:
+            result["default"] = schema.default
+        if schema.minimum is not None:
+            result["minimum"] = schema.minimum
+        if schema.maximum is not None:
+            result["maximum"] = schema.maximum
+        if schema.min_length is not None:
+            result["minLength"] = schema.min_length
+        if schema.max_length is not None:
+            result["maxLength"] = schema.max_length
+        if schema.pattern:
+            result["pattern"] = schema.pattern
+        if schema.items:
+            result["items"] = self._schema_to_dict(schema.items)
+        if schema.properties:
+            result["properties"] = {
+                k: self._schema_to_dict(v)
+                for k, v in schema.properties.items()
+            }
+        if schema.required:
+            result["required"] = schema.required
+
+        return result
+
+    def _endpoint_to_dict(self, endpoint: Endpoint) -> dict:
+        """Convert an Endpoint to a dictionary."""
+        result = {
+            "summary": endpoint.summary,
+            "description": endpoint.description,
+            "responses": endpoint.responses,
+            "deprecated": endpoint.deprecated,
+        }
+
+        if endpoint.parameters:
+            result["parameters"] = [
+                {
+                    "name": p.name,
+                    "in": p.location.value,
+                    "required": p.required,
+                    "description": p.description,
+                    "schema": self._schema_to_dict(p.schema) if p.schema else {"type": p.param_type.value},
+                }
+                for p in endpoint.parameters
+            ]
+
+        if endpoint.request_body:
+            result["requestBody"] = {
+                "content": {
+                    "application/json": {
+                        "schema": self._schema_to_dict(endpoint.request_body)
+                    }
+                }
+            }
+
+        if endpoint.tags:
+            result["tags"] = endpoint.tags
+
+        if endpoint.security:
+            result["security"] = endpoint.security
+
+        return result
+
+    def generate_openapi(self) -> dict:
+        """Generate an OpenAPI 3.0 specification."""
+        paths = {}
+
+        for endpoint in self._spec.endpoints:
+            if endpoint.path not in paths:
+                paths[endpoint.path] = {}
+
+            paths[endpoint.path][endpoint.method.lower()] = self._endpoint_to_dict(endpoint)
+
+        spec = {
+            "openapi": "3.0.0",
+            "info": {
+                "title": self._spec.title,
+                "version": self._spec.version,
+                "description": self._spec.description,
+            },
+            "paths": paths,
+        }
+
+        if self._spec.servers:
+            spec["servers"] = [{"url": s} for s in self._spec.servers]
+
+        if self._spec.schemas:
+            spec["components"] = {
+                "schemas": {
+                    k: self._schema_to_dict(v)
+                    for k, v in self._spec.schemas.items()
+                }
+            }
+
+        if self._spec.contact:
+            spec["info"]["contact"] = self._spec.contact
+
+        if self._spec.license:
+            spec["info"]["license"] = self._spec.license
+
+        return spec
+
+    def generate_swagger(self) -> dict:
+        """Generate a Swagger 2.0 specification."""
+        paths = {}
+
+        for endpoint in self._spec.endpoints:
+            if endpoint.path not in paths:
+                paths[endpoint.path] = {}
+
+            paths[endpoint.path][endpoint.method.lower()] = self._endpoint_to_dict(endpoint)
+
+        spec = {
+            "swagger": "2.0",
+            "info": {
+                "title": self._spec.title,
+                "version": self._spec.version,
+                "description": self._spec.description,
+            },
+            "paths": paths,
+            "schemes": ["https"] if self._spec.servers else ["https"],
+        }
+
+        if self._spec.servers:
+            spec["host"] = self._spec.servers[0].replace("https://", "").replace("http://", "").split("/")[0]
+
+        if self._spec.schemas:
+            spec["definitions"] = {
+                k: self._schema_to_dict(v)
+                for k, v in self._spec.schemas.items()
+            }
+
+        return spec
+
+    def save_to_file(self, filename: str, format: str = "openapi") -> None:
+        """Save the specification to a file."""
+        if format == "openapi":
+            spec = self.generate_openapi()
         else:
-            return ActionResult(success=False, message=f"Unknown format: {format_type}")
+            spec = self.generate_swagger()
+
+        with open(filename, "w") as f:
+            json.dump(spec, f, indent=2)
+
+    def get_spec(self) -> APISpec:
+        """Get the API specification object."""
+        return self._spec
