@@ -1,254 +1,202 @@
-"""Drag trajectory utilities for curved and shaped drag paths.
+"""Drag trajectory utilities.
 
-This module provides utilities for calculating smooth, curved drag
-trajectories for natural-looking drag operations.
+This module provides utilities for generating and executing
+smooth drag trajectories.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Callable, Sequence
+from typing import Callable, List, Tuple, Optional
+from dataclasses import dataclass
 
 
-# Bezier curve implementation
-def linear_bezier(p0: float, p1: float, t: float) -> float:
-    """Linear Bezier interpolation."""
-    return p0 + (p1 - p0) * t
+@dataclass
+class Point2D:
+    """A 2D point."""
+    x: float
+    y: float
+
+    def distance_to(self, other: "Point2D") -> float:
+        dx = self.x - other.x
+        dy = self.y - other.y
+        return math.sqrt(dx * dx + dy * dy)
+
+    def lerp(self, other: "Point2D", t: float) -> "Point2D":
+        return Point2D(
+            x=self.x + (other.x - self.x) * t,
+            y=self.y + (other.y - self.y) * t,
+        )
 
 
-def quadratic_bezier(p0: float, p1: float, p2: float, t: float) -> float:
-    """Quadratic Bezier interpolation."""
-    one_minus_t = 1 - t
-    return one_minus_t ** 2 * p0 + 2 * one_minus_t * t * p1 + t ** 2 * p2
+@dataclass
+class TrajectoryConfig:
+    """Configuration for trajectory generation."""
+    points_per_segment: int = 10
+    smoothing_factor: float = 0.5
+    overshoot: float = 0.0
+    snap_to_grid: Optional[Tuple[int, int]] = None
 
 
-def cubic_bezier(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
-    """Cubic Bezier interpolation."""
-    one_minus_t = 1 - t
-    return (one_minus_t ** 3 * p0 + 
-            3 * one_minus_t ** 2 * t * p1 + 
-            3 * one_minus_t * t ** 2 * p2 + 
-            t ** 3 * p3)
+def linear_trajectory(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    num_points: int = 10,
+) -> List[Point2D]:
+    """Generate a linear trajectory between two points.
 
-
-def bezier_curve_2d(
-    start: tuple[int, int],
-    control1: tuple[int, int],
-    control2: tuple[int, int],
-    end: tuple[int, int],
-    steps: int = 50,
-) -> list[tuple[int, int]]:
-    """Generate points along a cubic Bezier curve.
-    
     Args:
-        start: Starting point (x, y).
-        control1: First control point.
-        control2: Second control point.
-        end: Ending point.
-        steps: Number of points to generate.
-    
+        start: Start coordinates.
+        end: End coordinates.
+        num_points: Number of points to generate.
+
     Returns:
-        List of (x, y) tuples along the curve.
+        List of points along the trajectory.
     """
-    points = []
-    for i in range(steps + 1):
-        t = i / steps
-        x = cubic_bezier(start[0], control1[0], control2[0], end[0], t)
-        y = cubic_bezier(start[1], control1[1], control2[1], end[1], t)
-        points.append((int(x), int(y)))
-    return points
+    s = Point2D(start[0], start[1])
+    e = Point2D(end[0], end[1])
+    return [s.lerp(e, t / (num_points - 1)) for t in range(num_points)]
 
 
-def arc_trajectory(
-    start: tuple[int, int],
-    end: tuple[int, int],
-    curvature: float = 0.5,
-    steps: int = 50,
-) -> list[tuple[int, int]]:
-    """Generate an arc-shaped drag trajectory.
-    
+def bezier_trajectory(
+    start: Tuple[float, float],
+    control: Tuple[float, float],
+    end: Tuple[float, float],
+    num_points: int = 20,
+) -> List[Point2D]:
+    """Generate a quadratic bezier trajectory.
+
     Args:
-        start: Starting point (x, y).
-        end: Ending point (x, y).
-        curvature: Curvature factor (-1.0 to 1.0). Positive curves upward/left,
-                   negative curves downward/right.
-        steps: Number of points to generate.
-    
+        start: Start coordinates.
+        control: Control point coordinates.
+        end: End coordinates.
+        num_points: Number of points to generate.
+
     Returns:
-        List of (x, y) tuples along the arc.
+        List of points along the trajectory.
     """
-    mid_x = (start[0] + end[0]) / 2
-    mid_y = (start[1] + end[1]) / 2
-    
-    # Calculate perpendicular offset for control point
+    def bezier(t: float) -> Point2D:
+        t2 = 1 - t
+        return Point2D(
+            x=t2 * t2 * start[0] + 2 * t2 * t * control[0] + t * t * end[0],
+            y=t2 * t2 * start[1] + 2 * t2 * t * control[1] + t * t * end[1],
+        )
+    return [bezier(t / (num_points - 1)) for t in range(num_points)]
+
+
+def curved_trajectory(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    curve_height: float = 50.0,
+    num_points: int = 20,
+) -> List[Point2D]:
+    """Generate a curved trajectory with automatic control point.
+
+    Args:
+        start: Start coordinates.
+        end: End coordinates.
+        curve_height: Height of the curve perpendicular to the line.
+        num_points: Number of points to generate.
+
+    Returns:
+        List of points along the trajectory.
+    """
+    mx = (start[0] + end[0]) / 2
+    my = (start[1] + end[1]) / 2
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     length = math.sqrt(dx * dx + dy * dy)
-    
     if length == 0:
-        return [start, end]
-    
-    # Perpendicular vector
-    px = -dy / length
-    py = dx / length
-    
-    # Control point offset
-    offset = curvature * length * 0.5
-    control = (mid_x + px * offset, mid_y + py * offset)
-    
-    return bezier_curve_2d(start, control, control, end, steps)
+        length = 1.0
+    cx = mx - (dy / length) * curve_height
+    cy = my + (dx / length) * curve_height
+    return bezier_trajectory(start, (cx, cy), end, num_points)
 
 
-def wave_trajectory(
-    start: tuple[int, int],
-    end: tuple[int, int],
-    amplitude: float = 50.0,
-    frequency: float = 2.0,
-    steps: int = 50,
-) -> list[tuple[int, int]]:
-    """Generate a wave-shaped drag trajectory.
-    
+def smooth_trajectory(
+    points: List[Point2D],
+    iterations: int = 3,
+) -> List[Point2D]:
+    """Smooth a trajectory using Chaikin subdivision.
+
     Args:
-        start: Starting point (x, y).
-        end: Ending point (x, y).
-        amplitude: Wave amplitude in pixels.
-        frequency: Number of complete waves.
-        steps: Number of points to generate.
-    
+        points: Original trajectory points.
+        iterations: Number of smoothing iterations.
+
     Returns:
-        List of (x, y) tuples along the wave.
+        Smoothed trajectory points.
     """
-    points = []
-    for i in range(steps + 1):
-        t = i / steps
-        
-        # Base linear interpolation
-        x = start[0] + (end[0] - start[0]) * t
-        y = start[1] + (end[1] - start[1]) * t
-        
-        # Add wave perpendicular to the line
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.sqrt(dx * dx + dy * dy)
-        
-        if length > 0:
-            px = -dy / length
-            py = dx / length
-            
-            wave = amplitude * math.sin(t * frequency * 2 * math.pi)
-            x += px * wave
-            y += py * wave
-        
-        points.append((int(x), int(y)))
-    return points
+    result = points[:]
+    for _ in range(iterations):
+        new_points: List[Point2D] = [result[0]]
+        for i in range(len(result) - 1):
+            p0 = result[i]
+            p1 = result[i + 1]
+            new_points.append(Point2D(
+                x=p0.x * 0.75 + p1.x * 0.25,
+                y=p0.y * 0.75 + p1.y * 0.25,
+            ))
+            new_points.append(Point2D(
+                x=p0.x * 0.25 + p1.x * 0.75,
+                y=p0.y * 0.25 + p1.y * 0.75,
+            ))
+        new_points.append(result[-1])
+        result = new_points
+    return result
 
 
-def spiral_trajectory(
-    center: tuple[int, int],
-    start_radius: float,
-    end_radius: float,
-    start_angle: float = 0.0,
-    revolutions: float = 1.0,
-    steps: int = 50,
-) -> list[tuple[int, int]]:
-    """Generate a spiral drag trajectory.
-    
+def resample_trajectory(
+    points: List[Point2D],
+    target_count: int,
+) -> List[Point2D]:
+    """Resample trajectory to a specific number of points.
+
     Args:
-        center: Center point of the spiral.
-        start_radius: Starting radius.
-        end_radius: Ending radius.
-        start_angle: Starting angle in radians.
-        revolutions: Number of complete revolutions.
-        steps: Number of points to generate.
-    
-    Returns:
-        List of (x, y) tuples along the spiral.
-    """
-    points = []
-    for i in range(steps + 1):
-        t = i / steps
-        angle = start_angle + revolutions * 2 * math.pi * t
-        radius = start_radius + (end_radius - start_radius) * t
-        
-        x = center[0] + radius * math.cos(angle)
-        y = center[1] + radius * math.sin(angle)
-        points.append((int(x), int(y)))
-    return points
+        points: Original trajectory points.
+        target_count: Desired number of points.
 
-
-def smooth_path(
-    points: Sequence[tuple[int, int]],
-    tension: float = 0.5,
-    steps_per_segment: int = 10,
-) -> list[tuple[int, int]]:
-    """Generate a smooth path through a series of points using Catmull-Rom spline.
-    
-    Args:
-        points: Sequence of points to smooth through.
-        tension: Tension parameter (0.0 = linear, 0.5 = smooth, 1.0 = max smoothing).
-        steps_per_segment: Number of interpolated points per segment.
-    
     Returns:
-        List of (x, y) tuples along the smooth path.
+        Resampled trajectory.
     """
-    if len(points) < 2:
-        return list(points)
-    if len(points) == 2:
-        return bezier_curve_2d(
-            points[0],
-            points[0],
-            points[1],
-            points[1],
-            steps_per_segment,
-        )
-    
-    result = []
-    
-    # Extend points with endpoints for Catmull-Rom
-    extended = [points[0], *points, points[-1]]
-    
-    for i in range(1, len(extended) - 2):
-        p0 = extended[i - 1]
-        p1 = extended[i]
-        p2 = extended[i + 1]
-        p3 = extended[i + 2]
-        
-        for j in range(steps_per_segment):
-            t = j / steps_per_segment
-            t2 = t * t
-            t3 = t2 * t
-            
-            x = 0.5 * ((2 * p1[0]) +
-                       (-p0[0] + p2[0]) * t +
-                       (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
-                       (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
-            
-            y = 0.5 * ((2 * p1[1]) +
-                       (-p0[1] + p2[1]) * t +
-                       (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
-                       (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
-            
-            result.append((int(x), int(y)))
-    
+    if len(points) <= 1:
+        return points[:]
+    if len(points) == target_count:
+        return points[:]
+
+    total_length = sum(
+        points[i].distance_to(points[i + 1])
+        for i in range(len(points) - 1)
+    )
+    step = total_length / (target_count - 1)
+
+    result = [points[0]]
+    accumulated = 0.0
+    j = 1
+
+    for i in range(1, target_count - 1):
+        target = step * i
+        while j < len(points):
+            seg_len = points[j - 1].distance_to(points[j])
+            if accumulated + seg_len >= target:
+                t = (target - accumulated) / seg_len if seg_len > 0 else 0
+                result.append(Point2D(
+                    x=points[j - 1].x + (points[j].x - points[j - 1].x) * t,
+                    y=points[j - 1].y + (points[j].y - points[j - 1].y) * t,
+                ))
+                break
+            accumulated += seg_len
+            j += 1
+
     result.append(points[-1])
     return result
 
 
-def parabolic_trajectory(
-    start: tuple[int, int],
-    peak: tuple[int, int],
-    end: tuple[int, int],
-    steps: int = 50,
-) -> list[tuple[int, int]]:
-    """Generate a parabolic (arc) trajectory through three points.
-    
-    Args:
-        start: Starting point.
-        peak: Peak/high point of the parabola.
-        end: Ending point.
-        steps: Number of points to generate.
-    
-    Returns:
-        List of (x, y) tuples along the parabola.
-    """
-    return bezier_curve_2d(start, peak, peak, end, steps)
+__all__ = [
+    "Point2D",
+    "TrajectoryConfig",
+    "linear_trajectory",
+    "bezier_trajectory",
+    "curved_trajectory",
+    "smooth_trajectory",
+    "resample_trajectory",
+]
