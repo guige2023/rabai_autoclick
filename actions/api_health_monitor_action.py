@@ -1,20 +1,28 @@
-# Copyright (c) 2024. coded by claude
-"""API Health Monitor Action Module.
+"""API health monitor action module for RabAI AutoClick.
 
-Monitors API health status, tracks latency metrics, and triggers alerts
-when services become unhealthy.
+Provides health monitoring for API endpoints:
+- ApiHealthMonitor: Monitor API endpoint health
+- HealthChecker: Periodic health checks
+- EndpointHealthTracker: Track endpoint health history
 """
-from typing import Optional, Dict, Any, List, Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-import asyncio
-import logging
 
-logger = logging.getLogger(__name__)
+from typing import Any, Callable, Dict, List, Optional, Tuple
+import time
+import threading
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from collections import defaultdict, deque
+
+import sys
+import os
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
 class HealthStatus(Enum):
+    """Health statuses."""
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
@@ -22,144 +30,158 @@ class HealthStatus(Enum):
 
 
 @dataclass
-class HealthCheckResult:
+class HealthConfig:
+    """Configuration for health monitoring."""
+    check_interval: float = 60.0
+    timeout: float = 5.0
+    failure_threshold: int = 3
+    success_threshold: int = 2
+    track_history: int = 100
+
+
+@dataclass
+class EndpointHealth:
+    """Endpoint health record."""
     endpoint: str
     status: HealthStatus
-    latency_ms: float
-    timestamp: datetime
-    error_message: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def is_healthy(self) -> bool:
-        return self.status == HealthStatus.HEALTHY
+    latency: float
+    status_code: int
+    timestamp: float = field(default_factory=time.time)
+    error: Optional[str] = None
 
 
-class HealthMonitor:
-    def __init__(
-        self,
-        check_interval: float = 30.0,
-        timeout: float = 5.0,
-        degraded_threshold: float = 1000.0,
-        unhealthy_threshold: float = 5000.0,
-    ):
-        self.check_interval = check_interval
-        self.timeout = timeout
-        self.degraded_threshold = degraded_threshold
-        self.unhealthy_threshold = unhealthy_threshold
-        self._health_checks: Dict[str, Callable] = {}
-        self._last_results: Dict[str, HealthCheckResult] = {}
-        self._alert_callbacks: List[Callable] = []
-        self._monitoring_task: Optional[asyncio.Task] = None
-
-    def register_check(self, name: str, check_fn: Callable) -> None:
-        self._health_checks[name] = check_fn
-
-    def register_alert_callback(self, callback: Callable) -> None:
-        self._alert_callbacks.append(callback)
-
-    async def check_health(self, name: str) -> HealthCheckResult:
-        if name not in self._health_checks:
-            return HealthCheckResult(
-                endpoint=name,
-                status=HealthStatus.UNKNOWN,
-                latency_ms=0.0,
-                timestamp=datetime.now(),
-                error_message="No health check registered",
-            )
-        try:
-            start = datetime.now()
-            result = await asyncio.wait_for(
-                self._health_checks[name](),
-                timeout=self.timeout,
-            )
-            latency = (datetime.now() - start).total_seconds() * 1000
-            status = self._determine_status(latency)
-            return HealthCheckResult(
-                endpoint=name,
-                status=status,
-                latency_ms=latency,
-                timestamp=datetime.now(),
-            )
-        except asyncio.TimeoutError:
-            return HealthCheckResult(
-                endpoint=name,
-                status=HealthStatus.UNHEALTHY,
-                latency_ms=self.timeout * 1000,
-                timestamp=datetime.now(),
-                error_message="Health check timed out",
-            )
-        except Exception as e:
-            return HealthCheckResult(
-                endpoint=name,
-                status=HealthStatus.UNHEALTHY,
-                latency_ms=0.0,
-                timestamp=datetime.now(),
-                error_message=str(e),
-            )
-
-    def _determine_status(self, latency_ms: float) -> HealthStatus:
-        if latency_ms >= self.unhealthy_threshold:
-            return HealthStatus.UNHEALTHY
-        if latency_ms >= self.degraded_threshold:
-            return HealthStatus.DEGRADED
-        return HealthStatus.HEALTHY
-
-    async def run_all_checks(self) -> Dict[str, HealthCheckResult]:
-        tasks = [self.check_health(name) for name in self._health_checks]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        result_map = {}
-        for name, result in zip(self._health_checks.keys(), results):
-            if isinstance(result, Exception):
-                result_map[name] = HealthCheckResult(
-                    endpoint=name,
-                    status=HealthStatus.UNHEALTHY,
-                    latency_ms=0.0,
-                    timestamp=datetime.now(),
-                    error_message=str(result),
-                )
+class ApiHealthMonitor:
+    """Monitor API endpoint health."""
+    
+    def __init__(self, config: HealthConfig):
+        self.config = config
+        self._endpoints: Dict[str, EndpointHealth] = {}
+        self._history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=config.track_history))
+        self._health_checks: Dict[str, Any] = {}
+        self._lock = threading.RLock()
+        self._stats = {"total_checks": 0, "healthy_checks": 0, "unhealthy_checks": 0}
+    
+    def record_check(self, endpoint: str, status: HealthStatus, latency: float = 0.0, status_code: int = 200, error: Optional[str] = None):
+        """Record health check result."""
+        health = EndpointHealth(
+            endpoint=endpoint,
+            status=status,
+            latency=latency,
+            status_code=status_code,
+            error=error
+        )
+        
+        with self._lock:
+            self._endpoints[endpoint] = health
+            self._history[endpoint].append(health)
+            self._stats["total_checks"] += 1
+            
+            if status == HealthStatus.HEALTHY:
+                self._stats["healthy_checks"] += 1
             else:
-                result_map[name] = result
-                self._last_results[name] = result
-        return result_map
+                self._stats["unhealthy_checks"] += 1
+    
+    def get_health(self, endpoint: str) -> HealthStatus:
+        """Get current health status for endpoint."""
+        with self._lock:
+            health = self._endpoints.get(endpoint)
+            if not health:
+                return HealthStatus.UNKNOWN
+            return health.status
+    
+    def get_history(self, endpoint: str) -> List[EndpointHealth]:
+        """Get health history for endpoint."""
+        with self._lock:
+            return list(self._history.get(endpoint, []))
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get health monitoring statistics."""
+        with self._lock:
+            endpoint_stats = {}
+            for ep, health in self._endpoints.items():
+                history = list(self._history.get(ep, []))
+                recent_statuses = [h.status for h in history[-10:]]
+                healthy_count = sum(1 for s in recent_statuses if s == HealthStatus.HEALTHY)
+                
+                endpoint_stats[ep] = {
+                    "current_status": health.status.value,
+                    "latency": health.latency,
+                    "recent_health_ratio": healthy_count / max(1, len(recent_statuses)),
+                    "check_count": len(history),
+                }
+            
+            return {
+                "tracked_endpoints": len(self._endpoints),
+                **{k: v for k, v in self._stats.items()},
+                "endpoints": endpoint_stats,
+            }
 
-    async def start_monitoring(self) -> None:
-        async def monitor_loop():
-            while True:
-                results = await self.run_all_checks()
-                await self._process_alerts(results)
-                await asyncio.sleep(self.check_interval)
 
-        self._monitoring_task = asyncio.create_task(monitor_loop())
-
-    async def stop_monitoring(self) -> None:
-        if self._monitoring_task:
-            self._monitoring_task.cancel()
-            try:
-                await self._monitoring_task
-            except asyncio.CancelledError:
-                pass
-
-    async def _process_alerts(self, results: Dict[str, HealthCheckResult]) -> None:
-        for result in results.values():
-            if result.status == HealthStatus.UNHEALTHY:
-                for callback in self._alert_callbacks:
-                    try:
-                        await callback(result)
-                    except Exception as e:
-                        logger.error(f"Alert callback failed: {e}")
-
-    def get_health_summary(self) -> Dict[str, Any]:
-        if not self._last_results:
-            return {"status": HealthStatus.UNKNOWN.value, "services": {}}
-        unhealthy = sum(1 for r in self._last_results.values() if r.status == HealthStatus.UNHEALTHY)
-        degraded = sum(1 for r in self._last_results.values() if r.status == HealthStatus.DEGRADED)
-        overall = HealthStatus.UNHEALTHY if unhealthy > 0 else HealthStatus.DEGRADED if degraded > 0 else HealthStatus.HEALTHY
-        return {
-            "status": overall.value,
-            "summary": {
-                "healthy": len(self._last_results) - unhealthy - degraded,
-                "degraded": degraded,
-                "unhealthy": unhealthy,
-            },
-            "services": {name: r.status.value for name, r in self._last_results.items()},
-        }
+class ApiHealthMonitorAction(BaseAction):
+    """API health monitor action."""
+    action_type = "api_health_monitor"
+    display_name = "API健康监控"
+    description = "API端点健康状态监控"
+    
+    def __init__(self):
+        super().__init__()
+        self._monitor: Optional[ApiHealthMonitor] = None
+        self._lock = threading.Lock()
+    
+    def _get_monitor(self, params: Dict[str, Any]) -> ApiHealthMonitor:
+        """Get or create health monitor."""
+        with self._lock:
+            if self._monitor is None:
+                config = HealthConfig(
+                    check_interval=params.get("check_interval", 60.0),
+                    timeout=params.get("timeout", 5.0),
+                    failure_threshold=params.get("failure_threshold", 3),
+                    track_history=params.get("track_history", 100),
+                )
+                self._monitor = ApiHealthMonitor(config)
+            return self._monitor
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute health monitoring operation."""
+        try:
+            monitor = self._get_monitor(params)
+            command = params.get("command", "record")
+            
+            if command == "record":
+                endpoint = params.get("endpoint")
+                status_str = params.get("status", "healthy").upper()
+                
+                try:
+                    status = HealthStatus[status_str]
+                except KeyError:
+                    status = HealthStatus.UNKNOWN
+                
+                monitor.record_check(
+                    endpoint=endpoint,
+                    status=status,
+                    latency=params.get("latency", 0.0),
+                    status_code=params.get("status_code", 200),
+                    error=params.get("error"),
+                )
+                return ActionResult(success=True)
+            
+            elif command == "health":
+                endpoint = params.get("endpoint")
+                health = monitor.get_health(endpoint)
+                return ActionResult(success=True, data={"endpoint": endpoint, "status": health.value})
+            
+            elif command == "history":
+                endpoint = params.get("endpoint")
+                history = monitor.get_history(endpoint)
+                return ActionResult(success=True, data={
+                    "history": [{"status": h.status.value, "latency": h.latency, "timestamp": h.timestamp} for h in history]
+                })
+            
+            elif command == "stats":
+                stats = monitor.get_stats()
+                return ActionResult(success=True, data={"stats": stats})
+            
+            return ActionResult(success=False, message=f"Unknown command: {command}")
+            
+        except Exception as e:
+            return ActionResult(success=False, message=f"ApiHealthMonitorAction error: {str(e)}")

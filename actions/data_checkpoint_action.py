@@ -1,176 +1,187 @@
 """Data checkpoint action module for RabAI AutoClick.
 
-Provides data checkpoint operations:
-- CheckpointCreateAction: Create a checkpoint
-- CheckpointRestoreAction: Restore from checkpoint
-- CheckpointListAction: List checkpoints
-- CheckpointDeleteAction: Delete checkpoint
-- CheckpointDiffAction: Compare checkpoints
+Provides checkpoint capabilities for data processing:
+- DataCheckpoint: Create checkpoints during data processing
+- CheckpointStore: Persistent checkpoint storage
+- IncrementalCheckpoint: Incremental checkpoint tracking
 """
 
-import hashlib
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import time
-import uuid
-from typing import Any, Dict, List, Optional
+import threading
+import logging
+import json
+import os
+from dataclasses import dataclass, field
+from enum import Enum
+from collections import defaultdict
 
 import sys
 import os
-
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class CheckpointCreateAction(BaseAction):
-    """Create a data checkpoint."""
-    action_type = "checkpoint_create"
-    display_name = "创建检查点"
-    description = "创建数据检查点"
+class CheckpointType(Enum):
+    """Checkpoint types."""
+    SNAPSHOT = "snapshot"
+    INCREMENTAL = "incremental"
+    MARKER = "marker"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+@dataclass
+class DataCheckpoint:
+    """Data checkpoint definition."""
+    checkpoint_id: str
+    name: str
+    checkpoint_type: CheckpointType
+    position: int
+    data: Any
+    checksum: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CheckpointConfig:
+    """Configuration for checkpointing."""
+    storage_path: Optional[str] = None
+    max_checkpoints: int = 100
+    compression: bool = False
+    auto_checkpoint_interval: int = 100
+    persist_on_create: bool = True
+
+
+class CheckpointStore:
+    """Storage for checkpoints."""
+    
+    def __init__(self, config: CheckpointConfig):
+        self.config = config
+        self._checkpoints: Dict[str, DataCheckpoint] = {}
+        self._checkpoints_by_name: Dict[str, List[str]] = defaultdict(list)
+        self._lock = threading.RLock()
+    
+    def save(self, checkpoint: DataCheckpoint):
+        """Save checkpoint to store."""
+        with self._lock:
+            self._checkpoints[checkpoint.checkpoint_id] = checkpoint
+            self._checkpoints_by_name[checkpoint.name].append(checkpoint.checkpoint_id)
+            
+            self._enforce_max(checkpoint.name)
+            self._persist(checkpoint)
+    
+    def _enforce_max(self, name: str):
+        """Enforce maximum checkpoints per name."""
+        ids = self._checkpoints_by_name[name]
+        while len(ids) > self.config.max_checkpoints:
+            oldest_id = ids.pop(0)
+            self._checkpoints.pop(oldest_id, None)
+    
+    def _persist(self, checkpoint: DataCheckpoint):
+        """Persist checkpoint to disk."""
+        if not self.config.storage_path:
+            return
         try:
-            name = params.get("name", "")
-            data_snapshot = params.get("data", {})
-            tags = params.get("tags", [])
-
-            if not name:
-                return ActionResult(success=False, message="name is required")
-
-            checkpoint_id = hashlib.md5(f"{name}:{time.time()}".encode()).hexdigest()[:12]
-
-            if not hasattr(context, "checkpoints"):
-                context.checkpoints = {}
-            context.checkpoints[checkpoint_id] = {
-                "checkpoint_id": checkpoint_id,
-                "name": name,
-                "data_size": len(str(data_snapshot)),
-                "tags": tags,
-                "created_at": time.time(),
-                "status": "created",
+            os.makedirs(self.config.storage_path, exist_ok=True)
+            path = os.path.join(self.config.storage_path, f"{checkpoint.checkpoint_id}.json")
+            data = {
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "name": checkpoint.name,
+                "type": checkpoint.checkpoint_type.value,
+                "position": checkpoint.position,
+                "data": checkpoint.data,
+                "checksum": checkpoint.checksum,
+                "created_at": checkpoint.created_at,
             }
-
-            return ActionResult(
-                success=True,
-                data={"checkpoint_id": checkpoint_id, "name": name, "tags": tags},
-                message=f"Checkpoint {checkpoint_id} created: {name}",
-            )
+            with open(path, 'w') as f:
+                json.dump(data, f, default=str)
         except Exception as e:
-            return ActionResult(success=False, message=f"Checkpoint create failed: {e}")
+            logging.error(f"Failed to persist checkpoint: {e}")
+    
+    def get(self, checkpoint_id: str) -> Optional[DataCheckpoint]:
+        """Get checkpoint by ID."""
+        with self._lock:
+            return self._checkpoints.get(checkpoint_id)
+    
+    def get_latest(self, name: str) -> Optional[DataCheckpoint]:
+        """Get latest checkpoint for name."""
+        with self._lock:
+            ids = self._checkpoints_by_name.get(name, [])
+            if ids:
+                return self._checkpoints.get(ids[-1])
+        return None
+    
+    def list_all(self, name: Optional[str] = None) -> List[DataCheckpoint]:
+        """List all checkpoints."""
+        with self._lock:
+            if name:
+                ids = self._checkpoints_by_name.get(name, [])
+                return [self._checkpoints[i] for i in ids if i in self._checkpoints]
+            return list(self._checkpoints.values())
 
 
-class CheckpointRestoreAction(BaseAction):
-    """Restore from checkpoint."""
-    action_type = "checkpoint_restore"
-    display_name = "恢复检查点"
-    description = "从检查点恢复数据"
-
+class DataCheckpointAction(BaseAction):
+    """Data checkpoint action."""
+    action_type = "data_checkpoint"
+    display_name = "数据检查点"
+    description = "数据处理检查点管理"
+    
+    def __init__(self):
+        super().__init__()
+        self._store: Optional[CheckpointStore] = None
+        self._lock = threading.Lock()
+    
+    def _get_store(self, params: Dict[str, Any]) -> CheckpointStore:
+        """Get or create checkpoint store."""
+        with self._lock:
+            if self._store is None:
+                config = CheckpointConfig(
+                    storage_path=params.get("storage_path"),
+                    max_checkpoints=params.get("max_checkpoints", 100),
+                    auto_checkpoint_interval=params.get("auto_checkpoint_interval", 100),
+                )
+                self._store = CheckpointStore(config)
+            return self._store
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute checkpoint operation."""
         try:
-            checkpoint_id = params.get("checkpoint_id", "")
-            if not checkpoint_id:
-                return ActionResult(success=False, message="checkpoint_id is required")
-
-            checkpoints = getattr(context, "checkpoints", {})
-            if checkpoint_id not in checkpoints:
-                return ActionResult(success=False, message=f"Checkpoint {checkpoint_id} not found")
-
-            cp = checkpoints[checkpoint_id]
-            cp["last_restored_at"] = time.time()
-            cp["restore_count"] = cp.get("restore_count", 0) + 1
-
-            return ActionResult(
-                success=True,
-                data={"checkpoint_id": checkpoint_id, "name": cp["name"], "restored": True},
-                message=f"Restored from checkpoint {checkpoint_id}: {cp['name']}",
-            )
+            store = self._get_store(params)
+            command = params.get("command", "create")
+            
+            if command == "create":
+                checkpoint_id = f"cp_{params.get('name', 'default')}_{int(time.time() * 1000)}"
+                cp = DataCheckpoint(
+                    checkpoint_id=checkpoint_id,
+                    name=params.get("name", "default"),
+                    checkpoint_type=CheckpointType[params.get("checkpoint_type", "snapshot").upper()],
+                    position=params.get("position", 0),
+                    data=params.get("data"),
+                )
+                store.save(cp)
+                return ActionResult(success=True, data={"checkpoint_id": checkpoint_id, "position": cp.position})
+            
+            elif command == "get":
+                checkpoint_id = params.get("checkpoint_id")
+                cp = store.get(checkpoint_id)
+                if cp:
+                    return ActionResult(success=True, data={"data": cp.data, "position": cp.position})
+                return ActionResult(success=False, message="Checkpoint not found")
+            
+            elif command == "latest":
+                name = params.get("name", "default")
+                cp = store.get_latest(name)
+                if cp:
+                    return ActionResult(success=True, data={"checkpoint_id": cp.checkpoint_id, "data": cp.data, "position": cp.position})
+                return ActionResult(success=False, message="No checkpoint found")
+            
+            elif command == "list":
+                name = params.get("name")
+                checkpoints = store.list_all(name)
+                return ActionResult(success=True, data={"checkpoints": [{"id": c.checkpoint_id, "position": c.position} for c in checkpoints]})
+            
+            return ActionResult(success=False, message=f"Unknown command: {command}")
+            
         except Exception as e:
-            return ActionResult(success=False, message=f"Checkpoint restore failed: {e}")
-
-
-class CheckpointListAction(BaseAction):
-    """List all checkpoints."""
-    action_type = "checkpoint_list"
-    display_name = "检查点列表"
-    description = "列出所有检查点"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            filter_tags = params.get("tags", [])
-            limit = params.get("limit", 50)
-
-            checkpoints = getattr(context, "checkpoints", {})
-            results = list(checkpoints.values())
-
-            if filter_tags:
-                results = [cp for cp in results if any(tag in cp.get("tags", []) for tag in filter_tags)]
-
-            results = sorted(results, key=lambda x: x.get("created_at", 0), reverse=True)[:limit]
-
-            return ActionResult(
-                success=True,
-                data={"checkpoints": results, "count": len(results)},
-                message=f"Found {len(results)} checkpoints",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Checkpoint list failed: {e}")
-
-
-class CheckpointDeleteAction(BaseAction):
-    """Delete a checkpoint."""
-    action_type = "checkpoint_delete"
-    display_name = "删除检查点"
-    description = "删除检查点"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            checkpoint_id = params.get("checkpoint_id", "")
-            if not checkpoint_id:
-                return ActionResult(success=False, message="checkpoint_id is required")
-
-            checkpoints = getattr(context, "checkpoints", {})
-            if checkpoint_id not in checkpoints:
-                return ActionResult(success=False, message=f"Checkpoint {checkpoint_id} not found")
-
-            cp_name = checkpoints[checkpoint_id]["name"]
-            del checkpoints[checkpoint_id]
-
-            return ActionResult(success=True, data={"checkpoint_id": checkpoint_id, "name": cp_name}, message=f"Checkpoint {cp_name} deleted")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Checkpoint delete failed: {e}")
-
-
-class CheckpointDiffAction(BaseAction):
-    """Compare two checkpoints."""
-    action_type = "checkpoint_diff"
-    display_name = "检查点对比"
-    description = "对比两个检查点"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            checkpoint_id_a = params.get("checkpoint_id_a", "")
-            checkpoint_id_b = params.get("checkpoint_id_b", "")
-
-            if not checkpoint_id_a or not checkpoint_id_b:
-                return ActionResult(success=False, message="checkpoint_id_a and checkpoint_id_b are required")
-
-            checkpoints = getattr(context, "checkpoints", {})
-            cp_a = checkpoints.get(checkpoint_id_a)
-            cp_b = checkpoints.get(checkpoint_id_b)
-
-            if not cp_a or not cp_b:
-                return ActionResult(success=False, message="One or both checkpoints not found")
-
-            diff = {
-                "checkpoint_a": cp_a["name"],
-                "checkpoint_b": cp_b["name"],
-                "size_diff": cp_b.get("data_size", 0) - cp_a.get("data_size", 0),
-                "time_diff_s": cp_b.get("created_at", 0) - cp_a.get("created_at", 0),
-            }
-
-            return ActionResult(
-                success=True,
-                data=diff,
-                message=f"Diff: {cp_a['name']} vs {cp_b['name']}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Checkpoint diff failed: {e}")
+            return ActionResult(success=False, message=f"DataCheckpointAction error: {str(e)}")

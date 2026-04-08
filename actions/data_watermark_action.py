@@ -1,178 +1,178 @@
 """Data watermark action module for RabAI AutoClick.
 
-Provides watermark operations:
-- WatermarkSetAction: Set watermark on stream
-- WatermarkQueryAction: Query watermark
-- WatermarkAdvanceAction: Advance watermark
-- WatermarkLagAction: Calculate lag
-- WatermarkGCAction: Garbage collect old records
+Provides watermark tracking for data streams:
+- WatermarkTracker: Track watermarks in data streams
+- EventTimeWatermark: Event-time watermark processing
+- ProcessingTimeWatermark: Processing-time watermark
 """
 
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import time
-import uuid
-from typing import Any, Dict, List, Optional
+import threading
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from collections import defaultdict
 
 import sys
 import os
-
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class WatermarkSetAction(BaseAction):
-    """Set watermark on a stream."""
-    action_type = "watermark_set"
-    display_name = "设置水位线"
-    description = "设置数据流水位线"
+class WatermarkStrategy(Enum):
+    """Watermark strategies."""
+    EVENT_TIME = "event_time"
+    PROCESSING_TIME = "processing_time"
+    PERIODIC = "periodic"
+    PER_PARTITION = "per_partition"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            stream_id = params.get("stream_id", "")
-            watermark_time = params.get("watermark_time", int(time.time()))
-            watermark_type = params.get("type", "event_time")
 
-            if not stream_id:
-                return ActionResult(success=False, message="stream_id is required")
+@dataclass
+class WatermarkConfig:
+    """Configuration for watermarks."""
+    strategy: WatermarkStrategy = WatermarkStrategy.EVENT_TIME
+    watermark_delay: float = 5.0
+    max_out_of_order: float = 60.0
+    update_interval: float = 1.0
 
-            if not hasattr(context, "watermarks"):
-                context.watermarks = {}
-            context.watermarks[stream_id] = {
-                "stream_id": stream_id,
-                "watermark_time": watermark_time,
-                "type": watermark_type,
-                "set_at": time.time(),
+
+class WatermarkTracker:
+    """Track watermarks in data streams."""
+    
+    def __init__(self, name: str, config: WatermarkConfig):
+        self.name = name
+        self.config = config
+        self._watermarks: Dict[str, float] = defaultdict(lambda: 0.0)
+        self._pending: Dict[str, List[Tuple[float, Any]]] = defaultdict(list)
+        self._lock = threading.RLock()
+        self._stats = {"total_events": 0, "watermarks_advanced": 0, "events_processed": 0}
+    
+    def update_watermark(self, partition: str, timestamp: float) -> bool:
+        """Update watermark for partition."""
+        with self._lock:
+            old_watermark = self._watermarks[partition]
+            new_watermark = timestamp - self.config.watermark_delay
+            
+            if new_watermark > old_watermark:
+                self._watermarks[partition] = new_watermark
+                self._stats["watermarks_advanced"] += 1
+                return True
+            return False
+    
+    def get_watermark(self, partition: str = "default") -> float:
+        """Get current watermark for partition."""
+        with self._lock:
+            return self._watermarks.get(partition, 0.0)
+    
+    def get_min_watermark(self) -> float:
+        """Get minimum watermark across all partitions."""
+        with self._lock:
+            if not self._watermarks:
+                return 0.0
+            return min(self._watermarks.values())
+    
+    def add_event(self, partition: str, timestamp: float, event: Any):
+        """Add event to pending buffer."""
+        with self._lock:
+            self._pending[partition].append((timestamp, event))
+            self._stats["total_events"] += 1
+    
+    def get_ready_events(self, partition: str = "default") -> List[Any]:
+        """Get events that are ready based on watermark."""
+        with self._lock:
+            watermark = self._watermarks.get(partition, 0.0)
+            pending = self._pending.get(partition, [])
+            
+            ready = []
+            not_ready = []
+            
+            for ts, event in pending:
+                if ts <= watermark:
+                    ready.append(event)
+                    self._stats["events_processed"] += 1
+                else:
+                    not_ready.append((ts, event))
+            
+            self._pending[partition] = not_ready
+            return ready
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get watermark statistics."""
+        with self._lock:
+            return {
+                "name": self.name,
+                "tracked_partitions": len(self._watermarks),
+                "min_watermark": self.get_min_watermark(),
+                "pending_events": sum(len(v) for v in self._pending.values()),
+                **{k: v for k, v in self._stats.items()},
             }
 
-            return ActionResult(
-                success=True,
-                data={"stream_id": stream_id, "watermark_time": watermark_time, "type": watermark_type},
-                message=f"Watermark set to {watermark_time} for stream {stream_id}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Watermark set failed: {e}")
 
-
-class WatermarkQueryAction(BaseAction):
-    """Query current watermark."""
-    action_type = "watermark_query"
-    display_name = "查询水位线"
-    description = "查询当前水位线"
-
+class DataWatermarkAction(BaseAction):
+    """Data watermark action."""
+    action_type = "data_watermark"
+    display_name = "数据水印"
+    description = "数据流时间水印跟踪"
+    
+    def __init__(self):
+        super().__init__()
+        self._trackers: Dict[str, WatermarkTracker] = {}
+        self._lock = threading.Lock()
+    
+    def _get_tracker(self, name: str, config: WatermarkConfig) -> WatermarkTracker:
+        """Get or create watermark tracker."""
+        with self._lock:
+            if name not in self._trackers:
+                self._trackers[name] = WatermarkTracker(name, config)
+            return self._trackers[name]
+    
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute watermark operation."""
         try:
-            stream_id = params.get("stream_id", "")
-            if not stream_id:
-                return ActionResult(success=False, message="stream_id is required")
-
-            watermarks = getattr(context, "watermarks", {})
-            wm = watermarks.get(stream_id)
-
-            if not wm:
-                return ActionResult(success=False, message=f"No watermark for stream {stream_id}")
-
-            return ActionResult(
-                success=True,
-                data={"stream_id": stream_id, "watermark_time": wm["watermark_time"], "type": wm["type"]},
-                message=f"Watermark: {wm['watermark_time']}",
+            name = params.get("name", "default")
+            command = params.get("command", "update")
+            
+            config = WatermarkConfig(
+                strategy=WatermarkStrategy[params.get("strategy", "event_time").upper()],
+                watermark_delay=params.get("watermark_delay", 5.0),
             )
+            
+            tracker = self._get_tracker(name, config)
+            
+            if command == "update":
+                partition = params.get("partition", "default")
+                timestamp = params.get("timestamp", time.time())
+                advanced = tracker.update_watermark(partition, timestamp)
+                return ActionResult(success=True, data={"advanced": advanced, "watermark": tracker.get_watermark(partition)})
+            
+            elif command == "get":
+                partition = params.get("partition", "default")
+                watermark = tracker.get_watermark(partition)
+                return ActionResult(success=True, data={"watermark": watermark})
+            
+            elif command == "min":
+                min_wm = tracker.get_min_watermark()
+                return ActionResult(success=True, data={"min_watermark": min_wm})
+            
+            elif command == "add_event":
+                partition = params.get("partition", "default")
+                timestamp = params.get("timestamp", time.time())
+                event = params.get("event")
+                tracker.add_event(partition, timestamp, event)
+                return ActionResult(success=True)
+            
+            elif command == "get_ready":
+                partition = params.get("partition", "default")
+                ready = tracker.get_ready_events(partition)
+                return ActionResult(success=True, data={"events": ready, "count": len(ready)})
+            
+            elif command == "stats":
+                stats = tracker.get_stats()
+                return ActionResult(success=True, data={"stats": stats})
+            
+            return ActionResult(success=False, message=f"Unknown command: {command}")
+            
         except Exception as e:
-            return ActionResult(success=False, message=f"Watermark query failed: {e}")
-
-
-class WatermarkAdvanceAction(BaseAction):
-    """Advance watermark to new time."""
-    action_type = "watermark_advance"
-    display_name = "推进水位线"
-    description = "推进水位线时间"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            stream_id = params.get("stream_id", "")
-            new_time = params.get("new_time", int(time.time()))
-
-            if not stream_id:
-                return ActionResult(success=False, message="stream_id is required")
-
-            watermarks = getattr(context, "watermarks", {})
-            if stream_id not in watermarks:
-                return ActionResult(success=False, message=f"No watermark for stream {stream_id}")
-
-            old_time = watermarks[stream_id]["watermark_time"]
-            watermarks[stream_id]["watermark_time"] = new_time
-            watermarks[stream_id]["advanced_at"] = time.time()
-
-            return ActionResult(
-                success=True,
-                data={"stream_id": stream_id, "old_time": old_time, "new_time": new_time},
-                message=f"Watermark advanced: {old_time} -> {new_time}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Watermark advance failed: {e}")
-
-
-class WatermarkLagAction(BaseAction):
-    """Calculate watermark lag."""
-    action_type = "watermark_lag"
-    display_name = "水位线延迟"
-    description = "计算水位线延迟"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            stream_id = params.get("stream_id", "")
-            current_time = params.get("current_time", int(time.time()))
-
-            if not stream_id:
-                return ActionResult(success=False, message="stream_id is required")
-
-            watermarks = getattr(context, "watermarks", {})
-            wm = watermarks.get(stream_id)
-            if not wm:
-                return ActionResult(success=False, message=f"No watermark for stream {stream_id}")
-
-            lag = current_time - wm["watermark_time"]
-
-            return ActionResult(
-                success=True,
-                data={"stream_id": stream_id, "watermark_time": wm["watermark_time"], "current_time": current_time, "lag_s": lag},
-                message=f"Lag: {lag}s",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Watermark lag failed: {e}")
-
-
-class WatermarkGCAction(BaseAction):
-    """Garbage collect old records below watermark."""
-    action_type = "watermark_gc"
-    display_name = "水位线清理"
-    description = "清理水位线以下的旧记录"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            stream_id = params.get("stream_id", "")
-            if not stream_id:
-                return ActionResult(success=False, message="stream_id is required")
-
-            watermarks = getattr(context, "watermarks", {})
-            streams = getattr(context, "data_streams", {})
-            wm = watermarks.get(stream_id)
-            stream = streams.get(stream_id, {})
-
-            if not wm:
-                return ActionResult(success=False, message=f"No watermark for stream {stream_id}")
-
-            wm_time = wm["watermark_time"]
-            buffer = stream.get("buffer", [])
-            original_count = len(buffer)
-            retained = [r for r in buffer if r.get("timestamp", 0) >= wm_time]
-
-            streams[stream_id]["buffer"] = retained
-            removed = original_count - len(retained)
-
-            return ActionResult(
-                success=True,
-                data={"stream_id": stream_id, "removed": removed, "retained": len(retained)},
-                message=f"GC: removed {removed} records, retained {len(retained)}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Watermark GC failed: {e}")
+            return ActionResult(success=False, message=f"DataWatermarkAction error: {str(e)}")

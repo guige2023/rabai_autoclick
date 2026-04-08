@@ -1,355 +1,324 @@
-"""
-Automation Guardrails Action Module.
+"""Automation guardrails action module for RabAI AutoClick.
 
-Provides safety guardrails, permission checking, resource limits,
-and compliance enforcement for automation workflows.
+Provides guardrails and safety checks for automation:
+- AutomationGuardrails: Safety guardrails for workflows
+- GuardRule: Individual guard rule
+- SafetyMonitor: Monitor and enforce safety constraints
 """
 
-from typing import Any, Callable, Dict, List, Optional, Set
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-import asyncio
-import logging
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import time
-import uuid
+import threading
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from collections import defaultdict
 
-logger = logging.getLogger(__name__)
+import sys
+import os
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class Permission(Enum):
-    """Permission types."""
-    READ = "read"
-    WRITE = "write"
-    DELETE = "delete"
-    EXECUTE = "execute"
-    ADMIN = "admin"
-
-
-class ResourceType(Enum):
-    """Resource types for limits."""
-    CPU = "cpu"
-    MEMORY = "memory"
-    NETWORK = "network"
-    STORAGE = "storage"
-    API_CALLS = "api_calls"
-    FILE_OPS = "file_operations"
+class GuardType(Enum):
+    """Guard types."""
+    RATE = "rate"
+    QUOTA = "quota"
+    TIMEOUT = "timeout"
+    CONDITION = "condition"
+    APPROVAL = "approval"
+    SLI = "sli"
 
 
 @dataclass
-class Principal:
-    """Security principal (user or service)."""
-    principal_id: str
+class GuardRule:
+    """Guard rule definition."""
+    rule_id: str
     name: str
-    roles: Set[str] = field(default_factory=set)
-    permissions: Set[Permission] = field(default_factory=set)
+    guard_type: GuardType
+    threshold: float
+    window: float = 60.0
+    enabled: bool = True
+    action: str = "block"
+    scope: str = "global"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class Resource:
-    """Resource with access controls."""
-    resource_id: str
-    name: str
-    resource_type: ResourceType
-    owner: Optional[str] = None
-    acl: Dict[str, Set[Permission]] = field(default_factory=dict)
+class GuardResult:
+    """Result of guard evaluation."""
+    passed: bool
+    rule_id: str
+    rule_name: str
+    action: str
+    message: Optional[str] = None
 
 
-@dataclass
-class ResourceLimit:
-    """Resource usage limit."""
-    resource_type: ResourceType
-    limit: float
-    window: timedelta
-    current_usage: float = 0.0
-    reset_at: datetime = field(default_factory=datetime.now)
-
-
-@dataclass
-class GuardrailResult:
-    """Result of guardrail check."""
-    allowed: bool
-    reason: str
-    details: Dict[str, Any] = field(default_factory=dict)
-
-
-class PermissionChecker:
-    """Checks permissions against ACLs."""
-
-    def __init__(self):
-        self.principals: Dict[str, Principal] = {}
-        self.resources: Dict[str, Resource] = {}
-
-    def add_principal(self, principal: Principal):
-        """Add a principal."""
-        self.principals[principal.principal_id] = principal
-
-    def add_resource(self, resource: Resource):
-        """Add a resource."""
-        self.resources[resource.resource_id] = resource
-
-    def grant_permission(
-        self,
-        resource_id: str,
-        principal_id: str,
-        permission: Permission
-    ):
-        """Grant permission to principal for resource."""
-        if resource_id in self.resources:
-            if principal_id not in self.resources[resource_id].acl:
-                self.resources[resource_id].acl[principal_id] = set()
-            self.resources[resource_id].acl[principal_id].add(permission)
-
-    def check_permission(
-        self,
-        principal_id: str,
-        resource_id: str,
-        permission: Permission
-    ) -> bool:
-        """Check if principal has permission for resource."""
-        principal = self.principals.get(principal_id)
-        resource = self.resources.get(resource_id)
-
-        if not principal or not resource:
-            return False
-
-        if Permission.ADMIN in principal.permissions:
-            return True
-
-        if principal_id in resource.acl:
-            if permission in resource.acl[principal_id]:
-                return True
-
-        if resource.owner == principal_id:
-            return True
-
-        return False
-
-
-class RateLimiter:
-    """Rate limiting for resources."""
-
-    def __init__(self):
-        self.limits: Dict[ResourceType, ResourceLimit] = {}
-
-    def set_limit(
-        self,
-        resource_type: ResourceType,
-        limit: float,
-        window: timedelta
-    ):
-        """Set rate limit for resource type."""
-        self.limits[resource_type] = ResourceLimit(
-            resource_type=resource_type,
-            limit=limit,
-            window=window
-        )
-
-    def check_limit(self, resource_type: ResourceType, amount: float = 1.0) -> GuardrailResult:
-        """Check if request is within rate limit."""
-        if resource_type not in self.limits:
-            return GuardrailResult(allowed=True, reason="No limit set")
-
-        limit = self.limits[resource_type]
-
-        if datetime.now() >= limit.reset_at:
-            limit.current_usage = 0.0
-            limit.reset_at = datetime.now() + limit.window
-
-        if limit.current_usage + amount > limit.limit:
-            return GuardrailResult(
-                allowed=False,
-                reason=f"Rate limit exceeded for {resource_type.value}",
-                details={
-                    "limit": limit.limit,
-                    "current": limit.current_usage,
-                    "requested": amount
-                }
-            )
-
-        limit.current_usage += amount
-        return GuardrailResult(
-            allowed=True,
-            reason="Within limits",
-            details={"current_usage": limit.current_usage}
-        )
-
-
-class ResourceGuard:
-    """Guards resource access."""
-
-    def __init__(self):
-        self.usage: Dict[str, float] = defaultdict(float)
-        self.max_usage: Dict[str, float] = {}
-
-    def set_max(self, resource_id: str, max_value: float):
-        """Set maximum resource usage."""
-        self.max_usage[resource_id] = max_value
-
-    def check_usage(self, resource_id: str, amount: float = 1.0) -> GuardrailResult:
-        """Check if usage is within limits."""
-        current = self.usage.get(resource_id, 0.0)
-        max_val = self.max_usage.get(resource_id, float("inf"))
-
-        if current + amount > max_val:
-            return GuardrailResult(
-                allowed=False,
-                reason=f"Resource limit exceeded: {resource_id}",
-                details={"current": current, "max": max_val, "requested": amount}
-            )
-
-        self.usage[resource_id] = current + amount
-        return GuardrailResult(
-            allowed=True,
-            reason="Resource available",
-            details={"current_usage": self.usage[resource_id]}
-        )
-
-    def release(self, resource_id: str, amount: float = 1.0):
-        """Release resource usage."""
-        self.usage[resource_id] = max(0.0, self.usage.get(resource_id, 0.0) - amount)
-
-
-class ComplianceChecker:
-    """Checks compliance with rules."""
-
-    def __init__(self):
-        self.rules: List[Tuple[str, Callable]] = []
-
-    def add_rule(self, name: str, checker: Callable[[Any], Tuple[bool, str]]):
-        """Add compliance rule."""
-        self.rules.append((name, checker))
-
-    def check(self, context: Dict[str, Any]) -> List[Tuple[str, bool, str]]:
-        """Check all compliance rules."""
-        results = []
-        for name, checker in self.rules:
-            try:
-                passed, reason = checker(context)
-                results.append((name, passed, reason))
-            except Exception as e:
-                results.append((name, False, f"Error: {str(e)}"))
-        return results
-
-
-class GuardrailEngine:
-    """Main guardrail enforcement engine."""
-
-    def __init__(self):
-        self.permission_checker = PermissionChecker()
-        self.rate_limiter = RateLimiter()
-        self.resource_guard = ResourceGuard()
-        self.compliance_checker = ComplianceChecker()
-        self._audit_log: List[Dict[str, Any]] = []
-
-    def add_audit_log(self, entry: Dict[str, Any]):
-        """Add to audit log."""
-        entry["timestamp"] = datetime.now().isoformat()
-        self._audit_log.append(entry)
-
-    def get_audit_log(
-        self,
-        principal_id: Optional[str] = None,
-        limit: int = 100
-    ) -> List[Dict[str, Any]]:
-        """Get audit log entries."""
-        log = self._audit_log
-        if principal_id:
-            log = [e for e in log if e.get("principal_id") == principal_id]
-        return log[-limit:]
-
-    async def check_guardrails(
-        self,
-        principal: Principal,
-        action: str,
-        resource_id: Optional[str] = None,
-        context: Optional[Dict[str, Any]] = None
-    ) -> GuardrailResult:
-        """Check all guardrails for action."""
-        context = context or {}
-
-        permission_map = {
-            "read": Permission.READ,
-            "write": Permission.WRITE,
-            "delete": Permission.DELETE,
-            "execute": Permission.EXECUTE
-        }
-
-        permission = permission_map.get(action)
-
-        if resource_id and permission:
-            if not self.permission_checker.check_permission(
-                principal.principal_id,
-                resource_id,
-                permission
-            ):
-                self.add_audit_log({
-                    "principal_id": principal.principal_id,
-                    "action": action,
-                    "resource_id": resource_id,
-                    "result": "denied",
-                    "reason": "Permission denied"
-                })
-                return GuardrailResult(
-                    allowed=False,
-                    reason=f"Permission denied for {action} on {resource_id}"
+class RateGuard:
+    """Rate-based guard."""
+    
+    def __init__(self, rule: GuardRule):
+        self.rule = rule
+        self._counts: Dict[str, int] = defaultdict(int)
+        self._timestamps: Dict[str, List[float]] = defaultdict(list)
+        self._lock = threading.RLock()
+    
+    def check(self, scope: str) -> GuardResult:
+        """Check if rate limit is exceeded."""
+        with self._lock:
+            now = time.time()
+            cutoff = now - self.rule.window
+            
+            self._timestamps[scope] = [t for t in self._timestamps[scope] if t > cutoff]
+            
+            if len(self._timestamps[scope]) >= self.rule.threshold:
+                return GuardResult(
+                    passed=False,
+                    rule_id=self.rule.rule_id,
+                    rule_name=self.rule.name,
+                    action=self.rule.action,
+                    message=f"Rate limit exceeded: {len(self._timestamps[scope])} >= {self.rule.threshold}"
                 )
-
-        compliance_results = self.compliance_checker.check(context)
-        failed = [r for r in compliance_results if not r[1]]
-        if failed:
-            self.add_audit_log({
-                "principal_id": principal.principal_id,
-                "action": action,
-                "resource_id": resource_id,
-                "result": "denied",
-                "reason": f"Compliance failure: {failed[0][0]}"
-            })
-            return GuardrailResult(
-                allowed=False,
-                reason=f"Compliance violation: {failed[0][2]}"
-            )
-
-        self.add_audit_log({
-            "principal_id": principal.principal_id,
-            "action": action,
-            "resource_id": resource_id,
-            "result": "allowed"
-        })
-
-        return GuardrailResult(
-            allowed=True,
-            reason="All guardrails passed"
-        )
+            
+            self._timestamps[scope].append(now)
+            return GuardResult(passed=True, rule_id=self.rule.rule_id, rule_name=self.rule.name, action="allow")
+    
+    def reset(self, scope: Optional[str] = None):
+        """Reset rate counters."""
+        with self._lock:
+            if scope:
+                self._timestamps.pop(scope, None)
+            else:
+                self._timestamps.clear()
 
 
-async def main():
-    """Demonstrate guardrails."""
-    engine = GuardrailEngine()
+class QuotaGuard:
+    """Quota-based guard."""
+    
+    def __init__(self, rule: GuardRule):
+        self.rule = rule
+        self._quotas: Dict[str, float] = defaultdict(float)
+        self._lock = threading.RLock()
+    
+    def check(self, scope: str, amount: float = 1.0) -> GuardResult:
+        """Check if quota allows operation."""
+        with self._lock:
+            current = self._quotas.get(scope, 0.0)
+            
+            if current + amount > self.rule.threshold:
+                return GuardResult(
+                    passed=False,
+                    rule_id=self.rule.rule_id,
+                    rule_name=self.rule.name,
+                    action=self.rule.action,
+                    message=f"Quota exceeded: {current} + {amount} > {self.rule.threshold}"
+                )
+            
+            self._quotas[scope] = current + amount
+            return GuardResult(passed=True, rule_id=self.rule.rule_id, rule_name=self.rule.name, action="allow")
+    
+    def reset(self, scope: Optional[str] = None):
+        """Reset quota."""
+        with self._lock:
+            if scope:
+                self._quotas.pop(scope, None)
+            else:
+                self._quotas.clear()
 
-    principal = Principal(
-        principal_id="user1",
-        name="Test User",
-        roles={"user"}
-    )
-    engine.permission_checker.add_principal(principal)
 
-    resource = Resource(
-        resource_id="file1",
-        name="Test File",
-        resource_type=ResourceType.STORAGE,
-        owner="user1"
-    )
-    engine.permission_checker.add_resource(resource)
+class AutomationGuardrails:
+    """Guardrails enforcement for automation workflows."""
+    
+    def __init__(self, name: str):
+        self.name = name
+        self._rules: Dict[str, GuardRule] = {}
+        self._guards: Dict[str, Any] = {}
+        self._approvals: Dict[str, bool] = {}
+        self._lock = threading.RLock()
+        self._stats = {"total_checks": 0, "passed_checks": 0, "blocked_checks": 0, "total_violations": 0}
+    
+    def add_rule(self, rule: GuardRule):
+        """Add guard rule."""
+        with self._lock:
+            self._rules[rule.rule_id] = rule
+            
+            if rule.guard_type == GuardType.RATE:
+                self._guards[rule.rule_id] = RateGuard(rule)
+            elif rule.guard_type == GuardType.QUOTA:
+                self._guards[rule.rule_id] = QuotaGuard(rule)
+    
+    def remove_rule(self, rule_id: str):
+        """Remove guard rule."""
+        with self._lock:
+            self._rules.pop(rule_id, None)
+            self._guards.pop(rule_id, None)
+    
+    def check(self, scope: str = "global", amount: float = 1.0) -> Tuple[bool, List[GuardResult]]:
+        """Check all guards for scope."""
+        with self._lock:
+            self._stats["total_checks"] += 1
+        
+        results = []
+        
+        with self._lock:
+            rules = list(self._rules.values())
+        
+        for rule in rules:
+            if not rule.enabled:
+                continue
+            
+            if rule.scope != "global" and rule.scope != scope:
+                continue
+            
+            if rule.guard_type == GuardType.RATE:
+                guard = self._guards.get(rule.rule_id)
+                if guard:
+                    result = guard.check(scope)
+                    results.append(result)
+            
+            elif rule.guard_type == GuardType.QUOTA:
+                guard = self._guards.get(rule.rule_id)
+                if guard:
+                    result = guard.check(scope, amount)
+                    results.append(result)
+            
+            elif rule.guard_type == GuardType.APPROVAL:
+                approved = self._approvals.get(f"{scope}:{rule.rule_id}", False)
+                if not approved:
+                    results.append(GuardResult(
+                        passed=False,
+                        rule_id=rule.rule_id,
+                        rule_name=rule.name,
+                        action=rule.action,
+                        message="Approval required"
+                    ))
+            
+            elif rule.guard_type == GuardType.CONDITION:
+                if "condition_fn" in rule.metadata:
+                    try:
+                        cond_fn = rule.metadata["condition_fn"]
+                        if not cond_fn():
+                            results.append(GuardResult(
+                                passed=False,
+                                rule_id=rule.rule_id,
+                                rule_name=rule.name,
+                                action=rule.action,
+                                message="Condition not met"
+                            ))
+                    except Exception as e:
+                        results.append(GuardResult(
+                            passed=False,
+                            rule_id=rule.rule_id,
+                            rule_name=rule.name,
+                            action=rule.action,
+                            message=f"Condition error: {str(e)}"
+                        ))
+        
+        with self._lock:
+            blocked = any(not r.passed and r.action == "block" for r in results)
+            if blocked:
+                self._stats["blocked_checks"] += 1
+                self._stats["total_violations"] += 1
+            else:
+                self._stats["passed_checks"] += 1
+        
+        return not blocked, results
+    
+    def approve(self, scope: str, rule_id: str):
+        """Approve a guard for scope."""
+        with self._lock:
+            self._approvals[f"{scope}:{rule_id}"] = True
+    
+    def revoke_approval(self, scope: str, rule_id: str):
+        """Revoke approval."""
+        with self._lock:
+            self._approvals.pop(f"{scope}:{rule_id}", None)
+    
+    def reset(self, rule_id: Optional[str] = None, scope: Optional[str] = None):
+        """Reset guard state."""
+        with self._lock:
+            if rule_id and rule_id in self._guards:
+                self._guards[rule_id].reset(scope)
+            elif scope:
+                for guard in self._guards.values():
+                    guard.reset(scope)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get guardrails statistics."""
+        with self._lock:
+            return {
+                "name": self.name,
+                "rule_count": len(self._rules),
+                **{k: v for k, v in self._stats.items()},
+            }
 
-    result = await engine.check_guardrails(
-        principal,
-        "read",
-        "file1"
-    )
-    print(f"Guardrail result: {result.allowed}, {result.reason}")
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+class AutomationGuardrailsAction(BaseAction):
+    """Automation guardrails action."""
+    action_type = "automation_guardrails"
+    display_name = "自动化护栏"
+    description = "自动化安全护栏控制"
+    
+    def __init__(self):
+        super().__init__()
+        self._guardrails: Dict[str, AutomationGuardrails] = {}
+        self._lock = threading.Lock()
+    
+    def _get_guardrails(self, name: str) -> AutomationGuardrails:
+        """Get or create guardrails."""
+        with self._lock:
+            if name not in self._guardrails:
+                self._guardrails[name] = AutomationGuardrails(name)
+            return self._guardrails[name]
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute guardrails operation."""
+        try:
+            name = params.get("name", "default")
+            command = params.get("command", "check")
+            
+            guardrails = self._get_guardrails(name)
+            
+            if command == "add_rule":
+                rule = GuardRule(
+                    rule_id=params.get("rule_id"),
+                    name=params.get("rule_name"),
+                    guard_type=GuardType[params.get("guard_type", "rate").upper()],
+                    threshold=params.get("threshold", 10.0),
+                    window=params.get("window", 60.0),
+                    action=params.get("action", "block"),
+                    scope=params.get("scope", "global"),
+                )
+                guardrails.add_rule(rule)
+                return ActionResult(success=True, message=f"Rule {rule.rule_id} added")
+            
+            elif command == "check":
+                scope = params.get("scope", "global")
+                amount = params.get("amount", 1.0)
+                passed, results = guardrails.check(scope, amount)
+                blocked = [r for r in results if not r.passed]
+                return ActionResult(
+                    success=passed,
+                    message="Check passed" if passed else f"Blocked by {len(blocked)} guard(s)",
+                    data={"passed": passed, "results": [{"rule": r.rule_name, "passed": r.passed, "message": r.message} for r in results]}
+                )
+            
+            elif command == "approve":
+                scope = params.get("scope", "global")
+                rule_id = params.get("rule_id")
+                guardrails.approve(scope, rule_id)
+                return ActionResult(success=True)
+            
+            elif command == "reset":
+                guardrails.reset()
+                return ActionResult(success=True)
+            
+            elif command == "stats":
+                stats = guardrails.get_stats()
+                return ActionResult(success=True, data={"stats": stats})
+            
+            return ActionResult(success=False, message=f"Unknown command: {command}")
+            
+        except Exception as e:
+            return ActionResult(success=False, message=f"AutomationGuardrailsAction error: {str(e)}")
