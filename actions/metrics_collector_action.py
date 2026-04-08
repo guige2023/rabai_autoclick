@@ -1,22 +1,23 @@
 """Metrics collector action module for RabAI AutoClick.
 
 Provides metrics collection with counters, gauges, histograms,
-and time series tracking for monitoring.
+and time series aggregation for monitoring.
 """
 
-import time
 import sys
 import os
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
-import threading
+from threading import Lock
+from collections import defaultdict
+from statistics import mean, median
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class MetricType(Enum):
+class MetricType(Enum) if False else object:
     """Metric types."""
     COUNTER = "counter"
     GAUGE = "gauge"
@@ -24,292 +25,359 @@ class MetricType(Enum):
     TIMER = "timer"
 
 
-from enum import Enum
-
-
 @dataclass
-class MetricValue:
-    """A single metric value."""
+class MetricPoint:
+    """A single metric data point."""
     timestamp: float
     value: float
     labels: Dict[str, str] = field(default_factory=dict)
 
 
 class MetricsCollectorAction(BaseAction):
-    """Metrics collector action for monitoring and observability.
+    """Collect and aggregate metrics.
     
-    Supports counters, gauges, histograms, and timers with
-    configurable retention and aggregation.
+    Supports counters, gauges, histograms, and timers
+    with labels and time series storage.
     """
     action_type = "metrics_collector"
-    display_name = "指标收集器"
-    description = "监控指标收集与聚合"
+    display_name = "指标收集"
+    description = "监控指标收集和聚合"
     
     def __init__(self):
         super().__init__()
-        self._metrics: Dict[str, Dict[str, Any]] = defaultdict(lambda: {'type': None, 'values': deque(maxlen=10000)})
-        self._lock = threading.RLock()
         self._counters: Dict[str, float] = defaultdict(float)
-        self._gauges: Dict[str, float] = defaultdict(float)
+        self._gauges: Dict[str, float] = {}
         self._histograms: Dict[str, List[float]] = defaultdict(list)
         self._timers: Dict[str, List[float]] = defaultdict(list)
+        self._series: Dict[str, List[MetricPoint]] = defaultdict(list)
+        self._labels: Dict[str, Dict[str, str]] = {}
+        self._lock = Lock()
     
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute metrics operations.
+        """Execute metrics operation.
         
         Args:
             context: Execution context.
             params: Dict with keys:
-                operation: inc|dec|set|gauge|record|get|stats
-                name: Metric name
-                value: Metric value
-                labels: Metric labels.
+                - operation: 'inc', 'dec', 'set', 'record', 'timing', 'get', 'snapshot'
+                - metric: Metric name
+                - value: Metric value
+                - labels: Metric labels
         
         Returns:
             ActionResult with operation result.
         """
-        operation = params.get('operation', 'get')
+        operation = params.get('operation', 'inc').lower()
         
         if operation == 'inc':
-            return self._inc(params)
+            return self._increment(params)
         elif operation == 'dec':
-            return self._dec(params)
+            return self._decrement(params)
         elif operation == 'set':
-            return self._set(params)
-        elif operation == 'gauge':
-            return self._gauge(params)
+            return self._set_gauge(params)
         elif operation == 'record':
-            return self._record(params)
+            return self._record_histogram(params)
+        elif operation == 'timing':
+            return self._record_timing(params)
         elif operation == 'get':
-            return self._get(params)
-        elif operation == 'stats':
-            return self._stats(params)
+            return self._get_metric(params)
+        elif operation == 'snapshot':
+            return self._snapshot(params)
         else:
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
+            return ActionResult(
+                success=False,
+                message=f"Unknown operation: {operation}"
+            )
     
-    def _inc(self, params: Dict[str, Any]) -> ActionResult:
-        """Increment counter."""
-        name = params.get('name')
+    def _increment(self, params: Dict[str, Any]) -> ActionResult:
+        """Increment a counter."""
+        metric = params.get('metric')
         value = params.get('value', 1)
         labels = params.get('labels', {})
         
-        if not name:
-            return ActionResult(success=False, message="Metric name required")
+        if not metric:
+            return ActionResult(success=False, message="metric is required")
         
-        key = self._make_key(name, labels)
+        key = self._make_key(metric, labels)
         
         with self._lock:
             self._counters[key] += value
-            self._record_metric(name, MetricType.COUNTER, self._counters[key], labels)
+            self._labels[key] = labels
+            self._add_to_series(key, self._counters[key], labels)
         
         return ActionResult(
             success=True,
-            message=f"Incremented {name} by {value}",
-            data={'name': name, 'value': self._counters[key], 'labels': labels}
+            message=f"Incremented {metric}",
+            data={'metric': metric, 'value': self._counters[key]}
         )
     
-    def _dec(self, params: Dict[str, Any]) -> ActionResult:
-        """Decrement counter."""
-        name = params.get('name')
+    def _decrement(self, params: Dict[str, Any]) -> ActionResult:
+        """Decrement a counter."""
+        metric = params.get('metric')
         value = params.get('value', 1)
         labels = params.get('labels', {})
         
-        if not name:
-            return ActionResult(success=False, message="Metric name required")
-        
-        key = self._make_key(name, labels)
+        key = self._make_key(metric, labels)
         
         with self._lock:
             self._counters[key] -= value
-            self._record_metric(name, MetricType.COUNTER, self._counters[key], labels)
         
         return ActionResult(
             success=True,
-            message=f"Decremented {name} by {value}",
-            data={'name': name, 'value': self._counters[key], 'labels': labels}
+            message=f"Decremented {metric}",
+            data={'metric': metric, 'value': self._counters[key]}
         )
     
-    def _set(self, params: Dict[str, Any]) -> ActionResult:
-        """Set gauge value."""
-        name = params.get('name')
+    def _set_gauge(self, params: Dict[str, Any]) -> ActionResult:
+        """Set a gauge value."""
+        metric = params.get('metric')
         value = params.get('value')
         labels = params.get('labels', {})
         
-        if not name or value is None:
-            return ActionResult(success=False, message="Name and value required")
+        if value is None:
+            return ActionResult(success=False, message="value is required")
         
-        key = self._make_key(name, labels)
+        key = self._make_key(metric, labels)
         
         with self._lock:
-            self._gauges[key] = value
-            self._record_metric(name, MetricType.GAUGE, value, labels)
+            self._gauges[key] = float(value)
+            self._labels[key] = labels
+            self._add_to_series(key, self._gauges[key], labels)
         
         return ActionResult(
             success=True,
-            message=f"Set {name} to {value}",
-            data={'name': name, 'value': value, 'labels': labels}
+            message=f"Set gauge {metric}",
+            data={'metric': metric, 'value': value}
         )
     
-    def _gauge(self, params: Dict[str, Any]) -> ActionResult:
-        """Alias for set."""
-        return self._set(params)
-    
-    def _record(self, params: Dict[str, Any]) -> ActionResult:
-        """Record histogram value or timer."""
-        name = params.get('name')
+    def _record_histogram(self, params: Dict[str, Any]) -> ActionResult:
+        """Record a histogram value."""
+        metric = params.get('metric')
         value = params.get('value')
-        metric_type = params.get('type', 'histogram')
         labels = params.get('labels', {})
         
-        if not name or value is None:
-            return ActionResult(success=False, message="Name and value required")
+        if value is None:
+            return ActionResult(success=False, message="value is required")
         
-        key = self._make_key(name, labels)
+        key = self._make_key(metric, labels)
         
         with self._lock:
-            if metric_type == 'histogram':
-                self._histograms[key].append(value)
-                self._record_metric(name, MetricType.HISTOGRAM, value, labels)
-            elif metric_type == 'timer':
-                self._timers[key].append(value)
-                self._record_metric(name, MetricType.TIMER, value, labels)
+            self._histograms[key].append(float(value))
+            self._labels[key] = labels
         
         return ActionResult(
             success=True,
-            message=f"Recorded {metric_type} {name}={value}",
-            data={'name': name, 'value': value, 'type': metric_type, 'labels': labels}
+            message=f"Recorded histogram {metric}",
+            data={'metric': metric, 'count': len(self._histograms[key])}
         )
     
-    def _get(self, params: Dict[str, Any]) -> ActionResult:
-        """Get current metric value."""
-        name = params.get('name')
+    def _record_timing(self, params: Dict[str, Any]) -> ActionResult:
+        """Record a timing value (in milliseconds)."""
+        metric = params.get('metric')
+        duration_ms = params.get('duration_ms')
         labels = params.get('labels', {})
         
-        if not name:
-            return ActionResult(success=False, message="Metric name required")
+        if duration_ms is None:
+            return ActionResult(success=False, message="duration_ms is required")
         
-        key = self._make_key(name, labels)
+        key = self._make_key(metric, labels)
         
         with self._lock:
-            if key in self._counters:
-                value = self._counters[key]
-            elif key in self._gauges:
-                value = self._gauges[key]
-            else:
-                return ActionResult(success=False, message=f"Metric {name} not found")
+            self._timers[key].append(float(duration_ms))
         
         return ActionResult(
             success=True,
-            message=f"Got {name}={value}",
-            data={'name': name, 'value': value, 'labels': labels}
+            message=f"Recorded timing {metric}",
+            data={'metric': metric, 'duration_ms': duration_ms}
         )
     
-    def _stats(self, params: Dict[str, Any]) -> ActionResult:
-        """Get statistics for all metrics."""
-        name = params.get('name')
-        labels = params.get('labels', {})
+    def _get_metric(self, params: Dict[str, Any]) -> ActionResult:
+        """Get current metric value(s)."""
+        metric = params.get('metric')
+        labels = params.get('labels')
         
         with self._lock:
-            stats = {}
-            
-            if name:
-                keys = [self._make_key(name, labels)]
-            else:
-                keys = list(set(list(self._counters.keys()) + list(self._gauges.keys())))
-            
-            for key in keys:
-                metric_name = key.split('::')[0] if '::' in key else key
-                label_str = key.split('::')[1] if '::' in key else '{}'
+            if metric:
+                key = self._make_key(metric, labels or {})
+                result = {}
                 
+                # Counter
                 if key in self._counters:
-                    stats[metric_name] = {
-                        'type': 'counter',
-                        'value': self._counters[key],
-                        'labels': self._parse_labels(label_str)
-                    }
-                elif key in self._gauges:
-                    stats[metric_name] = {
-                        'type': 'gauge',
-                        'value': self._gauges[key],
-                        'labels': self._parse_labels(label_str)
-                    }
-                elif key in self._histograms:
+                    result['counter'] = self._counters[key]
+                # Gauge
+                if key in self._gauges:
+                    result['gauge'] = self._gauges[key]
+                # Histogram
+                if key in self._histograms:
                     values = self._histograms[key]
-                    stats[metric_name] = {
-                        'type': 'histogram',
+                    result['histogram'] = {
                         'count': len(values),
                         'sum': sum(values),
-                        'avg': sum(values) / len(values) if values else 0,
-                        'min': min(values) if values else 0,
-                        'max': max(values) if values else 0,
-                        'p50': self._percentile(values, 50),
-                        'p90': self._percentile(values, 90),
-                        'p99': self._percentile(values, 99),
-                        'labels': self._parse_labels(label_str)
+                        'min': min(values),
+                        'max': max(values),
+                        'mean': mean(values),
+                        'median': median(values)
                     }
-                elif key in self._timers:
+                # Timer
+                if key in self._timers:
                     values = self._timers[key]
-                    stats[metric_name] = {
-                        'type': 'timer',
+                    result['timer'] = {
                         'count': len(values),
                         'sum': sum(values),
-                        'avg': sum(values) / len(values) if values else 0,
-                        'min': min(values) if values else 0,
-                        'max': max(values) if values else 0,
-                        'p50': self._percentile(values, 50),
-                        'p90': self._percentile(values, 90),
-                        'p99': self._percentile(values, 99),
-                        'labels': self._parse_labels(label_str)
+                        'min': min(values),
+                        'max': max(values),
+                        'mean': mean(values),
+                        'p95': self._percentile(values, 0.95),
+                        'p99': self._percentile(values, 0.99)
                     }
+                
+                return ActionResult(
+                    success=True,
+                    message=f"Metric {metric}",
+                    data={'metric': metric, 'labels': labels, 'values': result}
+                )
+            else:
+                # Return all metrics
+                return ActionResult(
+                    success=True,
+                    message="All metrics",
+                    data={
+                        'counters': dict(self._counters),
+                        'gauges': dict(self._gauges),
+                        'histogram_count': len(self._histograms),
+                        'timer_count': len(self._timers)
+                    }
+                )
+    
+    def _snapshot(self, params: Dict[str, Any]) -> ActionResult:
+        """Get a snapshot of all metrics."""
+        window = params.get('window', 300)  # seconds
+        
+        with self._lock:
+            snapshot = {
+                'timestamp': time.time(),
+                'counters': dict(self._counters),
+                'gauges': dict(self._gauges),
+                'histograms': {
+                    k: {
+                        'count': len(v),
+                        'sum': sum(v),
+                        'min': min(v) if v else 0,
+                        'max': max(v) if v else 0,
+                        'mean': mean(v) if v else 0
+                    }
+                    for k, v in self._histograms.items()
+                },
+                'timers': {
+                    k: {
+                        'count': len(v),
+                        'sum': sum(v),
+                        'min': min(v) if v else 0,
+                        'max': max(v) if v else 0,
+                        'mean': mean(v) if v else 0,
+                        'p95': self._percentile(v, 0.95),
+                        'p99': self._percentile(v, 0.99)
+                    }
+                    for k, v in self._timers.items()
+                }
+            }
         
         return ActionResult(
             success=True,
-            message=f"Stats for {len(stats)} metrics",
-            data={'metrics': stats, 'count': len(stats)}
+            message="Metrics snapshot",
+            data=snapshot
         )
     
-    def _record_metric(
+    def _make_key(self, metric: str, labels: Dict[str, str]) -> str:
+        """Create a metric key from name and labels."""
+        if not labels:
+            return metric
+        
+        label_str = ','.join(f"{k}={v}" for k, v in sorted(labels.items()))
+        return f"{metric}{{{label_str}}}"
+    
+    def _add_to_series(
         self,
-        name: str,
-        metric_type: MetricType,
+        key: str,
         value: float,
         labels: Dict[str, str]
     ) -> None:
-        """Record metric value in time series."""
-        key = f"{name}"
-        self._metrics[key]['type'] = metric_type.value
-        self._metrics[key]['values'].append(MetricValue(
+        """Add point to time series."""
+        self._series[key].append(MetricPoint(
             timestamp=time.time(),
             value=value,
             labels=labels
         ))
+        
+        # Limit series size
+        if len(self._series[key]) > 1000:
+            self._series[key] = self._series[key][-1000:]
     
-    def _make_key(self, name: str, labels: Dict[str, str]) -> str:
-        """Create metric key from name and labels."""
-        if not labels:
-            return name
-        label_str = ','.join(f"{k}={v}" for k, v in sorted(labels.items()))
-        return f"{name}::{label_str}"
-    
-    def _parse_labels(self, label_str: str) -> Dict[str, str]:
-        """Parse labels from string."""
-        if not label_str or label_str == '{}':
-            return {}
-        labels = {}
-        for pair in label_str.split(','):
-            if '=' in pair:
-                k, v = pair.split('=', 1)
-                labels[k] = v
-        return labels
-    
-    def _percentile(self, values: List[float], p: int) -> float:
+    def _percentile(self, values: List[float], p: float) -> float:
         """Calculate percentile of values."""
         if not values:
-            return 0
+            return 0.0
         sorted_values = sorted(values)
-        idx = int(len(sorted_values) * p / 100)
-        return sorted_values[min(idx, len(sorted_values) - 1)]
+        index = int(len(sorted_values) * p)
+        return sorted_values[min(index, len(sorted_values) - 1)]
+
+
+class PercentileTrackerAction(BaseAction):
+    """Track percentiles over a sliding window."""
+    action_type = "percentile_tracker"
+    display_name = "百分位追踪"
+    description = "滑动窗口百分位数追踪"
+    
+    def __init__(self):
+        super().__init__()
+        self._values: Dict[str, List[float]] = defaultdict(list)
+        self._window_size = 1000
+        self._lock = Lock()
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Track and get percentiles."""
+        metric = params.get('metric')
+        value = params.get('value')
+        percentiles = params.get('percentiles', [0.5, 0.9, 0.95, 0.99])
+        
+        if value is not None:
+            with self._lock:
+                self._values[metric].append(float(value))
+                if len(self._values[metric]) > self._window_size:
+                    self._values[metric] = self._values[metric][-self._window_size:]
+        
+        if metric and metric in self._values:
+            with self._lock:
+                values = self._values[metric]
+                result = {
+                    f"p{int(p*100)}": self._calc_percentile(values, p)
+                    for p in percentiles
+                }
+                result['count'] = len(values)
+            
+            return ActionResult(
+                success=True,
+                message=f"Percentiles for {metric}",
+                data=result
+            )
+        
+        return ActionResult(
+            success=False,
+            message="No data for metric"
+        )
+    
+    def _calc_percentile(self, values: List[float], p: float) -> float:
+        """Calculate percentile."""
+        if not values:
+            return 0.0
+        sorted_values = sorted(values)
+        index = int(len(sorted_values) * p)
+        return sorted_values[min(index, len(sorted_values) - 1)]
