@@ -1,192 +1,165 @@
-"""Scheduler action module for RabAI AutoClick.
-
-Provides scheduling operations:
-- SchedulerCronAction: Cron-based scheduling
-- SchedulerIntervalAction: Interval-based scheduling
-- SchedulerDelayAction: Delayed execution
-- SchedulerRetryAction: Retry scheduling
 """
-
-from __future__ import annotations
-
-import sys
-import os
-import time
+Scheduler utilities - cron parsing, interval calculation, task scheduling simulation.
+"""
 from typing import Any, Dict, List, Optional, Callable
+import time
+import logging
 from datetime import datetime, timedelta
+from collections import deque
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class SchedulerCronAction(BaseAction):
-    """Cron-based scheduling."""
-    action_type = "scheduler_cron"
-    display_name = "Cron调度"
-    description = "Cron定时调度"
-    version = "1.0"
+class BaseAction:
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cron scheduling."""
-        cron_expression = params.get('cron', '* * * * *')
-        timezone = params.get('timezone', 'UTC')
-        output_var = params.get('output_var', 'schedule_info')
+
+def _parse_cron(cron_str: str) -> Dict[str, List[int]]:
+    parts = cron_str.split()
+    if len(parts) != 5:
+        return {}
+    names = ["minute", "hour", "day", "month", "weekday"]
+    result = {}
+    for i, (name, part) in enumerate(zip(names, parts)):
+        if part == "*":
+            result[name] = list(range(60 if i == 0 else 24 if i == 1 else 31 if i == 2 else 12))
+        elif "," in part:
+            result[name] = [int(x) for x in part.split(",")]
+        elif "/" in part:
+            base, step = part.split("/")
+            start = 0 if base == "*" else int(base)
+            step_val = int(step)
+            max_val = 60 if i == 0 else 24 if i == 1 else 31 if i == 2 else 12
+            result[name] = list(range(start, max_val, step_val))
+        elif "-" in part:
+            start, end = part.split("-")
+            result[name] = list(range(int(start), int(end) + 1))
+        else:
+            result[name] = [int(part)]
+    return result
+
+
+def _next_run(cron_str: str, from_time: Optional[datetime] = None) -> Optional[datetime]:
+    cron = _parse_cron(cron_str)
+    if not cron:
+        return None
+    current = from_time or datetime.now()
+    for _ in range(366 * 24 * 60):
+        minute_match = current.minute in cron.get("minute", [current.minute])
+        hour_match = current.hour in cron.get("hour", [current.hour])
+        day_match = current.day in cron.get("day", [current.day])
+        month_match = current.month in cron.get("month", [current.month])
+        dow_match = current.weekday() in cron.get("weekday", [current.weekday()])
+        if minute_match and hour_match and day_match and month_match and dow_match:
+            return current
+        current += timedelta(minutes=1)
+    return None
+
+
+class SchedulerAction(BaseAction):
+    """Scheduler operations.
+
+    Provides cron parsing, next run calculation, interval scheduling, task queue.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: deque = deque()
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "parse_cron")
+        cron_str = params.get("cron", "")
 
         try:
-            import croniter
+            if operation == "parse_cron":
+                if not cron_str:
+                    return {"success": False, "error": "cron string required"}
+                result = _parse_cron(cron_str)
+                return {"success": True, "cron": result, "expression": cron_str}
 
-            resolved_cron = context.resolve_value(cron_expression) if context else cron_expression
+            elif operation == "next_run":
+                if not cron_str:
+                    return {"success": False, "error": "cron string required"}
+                from_str = params.get("from")
+                from_time = datetime.fromisoformat(from_str) if from_str else None
+                next_time = _next_run(cron_str, from_time)
+                if next_time:
+                    return {"success": True, "next_run": next_time.isoformat(), "timestamp": next_time.timestamp()}
+                return {"success": False, "error": "Could not calculate next run"}
 
-            now = datetime.now()
-            cron = croniter.croniter(resolved_cron, now)
-            next_run = cron.get_next(datetime)
+            elif operation == "is_due":
+                if not cron_str:
+                    return {"success": False, "error": "cron string required"}
+                now = datetime.now()
+                cron = _parse_cron(cron_str)
+                if not cron:
+                    return {"success": False, "error": "Invalid cron expression"}
+                minute_match = now.minute in cron.get("minute", [now.minute])
+                hour_match = now.hour in cron.get("hour", [now.hour])
+                day_match = now.day in cron.get("day", [now.day])
+                month_match = now.month in cron.get("month", [now.month])
+                dow_match = now.weekday() in cron.get("weekday", [now.weekday()])
+                is_due = minute_match and hour_match and day_match and month_match and dow_match
+                return {"success": True, "is_due": is_due, "checked_at": now.isoformat()}
 
-            result = {
-                'cron': resolved_cron,
-                'timezone': timezone,
-                'next_run': next_run.isoformat(),
-                'next_run_timestamp': next_run.timestamp(),
-                'scheduled': True,
-            }
+            elif operation == "schedule_interval":
+                interval_seconds = int(params.get("interval_seconds", 60))
+                last_run = params.get("last_run")
+                last_ts = datetime.fromisoformat(last_run).timestamp() if last_run else 0.0
+                elapsed = time.time() - last_ts
+                is_due = elapsed >= interval_seconds
+                next_in = max(0, interval_seconds - elapsed) if not is_due else 0
+                return {"success": True, "is_due": is_due, "elapsed_seconds": round(elapsed, 2), "next_in_seconds": round(next_in, 2)}
 
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Next run: {next_run.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-        except ImportError:
-            return ActionResult(success=False, message="croniter not installed")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cron error: {e}")
+            elif operation == "add_task":
+                task_name = params.get("name", "unnamed")
+                interval = int(params.get("interval_seconds", 60))
+                self._tasks.append({"name": task_name, "interval": interval, "added_at": time.time()})
+                return {"success": True, "tasks_queued": len(self._tasks), "task": task_name}
 
+            elif operation == "list_tasks":
+                return {"success": True, "tasks": list(self._tasks), "count": len(self._tasks)}
 
-class SchedulerIntervalAction(BaseAction):
-    """Interval-based scheduling."""
-    action_type = "scheduler_interval"
-    display_name = "间隔调度"
-    description = "间隔定时调度"
-    version = "1.0"
+            elif operation == "due_tasks":
+                now = time.time()
+                due = []
+                remaining = deque()
+                for task in self._tasks:
+                    elapsed = now - task["added_at"]
+                    if elapsed >= task["interval"]:
+                        due.append(task)
+                    else:
+                        remaining.append(task)
+                self._tasks = remaining
+                return {"success": True, "due": due, "count": len(due)}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute interval scheduling."""
-        interval_seconds = params.get('interval', 60)
-        start_time = params.get('start_time', None)
-        output_var = params.get('output_var', 'schedule_info')
+            elif operation == "human_interval":
+                seconds = int(params.get("seconds", 60))
+                if seconds < 60:
+                    return {"success": True, "human": f"{seconds} seconds"}
+                elif seconds < 3600:
+                    return {"success": True, "human": f"{seconds // 60} minutes"}
+                elif seconds < 86400:
+                    return {"success": True, "human": f"{seconds // 3600} hours"}
+                else:
+                    return {"success": True, "human": f"{seconds // 86400} days"}
 
-        try:
-            resolved_interval = context.resolve_value(interval_seconds) if context else interval_seconds
+            elif operation == "parse_interval":
+                interval_str = params.get("interval", "")
+                units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+                for unit, multiplier in units.items():
+                    if interval_str.endswith(unit):
+                        num = interval_str[:-1]
+                        return {"success": True, "seconds": int(num) * multiplier, "original": interval_str}
+                return {"success": True, "seconds": int(interval_str), "original": interval_str}
 
-            now = datetime.now()
-            if start_time:
-                resolved_start = context.resolve_value(start_time) if context else start_time
-                next_run = datetime.fromisoformat(resolved_start)
             else:
-                next_run = now + timedelta(seconds=resolved_interval)
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
-            result = {
-                'interval_seconds': resolved_interval,
-                'next_run': next_run.isoformat(),
-                'next_run_timestamp': next_run.timestamp(),
-                'scheduled': True,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Scheduled every {resolved_interval}s, next: {next_run.strftime('%H:%M:%S')}"
-            )
         except Exception as e:
-            return ActionResult(success=False, message=f"Interval scheduler error: {e}")
+            logger.error(f"SchedulerAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-class SchedulerDelayAction(BaseAction):
-    """Delayed execution."""
-    action_type = "scheduler_delay"
-    display_name = "延迟执行"
-    description = "延迟执行任务"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute delay."""
-        delay_seconds = params.get('delay', 0)
-        execute_at = params.get('execute_at', None)
-        output_var = params.get('output_var', 'delay_info')
-
-        try:
-            resolved_delay = context.resolve_value(delay_seconds) if context else delay_seconds
-
-            if execute_at:
-                resolved_execute = context.resolve_value(execute_at) if context else execute_at
-                execute_time = datetime.fromisoformat(resolved_execute)
-                delay = max(0, (execute_time - datetime.now()).total_seconds())
-            else:
-                delay = resolved_delay
-                execute_time = datetime.now() + timedelta(seconds=delay)
-
-            result = {
-                'delay_seconds': delay,
-                'execute_at': execute_time.isoformat(),
-                'execute_timestamp': execute_time.timestamp(),
-                'scheduled': True,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Scheduled to execute in {delay:.0f}s at {execute_time.strftime('%H:%M:%S')}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Delay scheduler error: {e}")
-
-
-class SchedulerRetryAction(BaseAction):
-    """Retry scheduling."""
-    action_type = "scheduler_retry"
-    display_name = "重试调度"
-    description = "重试调度任务"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute retry scheduling."""
-        max_retries = params.get('max_retries', 3)
-        retry_delay = params.get('retry_delay', 5)
-        backoff = params.get('backoff', 'exponential')
-        attempt = params.get('attempt', 0)
-        output_var = params.get('output_var', 'retry_info')
-
-        try:
-            resolved_max = context.resolve_value(max_retries) if context else max_retries
-            resolved_delay = context.resolve_value(retry_delay) if context else retry_delay
-            resolved_attempt = context.resolve_value(attempt) if context else attempt
-
-            if resolved_attempt >= resolved_max:
-                return ActionResult(
-                    success=False,
-                    data={output_var: {'should_retry': False, 'attempt': resolved_attempt, 'max_retries': resolved_max}},
-                    message=f"Max retries ({resolved_max}) reached"
-                )
-
-            if backoff == 'exponential':
-                delay = resolved_delay * (2 ** resolved_attempt)
-            elif backoff == 'linear':
-                delay = resolved_delay * (resolved_attempt + 1)
-            else:
-                delay = resolved_delay
-
-            result = {
-                'should_retry': True,
-                'attempt': resolved_attempt + 1,
-                'max_retries': resolved_max,
-                'delay_seconds': delay,
-                'backoff': backoff,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Retry {resolved_attempt + 1}/{resolved_max} in {delay}s"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Retry scheduler error: {e}")
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    return SchedulerAction().execute(context, params)
