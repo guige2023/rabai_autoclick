@@ -1,303 +1,109 @@
-"""
-API Security Action Module.
+# Copyright (c) 2024. coded by claude
+"""API Security Action Module.
 
-Provides API security features including
-authentication, authorization, and input validation.
+Provides security utilities for API protection including
+rate limiting, IP blocking, request signing, and input sanitization.
 """
-
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Optional, Dict, Any, Set, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-import asyncio
 import hashlib
 import hmac
 import logging
-import secrets
-import time
 
 logger = logging.getLogger(__name__)
 
 
-class AuthType(Enum):
-    """Authentication types."""
-    API_KEY = "api_key"
-    BASIC = "basic"
-    BEARER = "bearer"
-    OAUTH2 = "oauth2"
-    JWT = "jwt"
-
-
-class Permission(Enum):
-    """Permission levels."""
-    READ = "read"
-    WRITE = "write"
-    DELETE = "delete"
-    ADMIN = "admin"
+@dataclass
+class SecurityConfig:
+    enable_rate_limiting: bool = True
+    enable_ip_blacklist: bool = True
+    enable_request_signing: bool = False
+    max_requests_per_minute: int = 60
+    secret_key: Optional[str] = None
 
 
 @dataclass
-class User:
-    """User account."""
-    user_id: str
-    username: str
-    password_hash: str
-    permissions: Set[Permission] = field(default_factory=set)
-    api_keys: List[str] = field(default_factory=list)
-    is_active: bool = True
+class RequestInfo:
+    ip_address: str
+    user_agent: Optional[str]
+    timestamp: datetime
+    path: str
+    method: str
 
 
 @dataclass
-class AuthToken:
-    """Authentication token."""
-    token: str
-    user_id: str
-    created_at: datetime
-    expires_at: datetime
-    permissions: Set[Permission]
+class SecurityResult:
+    allowed: bool
+    reason: Optional[str] = None
+    remaining_requests: Optional[int] = None
 
 
-@dataclass
-class AuthResult:
-    """Result of authentication."""
-    success: bool
-    user: Optional[User] = None
-    token: Optional[AuthToken] = None
-    error: Optional[str] = None
+class APISecurity:
+    def __init__(self, config: Optional[SecurityConfig] = None):
+        self.config = config or SecurityConfig()
+        self._ip_blacklist: Set[str] = set()
+        self._ip_request_counts: Dict[str, list] = {}
+        self._lock_hmac = None
 
+    def add_ip_to_blacklist(self, ip: str) -> None:
+        self._ip_blacklist.add(ip)
 
-class PasswordHasher:
-    """Handles password hashing."""
-
-    @staticmethod
-    def hash(password: str, salt: Optional[str] = None) -> str:
-        """Hash a password."""
-        if salt is None:
-            salt = secrets.token_hex(16)
-
-        hash_obj = hashlib.pbkdf2_hmac(
-            'sha256',
-            password.encode('utf-8'),
-            salt.encode('utf-8'),
-            100000
-        )
-        return f"{salt}${hash_obj.hex()}"
-
-    @staticmethod
-    def verify(password: str, hashed: str) -> bool:
-        """Verify password against hash."""
-        try:
-            salt, hash_hex = hashed.split('$')
-            expected = hashlib.pbkdf2_hmac(
-                'sha256',
-                password.encode('utf-8'),
-                salt.encode('utf-8'),
-                100000
-            ).hex()
-            return hmac.compare_digest(expected, hash_hex)
-        except:
-            return False
-
-
-class APIKeyManager:
-    """Manages API keys."""
-
-    def __init__(self):
-        self.api_keys: Dict[str, str] = {}
-
-    def generate_key(self, user_id: str) -> str:
-        """Generate new API key."""
-        key = f"sk_{secrets.token_urlsafe(32)}"
-        self.api_keys[key] = user_id
-        return key
-
-    def validate_key(self, key: str) -> Optional[str]:
-        """Validate API key and return user ID."""
-        return self.api_keys.get(key)
-
-    def revoke_key(self, key: str) -> bool:
-        """Revoke an API key."""
-        if key in self.api_keys:
-            del self.api_keys[key]
+    def remove_ip_from_blacklist(self, ip: str) -> bool:
+        if ip in self._ip_blacklist:
+            self._ip_blacklist.discard(ip)
             return True
         return False
 
+    def check_request(self, request: RequestInfo) -> SecurityResult:
+        if self.config.enable_ip_blacklist and request.ip_address in self._ip_blacklist:
+            return SecurityResult(allowed=False, reason="IP address blocked")
+        if self.config.enable_rate_limiting:
+            rate_result = self._check_rate_limit(request.ip_address)
+            if not rate_result:
+                return SecurityResult(allowed=False, reason="Rate limit exceeded")
+            return rate_result
+        return SecurityResult(allowed=True, remaining_requests=self.config.max_requests_per_minute)
 
-class JWTHandler:
-    """Handles JWT tokens."""
-
-    def __init__(self, secret: str, expiry_seconds: int = 3600):
-        self.secret = secret
-        self.expiry_seconds = expiry_seconds
-
-    def create_token(self, user_id: str, permissions: Set[Permission]) -> AuthToken:
-        """Create JWT token."""
-        import base64
-        import json
-
+    def _check_rate_limit(self, ip: str) -> Optional[SecurityResult]:
         now = datetime.now()
-        expires = now + timedelta(seconds=self.expiry_seconds)
+        if ip not in self._ip_request_counts:
+            self._ip_request_counts[ip] = []
+        request_times = self._ip_request_counts[ip]
+        request_times = [t for t in request_times if (now - t).total_seconds() < 60]
+        self._ip_request_counts[ip] = request_times
+        if len(request_times) >= self.config.max_requests_per_minute:
+            return SecurityResult(allowed=False, reason="Rate limit exceeded", remaining_requests=0)
+        request_times.append(now)
+        remaining = self.config.max_requests_per_minute - len(request_times)
+        return SecurityResult(allowed=True, remaining_requests=remaining)
 
-        header = {"alg": "HS256", "typ": "JWT"}
-        payload = {
-            "sub": user_id,
-            "perms": [p.value for p in permissions],
-            "iat": int(now.timestamp()),
-            "exp": int(expires.timestamp())
-        }
-
-        header_b64 = base64.urlsafe_b64encode(
-            json.dumps(header).encode()
-        ).decode().rstrip('=')
-        payload_b64 = base64.urlsafe_b64encode(
-            json.dumps(payload).encode()
-        ).decode().rstrip('=')
-
+    def sign_request(self, method: str, path: str, body: Optional[str], timestamp: str) -> str:
+        if not self.config.secret_key:
+            raise ValueError("Secret key not configured")
+        message = f"{method}{path}{body or ''}{timestamp}"
         signature = hmac.new(
-            self.secret.encode(),
-            f"{header_b64}.{payload_b64}".encode(),
-            hashlib.sha256
+            self.config.secret_key.encode(),
+            message.encode(),
+            hashlib.sha256,
         ).hexdigest()
+        return signature
 
-        token_str = f"{header_b64}.{payload_b64}.{signature}"
-
-        return AuthToken(
-            token=token_str,
-            user_id=user_id,
-            created_at=now,
-            expires_at=expires,
-            permissions=permissions
-        )
-
-    def validate_token(self, token: str) -> Optional[AuthToken]:
-        """Validate JWT token."""
-        import base64
-        import json
-
-        try:
-            parts = token.split('.')
-            if len(parts) != 3:
-                return None
-
-            header_b64, payload_b64, signature = parts
-
-            expected_sig = hmac.new(
-                self.secret.encode(),
-                f"{header_b64}.{payload_b64}".encode(),
-                hashlib.sha256
-            ).hexdigest()
-
-            if not hmac.compare_digest(signature, expected_sig):
-                return None
-
-            payload = json.loads(
-                base64.urlsafe_b64decode(payload_b64 + '==')
-            )
-
-            if payload["exp"] < int(time.time()):
-                return None
-
-            return AuthToken(
-                token=token,
-                user_id=payload["sub"],
-                created_at=datetime.fromtimestamp(payload["iat"]),
-                expires_at=datetime.fromtimestamp(payload["exp"]),
-                permissions={Permission(p) for p in payload.get("perms", [])}
-            )
-
-        except Exception as e:
-            logger.error(f"JWT validation error: {e}")
-            return None
-
-
-class AuthManager:
-    """Main authentication manager."""
-
-    def __init__(self):
-        self.users: Dict[str, User] = {}
-        self.api_key_manager = APIKeyManager()
-        self.jwt_handler: Optional[JWTHandler] = None
-        self.active_tokens: Dict[str, AuthToken] = {}
-
-    def add_user(
-        self,
-        user_id: str,
-        username: str,
-        password: str,
-        permissions: Optional[Set[Permission]] = None
-    ) -> User:
-        """Add a new user."""
-        password_hash = PasswordHasher.hash(password)
-        user = User(
-            user_id=user_id,
-            username=username,
-            password_hash=password_hash,
-            permissions=permissions or {Permission.READ}
-        )
-        self.users[user_id] = user
-        self.users[username] = user
-        return user
-
-    def authenticate_basic(
-        self,
-        username: str,
-        password: str
-    ) -> AuthResult:
-        """Authenticate with username/password."""
-        user = self.users.get(username)
-
-        if not user or not user.is_active:
-            return AuthResult(success=False, error="Invalid credentials")
-
-        if not PasswordHasher.verify(password, user.password_hash):
-            return AuthResult(success=False, error="Invalid credentials")
-
-        if self.jwt_handler:
-            token = self.jwt_handler.create_token(user.user_id, user.permissions)
-            self.active_tokens[token.token] = token
-            return AuthResult(success=True, user=user, token=token)
-
-        return AuthResult(success=True, user=user)
-
-    def authenticate_api_key(self, key: str) -> AuthResult:
-        """Authenticate with API key."""
-        user_id = self.api_key_manager.validate_key(key)
-
-        if not user_id:
-            return AuthResult(success=False, error="Invalid API key")
-
-        user = self.users.get(user_id)
-
-        if not user or not user.is_active:
-            return AuthResult(success=False, error="User not found")
-
-        return AuthResult(success=True, user=user)
-
-    def check_permission(self, token: str, required: Permission) -> bool:
-        """Check if token has permission."""
-        auth_token = self.active_tokens.get(token)
-
-        if not auth_token:
+    def verify_request_signature(self, signature: str, method: str, path: str, body: Optional[str], timestamp: str) -> bool:
+        if not self.config.secret_key:
             return False
+        expected = self.sign_request(method, path, body, timestamp)
+        return hmac.compare_digest(signature, expected)
 
-        if auth_token.expires_at < datetime.now():
-            return False
+    def sanitize_input(self, text: str) -> str:
+        dangerous_chars = ["<", ">", '"', "'", "&", ";", "|", "`"]
+        for char in dangerous_chars:
+            text = text.replace(char, "")
+        return text
 
-        return required in auth_token.permissions or Permission.ADMIN in auth_token.permissions
+    def get_blocked_ips(self) -> Set[str]:
+        return set(self._ip_blacklist)
 
-
-def main():
-    """Demonstrate API security."""
-    manager = AuthManager()
-
-    manager.add_user("1", "admin", "password123", {Permission.ADMIN})
-
-    result = manager.authenticate_basic("admin", "password123")
-    print(f"Auth success: {result.success}")
-
-    if result.token:
-        print(f"Token: {result.token.token[:20]}...")
-
-
-if __name__ == "__main__":
-    main()
+    def clear_rate_limit_data(self) -> None:
+        self._ip_request_counts.clear()
