@@ -1,273 +1,176 @@
 """
-Memoization Utilities
+Memoization utilities with TTL and LRU support.
 
-Function memoization decorators with TTL, LRU, and custom cache policies.
-Thread-safe implementations with size limits and statistics.
-
-License: MIT
+Provides function memoization with time-to-live,
+thread-safety, and cache statistics.
 """
 
 from __future__ import annotations
 
-import functools
 import threading
 import time
-import weakref
-import hashlib
-import pickle
-from typing import (
-    Any,
-    Callable,
-    TypeVar,
-    Generic,
-    Optional,
-    Union,
-    Hashable,
-    Sequence,
-)
-from collections import OrderedDict
-from abc import ABC, abstractmethod
+import functools
+from typing import Any, Callable, TypeVar
+
 
 T = TypeVar("T")
-U = TypeVar("U")
-V = TypeVar("V")
-
-
-class CachePolicy(ABC):
-    """Abstract base for cache eviction policies."""
-    
-    @abstractmethod
-    def get(self, key: Hashable) -> Any: ...
-    
-    @abstractmethod
-    def set(self, key: Hashable, value: Any) -> None: ...
-    
-    @abstractmethod
-    def invalidate(self, key: Hashable) -> None: ...
-    
-    @abstractmethod
-    def clear(self) -> None: ...
-
-
-class LRUCache(CachePolicy):
-    """Least Recently Used cache with max size."""
-    
-    def __init__(self, maxsize: int = 128) -> None:
-        self._maxsize = maxsize
-        self._cache: OrderedDict = OrderedDict()
-        self._lock = threading.RLock()
-    
-    def get(self, key: Hashable) -> Any:
-        with self._lock:
-            if key not in self._cache:
-                return None
-            self._cache.move_to_end(key)
-            return self._cache[key]
-    
-    def set(self, key: Hashable, value: Any) -> None:
-        with self._lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
-            else:
-                if len(self._cache) >= self._maxsize:
-                    self._cache.popitem(last=False)
-                self._cache[key] = value
-    
-    def invalidate(self, key: Hashable) -> None:
-        with self._lock:
-            self._cache.pop(key, None)
-    
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()
-
-
-class TTLCache(CachePolicy):
-    """Time-To-Live cache with automatic expiration."""
-    
-    def __init__(self, ttl: float = 300.0, maxsize: int = 256) -> None:
-        self._ttl = ttl
-        self._maxsize = maxsize
-        self._cache: OrderedDict = OrderedDict()
-        self._timestamps: OrderedDict = OrderedDict()
-        self._lock = threading.RLock()
-    
-    def _is_expired(self, key: Hashable) -> bool:
-        ts = self._timestamps.get(key)
-        if ts is None:
-            return True
-        return time.monotonic() - ts > self._ttl
-    
-    def _cleanup(self) -> None:
-        expired = [k for k in self._cache if self._is_expired(k)]
-        for k in expired:
-            self._cache.pop(k, None)
-            self._timestamps.pop(k, None)
-        while len(self._cache) > self._maxsize:
-            self._cache.popitem(last=False)
-            self._timestamps.popitem(last=False)
-    
-    def get(self, key: Hashable) -> Any:
-        with self._lock:
-            if key not in self._cache or self._is_expired(key):
-                return None
-            self._cache.move_to_end(key)
-            self._timestamps[key] = time.monotonic()
-            return self._cache[key]
-    
-    def set(self, key: Hashable, value: Any) -> None:
-        with self._lock:
-            self._cleanup()
-            self._cache[key] = value
-            self._timestamps[key] = time.monotonic()
-    
-    def invalidate(self, key: Hashable) -> None:
-        with self._lock:
-            self._cache.pop(key, None)
-            self._timestamps.pop(key, None)
-    
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()
-            self._timestamps.clear()
-
-
-class LFUCache(CachePolicy):
-    """Least Frequently Used cache."""
-    
-    def __init__(self, maxsize: int = 128) -> None:
-        self._maxsize = maxsize
-        self._cache: OrderedDict = OrderedDict()
-        self._freq: dict = {}
-        self._lock = threading.RLock()
-    
-    def get(self, key: Hashable) -> Any:
-        with self._lock:
-            if key not in self._cache:
-                return None
-            self._freq[key] = self._freq.get(key, 0) + 1
-            self._cache.move_to_end(key)
-            return self._cache[key]
-    
-    def set(self, key: Hashable, value: Any) -> None:
-        with self._lock:
-            if key in self._cache:
-                self._freq[key] = self._freq.get(key, 0) + 1
-            else:
-                if len(self._cache) >= self._maxsize:
-                    min_freq = min(self._freq.values())
-                    lfu_keys = [k for k, f in self._freq.items() if f == min_freq]
-                    for k in lfu_keys:
-                        self._cache.pop(k, None)
-                        self._freq.pop(k, None)
-                        break
-                self._freq[key] = 1
-            self._cache[key] = value
-    
-    def invalidate(self, key: Hashable) -> None:
-        with self._lock:
-            self._cache.pop(key, None)
-            self._freq.pop(key, None)
-    
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()
-            self._freq.clear()
+R = TypeVar("R")
 
 
 def memoize(
-    cache: CachePolicy | None = None,
-    *,
-    maxsize: int = 128,
     ttl: float | None = None,
-    key_func: Callable[..., Hashable] | None = None,
-):
-    """Decorator to memoize function results.
-    
-    Example:
-        @memoize(ttl=60.0)
-        def expensive_func(x, y):
-            return compute(x, y)
+    max_size: int | None = None,
+) -> Callable[[Callable[..., R]], Callable[..., R]]:
     """
-    if cache is None:
-        if ttl:
-            cache = TTLCache(ttl=ttl, maxsize=maxsize)
-        else:
-            cache = LRUCache(maxsize=maxsize)
-    
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+    Decorator to memoize function with optional TTL.
+
+    Args:
+        ttl: Time-to-live in seconds
+        max_size: Maximum cache size (LRU eviction)
+
+    Returns:
+        Decorated function with cache attribute
+    """
+    def decorator(func: Callable[..., R]) -> Callable[..., R]:
+        cache: dict[str, tuple[R, float]] = {}
+        lock = threading.Lock()
+        access_order: list[str] = []
+
         @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> T:
-            if key_func:
-                cache_key = key_func(*args, **kwargs)
-            else:
-                try:
-                    cache_key = (args, tuple(sorted(kwargs.items())))
-                except TypeError:
-                    return func(*args, **kwargs)
-            
-            result = cache.get(cache_key)
-            if result is not None:
+        def wrapper(*args: object, **kwargs: object) -> R:
+            key = f"{args}:{sorted(kwargs.items())}"
+            now = time.time()
+
+            with lock:
+                if key in cache:
+                    value, expiry = cache[key]
+                    if ttl is None or now < expiry:
+                        if max_size:
+                            if key in access_order:
+                                access_order.remove(key)
+                            access_order.append(key)
+                        return value
+                    del cache[key]
+                    if key in access_order:
+                        access_order.remove(key)
+
+                result = func(*args, **kwargs)
+                cache[key] = (result, now + ttl if ttl else float("inf"))
+
+                if max_size:
+                    access_order.append(key)
+                    if len(access_order) > max_size:
+                        oldest = access_order.pop(0)
+                        cache.pop(oldest, None)
+
                 return result
-            
-            result = func(*args, **kwargs)
-            cache.set(cache_key, result)
-            return result
-        
-        wrapper.cache = cache
-        wrapper.cache_clear = cache.clear
-        wrapper.cache_invalidate = cache.invalidate
+
+        def cache_clear() -> None:
+            with lock:
+                cache.clear()
+                access_order.clear()
+
+        def cache_info() -> dict:
+            with lock:
+                return {
+                    "size": len(cache),
+                    "max_size": max_size,
+                    "ttl": ttl,
+                }
+
+        wrapper.cache_clear = cache_clear  # type: ignore
+        wrapper.cache_info = cache_info  # type: ignore
         return wrapper
     return decorator
 
 
-def memoize_method(maxsize: int = 128):
-    """Decorator for memoizing instance methods with weakref storage."""
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @functools.wraps(func)
-        def wrapper(self, *args: Any, **kwargs: Any) -> T:
-            cache_attr = f"_memo_cache_{func.__name__}"
-            if not hasattr(self, cache_attr):
-                setattr(self, cache_attr, LRUCache(maxsize=maxsize))
-            cache: LRUCache = getattr(self, cache_attr)
-            try:
-                key = (args, tuple(sorted(kwargs.items())))
-            except TypeError:
-                return func(self, *args, **kwargs)
-            result = cache.get(key)
-            if result is not None:
-                return result
-            result = func(self, *args, **kwargs)
-            cache.set(key, result)
-            return result
-        return wrapper
-    return decorator
+class MemoCache(Generic[T, R]):
+    """
+    Manual memoization cache.
 
+    Use when decorator pattern isn't suitable.
+    """
 
-class MemoizedResult(Generic[T]):
-    """Container for a memoized computation result with metadata."""
-    
     def __init__(
         self,
-        value: T,
-        computed_at: float | None = None,
-        key: Hashable | None = None,
-    ) -> None:
-        self.value = value
-        self.computed_at = computed_at or time.time()
-        self.key = key
-    
-    @property
-    def age_seconds(self) -> float:
-        return time.time() - self.computed_at
+        ttl: float | None = None,
+        max_size: int | None = None,
+    ):
+        self.ttl = ttl
+        self.max_size = max_size
+        self._cache: dict[T, tuple[R, float]] = {}
+        self._lock = threading.Lock()
+        self._access_order: list[T] = []
+        self._hits = 0
+        self._misses = 0
+
+    def get(self, key: T) -> R | None:
+        """Get cached value."""
+        now = time.time()
+        with self._lock:
+            if key in self._cache:
+                value, expiry = self._cache[key]
+                if self.ttl is None or now < expiry:
+                    self._hits += 1
+                    if self.max_size and key in self._access_order:
+                        self._access_order.remove(key)
+                        self._access_order.append(key)
+                    return value
+                del self._cache[key]
+                if key in self._access_order:
+                    self._access_order.remove(key)
+        self._misses += 1
+        return None
+
+    def set(self, key: T, value: R) -> None:
+        """Set cached value."""
+        now = time.time()
+        with self._lock:
+            if key in self._cache:
+                if self.max_size and key in self._access_order:
+                    self._access_order.remove(key)
+            elif self.max_size and len(self._access_order) >= self.max_size:
+                oldest = self._access_order.pop(0)
+                self._cache.pop(oldest, None)
+
+            self._cache[key] = (value, now + self.ttl if self.ttl else float("inf"))
+            self._access_order.append(key)
+
+    def invalidate(self, key: T) -> None:
+        """Remove key from cache."""
+        with self._lock:
+            self._cache.pop(key, None)
+            if key in self._access_order:
+                self._access_order.remove(key)
+
+    def clear(self) -> None:
+        """Clear all cached values."""
+        with self._lock:
+            self._cache.clear()
+            self._access_order.clear()
+        self._hits = 0
+        self._misses = 0
+
+    def stats(self) -> dict:
+        """Get cache statistics."""
+        with self._lock:
+            total = self._hits + self._misses
+            hit_rate = self._hits / total if total > 0 else 0.0
+            return {
+                "size": len(self._cache),
+                "max_size": self.max_size,
+                "ttl": self.ttl,
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": hit_rate,
+            }
 
 
-__all__ = [
-    "CachePolicy",
-    "LRUCache",
-    "TTLCache",
-    "LFUCache",
-    "memoize",
-    "memoize_method",
-    "MemoizedResult",
-]
+def lru_cache(max_size: int = 128) -> Callable[[Callable[..., R]], Callable[..., R]]:
+    """LRU cache without TTL."""
+    return memoize(max_size=max_size)
+
+
+def ttl_cache(ttl: float = 60.0) -> Callable[[Callable[..., R]], Callable[..., R]]:
+    """TTL cache without size limit."""
+    return memoize(ttl=ttl)
