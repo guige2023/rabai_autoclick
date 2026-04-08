@@ -1,373 +1,486 @@
-"""
-Elasticsearch Action Module.
+"""Elasticsearch integration for search and analytics operations.
 
-Provides Elasticsearch client capabilities for search and analytics.
+Handles Elasticsearch operations including indexing, searching,
+aggregations, and cluster management.
 """
 
-from typing import Any, Callable, Dict, List, Optional, Union
-from dataclasses import dataclass, field
-from enum import Enum
-import time
-import json
+from typing import Any, Optional
 import logging
-import threading
+from dataclasses import dataclass, field
+from datetime import datetime
+
+try:
+    from elasticsearch import Elasticsearch, NotFoundError
+except ImportError:
+    Elasticsearch = None
+    NotFoundError = None
 
 logger = logging.getLogger(__name__)
 
 
-class QueryType(Enum):
-    """Elasticsearch query types."""
-    MATCH = "match"
-    TERM = "term"
-    RANGE = "range"
-    BOOL = "bool"
-    FUZZY = "fuzzy"
-    WILDCARD = "wildcard"
-
-
-@dataclass
-class Document:
-    """Elasticsearch document."""
-    index: str
-    doc_type: str
-    id: Optional[str]
-    source: Dict[str, Any]
-    score: Optional[float] = None
-    created_at: float = field(default_factory=time.time)
-
-
-@dataclass
-class SearchResult:
-    """Search result container."""
-    total: int
-    hits: List[Document]
-    aggregations: Dict[str, Any] = field(default_factory=dict)
-    took_ms: int = 0
-
-
 @dataclass
 class ESConfig:
-    """Elasticsearch client configuration."""
-    hosts: List[str] = field(
-        default_factory=lambda: ["http://localhost:9200"]
-    )
-    index_name: str = "default"
-    doc_type: str = "_doc"
-    timeout: float = 30.0
+    """Configuration for Elasticsearch connection."""
+    hosts: list[str]
+    api_key: Optional[str] = None
+    basic_auth: Optional[tuple[str, str]] = None
+    timeout: int = 30
     max_retries: int = 3
     retry_on_timeout: bool = True
-    verify_certs: bool = False
+
+
+@dataclass
+class ESDocument:
+    """Represents an Elasticsearch document."""
+    id: Optional[str]
+    index: str
+    source: dict
+    score: Optional[float] = None
+    highlights: dict = field(default_factory=dict)
+
+
+@dataclass
+class ESSearchResult:
+    """Search result with documents and metadata."""
+    total: int
+    documents: list[ESDocument]
+    took_ms: int
+    scroll_id: Optional[str] = None
+    aggregations: dict = field(default_factory=dict)
+
+
+class ElasticsearchAPIError(Exception):
+    """Raised when Elasticsearch operations fail."""
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ElasticsearchAction:
-    """
-    Elasticsearch action handler.
-    
-    Provides Elasticsearch client for search and analytics.
-    
-    Example:
-        es = ElasticsearchAction(config=cfg)
-        es.connect()
-        es.create_index("my-index")
-        es.index("my-index", {"title": "Hello"})
-        es.search("my-index", {"query": {"match": {"title": "Hello"}}})
-    """
-    
-    def __init__(self, config: Optional[ESConfig] = None):
-        """
-        Initialize Elasticsearch handler.
-        
+    """Elasticsearch client for search and analytics operations."""
+
+    def __init__(self, config: ESConfig):
+        """Initialize Elasticsearch client with configuration.
+
         Args:
-            config: Elasticsearch configuration
+            config: ESConfig with hosts and auth
+
+        Raises:
+            ImportError: If elasticsearch-py is not installed
         """
-        self.config = config or ESConfig()
-        self._connected = False
-        self._indices: Dict[str, Dict[str, Any]] = {}
-        self._documents: Dict[str, Dict[str, Document]] = {}
-        self._lock = threading.RLock()
-    
-    def connect(self) -> bool:
+        if Elasticsearch is None:
+            raise ImportError("elasticsearch required: pip install elasticsearch")
+
+        self.config = config
+        self._client: Optional[Elasticsearch] = None
+
+    def connect(self) -> None:
+        """Establish connection to Elasticsearch.
+
+        Raises:
+            ElasticsearchAPIError: On connection failure
         """
-        Connect to Elasticsearch cluster.
-        
+        kwargs: dict[str, Any] = {
+            "timeout": self.config.timeout,
+            "max_retries": self.config.max_retries,
+            "retry_on_timeout": self.config.retry_on_timeout
+        }
+
+        if self.config.api_key:
+            kwargs["api_key"] = self.config.api_key
+        elif self.config.basic_auth:
+            kwargs["basic_auth"] = self.config.basic_auth
+
+        try:
+            self._client = Elasticsearch(hosts=self.config.hosts, **kwargs)
+            info = self._client.info()
+            logger.info(f"Connected to Elasticsearch: {info['cluster_name']}")
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Connection failed: {e}")
+
+    def disconnect(self) -> None:
+        """Close Elasticsearch connection."""
+        if self._client:
+            self._client.close()
+            self._client = None
+            logger.info("Disconnected from Elasticsearch")
+
+    @property
+    def client(self) -> Elasticsearch:
+        """Get ES client, connect if needed."""
+        if self._client is None:
+            self.connect()
+        return self._client
+
+    def index_document(self, index: str, doc: dict,
+                       doc_id: Optional[str] = None,
+                       refresh: bool = False) -> str:
+        """Index a document.
+
+        Args:
+            index: Index name
+            doc: Document body
+            doc_id: Optional document ID
+            refresh: Refresh index after indexing
+
         Returns:
-            True if connection successful
+            Document ID
         """
         try:
-            logger.info(f"Connecting to Elasticsearch: {self.config.hosts}")
-            self._connected = True
-            return True
+            kwargs: dict[str, Any] = {"index": index, "document": doc}
+
+            if doc_id:
+                kwargs["id"] = doc_id
+
+            if refresh:
+                kwargs["refresh"] = refresh
+
+            result = self.client.index(**kwargs)
+            return result["_id"]
+
         except Exception as e:
-            logger.error(f"Elasticsearch connection failed: {e}")
-            return False
-    
-    def disconnect(self) -> bool:
-        """
-        Disconnect from Elasticsearch.
-        
+            raise ElasticsearchAPIError(f"Index failed: {e}")
+
+    def get_document(self, index: str, doc_id: str) -> ESDocument:
+        """Get a document by ID.
+
+        Args:
+            index: Index name
+            doc_id: Document ID
+
         Returns:
-            True if disconnected
+            ESDocument object
+
+        Raises:
+            ElasticsearchAPIError: If document not found
         """
-        with self._lock:
-            self._connected = False
-            self._indices.clear()
-            self._documents.clear()
-            logger.info("Disconnected from Elasticsearch")
+        try:
+            result = self.client.get(index=index, id=doc_id)
+            return ESDocument(
+                id=result["_id"],
+                index=result["_index"],
+                source=result["_source"]
+            )
+
+        except NotFoundError:
+            raise ElasticsearchAPIError(f"Document not found: {doc_id}", status_code=404)
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Get failed: {e}")
+
+    def delete_document(self, index: str, doc_id: str,
+                        refresh: bool = False) -> bool:
+        """Delete a document.
+
+        Args:
+            index: Index name
+            doc_id: Document ID
+            refresh: Refresh index after deletion
+
+        Returns:
+            True if deleted
+        """
+        try:
+            self.client.delete(index=index, id=doc_id, refresh=refresh)
             return True
-    
-    def is_connected(self) -> bool:
-        """Check if connected."""
-        return self._connected
-    
-    def create_index(
-        self,
-        index: str,
-        mappings: Optional[Dict[str, Any]] = None,
-        settings: Optional[Dict[str, Any]] = None
-    ) -> bool:
+
+        except NotFoundError:
+            return False
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Delete failed: {e}")
+
+    def update_document(self, index: str, doc_id: str,
+                        doc: dict, retry_on_conflict: int = 3) -> bool:
+        """Update a document.
+
+        Args:
+            index: Index name
+            doc_id: Document ID
+            doc: Partial document with updated fields
+            retry_on_conflict: Number of retries on conflict
+
+        Returns:
+            True if updated
         """
-        Create an index.
-        
+        try:
+            self.client.update(
+                index=index,
+                id=doc_id,
+                doc=doc,
+                retry_on_conflict=retry_on_conflict
+            )
+            return True
+
+        except NotFoundError:
+            raise ElasticsearchAPIError(f"Document not found: {doc_id}", status_code=404)
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Update failed: {e}")
+
+    def search(self, index: str, query: dict,
+               size: int = 10, from_: int = 0,
+               sort: Optional[list] = None,
+               highlight: Optional[dict] = None,
+               aggregations: Optional[dict] = None,
+               scroll: Optional[str] = None) -> ESSearchResult:
+        """Execute a search query.
+
+        Args:
+            index: Index name or pattern
+            query: Elasticsearch query DSL
+            size: Number of results
+            from_: Starting offset
+            sort: Sort specification
+            highlight: Highlight configuration
+            aggregations: Aggregation definitions
+            scroll: Scroll context duration
+
+        Returns:
+            ESSearchResult with documents and metadata
+        """
+        try:
+            body: dict[str, Any] = {"query": query}
+
+            if sort:
+                body["sort"] = sort
+
+            if highlight:
+                body["highlight"] = highlight
+
+            if aggregations:
+                body["aggs"] = aggregations
+
+            kwargs: dict[str, Any] = {
+                "index": index,
+                "body": body,
+                "size": size,
+                "from_": from_
+            }
+
+            if scroll:
+                kwargs["scroll"] = scroll
+
+            result = self.client.search(**kwargs)
+
+            documents = []
+            for hit in result["hits"]["hits"]:
+                documents.append(ESDocument(
+                    id=hit["_id"],
+                    index=hit["_index"],
+                    source=hit["_source"],
+                    score=hit.get("_score"),
+                    highlights=hit.get("highlight", {})
+                ))
+
+            total = result["hits"]["total"]
+            total_count = total["value"] if isinstance(total, dict) else total
+
+            return ESSearchResult(
+                total=total_count,
+                documents=documents,
+                took_ms=result["took"],
+                scroll_id=result.get("_scroll_id"),
+                aggregations=result.get("aggregations", {})
+            )
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Search failed: {e}")
+
+    def scroll_search(self, index: str, query: dict,
+                       size: int = 100,
+                       scroll: str = "2m") -> list[ESDocument]:
+        """Execute a scroll search for large result sets.
+
+        Args:
+            index: Index name
+            query: Elasticsearch query
+            size: Batch size per scroll
+            scroll: Scroll context duration
+
+        Returns:
+            All matching ESDocument objects
+        """
+        try:
+            result = self.search(index, query, size=size, scroll=scroll)
+            all_docs = result.documents.copy()
+
+            while result.scroll_id and result.documents:
+                result = self.scroll(scroll_id=result.scroll_id, scroll=scroll)
+                all_docs.extend(result.documents)
+
+            return all_docs
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Scroll search failed: {e}")
+
+    def scroll(self, scroll_id: str, scroll: str = "2m") -> ESSearchResult:
+        """Scroll through existing search context.
+
+        Args:
+            scroll_id: Scroll context ID
+            scroll: Scroll duration
+
+        Returns:
+            ESSearchResult with next batch
+        """
+        try:
+            result = self.client.scroll(scroll_id=scroll_id, scroll=scroll)
+
+            documents = []
+            for hit in result["hits"]["hits"]:
+                documents.append(ESDocument(
+                    id=hit["_id"],
+                    index=hit["_index"],
+                    source=hit["_source"],
+                    score=hit.get("_score")
+                ))
+
+            return ESSearchResult(
+                total=len(documents),
+                documents=documents,
+                took_ms=result.get("took", 0),
+                scroll_id=result.get("_scroll_id")
+            )
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Scroll failed: {e}")
+
+    def create_index(self, index: str, mappings: Optional[dict] = None,
+                     settings: Optional[dict] = None) -> bool:
+        """Create an index with mappings and settings.
+
         Args:
             index: Index name
             mappings: Index field mappings
             settings: Index settings
-            
+
         Returns:
-            True if created successfully
+            True if created
         """
-        if not self._connected:
-            return False
-        
-        with self._lock:
-            self._indices[index] = {
-                "mappings": mappings or {},
-                "settings": settings or {},
-                "created_at": time.time()
-            }
-            self._documents[index] = {}
-            logger.info(f"Created index: {index}")
+        try:
+            body = {}
+            if mappings:
+                body["mappings"] = mappings
+            if settings:
+                body["settings"] = settings
+
+            self.client.indices.create(index=index, body=body)
             return True
-    
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Create index failed: {e}")
+
     def delete_index(self, index: str) -> bool:
-        """
-        Delete an index.
-        
+        """Delete an index.
+
         Args:
             index: Index name
-            
+
         Returns:
             True if deleted
         """
-        with self._lock:
-            if index in self._indices:
-                del self._indices[index]
-            if index in self._documents:
-                del self._documents[index]
-            logger.info(f"Deleted index: {index}")
+        try:
+            self.client.indices.delete(index=index)
             return True
-    
-    def index(
-        self,
-        index: str,
-        document: Dict[str, Any],
-        doc_id: Optional[str] = None,
-        refresh: bool = False
-    ) -> str:
-        """
-        Index a document.
-        
+
+        except NotFoundError:
+            return False
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Delete index failed: {e}")
+
+    def index_exists(self, index: str) -> bool:
+        """Check if index exists.
+
         Args:
             index: Index name
-            document: Document data
-            doc_id: Optional document ID
-            refresh: Whether to refresh immediately
-            
+
         Returns:
-            Document ID
+            True if exists
         """
-        if not self._connected:
-            raise RuntimeError("Not connected to Elasticsearch")
-        
-        doc_id = doc_id or f"doc_{int(time.time() * 1000)}"
-        
-        with self._lock:
-            if index not in self._documents:
-                self._documents[index] = {}
-            
-            doc = Document(
-                index=index,
-                doc_type=self.config.doc_type,
-                id=doc_id,
-                source=document
+        try:
+            return self.client.indices.exists(index=index)
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Index exists check failed: {e}")
+
+    def bulk_index(self, index: str, documents: list[dict],
+                   id_field: Optional[str] = None,
+                   refresh: bool = False) -> dict:
+        """Bulk index multiple documents.
+
+        Args:
+            index: Index name
+            documents: List of document bodies
+            id_field: Field to use as document ID
+            refresh: Refresh after bulk
+
+        Returns:
+            Bulk operation summary
+        """
+        try:
+            from elasticsearch.helpers import bulk
+
+            actions = []
+            for doc in documents:
+                action: dict[str, Any] = {
+                    "_index": index,
+                    "_source": doc
+                }
+
+                if id_field and id_field in doc:
+                    action["_id"] = doc[id_field]
+
+                actions.append(action)
+
+            success, failed = bulk(
+                self.client,
+                actions,
+                refresh=refresh
             )
-            self._documents[index][doc_id] = doc
-        
-        logger.debug(f"Indexed document {doc_id} in {index}")
-        return doc_id
-    
-    def get(
-        self,
-        index: str,
-        doc_id: str
-    ) -> Optional[Document]:
-        """
-        Get a document by ID.
-        
+
+            return {"success": success, "failed": len(failed) if failed else 0}
+
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Bulk index failed: {e}")
+
+    def refresh_index(self, index: str) -> None:
+        """Refresh an index to make recent changes searchable.
+
         Args:
             index: Index name
-            doc_id: Document ID
-            
+        """
+        try:
+            self.client.indices.refresh(index=index)
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Refresh failed: {e}")
+
+    def get_cluster_health(self) -> dict:
+        """Get cluster health status.
+
         Returns:
-            Document or None
+            Cluster health info
         """
-        with self._lock:
-            if index not in self._documents:
-                return None
-            return self._documents[index].get(doc_id)
-    
-    def delete(
-        self,
-        index: str,
-        doc_id: str,
-        refresh: bool = False
-    ) -> bool:
-        """
-        Delete a document.
-        
+        try:
+            return self.client.cluster.health()
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Cluster health failed: {e}")
+
+    def count(self, index: str, query: Optional[dict] = None) -> int:
+        """Count documents matching query.
+
         Args:
             index: Index name
-            doc_id: Document ID
-            refresh: Whether to refresh immediately
-            
-        Returns:
-            True if deleted
-        """
-        with self._lock:
-            if index in self._documents:
-                if doc_id in self._documents[index]:
-                    del self._documents[index][doc_id]
-                    logger.debug(f"Deleted document {doc_id}")
-                    return True
-        return False
-    
-    def search(
-        self,
-        index: str,
-        query: Dict[str, Any],
-        size: int = 10,
-        from_: int = 0,
-        sort: Optional[List[Dict[str, Any]]] = None,
-        aggregations: Optional[Dict[str, Any]] = None
-    ) -> SearchResult:
-        """
-        Search documents.
-        
-        Args:
-            index: Index name
-            query: Search query
-            size: Number of results
-            from_: Starting offset
-            sort: Sort specification
-            aggregations: Aggregation definitions
-            
-        Returns:
-            SearchResult with hits and aggregations
-        """
-        if not self._connected:
-            raise RuntimeError("Not connected to Elasticsearch")
-        
-        start_time = time.time()
-        
-        with self._lock:
-            hits = []
-            if index in self._documents:
-                for doc in self._documents[index].values():
-                    hits.append(doc)
-            
-            result = SearchResult(
-                total=len(hits),
-                hits=hits[:size],
-                aggregations=aggregations or {},
-                took_ms=int((time.time() - start_time) * 1000)
-            )
-        
-        return result
-    
-    def update(
-        self,
-        index: str,
-        doc_id: str,
-        doc: Dict[str, Any],
-        refresh: bool = False
-    ) -> bool:
-        """
-        Update a document.
-        
-        Args:
-            index: Index name
-            doc_id: Document ID
-            doc: Partial document update
-            refresh: Whether to refresh immediately
-            
-        Returns:
-            True if updated
-        """
-        with self._lock:
-            if index not in self._documents:
-                return False
-            if doc_id not in self._documents[index]:
-                return False
-            
-            existing = self._documents[index][doc_id]
-            existing.source.update(doc)
-            return True
-    
-    def bulk(
-        self,
-        operations: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Execute bulk operations.
-        
-        Args:
-            operations: List of bulk operations
-            
-        Returns:
-            Bulk operation results
-        """
-        with self._lock:
-            success_count = 0
-            error_count = 0
-            
-            for op in operations:
-                if "index" in op:
-                    success_count += 1
-                elif "delete" in op:
-                    success_count += 1
-                else:
-                    error_count += 1
-            
-            return {
-                "took": len(operations),
-                "errors": error_count > 0,
-                "items": [
-                    {"index": {"_id": f"doc_{i}"}}
-                    for i in range(success_count)
-                ]
-            }
-    
-    def count(self, index: str) -> int:
-        """
-        Get document count for an index.
-        
-        Args:
-            index: Index name
-            
+            query: Optional query filter
+
         Returns:
             Document count
         """
-        with self._lock:
-            if index not in self._documents:
-                return 0
-            return len(self._documents[index])
+        try:
+            kwargs: dict[str, Any] = {"index": index}
+            if query:
+                kwargs["body"] = {"query": query}
+            return self.client.count(**kwargs)["count"]
+        except Exception as e:
+            raise ElasticsearchAPIError(f"Count failed: {e}")
