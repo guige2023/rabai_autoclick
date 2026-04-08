@@ -1,272 +1,215 @@
-"""Data correlation analysis action module for RabAI AutoClick.
+"""
+Data Correlation Action Module.
 
-Provides correlation computation between numeric columns:
-Pearson, Spearman, Kendall, and Cramér's V for categorical.
+Computes correlations between data features,
+supports Pearson, Spearman, and custom correlation methods.
 """
 
 from __future__ import annotations
 
-import sys
-import os
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
-from collections import defaultdict
+from typing import Any, Optional
+from dataclasses import dataclass
+import logging
+import math
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
+
+
+class CorrelationMethod(Enum):
+    """Correlation method types."""
+    PEARSON = "pearson"
+    SPEARMAN = "spearman"
+    KENDALL = "kendall"
 
 
 @dataclass
-class CorrelationPair:
-    """A correlation pair between two columns."""
-    col_a: str
-    col_b: str
+class CorrelationResult:
+    """Result of correlation computation."""
+    variable_a: str
+    variable_b: str
+    correlation: float
     method: str
-    coefficient: float
     p_value: Optional[float] = None
-    strength: str = ""  # weak/moderate/strong/very_strong
-
-    def __post_init__(self):
-        abs_c = abs(self.coefficient)
-        if abs_c < 0.2:
-            self.strength = "weak"
-        elif abs_c < 0.4:
-            self.strength = "weak_to_moderate"
-        elif abs_c < 0.6:
-            self.strength = "moderate"
-        elif abs_c < 0.8:
-            self.strength = "strong"
-        else:
-            self.strength = "very_strong"
+    significant: bool = False
 
 
-class PearsonCorrelationAction(BaseAction):
-    """Compute Pearson correlation coefficient between two numeric series.
-    
-    Measures linear relationship strength from -1 (perfect negative)
-    to +1 (perfect positive). Sensitive to outliers.
-    
-    Args:
-        col_a: First column name
-        col_b: Second column name
-        data: List of dicts with numeric values
-    
-    Returns:
-        CorrelationPair with coefficient and p_value
+class DataCorrelationAction:
+    """
+    Correlation analysis between data features.
+
+    Computes pairwise correlations using
+    Pearson, Spearman, or Kendall methods.
+
+    Example:
+        corr = DataCorrelationAction()
+        result = corr.correlate(data, "x", "y", method=CORRELATION_METHOD.PEARSON)
     """
 
-    def execute(self, col_a: str, col_b: str, data: List[Dict[str, Any]]) -> ActionResult:
-        try:
-            vals_a = [d[col_a] for d in data if col_a in d and d[col_a] is not None]
-            vals_b = [d[col_b] for d in data if col_b in d and d[col_b] is not None]
-
-            if len(vals_a) < 3 or len(vals_b) < 3:
-                return ActionResult(success=False, error="Insufficient data points")
-
-            n = min(len(vals_a), len(vals_b))
-            vals_a = vals_a[:n]
-            vals_b = vals_b[:n]
-
-            mean_a = sum(vals_a) / n
-            mean_b = sum(vals_b) / n
-
-            cov = sum((a - mean_a) * (b - mean_b) for a, b in zip(vals_a, vals_b))
-            std_a = (sum((a - mean_a) ** 2 for a in vals_a) ** 0.5)
-            std_b = (sum((b - mean_b) ** 2 for b in vals_b) ** 0.5)
-
-            if std_a == 0 or std_b == 0:
-                coefficient = 0.0
-            else:
-                coefficient = cov / (std_a * std_b)
-
-            # Approximate p-value using t-distribution
-            if abs(coefficient) >= 1.0:
-                p_value = 0.0
-            else:
-                t_stat = coefficient * ((n - 2) ** 0.5) / ((1 - coefficient ** 2) ** 0.5)
-                p_value = self._t_dist_pvalue(abs(t_stat), n - 2)
-
-            pair = CorrelationPair(
-                col_a=col_a, col_b=col_b, method="pearson",
-                coefficient=round(coefficient, 6), p_value=round(p_value, 6)
-            )
-            return ActionResult(success=True, data={
-                "coefficient": pair.coefficient,
-                "p_value": pair.p_value,
-                "strength": pair.strength,
-                "n_samples": n
-            })
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
-
-    def _t_dist_pvalue(self, t: float, df: int) -> float:
-        """Approximate two-tailed p-value from t-statistic."""
-        import math
-        x = df / (df + t * t)
-        # Beta regularized incomplete — simplified approximation
-        p = 0.5 * (1.0 + math.copysign(
-            1.0, t) * ((x + math.sqrt(abs(0.001 - x * (1.0 - x)))) / 0.5))
-        return max(0.0, min(1.0, 1.0 - abs(p - 0.5) * 2))
-
-
-class SpearmanCorrelationAction(BaseAction):
-    """Compute Spearman rank correlation coefficient.
-    
-    Non-parametric measure using rank order instead of values.
-    Handles non-linear relationships and is robust to outliers.
-    """
-
-    def execute(self, col_a: str, col_b: str, data: List[Dict[str, Any]]) -> ActionResult:
-        try:
-            filtered = [
-                (d[col_a], d[col_b])
-                for d in data
-                if col_a in d and col_b in d and d[col_a] is not None and d[col_b] is not None
-            ]
-            if len(filtered) < 3:
-                return ActionResult(success=False, error="Insufficient data points")
-
-            def rankify(values: List[float]) -> List[Tuple[int, float]]:
-                sorted_pairs = sorted(enumerate(values), key=lambda x: x[1])
-                ranks = {}
-                i = 0
-                while i < len(sorted_pairs):
-                    j = i
-                    while j < len(sorted_pairs) - 1 and \
-                            sorted_pairs[j + 1][1] == sorted_pairs[i][1]:
-                        j += 1
-                    avg_rank = (i + j) / 2.0
-                    for k in range(i, j + 1):
-                        ranks[sorted_pairs[k][0]] = avg_rank
-                    i = j + 1
-                return [(idx, ranks[idx]) for idx in range(len(values))]
-
-            vals_a = [v[0] for v in filtered]
-            vals_b = [v[1] for v in filtered]
-            ranks_a = rankify(vals_a)
-            ranks_b = rankify(vals_b)
-
-            n = len(ranks_a)
-            d_sq_sum = sum((ra - rb) ** 2 for (_, ra), (_, rb) in zip(ranks_a, ranks_b))
-            coefficient = 1.0 - (6.0 * d_sq_sum) / (n * (n * n - 1))
-
-            pair = CorrelationPair(
-                col_a=col_a, col_b=col_b, method="spearman",
-                coefficient=round(coefficient, 6)
-            )
-            return ActionResult(success=True, data={
-                "coefficient": pair.coefficient,
-                "strength": pair.strength,
-                "n_samples": n
-            })
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
-
-
-class CramersVCorrelationAction(BaseAction):
-    """Compute Cramér's V for categorical-categorical correlation.
-    
-    Based on chi-squared statistic, ranges from 0 (no association)
-    to 1 (perfect association). Symmetric measure.
-    """
-
-    def execute(self, col_a: str, col_b: str, data: List[Dict[str, Any]]) -> ActionResult:
-        try:
-            filtered = [
-                (str(d[col_a]), str(d[col_b]))
-                for d in data
-                if col_a in d and col_b in d and d[col_a] is not None and d[col_b] is not None
-            ]
-            if len(filtered) < 2:
-                return ActionResult(success=False, error="Insufficient data points")
-
-            n = len(filtered)
-
-            # Contingency table
-            count_ab: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-            count_a: Dict[str, int] = defaultdict(int)
-            count_b: Dict[str, int] = defaultdict(int)
-
-            for val_a, val_b in filtered:
-                count_ab[val_a][val_b] += 1
-                count_a[val_a] += 1
-                count_b[val_b] += 1
-
-            # Chi-squared
-            chi2 = 0.0
-            all_a = list(count_a.keys())
-            all_b = list(count_b.keys())
-            for va in all_a:
-                for vb in all_b:
-                    observed = count_ab[va][vb]
-                    expected = (count_a[va] * count_b[vb]) / n
-                    if expected > 0:
-                        chi2 += (observed - expected) ** 2 / expected
-
-            # Cramér's V
-            min_dim = min(len(all_a) - 1, len(all_b) - 1)
-            if min_dim == 0:
-                coefficient = 0.0
-            else:
-                coefficient = (chi2 / (n * min_dim)) ** 0.5
-
-            pair = CorrelationPair(
-                col_a=col_a, col_b=col_b, method="cramers_v",
-                coefficient=round(coefficient, 6)
-            )
-            return ActionResult(success=True, data={
-                "coefficient": pair.coefficient,
-                "strength": pair.strength,
-                "chi2": round(chi2, 4),
-                "n_samples": n
-            })
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
-
-
-class CorrelationMatrixAction(BaseAction):
-    """Compute full pairwise correlation matrix for numeric columns.
-    
-    Supports pearson, spearman, and kendall methods.
-    Returns matrix as dict of dicts.
-    """
-
-    def execute(
+    def __init__(
         self,
-        data: List[Dict[str, Any]],
-        columns: List[str],
-        method: str = "pearson"
-    ) -> ActionResult:
-        try:
-            if len(data) < 2:
-                return ActionResult(success=False, error="Insufficient rows")
+        significance_level: float = 0.05,
+    ) -> None:
+        self.significance_level = significance_level
 
-            valid_cols = [c for c in columns if all(c in row for row in data)]
-            if len(valid_cols) < 2:
-                return ActionResult(success=False, error="Need at least 2 valid columns")
+    def correlate(
+        self,
+        data: list[dict],
+        var_a: str,
+        var_b: str,
+        method: str = "pearson",
+    ) -> Optional[CorrelationResult]:
+        """Compute correlation between two variables."""
+        values_a = [row.get(var_a) for row in data if var_a in row]
+        values_b = [row.get(var_b) for row in data if var_b in row]
 
-            results: Dict[str, Dict[str, float]] = {}
-            for col_a in valid_cols:
-                results[col_a] = {}
-                for col_b in valid_cols:
-                    if col_a == col_b:
-                        results[col_a][col_b] = 1.0
-                    elif col_b in results:
-                        results[col_a][col_b] = results[col_b][col_a]
-                    else:
-                        if method == "pearson":
-                            action = PearsonCorrelationAction()
-                        elif method == "spearman":
-                            action = SpearmanCorrelationAction()
-                        else:
-                            return ActionResult(success=False, error=f"Unknown method: {method}")
+        valid_pairs = [
+            (a, b) for a, b in zip(values_a, values_b)
+            if a is not None and b is not None
+        ]
 
-                        res = action.execute(col_a, col_b, data)
-                        if res.success:
-                            results[col_a][col_b] = res.data["coefficient"]
-                        else:
-                            results[col_a][col_b] = 0.0
+        if len(valid_pairs) < 3:
+            return None
 
-            return ActionResult(success=True, data={"matrix": results, "method": method})
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
+        arr_a = [p[0] for p in valid_pairs]
+        arr_b = [p[1] for p in valid_pairs]
+
+        if method == "pearson":
+            correlation = self._pearson(arr_a, arr_b)
+        elif method == "spearman":
+            correlation = self._spearman(arr_a, arr_b)
+        elif method == "kendall":
+            correlation = self._kendall(arr_a, arr_b)
+        else:
+            correlation = self._pearson(arr_a, arr_b)
+
+        p_value = self._approximate_p_value(correlation, len(valid_pairs))
+
+        return CorrelationResult(
+            variable_a=var_a,
+            variable_b=var_b,
+            correlation=correlation,
+            method=method,
+            p_value=p_value,
+            significant=p_value < self.significance_level if p_value else False,
+        )
+
+    def correlation_matrix(
+        self,
+        data: list[dict],
+        variables: list[str],
+        method: str = "pearson",
+    ) -> dict[str, dict[str, float]]:
+        """Compute correlation matrix for multiple variables."""
+        matrix: dict[str, dict[str, float]] = {}
+
+        for var_a in variables:
+            matrix[var_a] = {}
+            for var_b in variables:
+                if var_a == var_b:
+                    matrix[var_a][var_b] = 1.0
+                elif var_b in matrix:
+                    matrix[var_a][var_b] = matrix[var_b][var_a]
+                else:
+                    result = self.correlate(data, var_a, var_b, method)
+                    matrix[var_a][var_b] = result.correlation if result else 0.0
+
+        return matrix
+
+    def find_strong_correlations(
+        self,
+        data: list[dict],
+        variables: list[str],
+        threshold: float = 0.7,
+        method: str = "pearson",
+    ) -> list[CorrelationResult]:
+        """Find all correlations above threshold."""
+        results = []
+
+        for i, var_a in enumerate(variables):
+            for var_b in variables[i + 1:]:
+                result = self.correlate(data, var_a, var_b, method)
+                if result and abs(result.correlation) >= threshold:
+                    results.append(result)
+
+        results.sort(key=lambda x: abs(x.correlation), reverse=True)
+        return results
+
+    def _pearson(self, x: list, y: list) -> float:
+        """Compute Pearson correlation coefficient."""
+        n = len(x)
+        if n == 0:
+            return 0.0
+
+        mean_x = sum(x) / n
+        mean_y = sum(y) / n
+
+        numerator = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+        denom_x = math.sqrt(sum((xi - mean_x) ** 2 for xi in x))
+        denom_y = math.sqrt(sum((yi - mean_y) ** 2 for yi in y))
+
+        denominator = denom_x * denom_y
+
+        if denominator == 0:
+            return 0.0
+
+        return numerator / denominator
+
+    def _spearman(self, x: list, y: list) -> float:
+        """Compute Spearman rank correlation."""
+        ranks_x = self._rank(x)
+        ranks_y = self._rank(y)
+
+        return self._pearson(ranks_x, ranks_y)
+
+    def _kendall(self, x: list, y: list) -> float:
+        """Compute Kendall tau correlation."""
+        n = len(x)
+        if n < 2:
+            return 0.0
+
+        concordant = 0
+        discordant = 0
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                sign_x = math.copysign(1, x[i] - x[j])
+                sign_y = math.copysign(1, y[i] - y[j])
+                product = sign_x * sign_y
+
+                if product > 0:
+                    concordant += 1
+                elif product < 0:
+                    discordant += 1
+
+        return (concordant - discordant) / (n * (n - 1) / 2)
+
+    def _rank(self, values: list) -> list[float]:
+        """Compute ranks for values."""
+        sorted_pairs = sorted(enumerate(values), key=lambda p: p[1])
+        ranks = [0] * len(values)
+
+        for rank, (idx, _) in enumerate(sorted_pairs, start=1):
+            ranks[idx] = rank
+
+        return ranks
+
+    def _approximate_p_value(
+        self,
+        correlation: float,
+        n: int,
+    ) -> Optional[float]:
+        """Approximate p-value for correlation."""
+        if n < 3:
+            return None
+
+        t = correlation * math.sqrt((n - 2) / (1 - correlation ** 2 + 1e-10))
+        df = n - 2
+
+        p_value = self._t_distribution_pvalue(abs(t), df)
+        return p_value * 2
+
+    @staticmethod
+    def _t_distribution_pvalue(t: float, df: int) -> float:
+        """Approximate p-value from t-distribution."""
+        x = df / (df + t * t)
+        return x ** (df / 2)

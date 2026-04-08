@@ -1,216 +1,176 @@
 """
 Automation Guard Action Module.
 
-Provides pre/post condition guards for automation actions
- with automatic rollback on failure.
+Guard rails and circuit breakers for automation,
+prevents runaway processes and enforces limits.
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable, Optional
 from dataclasses import dataclass, field
-from enum import Enum
 import logging
+import time
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 
-class GuardType(Enum):
-    """Type of guard."""
-    PRECONDITION = "precondition"
-    POSTCONDITION = "postcondition"
-    INVARIANT = "invariant"
+class GuardState(Enum):
+    """Guard state."""
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
 
 
 @dataclass
-class GuardResult:
-    """Result of guard evaluation."""
-    passed: bool
-    guard_name: str
-    message: str = ""
-    details: Optional[dict[str, Any]] = None
-
-
-@dataclass
-class GuardAction:
-    """A guard condition with optional remediation."""
-    name: str
-    guard_type: GuardType
-    condition: Callable[[], bool]
-    error_message: str = "Guard condition failed"
-    remediation: Optional[Callable[[], Any]] = None
+class GuardConfig:
+    """Guard configuration."""
+    failure_threshold: int = 5
+    recovery_timeout: float = 60.0
+    half_open_max_calls: int = 3
+    max_execution_time: float = 300.0
 
 
 class AutomationGuardAction:
     """
-    Pre/post condition guards for automation workflows.
+    Circuit breaker and guard rail for automation.
 
-    Evaluates conditions before and after actions with
-    automatic rollback and remediation support.
+    Prevents runaway automation by enforcing
+    failure thresholds and execution time limits.
 
     Example:
-        guard = AutomationGuardAction()
-        guard.add_precondition("app_running", check_app_running)
-        guard.add_postcondition("data_saved", check_data_saved)
-        with guard.guard("my_action"):
-            perform_action()
+        guard = AutomationGuardAction(failure_threshold=3)
+        with guard.protect():
+            run_automation()
     """
 
-    def __init__(self) -> None:
-        self._preconditions: list[GuardAction] = []
-        self._postconditions: list[GuardAction] = []
-        self._invariants: list[GuardAction] = []
-
-    def add_precondition(
+    def __init__(
         self,
-        name: str,
-        condition: Callable[[], bool],
-        error_message: str = "Precondition failed",
-        remediation: Optional[Callable[[], Any]] = None,
-    ) -> "AutomationGuardAction":
-        """Add a precondition guard."""
-        guard = GuardAction(
-            name=name,
-            guard_type=GuardType.PRECONDITION,
-            condition=condition,
-            error_message=error_message,
-            remediation=remediation,
-        )
-        self._preconditions.append(guard)
-        return self
+        config: Optional[GuardConfig] = None,
+        name: str = "default",
+    ) -> None:
+        self.config = config or GuardConfig()
+        self.name = name
+        self._state = GuardState.CLOSED
+        self._failure_count = 0
+        self._last_failure_time: Optional[float] = None
+        self._half_open_calls = 0
+        self._total_calls = 0
+        self._total_failures = 0
+        self._total_successes = 0
 
-    def add_postcondition(
+    def protect(
         self,
-        name: str,
-        condition: Callable[[], bool],
-        error_message: str = "Postcondition failed",
-        remediation: Optional[Callable[[], Any]] = None,
-    ) -> "AutomationGuardAction":
-        """Add a postcondition guard."""
-        guard = GuardAction(
-            name=name,
-            guard_type=GuardType.POSTCONDITION,
-            condition=condition,
-            error_message=error_message,
-            remediation=remediation,
-        )
-        self._postconditions.append(guard)
-        return self
-
-    def add_invariant(
-        self,
-        name: str,
-        condition: Callable[[], bool],
-        error_message: str = "Invariant violated",
-    ) -> "AutomationGuardAction":
-        """Add an invariant guard."""
-        guard = GuardAction(
-            name=name,
-            guard_type=GuardType.INVARIANT,
-            condition=condition,
-            error_message=error_message,
-        )
-        self._invariants.append(guard)
-        return self
-
-    def evaluate_preconditions(self) -> list[GuardResult]:
-        """Evaluate all preconditions."""
-        return self._evaluate_guards(self._preconditions)
-
-    def evaluate_postconditions(self) -> list[GuardResult]:
-        """Evaluate all postconditions."""
-        return self._evaluate_guards(self._postconditions)
-
-    def evaluate_invariants(self) -> list[GuardResult]:
-        """Evaluate all invariants."""
-        return self._evaluate_guards(self._invariants)
-
-    def _evaluate_guards(self, guards: list[GuardAction]) -> list[GuardResult]:
-        """Evaluate a list of guards."""
-        results: list[GuardResult] = []
-
-        for guard in guards:
-            try:
-                passed = guard.condition()
-                results.append(GuardResult(
-                    passed=passed,
-                    guard_name=guard.name,
-                    message=guard.error_message if not passed else "",
-                ))
-
-                if not passed and guard.remediation:
-                    logger.info(f"Running remediation for {guard.name}")
-                    guard.remediation()
-
-            except Exception as e:
-                results.append(GuardResult(
-                    passed=False,
-                    guard_name=guard.name,
-                    message=f"Guard evaluation error: {e}",
-                ))
-
-        return results
-
-    def all_passed(self, results: list[GuardResult]) -> bool:
-        """Check if all guards passed."""
-        return all(r.passed for r in results)
-
-    def guard(
-        self,
-        action_name: str,
-        action_func: Callable,
-        rollback: Optional[Callable[[], None]] = None,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
-        """Execute an action with guard protection."""
-        pre_results = self.evaluate_preconditions()
-        if not self.all_passed(pre_results):
-            failed = [r for r in pre_results if not r.passed]
-            logger.error(f"Preconditions failed for {action_name}: {failed}")
-            if rollback:
-                rollback()
-            raise RuntimeError(f"Preconditions failed for {action_name}")
+        """Execute function with guard protection."""
+        self._total_calls += 1
+
+        if not self._can_execute():
+            raise RuntimeError(
+                f"Guard '{self.name}' is OPEN. Circuit breaker tripped."
+            )
+
+        start_time = time.time()
 
         try:
-            result = action_func()
+            result = func(*args, **kwargs)
+            self._on_success()
+            return result
+
         except Exception as e:
-            logger.error(f"Action {action_name} failed: {e}")
-            if rollback:
-                rollback()
+            self._on_failure()
             raise
 
-        post_results = self.evaluate_postconditions()
-        if not self.all_passed(post_results):
-            failed = [r for r in post_results if not r.passed]
-            logger.error(f"Postconditions failed for {action_name}: {failed}")
-            if rollback:
-                rollback()
-            raise RuntimeError(f"Postconditions failed for {action_name}")
+        finally:
+            elapsed = time.time() - start_time
+            if elapsed > self.config.max_execution_time:
+                logger.warning(
+                    "Guard '%s': Execution took %.2fs (max: %.2fs)",
+                    self.name, elapsed, self.config.max_execution_time
+                )
 
-        return result
+    def _can_execute(self) -> bool:
+        """Check if execution is allowed."""
+        if self._state == GuardState.CLOSED:
+            return True
 
-    async def guard_async(
-        self,
-        action_name: str,
-        action_func: Callable,
-        rollback: Optional[Callable[[], None]] = None,
-    ) -> Any:
-        """Execute an async action with guard protection."""
-        pre_results = self.evaluate_preconditions()
-        if not self.all_passed(pre_results):
-            raise RuntimeError(f"Preconditions failed for {action_name}")
+        if self._state == GuardState.OPEN:
+            if self._should_attempt_recovery():
+                self._state = GuardState.HALF_OPEN
+                self._half_open_calls = 0
+                logger.info("Guard '%s' entering HALF_OPEN state", self.name)
+                return True
+            return False
 
-        try:
-            result = await action_func()
-        except Exception as e:
-            logger.error(f"Action {action_name} failed: {e}")
-            if rollback:
-                rollback()
-            raise
+        if self._state == GuardState.HALF_OPEN:
+            if self._half_open_calls < self.config.half_open_max_calls:
+                self._half_open_calls += 1
+                return True
+            return False
 
-        post_results = self.evaluate_postconditions()
-        if not self.all_passed(post_results):
-            if rollback:
-                rollback()
-            raise RuntimeError(f"Postconditions failed for {action_name}")
+        return False
 
-        return result
+    def _on_success(self) -> None:
+        """Handle successful execution."""
+        self._failure_count = 0
+        self._total_successes += 1
+
+        if self._state == GuardState.HALF_OPEN:
+            self._state = GuardState.CLOSED
+            logger.info("Guard '%s' recovered to CLOSED state", self.name)
+
+    def _on_failure(self) -> None:
+        """Handle failed execution."""
+        self._failure_count += 1
+        self._total_failures += 1
+        self._last_failure_time = time.time()
+
+        if self._state == GuardState.HALF_OPEN:
+            self._state = GuardState.OPEN
+            logger.warning("Guard '%s' failing in HALF_OPEN, reopening", self.name)
+
+        elif self._failure_count >= self.config.failure_threshold:
+            self._state = GuardState.OPEN
+            logger.warning(
+                "Guard '%s' OPENED after %d failures",
+                self.name, self._failure_count
+            )
+
+    def _should_attempt_recovery(self) -> bool:
+        """Check if recovery should be attempted."""
+        if self._last_failure_time is None:
+            return True
+
+        return (
+            time.time() - self._last_failure_time
+        ) >= self.config.recovery_timeout
+
+    def get_state(self) -> GuardState:
+        """Get current guard state."""
+        return self._state
+
+    def reset(self) -> None:
+        """Reset guard to closed state."""
+        self._state = GuardState.CLOSED
+        self._failure_count = 0
+        self._half_open_calls = 0
+        self._last_failure_time = None
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get guard statistics."""
+        return {
+            "name": self.name,
+            "state": self._state.value,
+            "failure_count": self._failure_count,
+            "total_calls": self._total_calls,
+            "total_successes": self._total_successes,
+            "total_failures": self._total_failures,
+            "success_rate": (
+                self._total_successes / self._total_calls * 100
+                if self._total_calls > 0 else 100.0
+            ),
+        }
