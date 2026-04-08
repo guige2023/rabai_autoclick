@@ -1,250 +1,412 @@
-"""XML parsing and manipulation action module for RabAI AutoClick.
+"""XML processing and parsing utilities.
 
-Provides XML operations:
-- XmlParseAction: Parse XML string/file
-- XmlToDictAction: Convert XML to dict
-- XmlFromDictAction: Create XML from dict
-- XmlXPathAction: Query XML with XPath
-- XmlValidateAction: Validate XML against schema
+Handles XML parsing, validation, transformation,
+namespace handling, and element manipulation.
 """
 
-from __future__ import annotations
+from typing import Any, Optional, Iterator
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+from io import BytesIO, StringIO
 
-import sys
-import os
-import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional
+try:
+    import xml.etree.ElementTree as ET
+except ImportError:
+    ET = None
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+try:
+    from lxml import etree
+    from lxml.builder import E
+    HAS_LXML = True
+except ImportError:
+    HAS_LXML = False
+    etree = None
+
+logger = logging.getLogger(__name__)
 
 
-class XmlParseAction(BaseAction):
-    """Parse XML string or file."""
-    action_type = "xml_parse"
-    display_name = "XML解析"
-    description = "解析XML"
-    version = "1.0"
+@dataclass
+class XMLConfig:
+    """Configuration for XML processing."""
+    encoding: str = "utf-8"
+    indent: str = "  "
+    namespace_separator: str = ":"
+    strip_whitespace: bool = True
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute XML parse."""
-        xml_str = params.get('xml', '')
-        xml_file = params.get('xml_file', None)
-        output_var = params.get('output_var', 'xml_tree')
 
-        if not xml_str and not xml_file:
-            return ActionResult(success=False, message="xml or xml_file is required")
+@dataclass
+class XMLElement:
+    """Wrapper for XML element with convenient access."""
+    tag: str
+    text: Optional[str] = None
+    tail: Optional[str] = None
+    attributes: dict = field(default_factory=dict)
+    children: list = field(default_factory=list)
+    namespaces: dict = field(default_factory=dict)
 
+
+class XMLParseError(Exception):
+    """Raised on XML parsing errors."""
+    pass
+
+
+class XMLValidationError(Exception):
+    """Raised on XML validation errors."""
+    pass
+
+
+class XMLAction:
+    """XML processing utilities."""
+
+    def __init__(self, config: Optional[XMLConfig] = None):
+        """Initialize XML processor with configuration.
+
+        Args:
+            config: XMLConfig with processing options
+        """
+        if ET is None:
+            raise ImportError("xml.etree.ElementTree is required (stdlib)")
+
+        self.config = config or XMLConfig()
+        self._namespaces: dict[str, str] = {}
+
+    def parse_string(self, xml_string: str) -> XMLElement:
+        """Parse XML from string.
+
+        Args:
+            xml_string: XML content as string
+
+        Returns:
+            XMLElement root object
+
+        Raises:
+            XMLParseError: On parse failure
+        """
         try:
-            resolved_str = context.resolve_value(xml_str) if context else xml_str
-            resolved_file = context.resolve_value(xml_file) if context else xml_file
+            if self.config.strip_whitespace:
+                xml_string = xml_string.strip()
 
-            if resolved_file:
-                tree = ET.parse(resolved_file)
-                root = tree.getroot()
-            else:
-                root = ET.fromstring(resolved_str)
+            root = ET.fromstring(xml_string)
+            return self._element_to_dict(root)
 
-            result = {'tag': root.tag, 'text': root.text, 'attributes': root.attrib}
-            if context:
-                context.set(output_var, root)
-            return ActionResult(success=True, message=f"Parsed XML: <{root.tag}>", data=result)
         except ET.ParseError as e:
-            return ActionResult(success=False, message=f"XML parse error: {str(e)}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"XML error: {str(e)}")
+            raise XMLParseError(f"Parse failed: {e}")
 
-    def get_required_params(self) -> List[str]:
-        return []
+    def parse_bytes(self, xml_bytes: bytes) -> XMLElement:
+        """Parse XML from bytes.
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'xml': '', 'xml_file': None, 'output_var': 'xml_tree'}
+        Args:
+            xml_bytes: XML content as bytes
 
+        Returns:
+            XMLElement root object
+        """
+        try:
+            root = ET.fromstring(xml_bytes)
+            return self._element_to_dict(root)
 
-class XmlToDictAction(BaseAction):
-    """Convert XML to dictionary."""
-    action_type = "xml_to_dict"
-    display_name = "XML转字典"
-    description = "将XML转换为字典"
-    version = "1.0"
+        except ET.ParseError as e:
+            raise XMLParseError(f"Parse failed: {e}")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute XML to dict."""
-        xml_str = params.get('xml', '')
-        xml_file = params.get('xml_file', None)
-        output_var = params.get('output_var', 'xml_dict')
+    def parse_file(self, file_path: str) -> XMLElement:
+        """Parse XML from file.
 
-        if not xml_str and not xml_file:
-            return ActionResult(success=False, message="xml or xml_file is required")
+        Args:
+            file_path: Path to XML file
+
+        Returns:
+            XMLElement root object
+        """
+        try:
+            tree = ET.parse(file_path)
+            return self._element_to_dict(tree.getroot())
+
+        except ET.ParseError as e:
+            raise XMLParseError(f"Parse failed: {e}")
+
+    def to_string(self, element: XMLElement, root_name: Optional[str] = None) -> str:
+        """Convert XMLElement to XML string.
+
+        Args:
+            element: XMLElement to serialize
+            root_name: Optional root element name override
+
+        Returns:
+            XML string
+        """
+        root = self._dict_to_element(element, root_name)
+        return ET.tostring(root, encoding=self.config.encoding, xml_declaration=True).decode(self.config.encoding)
+
+    def validate_xsd(self, xml_string: str, xsd_string: str) -> bool:
+        """Validate XML against XSD schema.
+
+        Args:
+            xml_string: XML content
+            xsd_string: XSD schema
+
+        Returns:
+            True if valid
+
+        Raises:
+            XMLValidationError: If invalid
+        """
+        if not HAS_LXML:
+            logger.warning("lxml not available, skipping XSD validation")
+            return True
 
         try:
-            import xmltodict
+            schema_doc = etree.fromstring(xsd_string.encode(self.config.encoding))
+            schema = etree.XMLSchema(schema_doc)
 
-            resolved_str = context.resolve_value(xml_str) if context else xml_str
-            resolved_file = context.resolve_value(xml_file) if context else xml_file
+            xml_doc = etree.fromstring(xml_string.encode(self.config.encoding))
 
-            if resolved_file:
-                with open(resolved_file, 'r') as f:
-                    data = xmltodict.parse(f.read())
-            else:
-                data = xmltodict.parse(resolved_str)
+            if not schema.validate(xml_doc):
+                errors = "\n".join(str(e) for e in schema.error_log)
+                raise XMLValidationError(f"Validation failed:\n{errors}")
 
-            if context:
-                context.set(output_var, data)
-            return ActionResult(success=True, message="XML converted to dict", data={'keys': list(data.keys()) if isinstance(data, dict) else type(data).__name__})
-        except ImportError:
-            return ActionResult(success=False, message="xmltodict not installed. Run: pip install xmltodict")
-        except Exception as e:
-            return ActionResult(success=False, message=f"XML to dict error: {str(e)}")
+            return True
 
-    def get_required_params(self) -> List[str]:
-        return []
+        except etree.XMLSyntaxError as e:
+            raise XMLValidationError(f"XSD syntax error: {e}")
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'xml': '', 'xml_file': None, 'output_var': 'xml_dict'}
+    def transform_xslt(self, xml_string: str, xslt_string: str) -> str:
+        """Transform XML using XSLT.
 
+        Args:
+            xml_string: XML content
+            xslt_string: XSLT stylesheet
 
-class XmlFromDictAction(BaseAction):
-    """Create XML from dictionary."""
-    action_type = "xml_from_dict"
-    display_name = "字典转XML"
-    description = "将字典转换为XML"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute dict to XML."""
-        data = params.get('data', {})
-        root_tag = params.get('root_tag', 'root')
-        output_var = params.get('output_var', 'xml_string')
-
-        if not data:
-            return ActionResult(success=False, message="data is required")
+        Returns:
+            Transformed XML string
+        """
+        if not HAS_LXML:
+            raise ImportError("lxml required for XSLT transformation: pip install lxml")
 
         try:
-            import xmltodict
+            xslt_doc = etree.fromstring(xslt_string.encode(self.config.encoding))
+            transform = etree.XSLT(xslt_doc)
 
-            resolved_data = context.resolve_value(data) if context else data
+            xml_doc = etree.fromstring(xml_string.encode(self.config.encoding))
+            result = transform(xml_doc)
 
-            xml_str = xmltodict.unparse(resolved_data, full_document=True)
-            if root_tag and not xml_str.startswith('<'):
-                xml_str = f'<{root_tag}>{xml_str}</{root_tag}>'
+            return str(result)
 
-            if context:
-                context.set(output_var, xml_str)
-            return ActionResult(success=True, message=f"Generated XML ({len(xml_str)} chars)", data={'xml': xml_str})
-        except ImportError:
-            return ActionResult(success=False, message="xmltodict not installed")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Dict to XML error: {str(e)}")
+        except etree.XMLSyntaxError as e:
+            raise XMLParseError(f"XSLT parse failed: {e}")
 
-    def get_required_params(self) -> List[str]:
-        return ['data']
+    def xpath_query(self, xml_string: str, xpath: str,
+                   namespaces: Optional[dict] = None) -> list:
+        """Execute XPath query on XML.
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'root_tag': 'root', 'output_var': 'xml_string'}
+        Args:
+            xml_string: XML content
+            xpath: XPath expression
+            namespaces: Optional namespace prefix map
 
-
-class XmlXPathAction(BaseAction):
-    """Query XML with XPath."""
-    action_type = "xml_xpath"
-    display_name = "XML XPath查询"
-    description = "XPath查询XML"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute XPath query."""
-        xml_tree_var = params.get('xml_tree_var', 'xml_tree')
-        xpath = params.get('xpath', '')
-        output_var = params.get('output_var', 'xpath_result')
-
-        if not xpath:
-            return ActionResult(success=False, message="xpath is required")
-
+        Returns:
+            List of matching elements/texts/values
+        """
         try:
-            resolved_xpath = context.resolve_value(xpath) if context else xpath
+            root = ET.fromstring(xml_string)
+            ns = namespaces or {}
 
-            tree = context.resolve_value(xml_tree_var) if context else None
-            if tree is None:
-                tree = context.resolve_value(xml_tree_var)
+            results = root.findall(xpath, ns)
 
-            if hasattr(tree, 'iter'):
-                results = tree.findall(resolved_xpath)
-            else:
-                return ActionResult(success=False, message=f"{xml_tree_var} is not an XML tree")
-
-            results_list = []
+            output = []
             for elem in results:
-                results_list.append({
-                    'tag': elem.tag,
-                    'text': elem.text,
-                    'attrib': elem.attrib,
-                })
+                if isinstance(elem, str):
+                    output.append(elem)
+                elif elem is None:
+                    pass
+                else:
+                    output.append(self._element_to_dict(elem))
 
-            result_data = {'results': results_list, 'count': len(results_list)}
-            if context:
-                context.set(output_var, results_list)
-            return ActionResult(success=True, message=f"XPath found {len(results_list)} matches", data=result_data)
-        except Exception as e:
-            return ActionResult(success=False, message=f"XPath error: {str(e)}")
+            return output
 
-    def get_required_params(self) -> List[str]:
-        return ['xpath']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'xml_tree_var': 'xml_tree', 'output_var': 'xpath_result'}
-
-
-class XmlValidateAction(BaseAction):
-    """Validate XML against schema."""
-    action_type = "xml_validate"
-    display_name = "XML验证"
-    description = "验证XML"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute XML validate."""
-        xml_str = params.get('xml', '')
-        xml_file = params.get('xml_file', None)
-        schema_file = params.get('schema_file', None)
-        output_var = params.get('output_var', 'xml_valid')
-
-        if not schema_file:
-            return ActionResult(success=False, message="schema_file is required")
-
-        try:
-            import xml.etree.ElementTree as ET
-
-            resolved_schema = context.resolve_value(schema_file) if context else schema_file
-
-            schema_tree = ET.parse(resolved_schema)
-            schema = ET.XMLSchema(schema_tree.getroot())
-
-            resolved_str = context.resolve_value(xml_str) if context else xml_str
-            resolved_file = context.resolve_value(xml_file) if context else xml_file
-
-            if resolved_file:
-                doc = ET.parse(resolved_file)
-            else:
-                doc = ET.fromstring(resolved_str)
-
-            schema.assertValid(doc)
-
-            result = {'valid': True}
-            if context:
-                context.set(output_var, True)
-            return ActionResult(success=True, message="XML is valid", data=result)
         except ET.ParseError as e:
-            result = {'valid': False, 'error': str(e)}
-            if context:
-                context.set(output_var, False)
-            return ActionResult(success=False, message=f"XML is invalid: {str(e)}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"XML validate error: {str(e)}")
+            raise XMLParseError(f"Parse failed: {e}")
 
-    def get_required_params(self) -> List[str]:
-        return []
+    def find_elements(self, element: XMLElement,
+                     tag: str,
+                     recursive: bool = True) -> list[XMLElement]:
+        """Find child elements by tag name.
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'xml': '', 'xml_file': None, 'schema_file': None, 'output_var': 'xml_valid'}
+        Args:
+            element: Parent XMLElement
+            tag: Tag name to find
+            recursive: Search recursively
+
+        Returns:
+            List of matching XMLElement objects
+        """
+        results = []
+
+        for child in element.children:
+            if child.tag == tag:
+                results.append(child)
+
+            if recursive and child.children:
+                results.extend(self.find_elements(child, tag, recursive=True))
+
+        return results
+
+    def add_element(self, parent: XMLElement,
+                   new_element: XMLElement,
+                   index: Optional[int] = None) -> None:
+        """Add child element to parent.
+
+        Args:
+            parent: Parent XMLElement
+            new_element: Element to add
+            index: Optional position to insert at
+        """
+        if index is None or index >= len(parent.children):
+            parent.children.append(new_element)
+        else:
+            parent.children.insert(index, new_element)
+
+    def remove_element(self, parent: XMLElement,
+                      element: XMLElement) -> bool:
+        """Remove child element from parent.
+
+        Args:
+            parent: Parent XMLElement
+            element: Element to remove
+
+        Returns:
+            True if removed
+        """
+        try:
+            parent.children.remove(element)
+            return True
+        except ValueError:
+            return False
+
+    def set_attribute(self, element: XMLElement,
+                      name: str, value: Any) -> None:
+        """Set element attribute.
+
+        Args:
+            element: XMLElement
+            name: Attribute name
+            value: Attribute value
+        """
+        element.attributes[name] = str(value)
+
+    def get_attribute(self, element: XMLElement,
+                     name: str, default: Any = None) -> Any:
+        """Get element attribute.
+
+        Args:
+            element: XMLElement
+            name: Attribute name
+            default: Default if not found
+
+        Returns:
+            Attribute value or default
+        """
+        return element.attributes.get(name, default)
+
+    def remove_attribute(self, element: XMLElement, name: str) -> bool:
+        """Remove element attribute.
+
+        Args:
+            element: XMLElement
+            name: Attribute name
+
+        Returns:
+            True if removed
+        """
+        if name in element.attributes:
+            del element.attributes[name]
+            return True
+        return False
+
+    def set_text(self, element: XMLElement, text: str) -> None:
+        """Set element text content.
+
+        Args:
+            element: XMLElement
+            text: Text content
+        """
+        element.text = text
+
+    def get_text(self, element: XMLElement) -> str:
+        """Get element text content.
+
+        Args:
+            element: XMLElement
+
+        Returns:
+            Text content or empty string
+        """
+        return element.text or ""
+
+    def flatten(self, element: XMLElement) -> dict:
+        """Flatten element to nested dict.
+
+        Args:
+            element: XMLElement to flatten
+
+        Returns:
+            Nested dict representation
+        """
+        result: dict[str, Any] = {
+            "@tag": element.tag,
+            "@attributes": element.attributes
+        }
+
+        if element.text:
+            result["#text"] = element.text
+
+        if element.children:
+            children_by_tag: dict[str, Any] = {}
+
+            for child in element.children:
+                child_data = self.flatten(child)
+
+                for key, value in child_data.items():
+                    if key in children_by_tag:
+                        existing = children_by_tag[key]
+                        if isinstance(existing, list):
+                            existing.append(value)
+                        else:
+                            children_by_tag[key] = [existing, value]
+                    else:
+                        children_by_tag[key] = value
+
+            result.update(children_by_tag)
+
+        return result
+
+    def _element_to_dict(self, elem: ET.Element) -> XMLElement:
+        """Convert ET.Element to XMLElement."""
+        children = []
+
+        for child in elem:
+            children.append(self._element_to_dict(child))
+
+        return XMLElement(
+            tag=elem.tag,
+            text=elem.text,
+            tail=elem.tail,
+            attributes=elem.attrib,
+            children=children,
+            namespaces=self._namespaces
+        )
+
+    def _dict_to_element(self, d: XMLElement,
+                        root_name: Optional[str] = None) -> ET.Element:
+        """Convert XMLElement to ET.Element."""
+        tag = root_name or d.tag
+        elem = ET.Element(tag, attrib=d.attributes)
+
+        if d.text:
+            elem.text = d.text
+
+        for child in d.children:
+            child_elem = self._dict_to_element(child, None)
+            elem.append(child_elem)
+
+        return elem
