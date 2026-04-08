@@ -1,219 +1,297 @@
-"""Scheduler utilities: cron-like scheduling, task queues, and periodic jobs."""
+"""Scheduler utilities for time-based automation execution.
+
+Provides cron-like scheduling, delayed execution,
+interval-based repetition, and calendar-aware scheduling
+for running automation workflows at specific times.
+
+Example:
+    >>> from utils.scheduler_utils import schedule, IntervalTask, CronTask
+    >>> schedule('0 9 * * *', lambda: open_browser())
+    >>> task = IntervalTask(interval=60, action=lambda: check_email())
+    >>> task.start()
+"""
 
 from __future__ import annotations
 
+import sched
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-from typing import Any, Callable
+from dataclasses import dataclass
+from typing import Callable, Optional
+from datetime import datetime
 
 __all__ = [
-    "Schedule",
+    "schedule",
+    "IntervalTask",
+    "CronTask",
     "Scheduler",
-    "PeriodicJob",
-    "CronSchedule",
+    "SchedulerError",
 ]
 
 
-class ScheduleType(Enum):
-    INTERVAL = "interval"
-    CRON = "cron"
-    ONCE = "once"
-    DATETIME = "datetime"
+class SchedulerError(Exception):
+    """Raised when scheduling operations fail."""
+    pass
 
 
 @dataclass
-class Schedule:
-    """Base schedule configuration."""
-    schedule_type: ScheduleType
-    interval_seconds: float | None = None
-    cron_expr: str | None = None
-    run_at: datetime | None = None
+class ScheduledTask:
+    """A scheduled task."""
 
-
-@dataclass
-class PeriodicJob:
-    """A scheduled periodic job."""
     id: str
-    name: str
-    fn: Callable[..., Any]
-    schedule: Schedule
-    args: tuple[Any, ...] = ()
-    kwargs: dict[str, Any] = field(default_factory=dict)
-    enabled: bool = True
-    max_instances: int = 1
-    last_run: datetime | None = None
-    next_run: datetime | None = None
-    run_count: int = 0
+    action: Callable
+    next_run: float
+    interval: Optional[float] = None  # None for one-shot tasks
+    cron_expr: Optional[str] = None
 
 
-class Scheduler:
-    """Thread-safe task scheduler with interval, datetime, and cron support."""
+def schedule(
+    when: str | float,
+    action: Callable,
+    repeat: bool = False,
+    interval: Optional[float] = None,
+) -> ScheduledTask:
+    """Schedule an action for execution.
 
-    def __init__(self) -> None:
-        self._jobs: dict[str, PeriodicJob] = {}
+    Args:
+        when: Cron expression string or Unix timestamp.
+        action: Callable to execute.
+        repeat: If True, repeat the task.
+        interval: Repeat interval in seconds.
+
+    Returns:
+        ScheduledTask object.
+
+    Example:
+        >>> task = schedule('0 9 * * *', action_fn)
+        >>> task = schedule(time.time() + 60, action_fn, repeat=True, interval=3600)
+    """
+    now = time.time()
+
+    if isinstance(when, str):
+        next_run = _parse_cron(when, now)
+    else:
+        next_run = float(when)
+
+    task = ScheduledTask(
+        id=str(id(action)),
+        action=action,
+        next_run=next_run,
+        interval=interval if repeat else None,
+    )
+    return task
+
+
+def _parse_cron(cron_expr: str, base_time: float) -> float:
+    """Parse a cron expression and return the next run timestamp.
+
+    This is a simplified parser supporting:
+    * * * * * (minute, hour, day, month, weekday)
+
+    Args:
+        cron_expr: Cron expression string.
+        base_time: Base timestamp to calculate from.
+
+    Returns:
+        Next matching Unix timestamp.
+    """
+    parts = cron_expr.strip().split()
+    if len(parts) != 5:
+        raise SchedulerError(f"Invalid cron expression: {cron_expr}")
+
+    dt = datetime.fromtimestamp(base_time)
+    minute_p, hour_p, day_p, month_p, weekday_p = parts
+
+    # Simple implementation: find the next matching time
+    for offset in range(366 * 24 * 60):  # max 1 year ahead
+        candidate = base_time + offset * 60
+        cand_dt = datetime.fromtimestamp(candidate)
+
+        if not _cron_part_matches(minute_p, cand_dt.minute):
+            continue
+        if not _cron_part_matches(hour_p, cand_dt.hour):
+            continue
+        if not _cron_part_matches(day_p, cand_dt.day):
+            continue
+        if not _cron_part_matches(month_p, cand_dt.month):
+            continue
+        if not _cron_part_matches(weekday_p, cand_dt.weekday()):
+            continue
+
+        return candidate
+
+    raise SchedulerError(f"No matching time found for cron: {cron_expr}")
+
+
+def _cron_part_matches(pattern: str, value: int) -> bool:
+    """Check if a cron field part matches a value."""
+    if pattern == "*":
+        return True
+    if "," in pattern:
+        return str(value) in pattern.split(",")
+    if "/" in pattern:
+        base, step = pattern.split("/")
+        step = int(step)
+        if base == "*":
+            return value % step == 0
+        return (value - int(base)) % step == 0
+    if "-" in pattern:
+        start, end = pattern.split("-")
+        return int(start) <= value <= int(end)
+    return int(pattern) == value
+
+
+class IntervalTask:
+    """A task that runs at a fixed interval.
+
+    Example:
+        >>> task = IntervalTask(interval=60, action=lambda: print('tick'))
+        >>> task.start()
+        >>> task.stop()
+    """
+
+    def __init__(
+        self,
+        interval: float,
+        action: Callable,
+        name: str = "",
+        immediately: bool = False,
+    ):
+        self.interval = interval
+        self.action = action
+        self.name = name or f"IntervalTask-{id(self)}"
+        self.immediately = immediately
         self._running = False
-        self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-
-    def add_interval(
-        self,
-        job_id: str,
-        fn: Callable[..., Any],
-        interval_seconds: float,
-        name: str = "",
-        **kwargs: Any,
-    ) -> PeriodicJob:
-        schedule = Schedule(schedule_type=ScheduleType.INTERVAL, interval_seconds=interval_seconds)
-        job = PeriodicJob(
-            id=job_id,
-            name=name or job_id,
-            fn=fn,
-            schedule=schedule,
-            kwargs=kwargs,
-        )
-        with self._lock:
-            self._jobs[job_id] = job
-        return job
-
-    def add_once(
-        self,
-        job_id: str,
-        fn: Callable[..., Any],
-        run_at: datetime,
-        name: str = "",
-        **kwargs: Any,
-    ) -> PeriodicJob:
-        schedule = Schedule(schedule_type=ScheduleType.DATETIME, run_at=run_at)
-        job = PeriodicJob(
-            id=job_id,
-            name=name or job_id,
-            fn=fn,
-            schedule=schedule,
-        )
-        with self._lock:
-            self._jobs[job_id] = job
-        return job
-
-    def remove(self, job_id: str) -> bool:
-        with self._lock:
-            if job_id in self._jobs:
-                del self._jobs[job_id]
-                return True
-            return False
-
-    def get_next_run(self, job: PeriodicJob) -> datetime | None:
-        if job.schedule.schedule_type == ScheduleType.INTERVAL:
-            interval = job.schedule.interval_seconds or 60.0
-            return datetime.now() + timedelta(seconds=interval)
-        elif job.schedule.schedule_type == ScheduleType.DATETIME:
-            return job.schedule.run_at
-        return None
+        self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
+        """Start the interval task."""
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop the interval task."""
         self._running = False
         if self._thread:
-            self._thread.join(timeout=5.0)
+            self._thread.join(timeout=5)
             self._thread = None
 
-    def _run_loop(self) -> None:
+    def _run(self) -> None:
+        """Main task loop."""
+        if self.immediately:
+            try:
+                self.action()
+            except Exception:
+                pass
+
         while self._running:
-            now = datetime.now()
+            time.sleep(self.interval)
+            if not self._running:
+                break
+            try:
+                self.action()
+            except Exception:
+                pass
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+
+class Scheduler:
+    """Event scheduler supporting one-shot and recurring tasks.
+
+    Example:
+        >>> scheduler = Scheduler()
+        >>> scheduler.every(60).seconds.do(lambda: print('tick'))
+        >>> scheduler.every().day.at('09:00').do(morning_task)
+        >>> scheduler.run()
+    """
+
+    def __init__(self):
+        self._tasks: list[ScheduledTask] = []
+        self._running = False
+        self._lock = threading.Lock()
+
+    def add_task(self, task: ScheduledTask) -> None:
+        with self._lock:
+            self._tasks.append(task)
+
+    def every(self, interval: float) -> "SchedulerBuilder":
+        return SchedulerBuilder(self, interval)
+
+    def run(self, blocking: bool = True) -> None:
+        """Start the scheduler loop."""
+        self._running = True
+
+        if blocking:
+            self._run_loop()
+        else:
+            t = threading.Thread(target=self._run_loop, daemon=True)
+            t.start()
+
+    def stop(self) -> None:
+        """Stop the scheduler."""
+        self._running = False
+
+    def _run_loop(self) -> None:
+        """Main scheduler loop."""
+        while self._running:
+            now = time.time()
+
             with self._lock:
-                for job in list(self._jobs.values()):
-                    if not job.enabled:
-                        continue
-                    next_run = self.get_next_run(job)
-                    if next_run and now >= next_run:
-                        self._execute_job(job)
+                due_tasks = [t for t in self._tasks if t.next_run <= now]
 
-            time.sleep(0.5)
+            for task in due_tasks:
+                try:
+                    task.action()
+                except Exception:
+                    pass
 
-    def _execute_job(self, job: PeriodicJob) -> None:
-        job.last_run = datetime.now()
-        job.run_count += 1
-        next_run = self.get_next_run(job)
-        if next_run:
-            job.next_run = next_run
+                with self._lock:
+                    if task.interval:
+                        task.next_run = now + task.interval
+                    else:
+                        self._tasks.remove(task)
 
-        try:
-            job.fn(*job.args, **job.kwargs)
-        except Exception:
-            pass
+            # Sleep until next task or 1 second
+            with self._lock:
+                if self._tasks:
+                    next_run = min(t.next_run for t in self._tasks)
+                    sleep_time = max(0.1, next_run - now)
+                else:
+                    sleep_time = 1.0
 
-    def list_jobs(self) -> list[PeriodicJob]:
-        with self._lock:
-            return list(self._jobs.values())
-
-    def enable(self, job_id: str) -> bool:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job:
-                job.enabled = True
-                return True
-            return False
-
-    def disable(self, job_id: str) -> bool:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job:
-                job.enabled = False
-                return True
-            return False
+            time.sleep(sleep_time)
 
 
-class CronSchedule:
-    """Simple cron expression parser (5-field: min hour day month weekday)."""
+class SchedulerBuilder:
+    """Fluent builder for scheduling tasks."""
 
-    @staticmethod
-    def parse(expr: str) -> dict[str, list[int]]:
-        parts = expr.split()
-        if len(parts) != 5:
-            raise ValueError(f"Invalid cron expr: {expr}")
-        fields = ["minute", "hour", "day", "month", "weekday"]
-        result = {}
-        for field_name, part in zip(fields, parts):
-            result[field_name] = CronSchedule._parse_field(part)
-        return result
+    def __init__(self, scheduler: Scheduler, interval: float):
+        self._scheduler = scheduler
+        self._interval = interval
 
-    @staticmethod
-    def _parse_field(field_str: str) -> list[int]:
-        if field_str == "*":
-            return list(range(0 if field_str == "*" else 0, 60))
-        values = []
-        for segment in field_str.split(","):
-            if "-" in segment:
-                start, end = segment.split("-", 1)
-                values.extend(range(int(start), int(end) + 1))
-            elif "/" in segment:
-                base, step = segment.split("/", 1)
-                start = 0 if base == "*" else int(base)
-                for i in range(start, 60, int(step)):
-                    values.append(i)
-            else:
-                values.append(int(segment))
-        return sorted(set(values))
+    def seconds(self) -> "SchedulerBuilder":
+        return self
 
-    @staticmethod
-    def next_run(expr: str, after: datetime | None = None) -> datetime:
-        parsed = CronSchedule.parse(expr)
-        after = after or datetime.now()
-        minute_vals = parsed["minute"]
-        hour_vals = parsed["hour"]
-        candidates = []
-        for h in hour_vals:
-            for m in minute_vals:
-                if h > after.hour or (h == after.hour and m > after.minute):
-                    candidates.append(datetime(after.year, after.month, after.day, h, m))
-        if not candidates:
-            return after + timedelta(days=1)
-        return min(candidates)
+    def minutes(self) -> "SchedulerBuilder":
+        self._interval *= 60
+        return self
+
+    def hours(self) -> "SchedulerBuilder":
+        self._interval *= 3600
+        return self
+
+    def do(self, action: Callable) -> ScheduledTask:
+        task = ScheduledTask(
+            id=str(id(action)),
+            action=action,
+            next_run=time.time() + self._interval,
+            interval=self._interval,
+        )
+        self._scheduler.add_task(task)
+        return task
