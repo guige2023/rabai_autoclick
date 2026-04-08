@@ -1,17 +1,18 @@
-"""Feature Flag Action Module.
+"""Feature flag action module for RabAI AutoClick.
 
 Provides feature flag management with targeting rules,
-percentage rollouts, and flag toggling.
+percentage rollouts, and real-time updates.
 """
 
+import sys
+import os
 import time
-import random
 import hashlib
 from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-import sys
-import os
+from threading import Lock
+import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
@@ -21,223 +22,338 @@ class FlagStatus(Enum):
     """Feature flag status."""
     ENABLED = "enabled"
     DISABLED = "disabled"
-    ROLLOUT = "rollout"
+    ROLLING_OUT = "rolling_out"
 
 
 @dataclass
 class TargetingRule:
-    """Targeting rule for flag."""
+    """A targeting rule for feature flag."""
     attribute: str
-    operator: str
+    operator: str  # eq, ne, gt, lt, in, not_in, contains
     value: Any
+    percentage: int = 100  # 0-100
 
 
 @dataclass
 class FeatureFlag:
-    """Feature flag definition."""
-    flag_id: str
+    """A feature flag definition."""
+    key: str
     name: str
-    description: Optional[str]
-    status: FlagStatus
-    rollout_percentage: float = 100.0
-    targeting_rules: List[TargetingRule] = field(default_factory=list)
+    description: str = ""
+    status: FlagStatus = FlagStatus.DISABLED
+    default_value: Any = False
+    rules: List[TargetingRule] = field(default_factory=list)
+    percentage: int = 0  # Global rollout percentage
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-
-
-class FeatureFlagManager:
-    """Manages feature flags."""
-
-    def __init__(self):
-        self._flags: Dict[str, FeatureFlag] = {}
-        self._history: List[Dict] = []
-
-    def create_flag(
-        self,
-        name: str,
-        description: Optional[str] = None,
-        status: FlagStatus = FlagStatus.DISABLED,
-        rollout_percentage: float = 100.0
-    ) -> str:
-        """Create a feature flag."""
-        flag_id = hashlib.md5(
-            f"{name}{time.time()}".encode()
-        ).hexdigest()[:8]
-
-        flag = FeatureFlag(
-            flag_id=flag_id,
-            name=name,
-            description=description,
-            status=status,
-            rollout_percentage=rollout_percentage
-        )
-
-        self._flags[flag_id] = flag
-        self._log_change(flag_id, "created")
-
-        return flag_id
-
-    def get_flag(self, flag_id: str) -> Optional[FeatureFlag]:
-        """Get flag by ID."""
-        return self._flags.get(flag_id)
-
-    def is_enabled(
-        self,
-        flag_id: str,
-        user_context: Optional[Dict] = None
-    ) -> bool:
-        """Check if flag is enabled for user."""
-        flag = self._flags.get(flag_id)
-        if not flag:
-            return False
-
-        if flag.status == FlagStatus.DISABLED:
-            return False
-
-        if flag.status == FlagStatus.ENABLED:
-            return True
-
-        if flag.status == FlagStatus.ROLLOUT:
-            return self._check_rollout(flag, user_context)
-
-        return False
-
-    def _check_rollout(
-        self,
-        flag: FeatureFlag,
-        user_context: Optional[Dict]
-    ) -> bool:
-        """Check rollout percentage."""
-        if user_context:
-            user_id = user_context.get("user_id", "")
-            hash_input = f"{flag.flag_id}:{user_id}"
-            hash_val = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
-            percentage = (hash_val % 100) + 1
-            return percentage <= flag.rollout_percentage
-        else:
-            return random.random() * 100 <= flag.rollout_percentage
-
-    def update_flag(
-        self,
-        flag_id: str,
-        status: Optional[FlagStatus] = None,
-        rollout_percentage: Optional[float] = None
-    ) -> bool:
-        """Update flag."""
-        flag = self._flags.get(flag_id)
-        if not flag:
-            return False
-
-        if status is not None:
-            flag.status = status
-        if rollout_percentage is not None:
-            flag.rollout_percentage = rollout_percentage
-
-        flag.updated_at = time.time()
-        self._log_change(flag_id, "updated")
-
-        return True
-
-    def delete_flag(self, flag_id: str) -> bool:
-        """Delete flag."""
-        if flag_id in self._flags:
-            del self._flags[flag_id]
-            self._log_change(flag_id, "deleted")
-            return True
-        return False
-
-    def _log_change(self, flag_id: str, action: str) -> None:
-        """Log flag change."""
-        self._history.append({
-            "flag_id": flag_id,
-            "action": action,
-            "timestamp": time.time()
-        })
-
-    def get_history(self, limit: int = 100) -> List[Dict]:
-        """Get flag change history."""
-        return self._history[-limit:]
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class FeatureFlagAction(BaseAction):
-    """Action for feature flag operations."""
-
+    """Manage feature flags with targeting and rollouts.
+    
+    Supports boolean flags, percentage rollouts, user targeting,
+    and real-time flag updates.
+    """
+    action_type = "feature_flag"
+    display_name = "特性开关"
+    description = "特性开关管理和灰度发布"
+    
     def __init__(self):
-        super().__init__("feature_flag")
-        self._manager = FeatureFlagManager()
-
-    def execute(self, params: Dict) -> ActionResult:
-        """Execute feature flag action."""
-        try:
-            operation = params.get("operation", "create")
-
-            if operation == "create":
-                return self._create(params)
-            elif operation == "get":
-                return self._get(params)
-            elif operation == "check":
-                return self._check(params)
-            elif operation == "update":
-                return self._update(params)
-            elif operation == "delete":
-                return self._delete(params)
-            elif operation == "history":
-                return self._history(params)
+        super().__init__()
+        self._flags: Dict[str, FeatureFlag] = {}
+        self._lock = Lock()
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute feature flag operation.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - operation: 'get', 'create', 'update', 'delete', 'list', 'toggle'
+                - key: Flag key
+                - flag: Flag config (for create/update)
+                - user: User context for targeting
+        
+        Returns:
+            ActionResult with flag evaluation result.
+        """
+        operation = params.get('operation', 'get').lower()
+        
+        if operation == 'get':
+            return self._get_flag(params)
+        elif operation == 'create':
+            return self._create_flag(params)
+        elif operation == 'update':
+            return self._update_flag(params)
+        elif operation == 'delete':
+            return self._delete_flag(params)
+        elif operation == 'list':
+            return self._list_flags(params)
+        elif operation == 'toggle':
+            return self._toggle_flag(params)
+        else:
+            return ActionResult(
+                success=False,
+                message=f"Unknown operation: {operation}"
+            )
+    
+    def _create_flag(self, params: Dict[str, Any]) -> ActionResult:
+        """Create a new feature flag."""
+        key = params.get('key')
+        name = params.get('name', key)
+        description = params.get('description', '')
+        default_value = params.get('default_value', False)
+        percentage = params.get('percentage', 0)
+        rules = params.get('rules', [])
+        
+        if not key:
+            return ActionResult(success=False, message="key is required")
+        
+        with self._lock:
+            if key in self._flags:
+                return ActionResult(
+                    success=False,
+                    message=f"Flag '{key}' already exists"
+                )
+            
+            flag = FeatureFlag(
+                key=key,
+                name=name,
+                description=description,
+                default_value=default_value,
+                percentage=percentage,
+                rules=[
+                    TargetingRule(
+                        attribute=r.get('attribute'),
+                        operator=r.get('operator', 'eq'),
+                        value=r.get('value'),
+                        percentage=r.get('percentage', 100)
+                    )
+                    for r in rules
+                ]
+            )
+            
+            self._flags[key] = flag
+        
+        return ActionResult(
+            success=True,
+            message=f"Created flag '{key}'",
+            data={'key': key, 'name': name}
+        )
+    
+    def _get_flag(self, params: Dict[str, Any]) -> ActionResult:
+        """Evaluate a feature flag."""
+        key = params.get('key')
+        user = params.get('user', {})
+        
+        if not key:
+            return ActionResult(success=False, message="key is required")
+        
+        with self._lock:
+            if key not in self._flags:
+                return ActionResult(
+                    success=True,
+                    message=f"Flag '{key}' not found, returning default",
+                    data={'key': key, 'enabled': False, 'value': False, 'source': 'default'}
+                )
+            
+            flag = self._flags[key]
+        
+        # Evaluate flag
+        enabled = self._evaluate_flag(flag, user)
+        value = flag.default_value if enabled else False
+        
+        return ActionResult(
+            success=True,
+            message=f"Flag '{key}' is {'enabled' if enabled else 'disabled'}",
+            data={
+                'key': key,
+                'enabled': enabled,
+                'value': value,
+                'source': 'rule' if enabled else 'disabled'
+            }
+        )
+    
+    def _evaluate_flag(self, flag: FeatureFlag, user: Dict[str, Any]) -> bool:
+        """Evaluate flag for a user."""
+        # Check if flag is enabled at all
+        if flag.status == FlagStatus.DISABLED:
+            return False
+        
+        if flag.status == FlagStatus.ENABLED:
+            # No rules, check percentage only
+            if not flag.rules and flag.percentage > 0:
+                return self._check_percentage(flag.key, user, flag.percentage)
+            elif not flag.rules:
+                return True
+        
+        # Evaluate targeting rules
+        for rule in flag.rules:
+            if self._check_rule(rule, user):
+                # Check percentage for this rule
+                return self._check_percentage(flag.key, user, rule.percentage)
+        
+        # Check global percentage
+        if flag.percentage > 0:
+            return self._check_percentage(flag.key, user, flag.percentage)
+        
+        return False
+    
+    def _check_rule(self, rule: TargetingRule, user: Dict[str, Any]) -> bool:
+        """Check if user matches targeting rule."""
+        user_value = user.get(rule.attribute)
+        
+        if user_value is None:
+            return False
+        
+        operator = rule.operator
+        value = rule.value
+        
+        if operator == 'eq':
+            return user_value == value
+        elif operator == 'ne':
+            return user_value != value
+        elif operator == 'gt':
+            return user_value > value
+        elif operator == 'lt':
+            return user_value < value
+        elif operator == 'gte':
+            return user_value >= value
+        elif operator == 'lte':
+            return user_value <= value
+        elif operator == 'in':
+            return user_value in (value if isinstance(value, list) else [value])
+        elif operator == 'not_in':
+            return user_value not in (value if isinstance(value, list) else [value])
+        elif operator == 'contains':
+            return value in user_value
+        
+        return False
+    
+    def _check_percentage(self, key: str, user: Dict[str, Any], percentage: int) -> bool:
+        """Check if user falls within percentage rollout."""
+        if percentage >= 100:
+            return True
+        if percentage <= 0:
+            return False
+        
+        # Use consistent hashing for percentage
+        user_id = str(user.get('id', user.get('user_id', 'anonymous')))
+        hash_input = f"{key}:{user_id}"
+        hash_value = int(hashlib.md5(hash_input.encode()).hexdigest(), 16)
+        bucket = hash_value % 100
+        
+        return bucket < percentage
+    
+    def _update_flag(self, params: Dict[str, Any]) -> ActionResult:
+        """Update a feature flag."""
+        key = params.get('key')
+        updates = params.get('flag', {})
+        
+        if not key:
+            return ActionResult(success=False, message="key is required")
+        
+        with self._lock:
+            if key not in self._flags:
+                return ActionResult(
+                    success=False,
+                    message=f"Flag '{key}' not found"
+                )
+            
+            flag = self._flags[key]
+            
+            # Apply updates
+            if 'name' in updates:
+                flag.name = updates['name']
+            if 'description' in updates:
+                flag.description = updates['description']
+            if 'default_value' in updates:
+                flag.default_value = updates['default_value']
+            if 'percentage' in updates:
+                flag.percentage = updates['percentage']
+            if 'rules' in updates:
+                flag.rules = [
+                    TargetingRule(
+                        attribute=r.get('attribute'),
+                        operator=r.get('operator', 'eq'),
+                        value=r.get('value'),
+                        percentage=r.get('percentage', 100)
+                    )
+                    for r in updates['rules']
+                ]
+            
+            flag.updated_at = time.time()
+        
+        return ActionResult(
+            success=True,
+            message=f"Updated flag '{key}'"
+        )
+    
+    def _delete_flag(self, params: Dict[str, Any]) -> ActionResult:
+        """Delete a feature flag."""
+        key = params.get('key')
+        
+        with self._lock:
+            if key in self._flags:
+                del self._flags[key]
+                return ActionResult(
+                    success=True,
+                    message=f"Deleted flag '{key}'"
+                )
+        
+        return ActionResult(
+            success=False,
+            message=f"Flag '{key}' not found"
+        )
+    
+    def _list_flags(self, params: Dict[str, Any]) -> ActionResult:
+        """List all feature flags."""
+        with self._lock:
+            flags = [
+                {
+                    'key': f.key,
+                    'name': f.name,
+                    'status': f.status.value,
+                    'percentage': f.percentage,
+                    'rules_count': len(f.rules),
+                    'updated_at': f.updated_at
+                }
+                for f in self._flags.values()
+            ]
+        
+        return ActionResult(
+            success=True,
+            message=f"{len(flags)} flags",
+            data={'flags': flags, 'count': len(flags)}
+        )
+    
+    def _toggle_flag(self, params: Dict[str, Any]) -> ActionResult:
+        """Toggle a feature flag on/off."""
+        key = params.get('key')
+        
+        with self._lock:
+            if key not in self._flags:
+                return ActionResult(
+                    success=False,
+                    message=f"Flag '{key}' not found"
+                )
+            
+            flag = self._flags[key]
+            
+            if flag.status == FlagStatus.ENABLED:
+                flag.status = FlagStatus.DISABLED
             else:
-                return ActionResult(success=False, message=f"Unknown: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=str(e))
-
-    def _create(self, params: Dict) -> ActionResult:
-        """Create a flag."""
-        flag_id = self._manager.create_flag(
-            name=params.get("name", ""),
-            description=params.get("description"),
-            status=FlagStatus(params.get("status", "disabled")),
-            rollout_percentage=params.get("rollout_percentage", 100)
+                flag.status = FlagStatus.ENABLED
+            
+            flag.updated_at = time.time()
+        
+        return ActionResult(
+            success=True,
+            message=f"Flag '{key}' is now {flag.status.value}",
+            data={'key': key, 'status': flag.status.value}
         )
-        return ActionResult(success=True, data={"flag_id": flag_id})
-
-    def _get(self, params: Dict) -> ActionResult:
-        """Get flag."""
-        flag = self._manager.get_flag(params.get("flag_id", ""))
-        if not flag:
-            return ActionResult(success=False, message="Flag not found")
-        return ActionResult(success=True, data={
-            "flag_id": flag.flag_id,
-            "name": flag.name,
-            "status": flag.status.value,
-            "rollout_percentage": flag.rollout_percentage
-        })
-
-    def _check(self, params: Dict) -> ActionResult:
-        """Check if flag is enabled."""
-        enabled = self._manager.is_enabled(
-            params.get("flag_id", ""),
-            params.get("user_context")
-        )
-        return ActionResult(success=True, data={"enabled": enabled})
-
-    def _update(self, params: Dict) -> ActionResult:
-        """Update flag."""
-        status = params.get("status")
-        if status:
-            status = FlagStatus(status)
-
-        success = self._manager.update_flag(
-            params.get("flag_id", ""),
-            status=status,
-            rollout_percentage=params.get("rollout_percentage")
-        )
-        return ActionResult(success=success)
-
-    def _delete(self, params: Dict) -> ActionResult:
-        """Delete flag."""
-        success = self._manager.delete_flag(params.get("flag_id", ""))
-        return ActionResult(success=success)
-
-    def _history(self, params: Dict) -> ActionResult:
-        """Get change history."""
-        history = self._manager.get_history(params.get("limit", 100))
-        return ActionResult(success=True, data={"history": history})
