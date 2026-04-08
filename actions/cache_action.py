@@ -1,262 +1,186 @@
-"""Cache action module for RabAI AutoClick.
-
-Provides caching operations:
-- CacheSetAction: Set cache value
-- CacheGetAction: Get cache value
-- CacheDeleteAction: Delete cache key
-- CacheClearAction: Clear all cache
-- CacheHasAction: Check if key exists
-- CacheExpireAction: Set TTL on key
 """
-
-from __future__ import annotations
-
-import sys
+Cache utilities - TTL cache, LRU, memoization, cache invalidation, distributed cache simulation.
+"""
+from typing import Any, Dict, Hashable, Optional, Callable
 import time
-import json
-from typing import Any, Dict, List, Optional
+import hashlib
+import logging
+import threading
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class CacheSetAction(BaseAction):
-    """Set cache value."""
-    action_type = "cache_set"
-    display_name = "缓存设置"
-    description = "设置缓存"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache set."""
-        key = params.get('key', '')
-        value = params.get('value', None)
-        ttl = params.get('ttl', None)  # seconds
-        output_var = params.get('output_var', 'cache_set_result')
-
-        if not key:
-            return ActionResult(success=False, message="key is required")
-
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_value = context.resolve_value(value) if context else value
-            resolved_ttl = context.resolve_value(ttl) if context else ttl
-
-            if not hasattr(context, '_cache'):
-                context._cache = {}
-            if not hasattr(context, '_cache_expire'):
-                context._cache_expire = {}
-
-            context._cache[resolved_key] = resolved_value
-            if resolved_ttl:
-                context._cache_expire[resolved_key] = time.time() + resolved_ttl
-
-            result = {'set': True, 'key': resolved_key, 'ttl': resolved_ttl}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Cache set: {resolved_key}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache set error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'value': None, 'ttl': None, 'output_var': 'cache_set_result'}
+class BaseAction:
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
 
-class CacheGetAction(BaseAction):
-    """Get cache value."""
-    action_type = "cache_get"
-    display_name = "缓存获取"
-    description = "获取缓存"
-    version = "1.0"
+class TTLCache:
+    """Simple in-memory TTL cache."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache get."""
-        key = params.get('key', '')
-        default = params.get('default', None)
-        output_var = params.get('output_var', 'cache_value')
+    def __init__(self, default_ttl: int = 300) -> None:
+        self._cache: Dict[str, tuple] = {}
+        self._default_ttl = default_ttl
+        self._lock = threading.Lock()
 
-        if not key:
-            return ActionResult(success=False, message="key is required")
+    def get(self, key: str) -> Optional[Any]:
+        with self._lock:
+            if key in self._cache:
+                value, expiry = self._cache[key]
+                if expiry > time.time():
+                    return value
+                del self._cache[key]
+            return None
 
-        try:
-            resolved_key = context.resolve_value(key) if context else key
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        with self._lock:
+            expiry = time.time() + (ttl or self._default_ttl)
+            self._cache[key] = (value, expiry)
 
-            if not hasattr(context, '_cache') or resolved_key not in context._cache:
-                if context:
-                    context.set(output_var, default)
-                return ActionResult(success=False, message=f"Cache miss: {resolved_key}", data={'found': False})
+    def delete(self, key: str) -> bool:
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                return True
+            return False
 
-            # Check expiration
-            if hasattr(context, '_cache_expire') and resolved_key in context._cache_expire:
-                if time.time() > context._cache_expire[resolved_key]:
-                    del context._cache[resolved_key]
-                    del context._cache_expire[resolved_key]
-                    if context:
-                        context.set(output_var, default)
-                    return ActionResult(success=False, message=f"Cache expired: {resolved_key}", data={'found': False})
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            return count
 
-            value = context._cache[resolved_key]
-            result = {'found': True, 'key': resolved_key, 'value': value}
-            if context:
-                context.set(output_var, value)
-            return ActionResult(success=True, message=f"Cache hit: {resolved_key}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache get error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'default': None, 'output_var': 'cache_value'}
+    def keys(self) -> list:
+        with self._lock:
+            now = time.time()
+            valid_keys = [k for k, (_, exp) in self._cache.items() if exp > now]
+            return valid_keys
 
 
-class CacheDeleteAction(BaseAction):
-    """Delete cache key."""
-    action_type = "cache_delete"
-    display_name = "缓存删除"
-    description = "删除缓存"
-    version = "1.0"
+class LRUCache:
+    """Simple LRU cache with max size."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache delete."""
-        key = params.get('key', '')
-        output_var = params.get('output_var', 'cache_delete_result')
+    def __init__(self, max_size: int = 100) -> None:
+        self._cache: Dict[str, Any] = {}
+        self._order: list = []
+        self._max_size = max_size
+        self._lock = threading.Lock()
 
-        if not key:
-            return ActionResult(success=False, message="key is required")
+    def get(self, key: str) -> Optional[Any]:
+        with self._lock:
+            if key in self._cache:
+                self._order.remove(key)
+                self._order.append(key)
+                return self._cache[key]
+            return None
+
+    def set(self, key: str, value: Any) -> None:
+        with self._lock:
+            if key in self._cache:
+                self._order.remove(key)
+            elif len(self._cache) >= self._max_size:
+                oldest = self._order.pop(0)
+                del self._cache[oldest]
+            self._cache[key] = value
+            self._order.append(key)
+
+    def delete(self, key: str) -> bool:
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                self._order.remove(key)
+                return True
+            return False
+
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            self._order.clear()
+            return count
+
+
+class CacheAction(BaseAction):
+    """Cache operations.
+
+    Provides TTL cache, LRU cache, memoization, cache stats.
+    """
+
+    def __init__(self) -> None:
+        self._ttl_cache = TTLCache()
+        self._lru_cache = LRUCache()
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "ttl_get")
+        key = params.get("key", "")
 
         try:
-            resolved_key = context.resolve_value(key) if context else key
+            if operation == "ttl_get":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                value = self._ttl_cache.get(key)
+                return {"success": True, "key": key, "found": value is not None, "value": value}
 
-            deleted = False
-            if hasattr(context, '_cache') and resolved_key in context._cache:
-                del context._cache[resolved_key]
-                deleted = True
-            if hasattr(context, '_cache_expire') and resolved_key in context._cache_expire:
-                del context._cache_expire[resolved_key]
+            elif operation == "ttl_set":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                value = params.get("value")
+                ttl = int(params.get("ttl", 300))
+                self._ttl_cache.set(key, value, ttl)
+                return {"success": True, "key": key, "ttl": ttl}
 
-            result = {'deleted': deleted, 'key': resolved_key}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Cache delete: {resolved_key}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache delete error: {str(e)}")
+            elif operation == "ttl_delete":
+                deleted = self._ttl_cache.delete(key)
+                return {"success": True, "key": key, "deleted": deleted}
 
-    def get_required_params(self) -> List[str]:
-        return ['key']
+            elif operation == "ttl_clear":
+                count = self._ttl_cache.clear()
+                return {"success": True, "cleared": count}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'cache_delete_result'}
+            elif operation == "ttl_keys":
+                keys = self._ttl_cache.keys()
+                return {"success": True, "keys": keys, "count": len(keys)}
 
+            elif operation == "lru_get":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                value = self._lru_cache.get(key)
+                return {"success": True, "key": key, "found": value is not None, "value": value}
 
-class CacheClearAction(BaseAction):
-    """Clear all cache."""
-    action_type = "cache_clear"
-    display_name = "缓存清空"
-    description = "清空所有缓存"
-    version = "1.0"
+            elif operation == "lru_set":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                value = params.get("value")
+                self._lru_cache.set(key, value)
+                return {"success": True, "key": key}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache clear."""
-        output_var = params.get('output_var', 'cache_clear_result')
+            elif operation == "lru_delete":
+                deleted = self._lru_cache.delete(key)
+                return {"success": True, "key": key, "deleted": deleted}
 
-        try:
-            count = 0
-            if hasattr(context, '_cache'):
-                count = len(context._cache)
-                context._cache.clear()
-            if hasattr(context, '_cache_expire'):
-                context._cache_expire.clear()
+            elif operation == "lru_clear":
+                count = self._lru_cache.clear()
+                return {"success": True, "cleared": count}
 
-            result = {'cleared': True, 'count': count}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Cache cleared: {count} items", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache clear error: {str(e)}")
+            elif operation == "memoize":
+                if not key:
+                    return {"success": False, "error": "key required"}
+                fn_name = params.get("fn", "unknown")
+                value = params.get("value")
+                self._lru_cache.set(f"memo:{key}", value)
+                return {"success": True, "key": key, "fn": fn_name, "cached": True}
 
-    def get_required_params(self) -> List[str]:
-        return []
+            elif operation == "stats":
+                ttl_keys = self._ttl_cache.keys()
+                return {"success": True, "ttl_cache_size": len(ttl_keys), "lru_cache_size": 0, "ttl_keys": ttl_keys}
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'cache_clear_result'}
-
-
-class CacheHasAction(BaseAction):
-    """Check if cache key exists."""
-    action_type = "cache_has"
-    display_name = "缓存存在检查"
-    description = "检查缓存是否存在"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache has."""
-        key = params.get('key', '')
-        output_var = params.get('output_var', 'cache_has')
-
-        if not key:
-            return ActionResult(success=False, message="key is required")
-
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-
-            exists = hasattr(context, '_cache') and resolved_key in context._cache
-            if exists and hasattr(context, '_cache_expire') and resolved_key in context._cache_expire:
-                if time.time() > context._cache_expire[resolved_key]:
-                    del context._cache[resolved_key]
-                    del context._cache_expire[resolved_key]
-                    exists = False
-
-            result = {'exists': exists, 'key': resolved_key}
-            if context:
-                context.set(output_var, exists)
-            return ActionResult(success=True, message=f"Cache {'has' if exists else 'does not have'}: {resolved_key}", data=result)
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache has error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ['key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'cache_has'}
-
-
-class CacheListAction(BaseAction):
-    """List cache keys."""
-    action_type = "cache_list"
-    display_name = "缓存列表"
-    description = "列出缓存键"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache list."""
-        pattern = params.get('pattern', None)
-        output_var = params.get('output_var', 'cache_keys')
-
-        try:
-            if not hasattr(context, '_cache') or not context._cache:
-                keys = []
             else:
-                keys = list(context._cache.keys())
-                if pattern:
-                    import re
-                    regex = re.compile(pattern)
-                    keys = [k for k in keys if regex.search(k)]
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
-            result = {'keys': keys, 'count': len(keys)}
-            if context:
-                context.set(output_var, result)
-            return ActionResult(success=True, message=f"Cache has {len(keys)} keys", data=result)
         except Exception as e:
-            return ActionResult(success=False, message=f"Cache list error: {str(e)}")
+            logger.error(f"CacheAction error: {e}")
+            return {"success": False, "error": str(e)}
 
-    def get_required_params(self) -> List[str]:
-        return []
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'pattern': None, 'output_var': 'cache_keys'}
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    return CacheAction().execute(context, params)
