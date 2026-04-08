@@ -1,291 +1,373 @@
 """Data classifier action module for RabAI AutoClick.
 
-Provides data classification with rule-based and pattern-based
-classification, category management, and label assignment.
+Provides classification actions for categorizing data
+based on rules, patterns, and ML models.
 """
 
 import re
 import sys
 import os
-import json
-from typing import Any, Dict, List, Optional, Union, Callable
-from collections import Counter
-import threading
+from typing import Any, Dict, List, Optional, Callable
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class DataClassifierAction(BaseAction):
-    """Classify data records based on rules and patterns.
+class RuleBasedClassifierAction(BaseAction):
+    """Classify data using rule-based logic.
     
-    Supports rule-based classification, pattern matching,
-    category management, and multi-label classification.
+    Applies classification rules to categorize data.
     """
-    action_type = "data_classifier"
-    display_name = "数据分类"
-    description = "数据分类，支持规则和模式匹配"
-    
-    def __init__(self):
-        super().__init__()
-        self._categories: Dict[str, Dict[str, Any]] = {}
-        self._classifications: Dict[str, List[str]] = {}
-        self._lock = threading.RLock()
-    
+    action_type = "rule_classifier"
+    display_name = "规则分类"
+    description = "基于规则的数据分类"
+
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Execute classification operations.
+        """Classify using rules.
         
         Args:
             context: Execution context.
-            params: Dict with keys: action (classify, add_category,
-                   list_categories, classify_batch), config.
+            params: Dict with keys: data, rules, default_category.
+                   rules: list of {condition, category, priority}.
         
         Returns:
             ActionResult with classification results.
         """
-        action = params.get('action', 'classify')
-        
-        if action == 'classify':
-            return self._classify(params)
-        elif action == 'classify_batch':
-            return self._classify_batch(params)
-        elif action == 'add_category':
-            return self._add_category(params)
-        elif action == 'list_categories':
-            return self._list_categories(params)
-        elif action == 'get_classification':
-            return self._get_classification(params)
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown action: {action}"
-            )
-    
-    def _classify(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Classify a single record."""
-        record = params.get('record', {})
-        key_field = params.get('key_field')
-        
-        if not record:
-            return ActionResult(success=False, message="record is required")
-        
-        key = record.get(key_field, str(hash(str(record)))) if key_field else str(hash(str(record)))
-        
-        with self._lock:
-            categories = self._classify_record(record)
-            self._classifications[key] = categories
-        
-        return ActionResult(
-            success=True,
-            message=f"Classified into {len(categories)} categories",
-            data={
-                'categories': categories,
-                'key': key
-            }
-        )
-    
-    def _classify_batch(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Classify multiple records."""
-        records = params.get('records', [])
-        if not records:
-            return ActionResult(success=False, message="No records provided")
-        
-        key_field = params.get('key_field')
-        multi_label = params.get('multi_label', True)
-        
-        results = []
-        category_counts = Counter()
-        
-        with self._lock:
-            for idx, record in enumerate(records):
-                key = record.get(key_field, idx) if key_field else idx
-                categories = self._classify_record(record)
-                
-                if multi_label:
-                    self._classifications[key] = categories
-                else:
-                    category = categories[0] if categories else 'uncategorized'
-                    self._classifications[key] = [category]
-                
-                for cat in categories:
-                    category_counts[cat] += 1
-                
-                results.append({
-                    'key': key,
-                    'categories': categories
-                })
-        
-        return ActionResult(
-            success=True,
-            message=f"Classified {len(records)} records",
-            data={
-                'results': results,
-                'count': len(results),
-                'category_distribution': dict(category_counts)
-            }
-        )
-    
-    def _classify_record(
-        self,
-        record: Dict[str, Any]
-    ) -> List[str]:
-        """Classify a record based on rules."""
-        categories = []
-        
-        for cat_name, cat_config in self._categories.items():
-            rules = cat_config.get('rules', [])
-            
-            if self._check_rules(record, rules):
-                categories.append(cat_name)
-        
-        return categories if categories else ['uncategorized']
-    
-    def _check_rules(
-        self,
-        record: Dict[str, Any],
-        rules: List[Dict[str, Any]]
-    ) -> bool:
-        """Check if record matches rules."""
+        data = params.get('data', {})
+        rules = params.get('rules', [])
+        default_category = params.get('default_category', 'uncategorized')
+
         if not rules:
-            return False
+            return ActionResult(success=False, message="rules are required")
+
+        rules_sorted = sorted(rules, key=lambda r: r.get('priority', 0), reverse=True)
+
+        if isinstance(data, dict):
+            category = self._classify_record(data, rules_sorted, default_category)
+            return ActionResult(
+                success=True,
+                message=f"Classified as: {category}",
+                data={'category': category, 'data': data}
+            )
+
+        elif isinstance(data, list):
+            results = []
+            for record in data:
+                if isinstance(record, dict):
+                    cat = self._classify_record(record, rules_sorted, default_category)
+                    results.append({'record': record, 'category': cat})
+            
+            categories = [r['category'] for r in results]
+            return ActionResult(
+                success=True,
+                message=f"Classified {len(results)} records",
+                data={'results': results, 'categories': categories}
+            )
+
+        return ActionResult(success=False, message="data must be dict or list")
+
+    def _classify_record(self, record: Dict, rules: List, default: str) -> str:
+        """Classify a single record."""
+        for rule in rules:
+            condition = rule.get('condition', '')
+            category = rule.get('category', default)
+            
+            if self._evaluate_condition(condition, record):
+                return category
         
-        match_all = all(self._check_rule(record, rule) for rule in rules)
-        return match_all
-    
-    def _check_rule(
-        self,
-        record: Dict[str, Any],
-        rule: Dict[str, Any]
-    ) -> bool:
-        """Check if record matches a single rule."""
-        field = rule.get('field')
-        operator = rule.get('operator', 'eq')
-        value = rule.get('value')
-        values = rule.get('values', [])
-        
-        if not field:
+        return default
+
+    def _evaluate_condition(self, condition: str, record: Dict) -> bool:
+        """Evaluate condition against record."""
+        if not condition:
             return True
         
-        record_value = record.get(field)
-        
-        if operator == 'eq':
-            return record_value == value
-        elif operator == 'ne':
-            return record_value != value
-        elif operator == 'gt':
-            return isinstance(record_value, (int, float)) and record_value > value
-        elif operator == 'gte':
-            return isinstance(record_value, (int, float)) and record_value >= value
-        elif operator == 'lt':
-            return isinstance(record_value, (int, float)) and record_value < value
-        elif operator == 'lte':
-            return isinstance(record_value, (int, float)) and record_value <= value
-        elif operator == 'in':
-            return record_value in values
-        elif operator == 'not_in':
-            return record_value not in values
-        elif operator == 'contains':
-            return isinstance(record_value, str) and value in record_value
-        elif operator == 'starts_with':
-            return isinstance(record_value, str) and record_value.startswith(str(value))
-        elif operator == 'ends_with':
-            return isinstance(record_value, str) and record_value.endswith(str(value))
-        elif operator == 'regex':
-            return isinstance(record_value, str) and bool(re.match(value, record_value))
-        elif operator == 'exists':
-            return (value and field in record) or (not value and field not in record)
-        elif operator == 'is_null':
-            return (value and record_value is None) or (not value and record_value is not None)
-        elif operator == 'is_empty':
-            is_empty = (record_value is None or record_value == '' or 
-                       (isinstance(record_value, (list, dict)) and len(record_value) == 0))
-            return is_empty
-        
-        return False
-    
-    def _add_category(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Add a classification category with rules."""
-        name = params.get('name')
-        if not name:
-            return ActionResult(success=False, message="name is required")
-        
-        description = params.get('description', '')
-        rules = params.get('rules', [])
-        priority = params.get('priority', 0)
-        
-        with self._lock:
-            self._categories[name] = {
-                'name': name,
-                'description': description,
-                'rules': rules,
-                'priority': priority,
-                'created_at': __import__('time').time()
-            }
-        
-        return ActionResult(
-            success=True,
-            message=f"Added category '{name}' with {len(rules)} rules",
-            data={
-                'category': name,
-                'rule_count': len(rules)
-            }
-        )
-    
-    def _list_categories(
-        self,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """List all classification categories."""
-        with self._lock:
-            categories = []
+        try:
+            if condition.startswith('$'):
+                return bool(record.get(condition[1:]))
             
-            for name, config in self._categories.items():
-                categories.append({
-                    'name': name,
-                    'description': config.get('description', ''),
-                    'rule_count': len(config.get('rules', [])),
-                    'priority': config.get('priority', 0)
-                })
+            match = re.match(r'(\w+)\s*(==|!=|>| |<|>=|<=|contains|startswith)\s*(.+)', condition)
+            if match:
+                field, op, value = match.groups()
+                field_value = record.get(field, '')
+                value = value.strip('"\'')
+                
+                if op == '==':
+                    return str(field_value) == value
+                elif op == '!=':
+                    return str(field_value) != value
+                elif op == '>':
+                    return float(field_value) > float(value)
+                elif op == '<':
+                    return float(field_value) < float(value)
+                elif op == '>=':
+                    return float(field_value) >= float(value)
+                elif op == '<=':
+                    return float(field_value) <= float(value)
+                elif op == 'contains':
+                    return value in str(field_value)
+                elif op == 'startswith':
+                    return str(field_value).startswith(value)
             
-            categories.sort(key=lambda x: x['priority'], reverse=True)
-        
-        return ActionResult(
-            success=True,
-            message=f"Found {len(categories)} categories",
-            data={'categories': categories, 'count': len(categories)}
-        )
+            return False
+        except:
+            return False
+
+
+class KeywordClassifierAction(BaseAction):
+    """Classify text using keyword matching.
     
-    def _get_classification(
+    Categorizes data based on keyword presence.
+    """
+    action_type = "keyword_classifier"
+    display_name = "关键词分类"
+    description = "基于关键词的数据分类"
+
+    def execute(
         self,
+        context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Get classification for a specific key."""
-        key = params.get('key')
+        """Classify using keywords.
         
-        if key is None:
-            return ActionResult(success=False, message="key is required")
+        Args:
+            context: Execution context.
+            params: Dict with keys: text, categories, match_mode,
+                   case_sensitive.
         
-        with self._lock:
-            categories = self._classifications.get(key, [])
+        Returns:
+            ActionResult with classification result.
+        """
+        text = params.get('text', '')
+        categories = params.get('categories', {})
+        match_mode = params.get('match_mode', 'first')
+        case_sensitive = params.get('case_sensitive', False)
+
+        if not text:
+            return ActionResult(success=False, message="text is required")
+
+        if not categories:
+            return ActionResult(success=False, message="categories are required")
+
+        search_text = text if case_sensitive else text.lower()
         
+        matches = {}
+        for category, keywords in categories.items():
+            if not isinstance(keywords, list):
+                keywords = [keywords]
+            
+            count = 0
+            for keyword in keywords:
+                search_keyword = keyword if case_sensitive else keyword.lower()
+                if search_keyword in search_text:
+                    count += 1
+            
+            if count > 0:
+                matches[category] = count
+
+        if not matches:
+            return ActionResult(
+                success=True,
+                message="No category matched",
+                data={'category': None, 'text': text}
+            )
+
+        if match_mode == 'first':
+            matched_category = list(matches.keys())[0]
+        elif match_mode == 'most_keywords':
+            matched_category = max(matches, key=matches.get)
+        else:
+            matched_category = list(matches.keys())[0]
+
         return ActionResult(
             success=True,
-            message=f"Found {len(categories)} categories for key",
+            message=f"Classified as: {matched_category}",
             data={
-                'key': key,
-                'categories': categories
+                'category': matched_category,
+                'matches': matches,
+                'text_preview': text[:100]
             }
         )
+
+    def execute_batch(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Classify multiple texts.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: texts, categories, match_mode,
+                   case_sensitive.
+        
+        Returns:
+            ActionResult with batch classification.
+        """
+        texts = params.get('texts', [])
+        categories = params.get('categories', {})
+        match_mode = params.get('match_mode', 'first')
+        case_sensitive = params.get('case_sensitive', False)
+
+        results = []
+        for text in texts:
+            result = self.execute(context, {
+                'text': text,
+                'categories': categories,
+                'match_mode': match_mode,
+                'case_sensitive': case_sensitive
+            })
+            results.append(result.data)
+
+        return ActionResult(
+            success=True,
+            message=f"Classified {len(results)} texts",
+            data={'results': results, 'count': len(results)}
+        )
+
+
+class PatternClassifierAction(BaseAction):
+    """Classify data using regex patterns.
+    
+    Categorizes based on pattern matching.
+    """
+    action_type = "pattern_classifier"
+    display_name = "模式分类"
+    description = "基于正则模式的数据分类"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Classify using patterns.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: text, patterns, default_category.
+                   patterns: dict of {category: [pattern_list]}.
+        
+        Returns:
+            ActionResult with classification.
+        """
+        text = params.get('text', '')
+        patterns = params.get('patterns', {})
+        default_category = params.get('default_category', 'uncategorized')
+
+        if not text:
+            return ActionResult(success=False, message="text is required")
+
+        if not patterns:
+            return ActionResult(success=False, message="patterns are required")
+
+        for category, pattern_list in patterns.items():
+            if not isinstance(pattern_list, list):
+                pattern_list = [pattern_list]
+            
+            for pattern in pattern_list:
+                if re.search(pattern, text):
+                    return ActionResult(
+                        success=True,
+                        message=f"Matched pattern for: {category}",
+                        data={
+                            'category': category,
+                            'matched_pattern': pattern,
+                            'text': text[:100]
+                        }
+                    )
+
+        return ActionResult(
+            success=True,
+            message=f"No pattern matched, default: {default_category}",
+            data={'category': default_category, 'text': text[:100]}
+        )
+
+
+class MultiLabelClassifierAction(BaseAction):
+    """Multi-label classification for data.
+    
+    Assigns multiple labels to data points.
+    """
+    action_type = "multilabel_classifier"
+    display_name = "多标签分类"
+    description = "多标签数据分类"
+
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Multi-label classify.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: data, classifiers, threshold.
+                   classifiers: list of {name, condition}.
+        
+        Returns:
+            ActionResult with all matched labels.
+        """
+        data = params.get('data', {})
+        classifiers = params.get('classifiers', [])
+        threshold = params.get('threshold', 1)
+
+        if not data:
+            return ActionResult(success=False, message="data is required")
+        if not classifiers:
+            return ActionResult(success=False, message="classifiers are required")
+
+        matched_labels = []
+        scores = {}
+
+        for clf in classifiers:
+            name = clf.get('name', 'unnamed')
+            condition = clf.get('condition', '')
+            
+            if self._evaluate_condition(condition, data):
+                matched_labels.append(name)
+                scores[name] = 1.0
+            else:
+                scores[name] = 0.0
+
+        if len(matched_labels) < threshold:
+            return ActionResult(
+                success=True,
+                message=f"Only {len(matched_labels)} labels matched, threshold: {threshold}",
+                data={'labels': [], 'scores': scores, 'data': data}
+            )
+
+        return ActionResult(
+            success=True,
+            message=f"Assigned {len(matched_labels)} labels",
+            data={
+                'labels': matched_labels,
+                'scores': scores,
+                'data': data
+            }
+        )
+
+    def _evaluate_condition(self, condition: str, record: Dict) -> bool:
+        """Evaluate condition."""
+        if not condition:
+            return True
+        
+        try:
+            match = re.match(r'(\w+)\s*(==|!=|>| |<|>=|<=|contains)\s*(.+)', condition)
+            if match:
+                field, op, value = match.groups()
+                field_value = record.get(field, '')
+                value = value.strip('"\'')
+                
+                if op == '==':
+                    return str(field_value) == value
+                elif op == '!=':
+                    return str(field_value) != value
+                elif op == 'contains':
+                    return value in str(field_value)
+            return False
+        except:
+            return False
