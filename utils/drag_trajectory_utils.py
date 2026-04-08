@@ -1,137 +1,227 @@
 """
-Drag Trajectory Utilities
+Drag trajectory utilities for computing smooth drag paths.
 
-Provides utilities for computing and executing
-drag trajectories in UI automation.
-
-Author: Agent3
+Provides trajectory computation with path smoothing,
+waypoint interpolation, and physics-based movement.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
 import math
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 
 @dataclass
-class Point:
-    """2D point for trajectory."""
+class Waypoint:
+    """A waypoint in a drag trajectory."""
     x: float
     y: float
-
-
-class TrajectoryType(Enum):
-    """Types of drag trajectories."""
-    LINEAR = auto()
-    EASE_IN = auto()
-    EASE_OUT = auto()
-    EASE_IN_OUT = auto()
-    BEZIER = auto()
-
-
-from enum import Enum, auto
+    arrival_time_ms: float = 0.0
 
 
 @dataclass
-class TrajectoryConfig:
-    """Configuration for a drag trajectory."""
-    trajectory_type: TrajectoryType = TrajectoryType.LINEAR
-    steps: int = 20
-    duration_ms: float = 500.0
+class TrajectoryPoint:
+    """A point along the computed trajectory."""
+    x: float
+    y: float
+    timestamp_ms: float
+    velocity_x: float = 0.0
+    velocity_y: float = 0.0
 
 
-class DragTrajectory:
-    """
-    Computes drag trajectories for smooth animations.
-    
-    Supports various trajectory types including
-    linear, ease-in, ease-out, and bezier curves.
-    """
+class DragTrajectoryComputer:
+    """Computes smooth drag trajectories."""
 
     def __init__(
         self,
-        start: Point,
-        end: Point,
-        config: TrajectoryConfig | None = None,
-    ) -> None:
-        self._start = start
-        self._end = end
-        self._config = config or TrajectoryConfig()
-        self._cached_points: list[Point] | None = None
+        interpolation_mode: str = "linear",  # "linear", "cubic", "bezier"
+        velocity_profile: str = "constant",  # "constant", "ease_in", "ease_out", "ease_in_out"
+    ):
+        self.interpolation_mode = interpolation_mode
+        self.velocity_profile = velocity_profile
 
-    def compute(self) -> list[Point]:
-        """Compute all trajectory points."""
-        if self._cached_points is not None:
-            return self._cached_points
-
-        points = []
-        steps = self._config.steps
-
-        for i in range(steps + 1):
-            t = i / steps
-            x, y = self._apply_easing(t)
-            points.append(Point(x, y))
-
-        self._cached_points = points
-        return points
-
-    def _apply_easing(self, t: float) -> tuple[float, float]:
-        """Apply easing function to get point at t."""
-        eased_t = t
-
-        if self._config.trajectory_type == TrajectoryType.EASE_IN:
-            eased_t = t * t
-        elif self._config.trajectory_type == TrajectoryType.EASE_OUT:
-            eased_t = 1 - (1 - t) * (1 - t)
-        elif self._config.trajectory_type == TrajectoryType.EASE_IN_OUT:
-            eased_t = 2 * t * t if t < 0.5 else 1 - pow(-2 * t + 2, 2) / 2
-        elif self._config.trajectory_type == TrajectoryType.BEZIER:
-            eased_t = self._cubic_bezier(t, 0.25, 0.1, 0.25, 1.0)
-
-        x = self._start.x + (self._end.x - self._start.x) * eased_t
-        y = self._start.y + (self._end.y - self._start.y) * eased_t
-        return x, y
-
-    def _cubic_bezier(
+    def compute_trajectory(
         self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        duration_ms: float,
+        num_points: int = 50,
+    ) -> list[TrajectoryPoint]:
+        """Compute a smooth trajectory from start to end.
+
+        Args:
+            start_x, start_y: Starting position
+            end_x, end_y: Ending position
+            duration_ms: Total duration
+            num_points: Number of points in the trajectory
+
+        Returns:
+            List of TrajectoryPoints with positions and timestamps
+        """
+        trajectory = []
+        prev_x, prev_y, prev_t = start_x, start_y, 0.0
+
+        for i in range(num_points + 1):
+            t = i / num_points
+
+            # Apply velocity profile
+            t = self._apply_velocity_profile(t)
+
+            # Interpolate position
+            x = start_x + (end_x - start_x) * t
+            y = start_y + (end_y - start_y) * t
+
+            timestamp_ms = duration_ms * t
+
+            # Compute velocity
+            dt = timestamp_ms - prev_t
+            vx = (x - prev_x) / dt * 1000 if dt > 0 else 0.0
+            vy = (y - prev_y) / dt * 1000 if dt > 0 else 0.0
+
+            trajectory.append(TrajectoryPoint(
+                x=x, y=y,
+                timestamp_ms=timestamp_ms,
+                velocity_x=vx,
+                velocity_y=vy,
+            ))
+
+            prev_x, prev_y, prev_t = x, y, timestamp_ms
+
+        return trajectory
+
+    def compute_curved_trajectory(
+        self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        control_x: float,
+        control_y: float,
+        duration_ms: float,
+        num_points: int = 50,
+    ) -> list[TrajectoryPoint]:
+        """Compute a curved trajectory using quadratic bezier.
+
+        Args:
+            control_x, control_y: Control point for the curve
+        """
+        trajectory = []
+        prev_x, prev_y, prev_t = start_x, start_y, 0.0
+
+        for i in range(num_points + 1):
+            t = i / num_points
+            t = self._apply_velocity_profile(t)
+
+            # Quadratic bezier
+            one_minus_t = 1 - t
+            x = one_minus_t ** 2 * start_x + 2 * one_minus_t * t * control_x + t ** 2 * end_x
+            y = one_minus_t ** 2 * start_y + 2 * one_minus_t * t * control_y + t ** 2 * end_y
+
+            timestamp_ms = duration_ms * t
+
+            dt = timestamp_ms - prev_t
+            vx = (x - prev_x) / dt * 1000 if dt > 0 else 0.0
+            vy = (y - prev_y) / dt * 1000 if dt > 0 else 0.0
+
+            trajectory.append(TrajectoryPoint(
+                x=x, y=y,
+                timestamp_ms=timestamp_ms,
+                velocity_x=vx,
+                velocity_y=vy,
+            ))
+
+            prev_x, prev_y, prev_t = x, y, timestamp_ms
+
+        return trajectory
+
+    def compute_waypoint_trajectory(
+        self,
+        waypoints: list[Waypoint],
+        duration_ms: float,
+        num_points: int = 50,
+    ) -> list[TrajectoryPoint]:
+        """Compute trajectory through waypoints."""
+        if len(waypoints) < 2:
+            return []
+
+        trajectory = []
+        total_distance = self._compute_total_distance(waypoints)
+
+        prev_x, prev_y, prev_t = waypoints[0].x, waypoints[0].y, 0.0
+
+        for i in range(num_points + 1):
+            t = i / num_points
+            t = self._apply_velocity_profile(t)
+
+            x, y = self._position_at_t(waypoints, t, total_distance)
+            timestamp_ms = duration_ms * t
+
+            dt = timestamp_ms - prev_t
+            vx = (x - prev_x) / dt * 1000 if dt > 0 else 0.0
+            vy = (y - prev_y) / dt * 1000 if dt > 0 else 0.0
+
+            trajectory.append(TrajectoryPoint(
+                x=x, y=y,
+                timestamp_ms=timestamp_ms,
+                velocity_x=vx,
+                velocity_y=vy,
+            ))
+
+            prev_x, prev_y, prev_t = x, y, timestamp_ms
+
+        return trajectory
+
+    def _apply_velocity_profile(self, t: float) -> float:
+        """Apply velocity/easing profile to normalized time."""
+        if self.velocity_profile == "constant":
+            return t
+        elif self.velocity_profile == "ease_in":
+            return t * t
+        elif self.velocity_profile == "ease_out":
+            return 1 - (1 - t) ** 2
+        elif self.velocity_profile == "ease_in_out":
+            return 2 * t * t if t < 0.5 else 1 - (-2 * t + 2) ** 2 / 2
+        return t
+
+    def _compute_total_distance(self, waypoints: list[Waypoint]) -> float:
+        """Compute total distance through waypoints."""
+        total = 0.0
+        for i in range(1, len(waypoints)):
+            dx = waypoints[i].x - waypoints[i-1].x
+            dy = waypoints[i].y - waypoints[i-1].y
+            total += math.hypot(dx, dy)
+        return total
+
+    def _position_at_t(
+        self,
+        waypoints: list[Waypoint],
         t: float,
-        x1: float,
-        y1: float,
-        x2: float,
-        y2: float,
-    ) -> float:
-        """Compute cubic bezier value at t."""
-        cx = 3 * x1
-        bx = 3 * (x2 - x1) - cx
-        ax = 1 - cx - bx
-        cy = 3 * y1
-        by = 3 * (y2 - y1) - cy
-        ay = 1 - cy - by
+        total_distance: float,
+    ) -> tuple[float, float]:
+        """Get position at normalized time t."""
+        if total_distance == 0:
+            return waypoints[0].x, waypoints[0].y
 
-        def sample(t: float) -> float:
-            return ((ax * t + bx) * t + cx) * t
+        target_dist = t * total_distance
+        accumulated = 0.0
 
-        return ((ay * t + by) * t + cy) * t
+        for i in range(1, len(waypoints)):
+            dx = waypoints[i].x - waypoints[i-1].x
+            dy = waypoints[i].y - waypoints[i-1].y
+            segment_dist = math.hypot(dx, dy)
 
-    def get_interpolator(self) -> Callable[[float], Point]:
-        """Get a function that interpolates at t."""
-        def interpolate(t: float) -> Point:
-            t = max(0.0, min(1.0, t))
-            x, y = self._apply_easing(t)
-            return Point(x, y)
-        return interpolate
+            if accumulated + segment_dist >= target_dist:
+                segment_t = (target_dist - accumulated) / segment_dist
+                x = waypoints[i-1].x + dx * segment_t
+                y = waypoints[i-1].y + dy * segment_t
+                return x, y
+
+            accumulated += segment_dist
+
+        return waypoints[-1].x, waypoints[-1].y
 
 
-def compute_linear_trajectory(
-    start: tuple[float, float],
-    end: tuple[float, float],
-    steps: int = 20,
-) -> list[tuple[float, float]]:
-    """Compute a linear trajectory between two points."""
-    trajectory = DragTrajectory(
-        Point(start[0], start[1]),
-        Point(end[0], end[1]),
-        TrajectoryConfig(trajectory_type=TrajectoryType.LINEAR, steps=steps),
-    )
-    points = trajectory.compute()
-    return [(p.x, p.y) for p in points]
+__all__ = ["DragTrajectoryComputer", "TrajectoryPoint", "Waypoint"]
