@@ -1,178 +1,106 @@
-"""CORS API action module for RabAI AutoClick.
+# Copyright (c) 2024. coded by claude
+"""API CORS Action Module.
 
-Provides CORS operations:
-- CORSConfigAction: Configure CORS settings
-- CORSPreflightAction: Handle preflight requests
-- CORSHeaderAction: Set CORS headers
-- CORSOriginAction: Validate allowed origins
-- CORSMethodAction: Validate allowed methods
+Handles Cross-Origin Resource Sharing (CORS) configuration and
+preflight request handling for API endpoints.
 """
+from typing import Optional, List, Dict, Any, Set
+from dataclasses import dataclass, field
+from enum import Enum
+import logging
 
-import time
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class CORSConfigAction(BaseAction):
-    """Configure CORS settings."""
-    action_type = "cors_config"
-    display_name = "CORS配置"
-    description = "配置CORS跨域设置"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            allowed_origins = params.get("allowed_origins", ["*"])
-            allowed_methods = params.get("allowed_methods", ["GET", "POST", "PUT", "DELETE"])
-            allowed_headers = params.get("allowed_headers", ["Content-Type", "Authorization"])
-            max_age = params.get("max_age", 3600)
-            allow_credentials = params.get("allow_credentials", False)
-
-            if not hasattr(context, "cors_config"):
-                context.cors_config = {}
-            context.cors_config = {
-                "allowed_origins": allowed_origins,
-                "allowed_methods": allowed_methods,
-                "allowed_headers": allowed_headers,
-                "max_age": max_age,
-                "allow_credentials": allow_credentials,
-                "configured_at": time.time(),
-            }
-
-            return ActionResult(
-                success=True,
-                data={"allowed_origins": allowed_origins, "allowed_methods": allowed_methods, "max_age": max_age},
-                message=f"CORS configured: {len(allowed_origins)} origins, {len(allowed_methods)} methods",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"CORS config failed: {e}")
+class CorsMode(Enum):
+    ALLOW_ALL = "allow_all"
+    RESTRICTED = "restricted"
+    CUSTOM = "custom"
 
 
-class CORSPreflightAction(BaseAction):
-    """Handle CORS preflight request."""
-    action_type = "cors_preflight"
-    display_name = "CORS预检"
-    description = "处理CORS预检请求"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            origin = params.get("origin", "")
-            method = params.get("method", "")
-            request_headers = params.get("request_headers", [])
-
-            if not origin or not method:
-                return ActionResult(success=False, message="origin and method are required")
-
-            cors_config = getattr(context, "cors_config", {})
-            allowed_origins = cors_config.get("allowed_origins", ["*"])
-            allowed_methods = cors_config.get("allowed_methods", [])
-
-            origin_allowed = "*" in allowed_origins or origin in allowed_origins
-            method_allowed = method.upper() in allowed_methods
-
-            headers = {
-                "Access-Control-Allow-Origin": origin if origin_allowed else "",
-                "Access-Control-Allow-Methods": ", ".join(allowed_methods),
-                "Access-Control-Allow-Headers": ", ".join(cors_config.get("allowed_headers", [])),
-                "Access-Control-Max-Age": str(cors_config.get("max_age", 3600)),
-            }
-
-            return ActionResult(
-                success=origin_allowed and method_allowed,
-                data={"origin": origin, "method": method, "allowed": origin_allowed and method_allowed, "headers": headers},
-                message=f"Preflight {method} from {origin}: {'allowed' if origin_allowed and method_allowed else 'denied'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"CORS preflight failed: {e}")
+@dataclass
+class CorsConfig:
+    allow_origins: Set[str]
+    allow_methods: Set[str]
+    allow_headers: Set[str]
+    allow_credentials: bool = False
+    max_age: int = 3600
+    expose_headers: Set[str] = field(default_factory=set)
+    allow_all: bool = False
 
 
-class CORSHeaderAction(BaseAction):
-    """Set CORS response headers."""
-    action_type = "cors_header"
-    display_name = "CORS头设置"
-    description = "设置CORS响应头"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            origin = params.get("origin", "")
-            include_credentials = params.get("include_credentials", False)
-
-            cors_config = getattr(context, "cors_config", {})
-            allowed_origins = cors_config.get("allowed_origins", ["*"])
-
-            origin_allowed = "*" in allowed_origins or origin in allowed_origins
-
-            headers = {}
-            if origin_allowed:
-                headers["Access-Control-Allow-Origin"] = origin if not include_credentials and "*" not in allowed_origins else origin
-                if include_credentials:
-                    headers["Access-Control-Allow-Credentials"] = "true"
-                headers["Access-Control-Expose-Headers"] = ", ".join(cors_config.get("allowed_headers", []))
-
-            return ActionResult(
-                success=True,
-                data={"origin": origin, "headers": headers},
-                message=f"CORS headers set for {origin}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"CORS header failed: {e}")
+@dataclass
+class CorsRequest:
+    origin: Optional[str]
+    method: str
+    headers: Dict[str, str]
+    is_preflight: bool
 
 
-class CORSOriginAction(BaseAction):
-    """Validate allowed origins."""
-    action_type = "cors_origin"
-    display_name = "CORS来源验证"
-    description = "验证CORS允许的来源"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            origin = params.get("origin", "")
-
-            if not origin:
-                return ActionResult(success=False, message="origin is required")
-
-            cors_config = getattr(context, "cors_config", {})
-            allowed_origins = cors_config.get("allowed_origins", ["*"])
-
-            allowed = "*" in allowed_origins or origin in allowed_origins
-            matched_origin = origin if origin in allowed_origins else ("*" if "*" in allowed_origins else None)
-
-            return ActionResult(
-                success=True,
-                data={"origin": origin, "allowed": allowed, "matched_origin": matched_origin},
-                message=f"Origin {origin}: {'allowed' if allowed else 'denied'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"CORS origin check failed: {e}")
+@dataclass
+class CorsResponse:
+    status_code: int
+    headers: Dict[str, str]
 
 
-class CORSMethodAction(BaseAction):
-    """Validate allowed HTTP methods."""
-    action_type = "cors_method"
-    display_name = "CORS方法验证"
-    description = "验证CORS允许的HTTP方法"
+class CorsHandler:
+    DEFAULT_ALLOW_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}
+    DEFAULT_ALLOW_HEADERS = {"Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            method = params.get("method", "").upper()
+    def __init__(self, config: Optional[CorsConfig] = None):
+        self.config = config or CorsConfig(
+            allow_origins=set(),
+            allow_methods=self.DEFAULT_ALLOW_METHODS,
+            allow_headers=self.DEFAULT_ALLOW_HEADERS,
+        )
 
-            if not method:
-                return ActionResult(success=False, message="method is required")
+    def update_config(self, config: CorsConfig) -> None:
+        self.config = config
 
-            cors_config = getattr(context, "cors_config", {})
-            allowed_methods = cors_config.get("allowed_methods", ["GET", "POST", "PUT", "DELETE"])
+    def handle_request(self, request: CorsRequest) -> Optional[CorsResponse]:
+        if request.is_preflight:
+            return self._handle_preflight(request)
+        return self._add_cors_headers(request, CorsResponse(status_code=200, headers={}))
 
-            allowed = method in allowed_methods
+    def _handle_preflight(self, request: CorsRequest) -> Optional[CorsResponse]:
+        if not self._is_origin_allowed(request.origin):
+            return CorsResponse(status_code=403, headers={})
+        headers = self._build_preflight_headers(request)
+        return CorsResponse(status_code=204, headers=headers)
 
-            return ActionResult(
-                success=True,
-                data={"method": method, "allowed": allowed, "allowed_methods": allowed_methods},
-                message=f"Method {method}: {'allowed' if allowed else 'denied'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"CORS method check failed: {e}")
+    def _is_origin_allowed(self, origin: Optional[str]) -> bool:
+        if not origin:
+            return True
+        if self.config.allow_all:
+            return True
+        return origin in self.config.allow_origins
+
+    def _build_preflight_headers(self, request: CorsRequest) -> Dict[str, str]:
+        headers = {}
+        if self.config.allow_all:
+            headers["Access-Control-Allow-Origin"] = "*"
+        elif request.origin:
+            headers["Access-Control-Allow-Origin"] = request.origin
+            if self.config.allow_credentials:
+                headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = ", ".join(self.config.allow_methods)
+        headers["Access-Control-Allow-Headers"] = ", ".join(self.config.allow_headers)
+        headers["Access-Control-Max-Age"] = str(self.config.max_age)
+        return headers
+
+    def _add_cors_headers(self, request: CorsRequest, response: CorsResponse) -> CorsResponse:
+        if self.config.allow_all:
+            response.headers["Access-Control-Allow-Origin"] = "*"
+        elif request.origin:
+            response.headers["Access-Control-Allow-Origin"] = request.origin
+        if self.config.expose_headers:
+            response.headers["Access-Control-Expose-Headers"] = ", ".join(self.config.expose_headers)
+        return response
+
+    def create_allow_all_handler(self) -> "CorsHandler":
+        return CorsHandler(config=CorsConfig(
+            allow_origins=set(),
+            allow_methods=self.DEFAULT_ALLOW_METHODS,
+            allow_headers=self.DEFAULT_ALLOW_HEADERS,
+            allow_all=True,
+        ))
