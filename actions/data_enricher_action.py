@@ -1,101 +1,186 @@
 """
 Data Enricher Action Module.
 
-Enriches data records with additional fields from lookup tables,
-external APIs, computed values, and cross-references.
+Enriches data records by joining with external sources,
+ appending computed fields, and resolving references.
 """
-from typing import Any, Optional
-from dataclasses import dataclass
-from actions.base_action import BaseAction
+
+from __future__ import annotations
+
+from typing import Any, Callable, Optional, Union
+from dataclasses import dataclass, field
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EnrichmentSource:
+    """An external source for data enrichment."""
+    name: str
+    lookup_func: Callable[[Any], Optional[dict[str, Any]]]
+    key_field: str
+    merge_strategy: str = "overwrite"
+
+
+@dataclass
+class ComputedField:
+    """A computed field definition."""
+    name: str
+    func: Callable[[dict[str, Any]], Any]
+    dependencies: list[str] = field(default_factory=list)
 
 
 @dataclass
 class EnrichmentResult:
-    """Result of data enrichment."""
-    records: list[dict[str, Any]]
+    """Result of an enrichment operation."""
     enriched_count: int
-    enrichment_sources: list[str]
+    lookup_count: int
+    hit_count: int
+    computed_count: int
+    errors: list[dict[str, Any]] = field(default_factory=list)
 
 
-class DataEnricherAction(BaseAction):
-    """Enrich data records with additional information."""
+class DataEnricherAction:
+    """
+    Data enrichment processor.
 
-    def __init__(self) -> None:
-        super().__init__("data_enricher")
+    Enriches records with data from external sources (databases, APIs)
+    and computed fields based on existing data.
 
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Enrich records with additional data.
+    Example:
+        enricher = DataEnricherAction()
+        enricher.add_lookup_source("users", lookup_user_by_id, key_field="user_id")
+        enricher.add_computed_field("full_name", lambda r: f"{r['first']} {r['last']}")
+        result = enricher.process(records)
+    """
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - records: List of dict records
-                - enrichments: List of enrichment configs
-                    - type: lookup, api, computed, constant
-                    - output_field: Field to add
-                    - source: Lookup dict or API endpoint
-                    - key_field: Key to match in source
-                    - value_field: Value to extract from source
+    def __init__(
+        self,
+        default_strategy: str = "overwrite",
+    ) -> None:
+        self.default_strategy = default_strategy
+        self._sources: list[EnrichmentSource] = []
+        self._computed_fields: list[ComputedField] = []
+        self._reference_resolvers: dict[str, Callable[[str], Optional[Any]]] = {}
 
-        Returns:
-            EnrichmentResult with enriched records
-        """
-        records = params.get("records", [])
-        enrichments = params.get("enrichments", [])
+    def add_lookup_source(
+        self,
+        name: str,
+        lookup_func: Callable[[Any], Optional[dict[str, Any]]],
+        key_field: str,
+        merge_strategy: str = "overwrite",
+    ) -> "DataEnricherAction":
+        """Add a lookup source for enrichment."""
+        source = EnrichmentSource(
+            name=name,
+            lookup_func=lookup_func,
+            key_field=key_field,
+            merge_strategy=merge_strategy,
+        )
+        self._sources.append(source)
+        return self
 
+    def add_computed_field(
+        self,
+        name: str,
+        func: Callable[[dict[str, Any]], Any],
+        dependencies: Optional[list[str]] = None,
+    ) -> "DataEnricherAction":
+        """Add a computed field that derives value from other fields."""
+        computed = ComputedField(
+            name=name,
+            func=func,
+            dependencies=dependencies or [],
+        )
+        self._computed_fields.append(computed)
+        return self
+
+    def add_reference_resolver(
+        self,
+        ref_type: str,
+        resolver_func: Callable[[str], Optional[Any]],
+    ) -> "DataEnricherAction":
+        """Add a reference resolver for URI/ID references."""
+        self._reference_resolvers[ref_type] = resolver_func
+        return self
+
+    def process(
+        self,
+        records: list[dict[str, Any]],
+        stop_on_error: bool = False,
+    ) -> EnrichmentResult:
+        """Process records through all enrichment steps."""
         enriched_count = 0
-        sources_used = []
+        lookup_count = 0
+        hit_count = 0
+        computed_count = 0
+        errors: list[dict[str, Any]] = []
 
-        for enrichment in enrichments:
-            enrich_type = enrichment.get("type", "lookup")
-            output_field = enrichment.get("output_field", "")
-            source = enrichment.get("source", {})
-            key_field = enrichment.get("key_field", "id")
-            value_field = enrichment.get("value_field", "value")
+        for idx, record in enumerate(records):
+            try:
+                for source in self._sources:
+                    lookup_count += 1
+                    lookup_key = record.get(source.key_field)
+                    if lookup_key is None:
+                        continue
 
-            if not output_field:
-                continue
+                    enriched = source.lookup_func(lookup_key)
+                    if enriched:
+                        hit_count += 1
+                        self._merge_record(record, enriched, source.merge_strategy)
 
-            sources_used.append(output_field)
+                for computed in self._computed_fields:
+                    try:
+                        deps = computed.dependencies
+                        if not deps or all(d in record for d in deps):
+                            record[computed.name] = computed.func(record)
+                            computed_count += 1
+                    except Exception as e:
+                        logger.debug(f"Computed field '{computed.name}' failed: {e}")
 
-            if enrich_type == "lookup":
-                lookup_dict = source if isinstance(source, dict) else {}
-                for r in records:
-                    if isinstance(r, dict):
-                        key = str(r.get(key_field, ""))
-                        if key in lookup_dict:
-                            r[output_field] = lookup_dict[key]
-                            enriched_count += 1
-                        else:
-                            r[output_field] = None
+                for ref_type, resolver in self._reference_resolvers.items():
+                    for field_name in list(record.keys()):
+                        if field_name.endswith(f"_{ref_type}_ref"):
+                            ref_value = record.get(field_name)
+                            if ref_value:
+                                resolved = resolver(ref_value)
+                                if resolved is not None:
+                                    result_field = field_name.replace(f"_{ref_type}_ref", "")
+                                    record[result_field] = resolved
 
-            elif enrich_type == "constant":
-                for r in records:
-                    if isinstance(r, dict):
-                        r[output_field] = source
+                enriched_count += 1
 
-            elif enrich_type == "computed":
-                expression = enrichment.get("expression", "")
-                for r in records:
-                    if isinstance(r, dict):
-                        try:
-                            r[output_field] = eval(expression, {"r": r}, {})
-                            enriched_count += 1
-                        except Exception:
-                            r[output_field] = None
-
-            elif enrich_type == "api":
-                for r in records:
-                    if isinstance(r, dict):
-                        key = str(r.get(key_field, ""))
-                        if key:
-                            r[output_field] = {"lookup_key": key, "status": "pending"}
-                        else:
-                            r[output_field] = None
+            except Exception as e:
+                error_entry = {"index": idx, "error": str(e), "record": record.get("id")}
+                errors.append(error_entry)
+                if stop_on_error:
+                    raise
 
         return EnrichmentResult(
-            records=records,
             enriched_count=enriched_count,
-            enrichment_sources=sources_used
-        ).__dict__
+            lookup_count=lookup_count,
+            hit_count=hit_count,
+            computed_count=computed_count,
+            errors=errors,
+        )
+
+    def _merge_record(
+        self,
+        target: dict[str, Any],
+        source: dict[str, Any],
+        strategy: str,
+    ) -> None:
+        """Merge source data into target record."""
+        if strategy == "overwrite":
+            target.update(source)
+        elif strategy == "preserve":
+            for key, value in source.items():
+                if key not in target:
+                    target[key] = value
+        elif strategy == "prefix":
+            for key, value in source.items():
+                target[f"{key}_enriched"] = value
+        elif strategy == "suffix":
+            for key, value in source.items():
+                target[f"{key}_ext"] = value
