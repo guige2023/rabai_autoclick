@@ -1,273 +1,267 @@
+"""Data transform action module for RabAI AutoClick.
+
+Provides data transformation operations:
+- TransformMapAction: Map/transform field values
+- TransformFlattenAction: Flatten nested structures
+- TransformPivotAction: Pivot data
+- TransformReshapeAction: Reshape data structures
 """
-Data transformation utilities - mapping, flattening, pivoting, reshaping, encoding.
-"""
-from typing import Any, Dict, List, Optional, Union, Callable
-import logging
 
-logger = logging.getLogger(__name__)
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
-class BaseAction:
-    """Base class for all actions."""
+import sys
+import os
 
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        raise NotImplementedError
-
-
-def _deep_get(d: Dict[str, Any], path: str, default: Any = None) -> Any:
-    keys = path.split(".")
-    result = d
-    for k in keys:
-        if isinstance(result, dict):
-            result = result.get(k)
-        elif isinstance(result, list) and k.isdigit():
-            idx = int(k)
-            result = result[idx] if 0 <= idx < len(result) else None
-        else:
-            return default
-        if result is None:
-            return default
-    return result
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-def _deep_set(d: Dict[str, Any], path: str, value: Any) -> None:
-    keys = path.split(".")
-    current = d
-    for k in keys[:-1]:
-        if k not in current:
-            current[k] = {}
-        current = current[k]
-    current[keys[-1]] = value
+class TransformMapAction(BaseAction):
+    """Map/transform field values."""
+    action_type = "transform_map"
+    display_name = "字段映射"
+    description = "映射和转换字段值"
 
-
-def _flatten_dict(d: Dict[str, Any], parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
-    items: List[tuple] = []
-    for k, v in d.items():
-        new_key = f"{parent_key}{sep}{k}" if parent_key else k
-        if isinstance(v, dict):
-            items.extend(_flatten_dict(v, new_key, sep).items())
-        elif isinstance(v, list):
-            for i, item in enumerate(v):
-                if isinstance(item, dict):
-                    items.extend(_flatten_dict(item, f"{new_key}[{i}]", sep).items())
-                else:
-                    items.append((f"{new_key}[{i}]", item))
-        else:
-            items.append((new_key, v))
-    return dict(items)
-
-
-def _unflatten_dict(d: Dict[str, Any], sep: str = ".") -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
-    for key, value in d.items():
-        _deep_set(result, key.replace("[", ".").replace("]", ""), value)
-    return result
-
-
-def _group_by(data: List[Dict[str, Any]], key: str) -> Dict[Any, List[Dict[str, Any]]]:
-    groups: Dict[Any, List[Dict[str, Any]]] = {}
-    for item in data:
-        val = item.get(key)
-        if val not in groups:
-            groups[val] = []
-        groups[val].append(item)
-    return groups
-
-
-def _pivot_data(
-    data: List[Dict[str, Any]],
-    index: str,
-    columns: str,
-    values: str,
-    aggfunc: str = "first"
-) -> Dict[str, Any]:
-    groups = _group_by(data, columns)
-    result: Dict[str, Any] = {}
-    for col_val, rows in groups.items():
-        row_map = {r.get(index): r.get(values) for r in rows}
-        if aggfunc == "first" or aggfunc == "last":
-            result[col_val] = row_map
-        elif aggfunc == "count":
-            result[col_val] = {k: len(v) for k, v in groups.items()}
-        elif aggfunc == "sum" and all(isinstance(r.get(values), (int, float)) for r in rows):
-            result[col_val] = sum(r.get(values, 0) for r in rows)
-        else:
-            result[col_val] = row_map
-    return result
-
-
-def _one_hot_encode(values: List[Any], categories: Optional[List[Any]] = None) -> List[List[int]]:
-    cats = categories or sorted(set(values))
-    cat_index = {c: i for i, c in enumerate(cats)}
-    return [[1 if v == c else 0 for c in cats] for v in values]
-
-
-def _label_encode(values: List[Any]) -> Dict[Any, int]:
-    unique = []
-    for v in values:
-        if v not in unique:
-            unique.append(v)
-    return {v: i for i, v in enumerate(unique)}
-
-
-def _normalize(values: List[float], min_val: Optional[float] = None, max_val: Optional[float] = None) -> List[float]:
-    mn = min_val if min_val is not None else min(values)
-    mx = max_val if max_val is not None else max(values)
-    if mx == mn:
-        return [0.0] * len(values)
-    return [(v - mn) / (mx - mn) for v in values]
-
-
-def _standardize(values: List[float]) -> List[float]:
-    if not values:
-        return []
-    mean = sum(values) / len(values)
-    variance = sum((v - mean) ** 2 for v in values) / len(values)
-    std = variance ** 0.5
-    if std == 0:
-        return [0.0] * len(values)
-    return [(v - mean) / std for v in values]
-
-
-class TransformAction(BaseAction):
-    """Data transformation operations.
-
-    Provides flattening, pivoting, mapping, encoding, normalization, standardization.
-    """
-
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        operation = params.get("operation", "map")
-        data = params.get("data", [])
-        key = params.get("key", "")
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            if operation == "flatten":
-                if isinstance(data, dict):
-                    result = _flatten_dict(data, sep=params.get("sep", "."))
-                    return {"success": True, "data": result}
-                return {"success": False, "error": "data must be a dict for flatten"}
+            data = params.get("data", [])
+            mappings = params.get("mappings", {})
+            expression_mappings = params.get("expression_mappings", [])
 
-            elif operation == "unflatten":
-                if isinstance(data, dict):
-                    result = _unflatten_dict(data, sep=params.get("sep", "."))
-                    return {"success": True, "data": result}
-                return {"success": False, "error": "data must be a dict for unflatten"}
+            if not data:
+                return ActionResult(success=False, message="data is required")
 
-            elif operation == "group_by":
-                if not key:
-                    return {"success": False, "error": "key required"}
-                groups = _group_by(data, key)
-                return {"success": True, "groups": groups, "group_count": len(groups)}
+            transformed = []
+            for record in data:
+                if isinstance(record, dict):
+                    new_record = dict(record)
+                    for old_field, new_value in mappings.items():
+                        if old_field in new_record:
+                            if callable(new_value):
+                                try:
+                                    new_record[old_field] = new_value(new_record[old_field])
+                                except Exception:
+                                    pass
+                            else:
+                                new_record[old_field] = new_value
 
-            elif operation == "pivot":
-                index = params.get("index", "")
-                columns = params.get("columns", "")
-                values = params.get("values", "")
-                aggfunc = params.get("aggfunc", "first")
-                if not all([index, columns, values]):
-                    return {"success": False, "error": "index, columns, values required"}
-                result = _pivot_data(data, index, columns, values, aggfunc)
-                return {"success": True, "pivot": result}
+                    for em in expression_mappings:
+                        field_name = em.get("field", "")
+                        expression = em.get("expression", "")
+                        try:
+                            new_record[field_name] = eval(expression, {"__builtins__": {}}, {"r": new_record})
+                        except Exception:
+                            new_record[field_name] = None
 
-            elif operation == "map":
-                if not key:
-                    return {"success": False, "error": "key required"}
-                mapping = params.get("mapping", {})
-                default = params.get("default")
-                results = [mapping.get(item.get(key), default) for item in data]
-                return {"success": True, "results": results, "count": len(results)}
+                    transformed.append(new_record)
+                else:
+                    transformed.append(record)
 
-            elif operation == "filter":
-                if not key:
-                    return {"success": False, "error": "key required"}
-                value = params.get("value")
-                results = [item for item in data if item.get(key) == value]
-                return {"success": True, "results": results, "count": len(results)}
-
-            elif operation == "sort_by":
-                if not key:
-                    return {"success": False, "error": "key required"}
-                reverse = params.get("reverse", False)
-                results = sorted(data, key=lambda x: x.get(key), reverse=reverse)
-                return {"success": True, "data": results, "count": len(results)}
-
-            elif operation == "select":
-                keys = params.get("keys", [])
-                if not keys:
-                    return {"success": False, "error": "keys required"}
-                results = [{k: item.get(k) for k in keys} for item in data]
-                return {"success": True, "data": results, "count": len(results)}
-
-            elif operation == "rename":
-                if not key:
-                    return {"success": False, "error": "key required"}
-                new_key = params.get("new_key", "")
-                results = []
-                for item in data:
-                    new_item = dict(item)
-                    if new_key and new_key != key:
-                        new_item[new_key] = new_item.pop(key, None)
-                    results.append(new_item)
-                return {"success": True, "data": results}
-
-            elif operation == "one_hot":
-                values = params.get("values", data if isinstance(data, list) else [])
-                categories = params.get("categories")
-                encoded = _one_hot_encode(values, categories)
-                return {"success": True, "encoded": encoded, "shape": [len(encoded), len(encoded[0]) if encoded else 0]}
-
-            elif operation == "label_encode":
-                values = params.get("values", data if isinstance(data, list) else [])
-                mapping = _label_encode(values)
-                encoded = [mapping.get(v, -1) for v in values]
-                return {"success": True, "mapping": mapping, "encoded": encoded}
-
-            elif operation == "normalize":
-                values = [float(v) for v in (data if isinstance(data, list) else [])]
-                min_val = float(params.get("min_val")) if params.get("min_val") else None
-                max_val = float(params.get("max_val")) if params.get("max_val") else None
-                result = _normalize(values, min_val, max_val)
-                return {"success": True, "data": result}
-
-            elif operation == "standardize":
-                values = [float(v) for v in (data if isinstance(data, list) else [])]
-                result = _standardize(values)
-                return {"success": True, "data": result}
-
-            elif operation == "deduplicate":
-                seen = set()
-                results = []
-                for item in data:
-                    key_val = str(item.get(key, item)) if key else str(item)
-                    if key_val not in seen:
-                        seen.add(key_val)
-                        results.append(item)
-                return {"success": True, "data": results, "removed": len(data) - len(results)}
-
-            elif operation == "deep_get":
-                path = params.get("path", key)
-                default_val = params.get("default")
-                if isinstance(data, dict):
-                    result = _deep_get(data, path, default_val)
-                    return {"success": True, "value": result}
-                return {"success": False, "error": "data must be a dict for deep_get"}
-
-            elif operation == "deep_set":
-                path = params.get("path", "")
-                value = params.get("value")
-                if isinstance(data, dict) and path:
-                    _deep_set(data, path, value)
-                    return {"success": True, "data": data}
-                return {"success": False, "error": "data must be a dict and path required"}
-
-            else:
-                return {"success": False, "error": f"Unknown operation: {operation}"}
+            return ActionResult(
+                success=True,
+                message=f"Transformed {len(transformed)} records",
+                data={"transformed": transformed, "count": len(transformed)}
+            )
 
         except Exception as e:
-            logger.error(f"TransformAction error: {e}")
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"Transform map failed: {str(e)}")
 
 
-def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-    """Entry point for transform operations."""
-    return TransformAction().execute(context, params)
+class TransformFlattenAction(BaseAction):
+    """Flatten nested data structures."""
+    action_type = "transform_flatten"
+    display_name = "扁平化"
+    description = "将嵌套结构扁平化"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            separator = params.get("separator", "_")
+            max_depth = params.get("max_depth", 10)
+            prefix = params.get("prefix", "")
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+
+            def flatten_value(value: Any, current_prefix: str = "", depth: int = 0) -> Dict[str, Any]:
+                result = {}
+                if depth >= max_depth:
+                    if current_prefix:
+                        result[current_prefix] = value
+                    return result
+
+                if isinstance(value, dict):
+                    for k, v in value.items():
+                        new_key = f"{current_prefix}{separator}{k}" if current_prefix else k
+                        result.update(flatten_value(v, new_key, depth + 1))
+                elif isinstance(value, (list, tuple)):
+                    for i, item in enumerate(value):
+                        new_key = f"{current_prefix}{separator}{i}" if current_prefix else str(i)
+                        result.update(flatten_value(item, new_key, depth + 1))
+                else:
+                    if current_prefix:
+                        result[current_prefix] = value
+                return result
+
+            flattened = []
+            for record in data:
+                if isinstance(record, dict):
+                    flat = flatten_value(record, prefix)
+                    flattened.append(flat)
+                else:
+                    flattened.append(record)
+
+            return ActionResult(
+                success=True,
+                message=f"Flattened {len(flattened)} records",
+                data={"flattened": flattened, "count": len(flattened)}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Transform flatten failed: {str(e)}")
+
+
+class TransformPivotAction(BaseAction):
+    """Pivot data."""
+    action_type = "transform_pivot"
+    display_name = "数据透视"
+    description = "数据透视转换"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            index = params.get("index", [])
+            columns = params.get("columns", [])
+            values = params.get("values", [])
+            aggregation = params.get("aggregation", "first")
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+            if not index or not columns or not values:
+                return ActionResult(success=False, message="index, columns, and values are required")
+
+            from collections import defaultdict
+            pivot = defaultdict(lambda: defaultdict(list))
+
+            for record in data:
+                index_key = tuple(record.get(i) for i in index)
+                col_key = tuple(record.get(c) for c in columns)
+                for v_field in values:
+                    val = record.get(v_field)
+                    pivot[index_key][col_key].append((v_field, val))
+
+            result = []
+            for idx, col_data in pivot.items():
+                row = {i: v for i, v in zip(index, idx)}
+                for col_key, val_list in col_data.items():
+                    for v_field, val in val_list:
+                        col_name = "_".join(str(k) for k in col_key) + "_" + v_field
+                        if aggregation == "first":
+                            row[col_name] = val_list[0][1] if val_list else None
+                        elif aggregation == "last":
+                            row[col_name] = val_list[-1][1] if val_list else None
+                        elif aggregation == "count":
+                            row[col_name] = len(val_list)
+                        elif aggregation == "sum":
+                            try:
+                                row[col_name] = sum(float(v[1]) for v in val_list)
+                            except (ValueError, TypeError):
+                                row[col_name] = 0
+                        elif aggregation == "avg":
+                            try:
+                                row[col_name] = sum(float(v[1]) for v in val_list) / len(val_list)
+                            except (ValueError, TypeError):
+                                row[col_name] = 0
+                        else:
+                            row[col_name] = val_list
+                result.append(row)
+
+            return ActionResult(
+                success=True,
+                message=f"Pivoted to {len(result)} rows",
+                data={"pivoted": result, "count": len(result)}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Transform pivot failed: {str(e)}")
+
+
+class TransformReshapeAction(BaseAction):
+    """Reshape data structures."""
+    action_type = "transform_reshape"
+    display_name = "结构重塑"
+    description = "重塑数据结构"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            reshape_type = params.get("reshape_type", "unpack")
+            key_field = params.get("key_field", "")
+            value_field = params.get("value_field", "")
+            into_list = params.get("into_list", False)
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+
+            if reshape_type == "unpack":
+                if not key_field or not value_field:
+                    return ActionResult(success=False, message="key_field and value_field required")
+                result = {}
+                for record in data:
+                    if isinstance(record, dict):
+                        key = record.get(key_field)
+                        value = record.get(value_field)
+                        if key is not None:
+                            result[key] = value
+                return ActionResult(
+                    success=True,
+                    message=f"Unpacked into {len(result)} keys",
+                    data={"reshaped": result, "count": len(result)}
+                )
+
+            elif reshape_type == "pack":
+                if not key_field:
+                    return ActionResult(success=False, message="key_field required for pack")
+                result = []
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        record = {key_field: k}
+                        if isinstance(v, dict):
+                            record.update(v)
+                        else:
+                            record[value_field] = v if value_field else v
+                        result.append(record)
+                return ActionResult(
+                    success=True,
+                    message=f"Packed into {len(result)} records",
+                    data={"reshaped": result, "count": len(result)}
+                )
+
+            elif reshape_type == "transpose":
+                if not data:
+                    return ActionResult(success=False, message="data is required")
+                if not all(isinstance(r, dict) for r in data):
+                    return ActionResult(success=False, message="All records must be dicts for transpose")
+                keys = set()
+                for r in data:
+                    keys.update(r.keys())
+                keys = sorted(keys)
+                result = []
+                for k in keys:
+                    row = {"_key": k}
+                    for r in data:
+                        row.update(r)
+                    result.append(row)
+                return ActionResult(
+                    success=True,
+                    message=f"Transposed {len(data)} records",
+                    data={"reshaped": result, "count": len(result)}
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown reshape_type: {reshape_type}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Transform reshape failed: {str(e)}")

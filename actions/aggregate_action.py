@@ -1,607 +1,293 @@
-"""Aggregate action module for RabAI AutoClick.
+"""Aggregation engine action module for RabAI AutoClick.
 
 Provides data aggregation operations:
-- AggregateCountAction: Count items
-- AggregateSumAction: Sum values
-- AggregateAvgAction: Average values
-- AggregateMinAction: Minimum value
-- AggregateMaxAction: Maximum value
-- AggregateFirstAction: Get first item
-- AggregateLastAction: Get last item
-- AggregatePluckAction: Pluck values from items
+- AggregateSumAction: Sum aggregation
+- AggregateGroupAction: Group by aggregation
+- AggregateWindowAction: Window-based aggregation
+- AggregateHistogramAction: Histogram aggregation
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+from collections import defaultdict
+from datetime import datetime
+
 
 import sys
 import os
+
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class AggregateCountAction(BaseAction):
-    """Count items."""
-    action_type = "aggregate_count"
-    display_name = "聚合计数"
-    description = "统计元素数量"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute count aggregation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, condition, output_var.
-
-        Returns:
-            ActionResult with count.
-        """
-        items = params.get('items', [])
-        condition = params.get('condition', None)
-        output_var = params.get('output_var', 'count_result')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-
-            if condition is not None:
-                resolved_cond = context.resolve_value(condition)
-                count = 0
-                for item in resolved_items:
-                    context.set('_count_item', item)
-                    try:
-                        if context.safe_exec(f"return_value = {resolved_cond}"):
-                            count += 1
-                    except Exception:
-                        pass
-            else:
-                count = len(resolved_items)
-
-            context.set(output_var, count)
-
-            return ActionResult(
-                success=True,
-                message=f"计数: {count}",
-                data={
-                    'count': count,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"聚合计数失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'condition': None, 'output_var': 'count_result'}
-
-
 class AggregateSumAction(BaseAction):
-    """Sum values."""
+    """Sum aggregation."""
     action_type = "aggregate_sum"
-    display_name = "聚合求和"
-    description = "求和"
+    display_name = "求和聚合"
+    description = "对数值字段求和"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute sum aggregation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, expression, output_var.
-
-        Returns:
-            ActionResult with sum.
-        """
-        items = params.get('items', [])
-        expression = params.get('expression', 'x')
-        output_var = params.get('output_var', 'sum_result')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            resolved_items = context.resolve_value(items)
-            resolved_expr = context.resolve_value(expression)
+            data = params.get("data", [])
+            field = params.get("field", "")
+            group_by = params.get("group_by", None)
+            filter_expr = params.get("filter", None)
 
-            total = 0
-            for item in resolved_items:
-                context.set('_sum_item', item)
-                try:
-                    val = context.safe_exec(f"return_value = {resolved_expr}")
-                    total += float(val)
-                except Exception:
-                    pass
+            if not data:
+                return ActionResult(success=False, message="data is required")
 
-            context.set(output_var, total)
+            filtered = data
+            if filter_expr:
+                column = filter_expr.get("column", "")
+                operator = filter_expr.get("operator", "==")
+                value = filter_expr.get("value", None)
+                if column:
+                    if operator == "==":
+                        filtered = [r for r in filtered if r.get(column) == value]
+                    elif operator == "!=":
+                        filtered = [r for r in filtered if r.get(column) != value]
+                    elif operator == ">":
+                        filtered = [r for r in filtered if r.get(column) is not None and r.get(column) > value]
+                    elif operator == "<":
+                        filtered = [r for r in filtered if r.get(column) is not None and r.get(column) < value]
 
-            return ActionResult(
-                success=True,
-                message=f"求和: {total}",
-                data={
-                    'sum': total,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"聚合求和失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'expression': 'x', 'output_var': 'sum_result'}
-
-
-class AggregateAvgAction(BaseAction):
-    """Average values."""
-    action_type = "aggregate_avg"
-    display_name = "聚合平均值"
-    description = "计算平均值"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute average aggregation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, expression, output_var.
-
-        Returns:
-            ActionResult with average.
-        """
-        items = params.get('items', [])
-        expression = params.get('expression', 'x')
-        output_var = params.get('output_var', 'avg_result')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_expr = context.resolve_value(expression)
-
-            values = []
-            for item in resolved_items:
-                context.set('_avg_item', item)
-                try:
-                    val = context.safe_exec(f"return_value = {resolved_expr}")
-                    values.append(float(val))
-                except Exception:
-                    pass
-
-            if len(values) == 0:
-                context.set(output_var, 0)
+            if group_by:
+                groups = defaultdict(list)
+                for r in filtered:
+                    key = tuple(r.get(g) for g in group_by)
+                    groups[key].append(r)
+                result = {}
+                for keys, records in groups.items():
+                    if field:
+                        try:
+                            total = sum(float(r.get(field, 0)) for r in records)
+                            result[keys if len(group_by) > 1 else keys[0]] = total
+                        except (ValueError, TypeError):
+                            result[keys if len(group_by) > 1 else keys[0]] = 0
                 return ActionResult(
                     success=True,
-                    message="没有可计算的值",
-                    data={'avg': 0, 'output_var': output_var}
-                )
-
-            avg = sum(values) / len(values)
-            context.set(output_var, avg)
-
-            return ActionResult(
-                success=True,
-                message=f"平均值: {avg}",
-                data={
-                    'avg': avg,
-                    'count': len(values),
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"聚合平均值失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'expression': 'x', 'output_var': 'avg_result'}
-
-
-class AggregateMinAction(BaseAction):
-    """Minimum value."""
-    action_type = "aggregate_min"
-    display_name = "聚合最小值"
-    description = "获取最小值"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute min aggregation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, expression, output_var.
-
-        Returns:
-            ActionResult with minimum.
-        """
-        items = params.get('items', [])
-        expression = params.get('expression', 'x')
-        output_var = params.get('output_var', 'min_result')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_expr = context.resolve_value(expression)
-
-            values = []
-            for item in resolved_items:
-                context.set('_min_item', item)
-                try:
-                    val = context.safe_exec(f"return_value = {resolved_expr}")
-                    values.append((float(val), item))
-                except Exception:
-                    pass
-
-            if len(values) == 0:
-                context.set(output_var, None)
-                return ActionResult(
-                    success=True,
-                    message="没有可计算的值",
-                    data={'min': None, 'output_var': output_var}
-                )
-
-            min_val, min_item = min(values, key=lambda x: x[0])
-            context.set(output_var, min_val)
-
-            return ActionResult(
-                success=True,
-                message=f"最小值: {min_val}",
-                data={
-                    'min': min_val,
-                    'item': min_item,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"聚合最小值失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'expression': 'x', 'output_var': 'min_result'}
-
-
-class AggregateMaxAction(BaseAction):
-    """Maximum value."""
-    action_type = "aggregate_max"
-    display_name = "聚合最大值"
-    description = "获取最大值"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute max aggregation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, expression, output_var.
-
-        Returns:
-            ActionResult with maximum.
-        """
-        items = params.get('items', [])
-        expression = params.get('expression', 'x')
-        output_var = params.get('output_var', 'max_result')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-            resolved_expr = context.resolve_value(expression)
-
-            values = []
-            for item in resolved_items:
-                context.set('_max_item', item)
-                try:
-                    val = context.safe_exec(f"return_value = {resolved_expr}")
-                    values.append((float(val), item))
-                except Exception:
-                    pass
-
-            if len(values) == 0:
-                context.set(output_var, None)
-                return ActionResult(
-                    success=True,
-                    message="没有可计算的值",
-                    data={'max': None, 'output_var': output_var}
-                )
-
-            max_val, max_item = max(values, key=lambda x: x[0])
-            context.set(output_var, max_val)
-
-            return ActionResult(
-                success=True,
-                message=f"最大值: {max_val}",
-                data={
-                    'max': max_val,
-                    'item': max_item,
-                    'output_var': output_var
-                }
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"聚合最大值失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'expression': 'x', 'output_var': 'max_result'}
-
-
-class AggregateFirstAction(BaseAction):
-    """Get first item."""
-    action_type = "aggregate_first"
-    display_name = "聚合第一个"
-    description = "获取第一个元素"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute first aggregation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, condition, output_var.
-
-        Returns:
-            ActionResult with first item.
-        """
-        items = params.get('items', [])
-        condition = params.get('condition', None)
-        output_var = params.get('output_var', 'first_result')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-
-            if condition is not None:
-                resolved_cond = context.resolve_value(condition)
-                for item in resolved_items:
-                    context.set('_first_item', item)
-                    try:
-                        if context.safe_exec(f"return_value = {resolved_cond}"):
-                            context.set(output_var, item)
-                            return ActionResult(
-                                success=True,
-                                message=f"第一个: {item}",
-                                data={'first': item, 'output_var': output_var}
-                            )
-                    except Exception:
-                        pass
-
-                context.set(output_var, None)
-                return ActionResult(
-                    success=True,
-                    message="没有找到匹配的项",
-                    data={'first': None, 'output_var': output_var}
+                    message=f"Grouped sum: {len(result)} groups",
+                    data={"groups": result, "group_by": group_by, "field": field}
                 )
             else:
-                if len(resolved_items) > 0:
-                    result = resolved_items[0]
-                    context.set(output_var, result)
-                    return ActionResult(
-                        success=True,
-                        message=f"第一个: {result}",
-                        data={'first': result, 'output_var': output_var}
-                    )
-                else:
-                    context.set(output_var, None)
-                    return ActionResult(
-                        success=True,
-                        message="列表为空",
-                        data={'first': None, 'output_var': output_var}
-                    )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"聚合第一个失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'condition': None, 'output_var': 'first_result'}
-
-
-class AggregateLastAction(BaseAction):
-    """Get last item."""
-    action_type = "aggregate_last"
-    display_name = "聚合最后一个"
-    description = "获取最后一个元素"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute last aggregation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, condition, output_var.
-
-        Returns:
-            ActionResult with last item.
-        """
-        items = params.get('items', [])
-        condition = params.get('condition', None)
-        output_var = params.get('output_var', 'last_result')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
-        try:
-            resolved_items = context.resolve_value(items)
-
-            if condition is not None:
-                resolved_cond = context.resolve_value(condition)
-                last_match = None
-                for item in resolved_items:
-                    context.set('_last_item', item)
+                if field:
                     try:
-                        if context.safe_exec(f"return_value = {resolved_cond}"):
-                            last_match = item
-                    except Exception:
-                        pass
+                        total = sum(float(r.get(field, 0)) for r in filtered)
+                    except (ValueError, TypeError):
+                        total = 0
+                else:
+                    total = len(filtered)
+                return ActionResult(
+                    success=True,
+                    message=f"Sum: {total}",
+                    data={"sum": total, "count": len(filtered)}
+                )
 
-                if last_match is not None:
-                    context.set(output_var, last_match)
-                    return ActionResult(
-                        success=True,
-                        message=f"最后一个: {last_match}",
-                        data={'last': last_match, 'output_var': output_var}
-                    )
-                else:
-                    context.set(output_var, None)
-                    return ActionResult(
-                        success=True,
-                        message="没有找到匹配的项",
-                        data={'last': None, 'output_var': output_var}
-                    )
-            else:
-                if len(resolved_items) > 0:
-                    result = resolved_items[-1]
-                    context.set(output_var, result)
-                    return ActionResult(
-                        success=True,
-                        message=f"最后一个: {result}",
-                        data={'last': result, 'output_var': output_var}
-                    )
-                else:
-                    context.set(output_var, None)
-                    return ActionResult(
-                        success=True,
-                        message="列表为空",
-                        data={'last': None, 'output_var': output_var}
-                    )
         except Exception as e:
+            return ActionResult(success=False, message=f"Aggregate sum failed: {str(e)}")
+
+
+class AggregateGroupAction(BaseAction):
+    """Group by aggregation."""
+    action_type = "aggregate_group"
+    display_name = "分组聚合"
+    description = "分组聚合数据"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            group_by = params.get("group_by", [])
+            aggregations = params.get("aggregations", [])
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+            if not group_by:
+                return ActionResult(success=False, message="group_by is required")
+            if not aggregations:
+                return ActionResult(success=False, message="aggregations is required")
+
+            groups = defaultdict(list)
+            for r in data:
+                key = tuple(r.get(g) for g in group_by)
+                groups[key].append(r)
+
+            results = []
+            for keys, records in groups.items():
+                row = {g: k for g, k in zip(group_by, keys)}
+                for agg in aggregations:
+                    field_name = agg.get("field", "")
+                    func = agg.get("func", "sum")
+                    alias = agg.get("alias", f"{field_name}_{func}")
+
+                    values = [r.get(field_name) for r in records if r.get(field_name) is not None]
+
+                    if func == "sum":
+                        try:
+                            row[alias] = sum(float(v) for v in values)
+                        except (ValueError, TypeError):
+                            row[alias] = 0
+                    elif func == "avg":
+                        try:
+                            row[alias] = sum(float(v) for v in values) / len(values) if values else 0
+                        except (ValueError, TypeError):
+                            row[alias] = 0
+                    elif func == "count":
+                        row[alias] = len(values)
+                    elif func == "min":
+                        try:
+                            row[alias] = min(float(v) for v in values) if values else None
+                        except (ValueError, TypeError):
+                            row[alias] = None
+                    elif func == "max":
+                        try:
+                            row[alias] = max(float(v) for v in values) if values else None
+                        except (ValueError, TypeError):
+                            row[alias] = None
+                    elif func == "first":
+                        row[alias] = values[0] if values else None
+                    elif func == "last":
+                        row[alias] = values[-1] if values else None
+
+                results.append(row)
+
             return ActionResult(
-                success=False,
-                message=f"聚合最后一个失败: {str(e)}"
+                success=True,
+                message=f"Grouped into {len(results)} groups",
+                data={"results": results, "group_count": len(results)}
             )
 
-    def get_required_params(self) -> List[str]:
-        return ['items']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'condition': None, 'output_var': 'last_result'}
+        except Exception as e:
+            return ActionResult(success=False, message=f"Aggregate group failed: {str(e)}")
 
 
-class AggregatePluckAction(BaseAction):
-    """Pluck values from items."""
-    action_type = "aggregate_pluck"
-    display_name = "聚合提取"
-    description = "从每个元素中提取值"
+class AggregateWindowAction(BaseAction):
+    """Window-based aggregation."""
+    action_type = "aggregate_window"
+    display_name = "窗口聚合"
+    description = "基于窗口的聚合"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute pluck aggregation.
-
-        Args:
-            context: Execution context.
-            params: Dict with items, key, output_var.
-
-        Returns:
-            ActionResult with plucked values.
-        """
-        items = params.get('items', [])
-        key = params.get('key', '')
-        output_var = params.get('output_var', 'pluck_result')
-
-        valid, msg = self.validate_type(items, (list, tuple), 'items')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            resolved_items = context.resolve_value(items)
-            resolved_key = context.resolve_value(key)
+            data = params.get("data", [])
+            window_size = params.get("window_size", 5)
+            field = params.get("field", "")
+            func = params.get("func", "avg")
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
 
             result = []
-            for item in resolved_items:
-                context.set('_pluck_item', item)
-                try:
-                    if isinstance(item, dict):
-                        val = item.get(resolved_key)
-                    else:
-                        val = context.safe_exec(f"return_value = {resolved_key}")
-                    result.append(val)
-                except Exception:
-                    result.append(None)
+            for i in range(len(data)):
+                window_start = max(0, i - window_size + 1)
+                window = data[window_start:i + 1]
+                if field:
+                    values = [float(w.get(field, 0)) for w in window if w.get(field) is not None]
+                else:
+                    values = [float(w) for w in window if w is not None]
 
-            context.set(output_var, result)
+                if func == "avg":
+                    val = sum(values) / len(values) if values else 0
+                elif func == "sum":
+                    val = sum(values) if values else 0
+                elif func == "min":
+                    val = min(values) if values else 0
+                elif func == "max":
+                    val = max(values) if values else 0
+                elif func == "count":
+                    val = len(values)
+                else:
+                    val = None
+
+                result.append({
+                    "index": i,
+                    "window_start": window_start,
+                    "window_end": i,
+                    "window_size": len(window),
+                    "value": val,
+                    "original": data[i]
+                })
 
             return ActionResult(
                 success=True,
-                message=f"提取完成: {len(result)} 项",
+                message=f"Window aggregation: {len(result)} rows",
+                data={"results": result, "window_size": window_size}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Aggregate window failed: {str(e)}")
+
+
+class AggregateHistogramAction(BaseAction):
+    """Histogram aggregation."""
+    action_type = "aggregate_histogram"
+    display_name = "直方图聚合"
+    description = "生成直方图分布"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            field = params.get("field", "")
+            bins = params.get("bins", 10)
+            bin_width = params.get("bin_width", None)
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+
+            values = []
+            for r in data:
+                if field:
+                    v = r.get(field)
+                    if v is not None:
+                        try:
+                            values.append(float(v))
+                        except (ValueError, TypeError):
+                            pass
+                else:
+                    try:
+                        values.append(float(r))
+                    except (ValueError, TypeError):
+                        pass
+
+            if not values:
+                return ActionResult(success=False, message="No numeric values found")
+
+            min_val = min(values)
+            max_val = max(values)
+
+            if bin_width:
+                num_bins = max(1, int((max_val - min_val) / bin_width))
+            else:
+                num_bins = bins
+
+            bin_width = (max_val - min_val) / num_bins if num_bins > 0 else 1
+            histogram = [0] * num_bins
+            bin_edges = [min_val + i * bin_width for i in range(num_bins + 1)]
+
+            for v in values:
+                bin_idx = min(int((v - min_val) / bin_width), num_bins - 1)
+                histogram[bin_idx] += 1
+
+            bins_data = [
+                {
+                    "bin_start": bin_edges[i],
+                    "bin_end": bin_edges[i + 1],
+                    "count": histogram[i],
+                    "bin_center": (bin_edges[i] + bin_edges[i + 1]) / 2
+                }
+                for i in range(num_bins)
+            ]
+
+            return ActionResult(
+                success=True,
+                message=f"Histogram with {num_bins} bins",
                 data={
-                    'result': result,
-                    'count': len(result),
-                    'output_var': output_var
+                    "histogram": bins_data,
+                    "min": min_val,
+                    "max": max_val,
+                    "mean": sum(values) / len(values),
+                    "total_count": len(values)
                 }
             )
+
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"聚合提取失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['items', 'key']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'output_var': 'pluck_result'}
+            return ActionResult(success=False, message=f"Aggregate histogram failed: {str(e)}")
