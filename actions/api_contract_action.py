@@ -1,192 +1,299 @@
-"""API contract/action module for RabAI AutoClick.
+"""
+API Contract Action Module.
 
-Provides API contract operations:
-- ContractDefineAction: Define API contract
-- ContractValidateAction: Validate request against contract
-- ContractMockAction: Generate mock response
-- ContractDiffAction: Compare contract versions
-- ContractPublishAction: Publish contract
+Provides API contract testing, schema validation,
+and contract enforcement capabilities.
 """
 
-import hashlib
-import time
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+import asyncio
+import json
+import logging
+import re
 import uuid
-from typing import Any, Dict, List, Optional
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ContractDefineAction(BaseAction):
-    """Define an API contract."""
-    action_type = "contract_define"
-    display_name = "定义契约"
-    description = "定义API契约"
+class ContractType(Enum):
+    """Contract types."""
+    CONSUMER = "consumer"
+    PROVIDER = "provider"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            version = params.get("version", "1.0.0")
-            endpoints = params.get("endpoints", [])
-            schemas = params.get("schemas", {})
 
-            if not name:
-                return ActionResult(success=False, message="name is required")
+class ViolationSeverity(Enum):
+    """Severity of contract violations."""
+    BLOCKING = "blocking"
+    WARNING = "warning"
+    INFO = "info"
 
-            contract_id = hashlib.md5(f"{name}:{version}".encode()).hexdigest()[:12]
 
-            if not hasattr(context, "api_contracts"):
-                context.api_contracts = {}
-            context.api_contracts[contract_id] = {
-                "contract_id": contract_id,
-                "name": name,
-                "version": version,
-                "endpoints": endpoints,
-                "schemas": schemas,
-                "defined_at": time.time(),
-                "status": "draft",
-            }
+@dataclass
+class SchemaField:
+    """Schema field definition."""
+    name: str
+    field_type: type
+    required: bool = False
+    pattern: Optional[str] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    enum_values: Optional[List[Any]] = None
+    items: Optional["SchemaField"] = None
 
-            return ActionResult(
-                success=True,
-                data={"contract_id": contract_id, "name": name, "version": version, "endpoint_count": len(endpoints)},
-                message=f"Contract {contract_id} defined: {name} v{version}",
+
+@dataclass
+class APIEndpoint:
+    """API endpoint contract."""
+    path: str
+    method: str
+    request_schema: Optional["Schema"] = None
+    response_schema: Optional["Schema"] = None
+    headers_schema: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class Schema:
+    """JSON Schema definition."""
+    name: str
+    fields: Dict[str, SchemaField]
+    strict: bool = False
+
+    def validate(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate data against schema."""
+        errors = []
+
+        for field_name, field_def in self.fields.items():
+            if field_name not in data:
+                if field_def.required:
+                    errors.append(f"Missing required field: {field_name}")
+                continue
+
+            value = data[field_name]
+            field_errors = self._validate_field(field_def, value)
+            errors.extend(field_errors)
+
+        if self.strict:
+            extra = set(data.keys()) - set(self.fields.keys())
+            if extra:
+                errors.append(f"Extra fields not allowed: {extra}")
+
+        return len(errors) == 0, errors
+
+    def _validate_field(self, field_def: SchemaField, value: Any) -> List[str]:
+        """Validate single field."""
+        errors = []
+
+        if value is None:
+            return errors
+
+        if not isinstance(value, field_def.field_type):
+            errors.append(f"Field {field_def.name}: expected {field_def.field_type}, got {type(value)}")
+            return errors
+
+        if field_def.pattern:
+            if not re.match(field_def.pattern, str(value)):
+                errors.append(f"Field {field_def.name}: pattern mismatch")
+
+        if field_def.min_value is not None:
+            if isinstance(value, (int, float)) and value < field_def.min_value:
+                errors.append(f"Field {field_def.name}: below minimum {field_def.min_value}")
+
+        if field_def.max_value is not None:
+            if isinstance(value, (int, float)) and value > field_def.max_value:
+                errors.append(f"Field {field_def.name}: above maximum {field_def.max_value}")
+
+        if field_def.enum_values:
+            if value not in field_def.enum_values:
+                errors.append(f"Field {field_def.name}: not in enum {field_def.enum_values}")
+
+        return errors
+
+
+@dataclass
+class ContractViolation:
+    """Contract violation record."""
+    contract_id: str
+    endpoint: str
+    severity: ViolationSeverity
+    message: str
+    details: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class ContractTestResult:
+    """Result of contract test."""
+    test_id: str
+    contract_id: str
+    passed: bool
+    violations: List[ContractViolation]
+    execution_time: float
+
+
+class ContractEnforcer:
+    """Enforces API contracts."""
+
+    def __init__(self):
+        self.contracts: Dict[str, APIEndpoint] = {}
+        self.violations: List[ContractViolation] = []
+
+    def register_contract(self, contract: APIEndpoint):
+        """Register API contract."""
+        key = f"{contract.method}:{contract.path}"
+        self.contracts[key] = contract
+
+    async def validate_request(
+        self,
+        method: str,
+        path: str,
+        body: Any,
+        headers: Dict[str, str]
+    ) -> List[ContractViolation]:
+        """Validate request against contract."""
+        key = f"{method}:{path}"
+        contract = self.contracts.get(key)
+
+        if not contract:
+            return []
+
+        violations = []
+        data = body if isinstance(body, dict) else {}
+
+        if contract.request_schema:
+            valid, errors = contract.request_schema.validate(data)
+            if not valid:
+                for error in errors:
+                    violations.append(ContractViolation(
+                        contract_id=key,
+                        endpoint=path,
+                        severity=ViolationSeverity.BLOCKING,
+                        message=f"Request validation failed: {error}"
+                    ))
+
+        return violations
+
+    async def validate_response(
+        self,
+        method: str,
+        path: str,
+        status_code: int,
+        body: Any,
+        headers: Dict[str, str]
+    ) -> List[ContractViolation]:
+        """Validate response against contract."""
+        key = f"{method}:{path}"
+        contract = self.contracts.get(key)
+
+        if not contract:
+            return []
+
+        violations = []
+        data = body if isinstance(body, dict) else {}
+
+        if contract.response_schema:
+            valid, errors = contract.response_schema.validate(data)
+            if not valid:
+                for error in errors:
+                    violations.append(ContractViolation(
+                        contract_id=key,
+                        endpoint=path,
+                        severity=ViolationSeverity.BLOCKING,
+                        message=f"Response validation failed: {error}"
+                    ))
+
+        return violations
+
+
+class ContractTester:
+    """Tests API contracts."""
+
+    def __init__(self, enforcer: ContractEnforcer):
+        self.enforcer = enforcer
+        self.test_cases: Dict[str, List[Dict[str, Any]]] = {}
+
+    def add_test_case(
+        self,
+        contract_id: str,
+        test_case: Dict[str, Any]
+    ):
+        """Add test case for contract."""
+        if contract_id not in self.test_cases:
+            self.test_cases[contract_id] = []
+        self.test_cases[contract_id].append(test_case)
+
+    async def run_tests(
+        self,
+        contract_id: str,
+        executor: Callable
+    ) -> ContractTestResult:
+        """Run contract tests."""
+        start_time = datetime.now()
+        test_cases = self.test_cases.get(contract_id, [])
+        violations = []
+
+        for case in test_cases:
+            method = case.get("method", "GET")
+            path = case.get("path", "/")
+            expected_status = case.get("expected_status", 200)
+
+            result = await executor(method, path, case.get("body"))
+
+            if result["status_code"] != expected_status:
+                violations.append(ContractViolation(
+                    contract_id=contract_id,
+                    endpoint=path,
+                    severity=ViolationSeverity.BLOCKING,
+                    message=f"Expected status {expected_status}, got {result['status_code']}"
+                ))
+
+            response_violations = await self.enforcer.validate_response(
+                method, path, result["status_code"], result["body"], {}
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Contract define failed: {e}")
+            violations.extend(response_violations)
+
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ContractTestResult(
+            test_id=str(uuid.uuid4()),
+            contract_id=contract_id,
+            passed=len(violations) == 0,
+            violations=violations,
+            execution_time=execution_time
+        )
 
 
-class ContractValidateAction(BaseAction):
-    """Validate request against contract."""
-    action_type = "contract_validate"
-    display_name = "契约验证"
-    description = "验证请求是否符合契约"
+async def main():
+    """Demonstrate contract testing."""
+    enforcer = ContractEnforcer()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            contract_id = params.get("contract_id", "")
-            request = params.get("request", {})
+    schema = Schema(
+        name="UserSchema",
+        fields={
+            "id": SchemaField(name="id", field_type=int, required=True),
+            "name": SchemaField(name="name", field_type=str, required=True),
+            "email": SchemaField(name="email", field_type=str, pattern=r"^[\w\.]+@[\w\.]+$")
+        }
+    )
 
-            if not contract_id:
-                return ActionResult(success=False, message="contract_id is required")
+    contract = APIEndpoint(
+        path="/users",
+        method="POST",
+        request_schema=schema
+    )
 
-            contracts = getattr(context, "api_contracts", {})
-            if contract_id not in contracts:
-                return ActionResult(success=False, message=f"Contract {contract_id} not found")
+    enforcer.register_contract(contract)
 
-            contract = contracts[contract_id]
-            errors = []
-            warnings = []
+    violations = await enforcer.validate_request(
+        "POST", "/users",
+        {"id": 1, "name": "John", "email": "john@example.com"},
+        {}
+    )
 
-            if "path" not in request:
-                errors.append("Missing required field: path")
-            if "method" not in request:
-                errors.append("Missing required field: method")
-
-            return ActionResult(
-                success=len(errors) == 0,
-                data={"contract_id": contract_id, "valid": len(errors) == 0, "errors": errors, "warnings": warnings},
-                message=f"Contract validation: {'PASSED' if not errors else f'{len(errors)} errors'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Contract validate failed: {e}")
+    print(f"Violations: {len(violations)}")
 
 
-class ContractMockAction(BaseAction):
-    """Generate mock response from contract."""
-    action_type = "contract_mock"
-    display_name = "契约Mock"
-    description = "根据契约生成Mock响应"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            contract_id = params.get("contract_id", "")
-            endpoint_path = params.get("path", "")
-            method = params.get("method", "GET")
-
-            if not contract_id:
-                return ActionResult(success=False, message="contract_id is required")
-
-            contracts = getattr(context, "api_contracts", {})
-            if contract_id not in contracts:
-                return ActionResult(success=False, message=f"Contract {contract_id} not found")
-
-            mock_response = {
-                "status_code": 200,
-                "headers": {"Content-Type": "application/json"},
-                "body": {"mock": True, "contract_id": contract_id, "path": endpoint_path, "method": method},
-            }
-
-            return ActionResult(
-                success=True,
-                data={"contract_id": contract_id, "mock_response": mock_response},
-                message=f"Mock generated for {method} {endpoint_path}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Contract mock failed: {e}")
-
-
-class ContractDiffAction(BaseAction):
-    """Compare two contract versions."""
-    action_type = "contract_diff"
-    display_name = "契约对比"
-    description = "对比两个契约版本"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            contract_id = params.get("contract_id", "")
-            version_a = params.get("version_a", "")
-            version_b = params.get("version_b", "")
-
-            if not contract_id or not version_a or not version_b:
-                return ActionResult(success=False, message="contract_id, version_a, and version_b are required")
-
-            contracts = getattr(context, "api_contracts", {})
-
-            added = [{"endpoint": f"/api/v{version_b}/new", "change": "added"}]
-            removed = [{"endpoint": f"/api/v{version_a}/old", "change": "removed"}]
-            changed = [{"endpoint": "/api/shared", "change": "modified"}]
-
-            return ActionResult(
-                success=True,
-                data={"contract_id": contract_id, "version_a": version_a, "version_b": version_b, "added": added, "removed": removed, "changed": changed},
-                message=f"Contract diff: {len(added)} added, {len(removed)} removed, {len(changed)} changed",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Contract diff failed: {e}")
-
-
-class ContractPublishAction(BaseAction):
-    """Publish a contract."""
-    action_type = "contract_publish"
-    display_name = "契约发布"
-    description = "发布API契约"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            contract_id = params.get("contract_id", "")
-            environment = params.get("environment", "production")
-
-            if not contract_id:
-                return ActionResult(success=False, message="contract_id is required")
-
-            contracts = getattr(context, "api_contracts", {})
-            if contract_id not in contracts:
-                return ActionResult(success=False, message=f"Contract {contract_id} not found")
-
-            contract = contracts[contract_id]
-            contract["status"] = "published"
-            contract["published_at"] = time.time()
-            contract["environment"] = environment
-
-            return ActionResult(
-                success=True,
-                data={"contract_id": contract_id, "environment": environment, "status": "published"},
-                message=f"Contract {contract_id} published to {environment}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Contract publish failed: {e}")
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,258 +1,299 @@
-"""Data Aggregation action module for RabAI AutoClick.
+"""
+Data Aggregation Action Module.
 
-Provides data aggregation operations:
-- AggregateSumAction: Sum aggregation
-- AggregateGroupAction: Group by aggregation
-- AggregateWindowAction: Window functions
-- AggregatePivotAction: Pivot table
+Provides real-time data aggregation with rolling windows,
+stream processing, and materialized view capabilities.
 """
 
-from __future__ import annotations
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+import asyncio
+import logging
+import time
+from collections import defaultdict, deque
 
-import sys
-import os
-from typing import Any, Dict, List, Optional
-from collections import defaultdict
-
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class AggregateSumAction(BaseAction):
-    """Sum aggregation."""
-    action_type = "aggregate_sum"
-    display_name = "求和聚合"
-    description = "求和聚合"
-    version = "1.0"
+class WindowType(Enum):
+    """Window types for aggregation."""
+    TUMBLING = "tumbling"
+    SLIDING = "sliding"
+    SESSION = "session"
+    COUNT = "count"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute sum aggregation."""
-        data = params.get('data', [])
-        field = params.get('field', '')
-        group_by = params.get('group_by', None)
-        output_var = params.get('output_var', 'sum_result')
 
-        if not data or not field:
-            return ActionResult(success=False, message="data and field are required")
+@dataclass
+class Window:
+    """Time window definition."""
+    window_id: str
+    window_type: WindowType
+    start_time: datetime
+    end_time: datetime
+    size: timedelta
+    slide: Optional[timedelta] = None
 
-        try:
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_group_by = context.resolve_value(group_by) if context else group_by
 
-            if resolved_group_by:
-                groups = defaultdict(list)
-                for record in resolved_data:
-                    key = record.get(resolved_group_by, 'unknown')
-                    value = record.get(field, 0)
-                    if isinstance(value, (int, float)):
-                        groups[key].append(value)
+@dataclass
+class AggregationResult:
+    """Result of aggregation."""
+    window_id: str
+    timestamp: datetime
+    measures: Dict[str, float]
+    dimensions: Dict[str, Any]
+    count: int
 
-                result = {k: sum(v) for k, v in groups.items()}
-            else:
-                values = [r.get(field, 0) for r in resolved_data if isinstance(r.get(field), (int, float))]
-                result = {'total': sum(values)}
 
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Sum: {result.get('total', sum(result.values())) if isinstance(result, dict) else result}"
+class RollingWindow:
+    """Rolling window buffer."""
+
+    def __init__(self, max_size: int = 1000):
+        self.max_size = max_size
+        self._buffer: deque = deque(maxlen=max_size)
+
+    def add(self, item: Any):
+        """Add item to window."""
+        self._buffer.append(item)
+
+    def get_all(self) -> List[Any]:
+        """Get all items."""
+        return list(self._buffer)
+
+    def get_range(self, start: datetime, end: datetime) -> List[Any]:
+        """Get items in time range."""
+        return [
+            item for item in self._buffer
+            if hasattr(item, "timestamp") and start <= item.timestamp <= end
+        ]
+
+    def size(self) -> int:
+        """Get current size."""
+        return len(self._buffer)
+
+
+class AggregationFunction:
+    """Built-in aggregation functions."""
+
+    @staticmethod
+    def sum(values: List[float]) -> float:
+        return sum(values)
+
+    @staticmethod
+    def avg(values: List[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def min(values: List[float]) -> float:
+        return min(values) if values else 0.0
+
+    @staticmethod
+    def max(values: List[float]) -> float:
+        return max(values) if values else 0.0
+
+    @staticmethod
+    def count(values: List[Any]) -> int:
+        return len(values)
+
+    @staticmethod
+    def distinct(values: List[Any]) -> int:
+        return len(set(values))
+
+    @staticmethod
+    def stddev(values: List[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / len(values)
+        return variance ** 0.5
+
+
+class DataAggregator:
+    """Main data aggregator."""
+
+    def __init__(self):
+        self.windows: Dict[str, RollingWindow] = {}
+        self.aggregations: Dict[str, Dict[str, Callable]] = {}
+        self._running = False
+
+    def create_window(
+        self,
+        window_id: str,
+        window_type: WindowType,
+        size: timedelta,
+        slide: Optional[timedelta] = None
+    ) -> Window:
+        """Create aggregation window."""
+        window = Window(
+            window_id=window_id,
+            window_type=window_type,
+            start_time=datetime.now(),
+            end_time=datetime.now() + size,
+            size=size,
+            slide=slide
+        )
+
+        self.windows[window_id] = RollingWindow()
+        self.aggregations[window_id] = {
+            "sum": AggregationFunction.sum,
+            "avg": AggregationFunction.avg,
+            "min": AggregationFunction.min,
+            "max": AggregationFunction.max,
+            "count": AggregationFunction.count,
+            "distinct": AggregationFunction.distinct,
+            "stddev": AggregationFunction.stddev
+        }
+
+        return window
+
+    def add_data(self, window_id: str, data: Any):
+        """Add data to window."""
+        if window_id in self.windows:
+            self.windows[window_id].add(data)
+
+    def aggregate(
+        self,
+        window_id: str,
+        measure: str,
+        value_extractor: Callable[[Any], float]
+    ) -> Optional[float]:
+        """Aggregate window data."""
+        if window_id not in self.windows:
+            return None
+
+        window = self.windows[window_id]
+        values = [value_extractor(item) for item in window.get_all()]
+
+        agg_func = self.aggregations.get(window_id, {}).get(measure)
+        if agg_func:
+            return agg_func(values)
+
+        return None
+
+    def get_results(
+        self,
+        window_id: str,
+        measures: List[str],
+        value_extractors: Dict[str, Callable]
+    ) -> Optional[AggregationResult]:
+        """Get aggregation results."""
+        if window_id not in self.windows:
+            return None
+
+        measures_result = {}
+        for measure in measures:
+            extractor = value_extractors.get(measure)
+            if extractor:
+                result = self.aggregate(window_id, measure, extractor)
+                measures_result[measure] = result
+
+        return AggregationResult(
+            window_id=window_id,
+            timestamp=datetime.now(),
+            measures=measures_result,
+            dimensions={},
+            count=self.windows[window_id].size()
+        )
+
+
+class StreamProcessor:
+    """Stream processing with windowed aggregation."""
+
+    def __init__(self, aggregator: DataAggregator):
+        self.aggregator = aggregator
+        self._handlers: List[Callable] = []
+        self._running = False
+
+    def add_handler(self, handler: Callable):
+        """Add result handler."""
+        self._handlers.append(handler)
+
+    async def process_stream(
+        self,
+        data_stream: List[Any],
+        window_id: str
+    ):
+        """Process data stream."""
+        for data in data_stream:
+            self.aggregator.add_data(window_id, data)
+
+            result = self.aggregator.get_results(
+                window_id,
+                ["sum", "avg", "count"],
+                {"sum": lambda x: x, "avg": lambda x: x, "count": lambda x: 1}
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Sum aggregation error: {e}")
+
+            if result:
+                for handler in self._handlers:
+                    try:
+                        handler(result)
+                    except Exception as e:
+                        logger.error(f"Handler error: {e}")
 
 
-class AggregateGroupAction(BaseAction):
-    """Group by aggregation."""
-    action_type = "aggregate_group"
-    display_name = "分组聚合"
-    description = "分组聚合"
-    version = "1.0"
+class MaterializedView:
+    """Materialized view for pre-computed aggregations."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute group aggregation."""
-        data = params.get('data', [])
-        group_by = params.get('group_by', '')
-        aggregations = params.get('aggregations', [])
-        output_var = params.get('output_var', 'group_result')
+    def __init__(self, name: str):
+        self.name = name
+        self.data: List[Dict[str, Any]] = []
+        self.last_refresh: Optional[datetime] = None
+        self.refresh_interval: timedelta = timedelta(minutes=5)
 
-        if not data or not group_by:
-            return ActionResult(success=False, message="data and group_by are required")
+    def refresh(self, data: List[Dict[str, Any]]):
+        """Refresh materialized view."""
+        self.data = data.copy()
+        self.last_refresh = datetime.now()
 
-        try:
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_aggregations = context.resolve_value(aggregations) if context else aggregations
+    def query(
+        self,
+        filters: Optional[Dict[str, Any]] = None,
+        order_by: Optional[str] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Query materialized view."""
+        result = self.data
 
-            groups = defaultdict(list)
-            for record in resolved_data:
-                key = record.get(group_by, 'unknown')
-                groups[key].append(record)
+        if filters:
+            for key, value in filters.items():
+                result = [r for r in result if r.get(key) == value]
 
-            results = []
-            for group_key, group_records in groups.items():
-                result_row = {group_by: group_key, '_count': len(group_records)}
+        if order_by:
+            reverse = order_by.startswith("-")
+            field = order_by.lstrip("-")
+            result = sorted(result, key=lambda x: x.get(field, 0), reverse=reverse)
 
-                for agg in resolved_aggregations:
-                    field = agg.get('field', '')
-                    func = agg.get('function', 'sum')
+        if limit:
+            result = result[:limit]
 
-                    values = [r.get(field, 0) for r in group_records if isinstance(r.get(field), (int, float))]
-
-                    if func == 'sum':
-                        result_row[f'{field}_sum'] = sum(values)
-                    elif func == 'avg':
-                        result_row[f'{field}_avg'] = sum(values) / len(values) if values else 0
-                    elif func == 'min':
-                        result_row[f'{field}_min'] = min(values) if values else None
-                    elif func == 'max':
-                        result_row[f'{field}_max'] = max(values) if values else None
-                    elif func == 'count':
-                        result_row[f'{field}_count'] = len(values)
-
-                results.append(result_row)
-
-            return ActionResult(
-                success=True,
-                data={output_var: {'groups': results, 'group_count': len(results)}},
-                message=f"Grouped into {len(results)} groups"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Group aggregation error: {e}")
+        return result
 
 
-class AggregateWindowAction(BaseAction):
-    """Window functions."""
-    action_type = "aggregate_window"
-    display_name = "窗口函数"
-    description = "窗口函数聚合"
-    version = "1.0"
+async def main():
+    """Demonstrate data aggregation."""
+    aggregator = DataAggregator()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute window function."""
-        data = params.get('data', [])
-        field = params.get('field', '')
-        window_type = params.get('window_type', 'rolling')
-        window_size = params.get('window_size', 3)
-        func = params.get('function', 'avg')
-        sort_by = params.get('sort_by', None)
-        output_var = params.get('output_var', 'window_result')
+    window = aggregator.create_window(
+        "metrics",
+        WindowType.TUMBLING,
+        size=timedelta(minutes=5)
+    )
 
-        if not data or not field:
-            return ActionResult(success=False, message="data and field are required")
+    for i in range(100):
+        aggregator.add_data("metrics", float(i))
 
-        try:
-            resolved_data = context.resolve_value(data) if context else data
-            resolved_sort_by = context.resolve_value(sort_by) if context else sort_by
+    result = aggregator.get_results(
+        "metrics",
+        ["sum", "avg", "min", "max", "count"],
+        {"sum": lambda x: x, "avg": lambda x: x, "min": lambda x: x, "max": lambda x: x, "count": lambda x: 1}
+    )
 
-            if resolved_sort_by:
-                resolved_data = sorted(resolved_data, key=lambda x: x.get(resolved_sort_by, 0))
-
-            values = [r.get(field, 0) for r in resolved_data if isinstance(r.get(field), (int, float))]
-
-            windowed = []
-            for i, record in enumerate(resolved_data):
-                if window_type == 'rolling':
-                    start = max(0, i - window_size + 1)
-                    window_values = values[start:i + 1]
-                else:
-                    window_values = values[:i + 1]
-
-                if func == 'avg':
-                    record[f'{field}_window_avg'] = sum(window_values) / len(window_values) if window_values else 0
-                elif func == 'sum':
-                    record[f'{field}_window_sum'] = sum(window_values)
-                elif func == 'min':
-                    record[f'{field}_window_min'] = min(window_values) if window_values else None
-                elif func == 'max':
-                    record[f'{field}_window_max'] = max(window_values) if window_values else None
-
-                windowed.append(record)
-
-            result = {
-                'data': windowed,
-                'window_type': window_type,
-                'window_size': window_size,
-                'function': func,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Window function '{func}' applied"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Window aggregation error: {e}")
+    if result:
+        print(f"Sum: {result.measures.get('sum')}")
+        print(f"Avg: {result.measures.get('avg')}")
+        print(f"Count: {result.count}")
 
 
-class AggregatePivotAction(BaseAction):
-    """Pivot table."""
-    action_type = "aggregate_pivot"
-    display_name = "数据透视"
-    description = "数据透视表"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute pivot table."""
-        data = params.get('data', [])
-        index = params.get('index', '')
-        columns = params.get('columns', '')
-        values = params.get('values', '')
-        aggfunc = params.get('aggfunc', 'sum')
-        output_var = params.get('output_var', 'pivot_result')
-
-        if not data or not index or not columns or not values:
-            return ActionResult(success=False, message="data, index, columns, and values are required")
-
-        try:
-            resolved_data = context.resolve_value(data) if context else data
-
-            pivot = defaultdict(lambda: defaultdict(list))
-
-            for record in resolved_data:
-                idx_val = record.get(index, 'unknown')
-                col_val = record.get(columns, 'unknown')
-                val = record.get(values, 0)
-                if isinstance(val, (int, float)):
-                    pivot[idx_val][col_val].append(val)
-
-            result_data = []
-            all_columns = set()
-            for idx_val in pivot:
-                all_columns.update(pivot[idx_val].keys())
-
-            for idx_val in sorted(pivot.keys()):
-                row = {index: idx_val}
-                for col_val in sorted(all_columns):
-                    col_values = pivot[idx_val].get(col_val, [])
-                    if col_values:
-                        if aggfunc == 'sum':
-                            row[f'{col_val}'] = sum(col_values)
-                        elif aggfunc == 'avg':
-                            row[f'{col_val}'] = sum(col_values) / len(col_values)
-                        elif aggfunc == 'count':
-                            row[f'{col_val}'] = len(col_values)
-                        elif aggfunc == 'min':
-                            row[f'{col_val}'] = min(col_values)
-                        elif aggfunc == 'max':
-                            row[f'{col_val}'] = max(col_values)
-                    else:
-                        row[f'{col_val}'] = None
-                result_data.append(row)
-
-            result = {
-                'data': result_data,
-                'row_count': len(result_data),
-                'column_count': len(all_columns),
-                'index': index,
-                'columns': columns,
-                'values': values,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Pivot: {len(result_data)} rows x {len(all_columns)} columns"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pivot aggregation error: {e}")
+if __name__ == "__main__":
+    asyncio.run(main())
