@@ -1,259 +1,233 @@
-"""Cache invalidation strategies: TTL, manual, dependency-based, and probabilistic."""
+"""Cache invalidation utilities for automation result caching.
+
+Provides TTL-based caching, cache invalidation strategies,
+and memoization decorators for caching expensive
+automation computations.
+
+Example:
+    >>> from utils.cache_invalidation_utils import cached, invalidate_cache
+    >>> @cached(ttl=60)
+    ... def expensive_lookup(key):
+    ...     return do_lookup(key)
+    >>> invalidate_cache('expensive_lookup')
+"""
 
 from __future__ import annotations
 
 import hashlib
-import threading
 import time
-from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Any, Callable, FrozenSet
+from dataclasses import dataclass
+from functools import wraps
+from typing import Any, Callable, Optional
 
 __all__ = [
+    "cached",
     "CacheEntry",
-    "CacheInvalidationPolicy",
-    "TTLCache",
-    "DependencyGraph",
-    "ProbabilisticCache",
+    "InMemoryCache",
+    "invalidate_cache",
+    "CacheStats",
 ]
 
 
 @dataclass
 class CacheEntry:
-    """A cache entry with invalidation metadata."""
-    key: str
+    """A single cache entry with TTL."""
+
     value: Any
-    created_at: float = field(default_factory=time.time)
-    accessed_at: float = field(default_factory=time.time)
-    access_count: int = 0
-    ttl: float | None = None
-    dependencies: FrozenSet[str] = field(default_factory=frozenset)
-    tags: FrozenSet[str] = field(default_factory=frozenset)
+    created_at: float
+    expires_at: float
 
-    def is_expired(self) -> bool:
-        if self.ttl is None:
-            return False
-        return time.time() > self.created_at + self.ttl
-
-    def touch(self) -> None:
-        self.accessed_at = time.time()
-        self.access_count += 1
+    def is_expired(self, ttl: float) -> bool:
+        return time.time() > self.expires_at
 
 
-class CacheInvalidationPolicy:
-    """Policies for cache invalidation."""
+@dataclass
+class CacheStats:
+    """Cache statistics."""
 
-    @staticmethod
-    def ttl(entry: CacheEntry) -> bool:
-        return entry.is_expired()
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
 
-    @staticmethod
-    def lru(entry: CacheEntry, max_age: float = 300.0) -> bool:
-        return time.time() - entry.accessed_at > max_age
-
-    @staticmethod
-    def lfu(entry: CacheEntry, min_hits: int = 2) -> bool:
-        return entry.access_count < min_hits
-
-    @staticmethod
-    def always_false(entry: CacheEntry) -> bool:
-        return False
+    @property
+    def hit_rate(self) -> float:
+        total = self.hits + self.misses
+        return self.hits / total if total > 0 else 0.0
 
 
-class TTLCache:
-    """Thread-safe TTL cache with invalidation policies."""
+class InMemoryCache:
+    """Thread-safe in-memory cache with TTL.
 
-    def __init__(
-        self,
-        default_ttl: float = 300.0,
-        max_size: int = 1000,
-        invalidation_policy: Callable[[CacheEntry], bool] | None = None,
-    ) -> None:
-        self.default_ttl = default_ttl
+    Example:
+        >>> cache = InMemoryCache(max_size=100, default_ttl=60)
+        >>> cache.set('key', 'value')
+        >>> cache.get('key')
+        'value'
+    """
+
+    def __init__(self, max_size: int = 1000, default_ttl: float = 300.0):
         self.max_size = max_size
-        self.policy = invalidation_policy or CacheInvalidationPolicy.ttl
+        self.default_ttl = default_ttl
         self._store: dict[str, CacheEntry] = {}
-        self._lock = threading.RLock()
-        self._hits = 0
-        self._misses = 0
+        self._lock = __import__("threading").Lock()
+        self.stats = CacheStats()
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(self, key: str) -> Optional[Any]:
+        """Get a value from the cache.
+
+        Returns:
+            Cached value, or None if not found or expired.
+        """
         with self._lock:
             entry = self._store.get(key)
             if entry is None:
-                self._misses += 1
-                return default
-            if self.policy(entry):
+                self.stats.misses += 1
+                return None
+            if entry.is_expired(self.default_ttl):
                 del self._store[key]
-                self._misses += 1
-                return default
-            entry.touch()
-            self._hits += 1
+                self.stats.misses += 1
+                self.stats.evictions += 1
+                return None
+            self.stats.hits += 1
             return entry.value
 
-    def set(
-        self,
-        key: str,
-        value: Any,
-        ttl: float | None = None,
-        tags: list[str] | None = None,
-        dependencies: list[str] | None = None,
-    ) -> None:
+    def set(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
+        """Set a value in the cache."""
         with self._lock:
-            if len(self._store) >= self.max_size:
-                self._evict_one()
+            if len(self._store) >= self.max_size and key not in self._store:
+                self._evict_oldest()
+            ttl = ttl if ttl is not None else self.default_ttl
+            now = time.time()
             self._store[key] = CacheEntry(
-                key=key,
                 value=value,
-                ttl=ttl if ttl is not None else self.default_ttl,
-                tags=frozenset(tags or []),
-                dependencies=frozenset(dependencies or []),
+                created_at=now,
+                expires_at=now + ttl,
             )
 
-    def invalidate(self, key: str) -> bool:
+    def delete(self, key: str) -> bool:
+        """Delete a key from the cache."""
         with self._lock:
             if key in self._store:
                 del self._store[key]
                 return True
             return False
 
-    def invalidate_by_tags(self, *tags: str) -> int:
-        count = 0
-        with self._lock:
-            to_remove = [
-                k for k, e in self._store.items()
-                if any(tag in e.tags for tag in tags)
-            ]
-            for k in to_remove:
-                del self._store[k]
-                count += 1
-        return count
-
-    def invalidate_dependencies(self, *deps: str) -> int:
-        count = 0
-        with self._lock:
-            to_remove = [
-                k for k, e in self._store.items()
-                if any(dep in e.dependencies for dep in deps)
-            ]
-            for k in to_remove:
-                del self._store[k]
-                count += 1
-        return count
-
-    def _evict_one(self) -> None:
-        if not self._store:
-            return
-        lru_key = min(
-            self._store.keys(),
-            key=lambda k: self._store[k].accessed_at,
-        )
-        del self._store[lru_key]
-
     def clear(self) -> None:
+        """Clear all cached entries."""
         with self._lock:
             self._store.clear()
 
-    def stats(self) -> dict[str, Any]:
+    def _evict_oldest(self) -> None:
+        """Evict the oldest non-expired entry."""
+        if not self._store:
+            return
+        oldest_key = min(self._store, key=lambda k: self._store[k].created_at)
+        del self._store[oldest_key]
+        self.stats.evictions += 1
+
+    def invalidate_expired(self) -> int:
+        """Remove all expired entries.
+
+        Returns:
+            Number of entries removed.
+        """
         with self._lock:
-            total = self._hits + self._misses
-            return {
-                "hits": self._hits,
-                "misses": self._misses,
-                "hit_rate": self._hits / total if total > 0 else 0.0,
-                "size": len(self._store),
-                "max_size": self.max_size,
-            }
+            expired = [
+                k for k, v in self._store.items()
+                if v.is_expired(self.default_ttl)
+            ]
+            for k in expired:
+                del self._store[k]
+            self.stats.evictions += len(expired)
+            return len(expired)
 
 
-class DependencyGraph:
-    """Dependency graph for cache invalidation."""
-
-    def __init__(self) -> None:
-        self._graph: dict[str, set[str]] = defaultdict(set)
-        self._dependents: dict[str, set[str]] = defaultdict(set)
-
-    def add_dependency(self, key: str, depends_on: str) -> None:
-        self._graph[key].add(depends_on)
-        self._dependents[depends_on].add(key)
-
-    def get_dependents(self, key: str) -> set[str]:
-        """Get all keys that depend on this key (should be invalidated when key changes)."""
-        result: set[str] = set()
-        stack = list(self._dependents.get(key, set()))
-        while stack:
-            k = stack.pop()
-            if k not in result:
-                result.add(k)
-                stack.extend(self._dependents.get(k, set()))
-        return result
-
-    def invalidate_key(self, key: str) -> list[str]:
-        return list(self.get_dependents(key))
+# Global cache registry
+_cache_registry: dict[str, InMemoryCache] = {}
 
 
-class ProbabilisticCache:
-    """Cache with probabilistic early expiration (Stale-While-Revalidate)."""
+def cached(
+    ttl: float = 300.0,
+    max_size: int = 1000,
+    key_prefix: Optional[str] = None,
+) -> Callable:
+    """Decorator to cache function results.
 
-    def __init__(
-        self,
-        ttl: float = 300.0,
-        beta: float = 1.0,
-        get_value_fn: Callable[[str], Any] | None = None,
-    ) -> None:
-        self.ttl = ttl
-        self.beta = beta
-        self._get_value_fn = get_value_fn
-        self._store: dict[str, CacheEntry] = {}
-        self._lock = threading.Lock()
-        self._refreshes: dict[str, float] = {}
-        self._stales: int = 0
-        self._fresh: int = 0
+    Args:
+        ttl: Time-to-live in seconds.
+        max_size: Maximum cache entries.
+        key_prefix: Optional prefix for cache keys.
 
-    def get(
-        self,
-        key: str,
-        default: Any = None,
-        revalidate_fn: Callable[[], Any] | None = None,
-    ) -> Any:
-        with self._lock:
-            entry = self._store.get(key)
-            if entry is None:
-                return default
+    Returns:
+        Decorated function.
 
-            age = time.time() - entry.created_at
-            staleness = max(0.0, age - self.ttl)
+    Example:
+        >>> @cached(ttl=60)
+        ... def get_data(key):
+        ...     return fetch_from_api(key)
+    """
+    cache = InMemoryCache(max_size=max_size, default_ttl=ttl)
+    cache_key = key_prefix or id(cached)
+    _cache_registry[cache_key] = cache
 
-            if staleness == 0:
-                self._fresh += 1
-                entry.touch()
-                return entry.value
+    def decorator(fn: Callable) -> Callable:
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            # Build cache key from function name and args
+            key_parts = [fn.__module__, fn.__name__]
+            key_parts.extend(str(a) for a in args)
+            key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
+            cache_key_str = "|".join(key_parts)
+            key_hash = hashlib.md5(cache_key_str.encode()).hexdigest()
 
-            probability = self._staleness_probability(staleness)
-            import random
-            should_revalidate = random.random() < probability
+            result = cache.get(key_hash)
+            if result is not None:
+                return result
 
-            if should_revalidate and revalidate_fn:
-                self._stales += 1
-                new_value = revalidate_fn()
-                self._store[key] = CacheEntry(key=key, value=new_value, ttl=self.ttl)
-                return new_value
-            else:
-                self._fresh += 1
-                entry.touch()
-                return entry.value
+            result = fn(*args, **kwargs)
+            cache.set(key_hash, result, ttl=ttl)
+            return result
 
-    def _staleness_probability(self, staleness: float) -> float:
-        return min(1.0, staleness / (self.ttl * self.beta))
+        wrapper.cache = cache
+        wrapper.cache_key = cache_key
+        return wrapper
 
-    def set(self, key: str, value: Any) -> None:
-        with self._lock:
-            self._store[key] = CacheEntry(key=key, value=value, ttl=self.ttl)
+    return decorator
 
-    def stats(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "fresh": self._fresh,
-                "stale_revalidations": self._stales,
-                "size": len(self._store),
-            }
+
+def invalidate_cache(key_prefix: Optional[str] = None) -> None:
+    """Invalidate cache entries.
+
+    Args:
+        key_prefix: If provided, invalidate entries with this prefix.
+            If None, invalidate all caches.
+    """
+    if key_prefix is None:
+        for cache in _cache_registry.values():
+            cache.clear()
+    else:
+        cache = _cache_registry.get(key_prefix)
+        if cache:
+            cache.clear()
+
+
+def get_cache_stats(key_prefix: Optional[str] = None) -> CacheStats:
+    """Get cache statistics.
+
+    Args:
+        key_prefix: Specific cache to query, or None for aggregate.
+
+    Returns:
+        CacheStats object.
+    """
+    if key_prefix:
+        cache = _cache_registry.get(key_prefix)
+        return cache.stats if cache else CacheStats()
+
+    # Aggregate stats
+    total = CacheStats()
+    for cache in _cache_registry.values():
+        total.hits += cache.stats.hits
+        total.misses += cache.stats.misses
+        total.evictions += cache.stats.evictions
+    return total
