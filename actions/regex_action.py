@@ -1,266 +1,145 @@
-"""Regex operations action module for RabAI AutoClick.
-
-Provides regex operations:
-- RegexMatchAction: Match pattern
-- RegexSearchAction: Search pattern
-- RegexFindAllAction: Find all matches
-- RegexReplaceAction: Replace pattern
-- RegexSplitAction: Split by pattern
-- RegexGroupsAction: Extract groups
 """
-
+Regex utilities - pattern matching, extraction, substitution, validation, splitting.
+"""
+from typing import Any, Dict, List, Optional, Pattern
 import re
-from typing import Any, Dict, List, Optional, Tuple
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class RegexMatchAction(BaseAction):
-    """Match pattern at beginning."""
-    action_type = "regex_match"
-    display_name = "正则匹配"
-    description = "匹配开头模式"
+class BaseAction:
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+class RegexAction(BaseAction):
+    """Regex operations.
+
+    Provides pattern matching, extraction, substitution, validation, splitting.
+    """
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "match")
+        pattern = params.get("pattern", "")
+        text = params.get("text", "")
+
         try:
-            text = params.get("text", "")
-            pattern = params.get("pattern", "")
-            flags = params.get("flags", 0)
+            flags = 0
+            if params.get("ignore_case"):
+                flags |= re.IGNORECASE
+            if params.get("multiline"):
+                flags |= re.MULTILINE
+            if params.get("dotall"):
+                flags |= re.DOTALL
 
-            if not text or not pattern:
-                return ActionResult(success=False, message="text and pattern required")
-
-            try:
+            if operation == "match":
+                if not pattern or text is None:
+                    return {"success": False, "error": "pattern and text required"}
                 compiled = re.compile(pattern, flags)
-            except re.error as e:
-                return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
+                m = compiled.match(text)
+                if m:
+                    return {"success": True, "matched": True, "group": m.group(), "groups": m.groups()}
+                return {"success": True, "matched": False}
 
-            match = compiled.match(text)
-
-            if match:
-                return ActionResult(
-                    success=True,
-                    message="Pattern matched",
-                    data={
-                        "matched": True,
-                        "match": match.group(),
-                        "span": match.span(),
-                        "groups": match.groups()
-                    }
-                )
-            else:
-                return ActionResult(success=True, message="No match", data={"matched": False})
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Match error: {str(e)}")
-
-
-class RegexSearchAction(BaseAction):
-    """Search for pattern."""
-    action_type = "regex_search"
-    display_name = "正则搜索"
-    description = "搜索正则模式"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            pattern = params.get("pattern", "")
-            flags = params.get("flags", 0)
-
-            if not text or not pattern:
-                return ActionResult(success=False, message="text and pattern required")
-
-            try:
+            elif operation == "search":
+                if not pattern or text is None:
+                    return {"success": False, "error": "pattern and text required"}
                 compiled = re.compile(pattern, flags)
-            except re.error as e:
-                return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
+                m = compiled.search(text)
+                if m:
+                    return {"success": True, "matched": True, "match": m.group(), "start": m.start(), "end": m.end()}
+                return {"success": True, "matched": False}
 
-            match = compiled.search(text)
-
-            if match:
-                return ActionResult(
-                    success=True,
-                    message="Pattern found",
-                    data={
-                        "found": True,
-                        "match": match.group(),
-                        "span": match.span(),
-                        "position": match.start(),
-                        "groups": match.groups()
-                    }
-                )
-            else:
-                return ActionResult(success=True, message="Pattern not found", data={"found": False})
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Search error: {str(e)}")
-
-
-class RegexFindAllAction(BaseAction):
-    """Find all matches."""
-    action_type = "regex_findall"
-    display_name = "正则查找全部"
-    description = "查找所有匹配项"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            pattern = params.get("pattern", "")
-            flags = params.get("flags", 0)
-            max_count = params.get("max_count", 0)
-
-            if not text or not pattern:
-                return ActionResult(success=False, message="text and pattern required")
-
-            try:
+            elif operation == "findall":
+                if not pattern or text is None:
+                    return {"success": False, "error": "pattern and text required"}
                 compiled = re.compile(pattern, flags)
-            except re.error as e:
-                return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
-
-            if max_count > 0:
-                matches = compiled.findall(text)[:max_count]
-            else:
                 matches = compiled.findall(text)
+                return {"success": True, "matches": matches, "count": len(matches)}
 
-            results = []
-            for match in compiled.finditer(text):
-                results.append({
-                    "match": match.group(),
-                    "span": match.span(),
-                    "position": match.start(),
-                    "groups": match.groups()
-                })
-                if max_count > 0 and len(results) >= max_count:
-                    break
-
-            return ActionResult(
-                success=True,
-                message=f"Found {len(matches)} matches",
-                data={"matches": results, "count": len(matches)}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"FindAll error: {str(e)}")
-
-
-class RegexReplaceAction(BaseAction):
-    """Replace pattern."""
-    action_type = "regex_replace"
-    display_name = "正则替换"
-    description = "替换正则模式"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            pattern = params.get("pattern", "")
-            replacement = params.get("replacement", "")
-            flags = params.get("flags", 0)
-            count = params.get("count", 0)
-
-            if not text or not pattern:
-                return ActionResult(success=False, message="text and pattern required")
-
-            try:
+            elif operation == "finditer":
+                if not pattern or text is None:
+                    return {"success": False, "error": "pattern and text required"}
                 compiled = re.compile(pattern, flags)
-            except re.error as e:
-                return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
+                results = []
+                for m in compiled.finditer(text):
+                    results.append({"match": m.group(), "start": m.start(), "end": m.end(), "groups": m.groups()})
+                return {"success": True, "matches": results, "count": len(results)}
 
-            if count > 0:
-                result = compiled.sub(replacement, text, count=count)
-            else:
-                result = compiled.sub(replacement, text)
-
-            return ActionResult(
-                success=True,
-                message=f"Replaced pattern",
-                data={"result": result, "original": text, "replacement": replacement}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Replace error: {str(e)}")
-
-
-class RegexSplitAction(BaseAction):
-    """Split by pattern."""
-    action_type = "regex_split"
-    display_name = "正则分割"
-    description = "按正则分割"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            pattern = params.get("pattern", "")
-            flags = params.get("flags", 0)
-            max_split = params.get("max_split", 0)
-
-            if not text or not pattern:
-                return ActionResult(success=False, message="text and pattern required")
-
-            try:
+            elif operation == "split":
+                if not pattern or text is None:
+                    return {"success": False, "error": "pattern and text required"}
                 compiled = re.compile(pattern, flags)
-            except re.error as e:
-                return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
-
-            if max_split > 0:
-                parts = compiled.split(text, maxsplit=max_split)
-            else:
                 parts = compiled.split(text)
+                return {"success": True, "parts": parts, "count": len(parts)}
 
-            return ActionResult(
-                success=True,
-                message=f"Split into {len(parts)} parts",
-                data={"parts": parts, "count": len(parts)}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Split error: {str(e)}")
-
-
-class RegexGroupsAction(BaseAction):
-    """Extract capture groups."""
-    action_type = "regex_groups"
-    display_name = "正则捕获组"
-    description = "提取捕获组"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            pattern = params.get("pattern", "")
-            flags = params.get("flags", 0)
-            names = params.get("group_names", [])
-
-            if not text or not pattern:
-                return ActionResult(success=False, message="text and pattern required")
-
-            try:
+            elif operation == "sub":
+                if not pattern or text is None:
+                    return {"success": False, "error": "pattern and text required"}
+                replacement = params.get("replacement", "")
+                count = int(params.get("count", 0))
                 compiled = re.compile(pattern, flags)
-            except re.error as e:
-                return ActionResult(success=False, message=f"Invalid regex: {str(e)}")
+                result = compiled.sub(replacement, text, count=count)
+                return {"success": True, "result": result}
 
-            matches = []
-            for match in compiled.finditer(text):
-                groups = match.groups()
-                result = {"match": match.group(), "groups": list(groups)}
+            elif operation == "validate":
+                if not pattern:
+                    return {"success": False, "error": "pattern required"}
+                try:
+                    compiled = re.compile(pattern, flags)
+                    return {"success": True, "valid": True, "pattern": pattern}
+                except re.error as e:
+                    return {"success": True, "valid": False, "error": str(e), "pattern": pattern}
 
-                if names:
-                    named_groups = {}
-                    for i, name in enumerate(names):
-                        if i < len(groups):
-                            named_groups[name] = groups[i]
-                    result["named_groups"] = named_groups
+            elif operation == "groups":
+                if not pattern or text is None:
+                    return {"success": False, "error": "pattern and text required"}
+                compiled = re.compile(pattern, flags)
+                m = compiled.search(text)
+                if m:
+                    named = m.groupdict() if m.groupdict() else {}
+                    return {"success": True, "groups": m.groups(), "named_groups": named, "count": len(m.groups())}
+                return {"success": True, "groups": None}
 
-                matches.append(result)
+            elif operation == "extract_emails":
+                if not text:
+                    return {"success": False, "error": "text required"}
+                pattern_email = r"\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b"
+                emails = re.findall(pattern_email, text)
+                return {"success": True, "emails": emails, "count": len(emails)}
 
-            return ActionResult(
-                success=True,
-                message=f"Extracted {len(matches)} matches with groups",
-                data={"matches": matches, "count": len(matches)}
-            )
+            elif operation == "extract_phones":
+                if not text:
+                    return {"success": False, "error": "text required"}
+                pattern_phone = r"\+?[\d\s\-\(\)]{10,}"
+                phones = re.findall(pattern_phone, text)
+                cleaned = [re.sub(r"[^\d+]", "", p) for p in phones]
+                return {"success": True, "phones": cleaned, "count": len(cleaned)}
 
+            elif operation == "extract_urls":
+                if not text:
+                    return {"success": False, "error": "text required"}
+                pattern_url = r"https?://\S+"
+                urls = re.findall(pattern_url, text)
+                return {"success": True, "urls": urls, "count": len(urls)}
+
+            elif operation == "replace_all":
+                if not pattern or text is None:
+                    return {"success": False, "error": "pattern and text required"}
+                replacement = params.get("replacement", "")
+                result = text.replace(pattern, replacement)
+                return {"success": True, "result": result, "replacements": text.count(pattern)}
+
+            else:
+                return {"success": False, "error": f"Unknown operation: {operation}"}
+
+        except re.error as e:
+            return {"success": False, "error": f"Regex error: {e}"}
         except Exception as e:
-            return ActionResult(success=False, message=f"Groups error: {str(e)}")
+            logger.error(f"RegexAction error: {e}")
+            return {"success": False, "error": str(e)}
+
+
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    return RegexAction().execute(context, params)
