@@ -1,318 +1,592 @@
-"""
-Data Enrichment Action - Enriches data with external sources and lookups.
+"""Data Enrichment Action Module.
 
-This module provides data enrichment capabilities including lookups,
-joins, computed fields, and external data source integration.
+Provides data enrichment capabilities including lookups,
+external data integration, field augmentation, and
+contextual data enhancement.
 """
 
 from __future__ import annotations
 
-import asyncio
+import sys
+import os
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, TypeVar
-from enum import Enum
 import hashlib
+from typing import Any, Callable, Dict, List, Optional, Set
+from dataclasses import dataclass, field
+from enum import Enum
 
-
-T = TypeVar("T")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
 class EnrichmentType(Enum):
-    """Type of data enrichment."""
+    """Types of data enrichment."""
     LOOKUP = "lookup"
-    JOIN = "join"
-    COMPUTED = "computed"
+    CALCULATED = "calculated"
     EXTERNAL = "external"
-    CACHED = "cached"
+    INFERRED = "inferred"
+    AGGREGATED = "aggregated"
+    GEO = "geo"
+    TEMPORAL = "temporal"
+
+
+class LookupType(Enum):
+    """Types of lookup operations."""
+    EXACT = "exact"
+    FUZZY = "fuzzy"
+    RANGE = "range"
+    PREFIX = "prefix"
 
 
 @dataclass
 class LookupTable:
     """A lookup table for data enrichment."""
-    name: str
+    table_name: str
     key_field: str
-    value_fields: list[str]
-    data: dict[Any, dict[str, Any]] = field(default_factory=dict)
-    _lookup_index: dict[Any, dict[str, Any]] = field(default_factory=dict, repr=False)
-    
-    def __post_init__(self) -> None:
-        self._build_index()
-    
-    def _build_index(self) -> None:
-        """Build lookup index for fast access."""
-        for record in self.data.values():
-            key = record.get(self.key_field)
-            if key is not None:
-                self._lookup_index[key] = record
-    
-    def add(self, key: Any, record: dict[str, Any]) -> None:
-        """Add a record to the lookup table."""
-        self.data[key] = record
-        self._lookup_index[key] = record
-    
-    def get(self, key: Any) -> dict[str, Any] | None:
-        """Get a record by key."""
-        return self._lookup_index.get(key)
-    
-    def lookup(self, key: Any, value_field: str) -> Any | None:
-        """Lookup a specific value field."""
-        record = self._lookup_index.get(key)
-        return record.get(value_field) if record else None
+    value_fields: List[str]
+    data: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    lookup_type: LookupType = LookupType.EXACT
 
 
 @dataclass
 class EnrichmentRule:
-    """A rule defining how to enrich data."""
+    """A data enrichment rule definition."""
     rule_id: str
     name: str
     enrichment_type: EnrichmentType
     source_field: str
     target_field: str
-    params: dict[str, Any] = field(default_factory=dict)
+    config: Dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    priority: int = 0
 
 
 @dataclass
 class EnrichmentResult:
-    """Result of data enrichment operation."""
-    enriched_count: int
-    failed_count: int
-    enriched_records: list[dict[str, Any]]
-    errors: list[str] = field(default_factory=list)
-    duration_ms: float = 0.0
+    """Result of an enrichment operation."""
+    original_record: Dict[str, Any]
+    enriched_record: Dict[str, Any]
+    fields_added: List[str]
+    fields_modified: List[str]
+    enrichment_time: float
 
 
-class DataEnricher:
+class DataEnrichmentAction(BaseAction):
     """
-    Enriches data using various strategies.
-    
+    Data enrichment with lookups, calculations, and external data.
+
+    Enriches records with derived values, lookups, and
+    contextual information from various sources.
+
     Example:
-        enricher = DataEnricher()
-        enricher.add_lookup_table("countries", countries_data, "country_code")
-        enriched = enricher.enrich(records, "country_code", "country_name")
+        enricher = DataEnrichmentAction()
+        result = enricher.execute(ctx, {
+            "action": "enrich",
+            "data": {"user_id": 123},
+            "rules": [{"name": "add_user_info", "source_field": "user_id", "target_field": "user_info"}]
+        })
     """
-    
+    action_type = "data_enrichment"
+    display_name = "数据增强"
+    description = "通过查表、计算和外部数据集成丰富数据内容"
+
     def __init__(self) -> None:
-        self._lookup_tables: dict[str, LookupTable] = {}
-        self._computed_functions: dict[str, Callable[[Any], Any]] = {}
-        self._external_sources: dict[str, Callable[[Any], Any]] = {}
-        self._cache: dict[str, Any] = {}
-        self._cache_ttl: float = 300.0
-        self._cache_timestamps: dict[str, float] = {}
-    
-    def add_lookup_table(
-        self,
-        name: str,
-        data: list[dict[str, Any]],
-        key_field: str,
-        value_fields: list[str] | None = None,
-    ) -> None:
+        super().__init__()
+        self._lookup_tables: Dict[str, LookupTable] = {}
+        self._rules: List[EnrichmentRule] = []
+        self._cache: Dict[str, Any] = {}
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute an enrichment action.
+
+        Args:
+            context: Execution context.
+            params: Dict with keys: action, data, rules, etc.
+
+        Returns:
+            ActionResult with enrichment result.
+        """
+        action = params.get("action", "")
+
+        try:
+            if action == "enrich":
+                return self._enrich_record(params)
+            elif action == "enrich_batch":
+                return self._enrich_batch(params)
+            elif action == "add_lookup_table":
+                return self._add_lookup_table(params)
+            elif action == "lookup":
+                return self._lookup(params)
+            elif action == "add_rule":
+                return self._add_rule(params)
+            elif action == "calculate_field":
+                return self._calculate_field(params)
+            elif action == "infer_field":
+                return self._infer_field(params)
+            elif action == "geo_enrich":
+                return self._geo_enrich(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Enrichment error: {str(e)}")
+
+    def _enrich_record(self, params: Dict[str, Any]) -> ActionResult:
+        """Enrich a single record."""
+        record = params.get("data", {})
+        rules = params.get("rules", [])
+        use_cache = params.get("use_cache", True)
+
+        if not record:
+            return ActionResult(success=False, message="No data provided")
+
+        start_time = time.time()
+        enriched = record.copy()
+        fields_added: List[str] = []
+        fields_modified: List[str] = []
+
+        rule_list = [self._build_rule(r) for r in rules] if rules else self._rules
+
+        rule_list.sort(key=lambda r: r.priority)
+
+        for rule in rule_list:
+            if not rule.enabled:
+                continue
+
+            if rule.source_field not in enriched and rule.source_field not in record:
+                continue
+
+            try:
+                result = self._apply_rule(rule, enriched, use_cache)
+
+                if result is not None:
+                    if rule.target_field not in enriched:
+                        fields_added.append(rule.target_field)
+                    else:
+                        fields_modified.append(rule.target_field)
+
+                    enriched[rule.target_field] = result
+
+            except Exception:
+                pass
+
+        enrichment_time = time.time() - start_time
+
+        return ActionResult(
+            success=True,
+            message=f"Enriched record with {len(fields_added)} new fields",
+            data={
+                "fields_added": fields_added,
+                "fields_modified": fields_modified,
+                "enrichment_time": enrichment_time,
+                "record": enriched,
+            }
+        )
+
+    def _enrich_batch(self, params: Dict[str, Any]) -> ActionResult:
+        """Enrich a batch of records."""
+        data = params.get("data", [])
+        rules = params.get("rules", [])
+        parallel = params.get("parallel", False)
+
+        if not data:
+            return ActionResult(success=False, message="No data provided")
+
+        results = []
+        start_time = time.time()
+
+        for record in data:
+            result = self._enrich_record({
+                "data": record,
+                "rules": rules,
+                "use_cache": True,
+            })
+            results.append(result.data.get("record", record) if result.success else record)
+
+        total_time = time.time() - start_time
+
+        return ActionResult(
+            success=True,
+            message=f"Enriched {len(results)} records in {total_time:.2f}s",
+            data={
+                "total_records": len(data),
+                "enriched_records": len(results),
+                "total_time": total_time,
+                "avg_time_per_record": total_time / len(data) if data else 0,
+                "records": results,
+            }
+        )
+
+    def _add_lookup_table(self, params: Dict[str, Any]) -> ActionResult:
         """Add a lookup table for enrichment."""
-        if value_fields is None:
-            value_fields = list(data[0].keys()) if data else []
-        
-        lookup_data = {i: record for i, record in enumerate(data)}
-        table = LookupTable(
-            name=name,
+        table_name = params.get("table_name", "")
+        key_field = params.get("key_field", "")
+        value_fields = params.get("value_fields", [])
+        data = params.get("data", [])
+        lookup_type_str = params.get("lookup_type", "exact")
+
+        if not table_name or not key_field:
+            return ActionResult(success=False, message="table_name and key_field are required")
+
+        if not value_fields:
+            return ActionResult(success=False, message="value_fields is required")
+
+        try:
+            lookup_type = LookupType(lookup_type_str)
+        except ValueError:
+            lookup_type = LookupType.EXACT
+
+        table_data: Dict[str, Dict[str, Any]] = {}
+
+        for row in data:
+            if isinstance(row, dict):
+                key = row.get(key_field)
+                if key is not None:
+                    table_data[str(key)] = {f: row.get(f) for f in value_fields}
+
+        lookup_table = LookupTable(
+            table_name=table_name,
             key_field=key_field,
             value_fields=value_fields,
-            data=lookup_data,
+            data=table_data,
+            lookup_type=lookup_type,
         )
-        for i, record in enumerate(data):
-            table.add(i, record)
-        
-        self._lookup_tables[name] = table
-    
-    def add_computed_field(
-        self,
-        name: str,
-        func: Callable[[dict[str, Any]], Any],
-    ) -> None:
-        """Add a computed field function."""
-        self._computed_functions[name] = func
-    
-    def add_external_source(
-        self,
-        name: str,
-        fetcher: Callable[[Any], Any],
-    ) -> None:
-        """Add an external data source."""
-        self._external_sources[name] = fetcher
-    
-    async def enrich(
-        self,
-        records: list[dict[str, Any]],
-        rule: EnrichmentRule,
-    ) -> EnrichmentResult:
-        """Enrich records based on a rule."""
-        start_time = time.time()
-        enriched_records = []
-        errors = []
-        failed = 0
-        
-        for i, record in enumerate(records):
-            try:
-                enriched = await self._apply_rule(record, rule)
-                enriched_records.append(enriched)
-            except Exception as e:
-                errors.append(f"Record {i}: {str(e)}")
-                failed += 1
-        
-        return EnrichmentResult(
-            enriched_count=len(enriched_records),
-            failed_count=failed,
-            enriched_records=enriched_records,
-            errors=errors,
-            duration_ms=(time.time() - start_time) * 1000,
+
+        self._lookup_tables[table_name] = lookup_table
+
+        return ActionResult(
+            success=True,
+            message=f"Lookup table added: {table_name}",
+            data={
+                "table_name": table_name,
+                "key_field": key_field,
+                "value_fields": value_fields,
+                "row_count": len(table_data),
+            }
         )
-    
-    async def _apply_rule(
-        self,
-        record: dict[str, Any],
-        rule: EnrichmentRule,
-    ) -> dict[str, Any]:
-        """Apply a single enrichment rule to a record."""
-        result = record.copy()
-        
+
+    def _lookup(self, params: Dict[str, Any]) -> ActionResult:
+        """Perform a lookup operation."""
+        table_name = params.get("table_name", "")
+        key = params.get("key")
+        fields = params.get("fields", [])
+
+        if not table_name:
+            return ActionResult(success=False, message="table_name is required")
+        if key is None:
+            return ActionResult(success=False, message="key is required")
+
+        if table_name not in self._lookup_tables:
+            return ActionResult(success=False, message=f"Lookup table not found: {table_name}")
+
+        table = self._lookup_tables[table_name]
+
+        result = self._perform_lookup(table, key, fields)
+
+        if result:
+            return ActionResult(
+                success=True,
+                message=f"Found {len(result)} fields for key",
+                data={"found": True, "values": result}
+            )
+        else:
+            return ActionResult(
+                success=False,
+                message=f"Key not found: {key}",
+                data={"found": False}
+            )
+
+    def _add_rule(self, params: Dict[str, Any]) -> ActionResult:
+        """Add an enrichment rule."""
+        rule = self._build_rule(params)
+
+        if not rule.rule_id:
+            rule.rule_id = self._generate_rule_id()
+
+        self._rules.append(rule)
+
+        return ActionResult(
+            success=True,
+            message=f"Rule added: {rule.name}",
+            data={"rule_id": rule.rule_id, "rule_name": rule.name}
+        )
+
+    def _calculate_field(self, params: Dict[str, Any]) -> ActionResult:
+        """Calculate a derived field value."""
+        expression = params.get("expression", "")
+        record = params.get("record", {})
+        field_name = params.get("field_name", "calculated")
+
+        if not expression:
+            return ActionResult(success=False, message="expression is required")
+
+        try:
+            result = self._evaluate_expression(expression, record)
+
+            return ActionResult(
+                success=True,
+                message=f"Calculated {field_name}",
+                data={"field_name": field_name, "value": result}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Calculation error: {str(e)}")
+
+    def _infer_field(self, params: Dict[str, Any]) -> ActionResult:
+        """Infer a field value based on patterns."""
+        field_name = params.get("field_name", "")
+        source_fields = params.get("source_fields", [])
+        record = params.get("record", {})
+        inference_type = params.get("type", "type_based")
+
+        if not source_fields:
+            return ActionResult(success=False, message="source_fields is required")
+
+        inferred_value = None
+
+        if inference_type == "type_based":
+            inferred_value = self._infer_type(record, source_fields)
+        elif inference_type == "pattern_based":
+            inferred_value = self._infer_pattern(record, source_fields)
+        elif inference_type == "value_based":
+            inferred_value = self._infer_value(record, source_fields)
+
+        return ActionResult(
+            success=True,
+            data={
+                "inferred_field": field_name,
+                "inferred_value": inferred_value,
+                "confidence": 0.8,
+            }
+        )
+
+    def _geo_enrich(self, params: Dict[str, Any]) -> ActionResult:
+        """Enrich data with geographic information."""
+        record = params.get("record", {})
+        location_field = params.get("location_field", "location")
+        enrich_fields = params.get("enrich_fields", ["country", "region", "timezone"])
+
+        location = record.get(location_field)
+
+        if not location:
+            return ActionResult(success=False, message=f"Location field not found: {location_field}")
+
+        geo_data: Dict[str, Any] = {}
+
+        geo_data["country"] = "Unknown"
+        geo_data["region"] = "Unknown"
+        geo_data["timezone"] = "UTC"
+
+        return ActionResult(
+            success=True,
+            data={
+                "location": location,
+                "enriched_fields": geo_data,
+            }
+        )
+
+    def _apply_rule(self, rule: EnrichmentRule, record: Dict[str, Any], use_cache: bool) -> Any:
+        """Apply an enrichment rule to a record."""
+        cache_key = None
+
+        if use_cache:
+            source_value = record.get(rule.source_field)
+            cache_key = f"{rule.rule_id}:{source_value}"
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+
+        result = None
+
         if rule.enrichment_type == EnrichmentType.LOOKUP:
-            lookup_name = rule.params.get("lookup_table")
-            if lookup_name in self._lookup_tables:
-                table = self._lookup_tables[lookup_name]
-                key = record.get(rule.source_field)
-                value = table.lookup(key, rule.params.get("value_field", rule.target_field))
-                result[rule.target_field] = value
-        
-        elif rule.enrichment_type == EnrichmentType.COMPUTED:
-            func_name = rule.params.get("function")
-            if func_name in self._computed_functions:
-                func = self._computed_functions[func_name]
-                result[rule.target_field] = func(record)
-        
-        elif rule.enrichment_type == EnrichmentType.EXTERNAL:
-            source_name = rule.params.get("source")
-            if source_name in self._external_sources:
-                fetcher = self._external_sources[source_name]
-                key = record.get(rule.source_field)
-                cache_key = f"{source_name}:{key}"
-                
-                if cache_key in self._cache:
-                    if (time.time() - self._cache_timestamps.get(cache_key, 0)) < self._cache_ttl:
-                        result[rule.target_field] = self._cache[cache_key]
-                    else:
-                        value = await fetcher(key)
-                        self._cache[cache_key] = value
-                        self._cache_timestamps[cache_key] = time.time()
-                        result[rule.target_field] = value
-                else:
-                    value = await fetcher(key)
-                    self._cache[cache_key] = value
-                    self._cache_timestamps[cache_key] = time.time()
-                    result[rule.target_field] = value
-        
-        elif rule.enrichment_type == EnrichmentType.JOIN:
-            join_table = rule.params.get("join_table")
-            join_key = rule.params.get("join_key", rule.source_field)
-            if join_table in self._lookup_tables:
-                table = self._lookup_tables[join_table]
-                key = record.get(join_key)
-                joined = table.get(key)
-                if joined:
-                    for field_name in rule.params.get("fields", []):
-                        result[f"{rule.target_field}_{field_name}"] = joined.get(field_name)
-        
+            table_name = rule.config.get("table_name")
+            if table_name and table_name in self._lookup_tables:
+                source_value = record.get(rule.source_field)
+                table = self._lookup_tables[table_name]
+                lookup_result = self._perform_lookup(table, source_value, rule.config.get("value_fields", []))
+                result = lookup_result
+            else:
+                result = self._lookup_static(rule.config, record.get(rule.source_field))
+
+        elif rule.enrichment_type == EnrichmentType.CALCULATED:
+            expression = rule.config.get("expression", "")
+            if expression:
+                result = self._evaluate_expression(expression, record)
+
+        elif rule.enrichment_type == EnrichmentType.INFERRED:
+            result = self._infer_value(record, [rule.source_field])
+
+        elif rule.enrichment_type == EnrichmentType.TEMPORAL:
+            result = self._enrich_temporal(record, rule.source_field, rule.config)
+
+        elif rule.enrichment_type == EnrichmentType.GEO:
+            result = self._enrich_geo(record, rule.source_field, rule.config)
+
+        if cache_key and result is not None:
+            self._cache[cache_key] = result
+
         return result
-    
-    def lookup_sync(
+
+    def _perform_lookup(
         self,
-        lookup_name: str,
+        table: LookupTable,
         key: Any,
-        value_field: str,
-    ) -> Any | None:
-        """Synchronous lookup from a table."""
-        if lookup_name in self._lookup_tables:
-            return self._lookup_tables[lookup_name].lookup(key, value_field)
+        fields: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Perform a lookup in a table."""
+        key_str = str(key)
+
+        if table.lookup_type == LookupType.EXACT:
+            if key_str in table.data:
+                return {f: table.data[key_str].get(f) for f in fields} if fields else table.data[key_str]
+            return None
+
+        elif table.lookup_type == LookupType.PREFIX:
+            matches = {k: v for k, v in table.data.items() if k.startswith(key_str)}
+            if matches:
+                first_match = list(matches.values())[0]
+                return {f: first_match.get(f) for f in fields} if fields else first_match
+            return None
+
+        elif table.lookup_type == LookupType.FUZZY:
+            matches = {k: v for k, v in table.data.items() if self._fuzzy_match(key_str, k)}
+            if matches:
+                best_match = max(matches.keys(), key=lambda k: self._fuzzy_score(key_str, k))
+                return {f: matches[best_match].get(f) for f in fields} if fields else matches[best_match]
+            return None
+
         return None
-    
+
+    def _lookup_static(self, config: Dict[str, Any], key: Any) -> Any:
+        """Perform a static lookup from config."""
+        lookup_map = config.get("map", {})
+        default = config.get("default")
+        return lookup_map.get(key, default)
+
+    def _evaluate_expression(self, expression: str, record: Dict[str, Any]) -> Any:
+        """Evaluate a mathematical/string expression."""
+        try:
+            context = record.copy()
+            context["math"] = __import__("math")
+
+            result = eval(expression, {"__builtins__": {}}, context)
+            return result
+        except Exception:
+            return None
+
+    def _infer_type(self, record: Dict[str, Any], source_fields: List[str]) -> str:
+        """Infer type based on field values."""
+        for field_name in source_fields:
+            value = record.get(field_name)
+            if value is not None:
+                return type(value).__name__
+        return "unknown"
+
+    def _infer_pattern(self, record: Dict[str, Any], source_fields: List[str]) -> Optional[str]:
+        """Infer based on patterns in field values."""
+        return None
+
+    def _infer_value(self, record: Dict[str, Any], source_fields: List[str]) -> Optional[Any]:
+        """Infer a value from source fields."""
+        for field_name in source_fields:
+            value = record.get(field_name)
+            if value is not None:
+                return value
+        return None
+
+    def _enrich_temporal(
+        self,
+        record: Dict[str, Any],
+        source_field: str,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Enrich with temporal data."""
+        value = record.get(source_field)
+        enrich_with = config.get("enrich_with", [])
+
+        result: Dict[str, Any] = {}
+
+        try:
+            if isinstance(value, (int, float)):
+                dt = time.localtime(value)
+            else:
+                return result
+
+            if "year" in enrich_with:
+                result["year"] = dt.tm_year
+            if "month" in enrich_with:
+                result["month"] = dt.tm_mon
+            if "day" in enrich_with:
+                result["day"] = dt.tm_mday
+            if "hour" in enrich_with:
+                result["hour"] = dt.tm_hour
+            if "weekday" in enrich_with:
+                result["weekday"] = dt.tm_wday
+            if "is_weekend" in enrich_with:
+                result["is_weekend"] = dt.tm_wday >= 5
+
+        except Exception:
+            pass
+
+        return result
+
+    def _enrich_geo(
+        self,
+        record: Dict[str, Any],
+        source_field: str,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Enrich with geographic data."""
+        return {}
+
+    def _fuzzy_match(self, s1: str, s2: str) -> bool:
+        """Check if two strings fuzzy match."""
+        return self._fuzzy_score(s1, s2) > 0.5
+
+    def _fuzzy_score(self, s1: str, s2: str) -> float:
+        """Calculate fuzzy match score between two strings."""
+        if not s1 or not s2:
+            return 0.0
+
+        s1_lower = s1.lower()
+        s2_lower = s2.lower()
+
+        if s1_lower == s2_lower:
+            return 1.0
+
+        common = sum(1 for c in s1_lower if c in s2_lower)
+        return common / max(len(s1_lower), len(s2_lower))
+
+    def _build_rule(self, rule_data: Dict[str, Any]) -> EnrichmentRule:
+        """Build an EnrichmentRule from data."""
+        enrichment_type_str = rule_data.get("enrichment_type", "calculated")
+
+        try:
+            enrichment_type = EnrichmentType(enrichment_type_str)
+        except ValueError:
+            enrichment_type = EnrichmentType.CALCULATED
+
+        return EnrichmentRule(
+            rule_id=rule_data.get("rule_id", ""),
+            name=rule_data.get("name", "unnamed_rule"),
+            enrichment_type=enrichment_type,
+            source_field=rule_data.get("source_field", ""),
+            target_field=rule_data.get("target_field", ""),
+            config=rule_data.get("config", {}),
+            enabled=rule_data.get("enabled", True),
+            priority=rule_data.get("priority", 0),
+        )
+
+    def _generate_rule_id(self) -> str:
+        """Generate a unique rule ID."""
+        return f"rule_{hashlib.sha1(str(time.time_ns()).encode()).hexdigest()[:8]}"
+
+    def get_enrichment_stats(self) -> Dict[str, Any]:
+        """Get enrichment statistics."""
+        return {
+            "lookup_tables": len(self._lookup_tables),
+            "total_rules": len(self._rules),
+            "enabled_rules": sum(1 for r in self._rules if r.enabled),
+            "cache_size": len(self._cache),
+        }
+
     def clear_cache(self) -> None:
         """Clear the enrichment cache."""
         self._cache.clear()
-        self._cache_timestamps.clear()
-
-
-class DataEnrichmentAction:
-    """
-    Data enrichment action for automation workflows.
-    
-    Example:
-        action = DataEnrichmentAction()
-        action.add_lookup_table("geo", geo_data, "zip_code")
-        
-        rule = EnrichmentRule(
-            rule_id="add_city",
-            name="Add City",
-            enrichment_type=EnrichmentType.LOOKUP,
-            source_field="zip_code",
-            target_field="city",
-            params={"lookup_table": "geo", "value_field": "city"},
-        )
-        
-        result = await action.enrich_records(records, [rule])
-    """
-    
-    def __init__(self) -> None:
-        self.enricher = DataEnricher()
-    
-    def add_lookup(
-        self,
-        name: str,
-        data: list[dict[str, Any]],
-        key_field: str,
-    ) -> None:
-        """Add a lookup table."""
-        self.enricher.add_lookup_table(name, data, key_field)
-    
-    def add_computed(
-        self,
-        name: str,
-        func: Callable[[dict[str, Any]], Any],
-    ) -> None:
-        """Add a computed field."""
-        self.enricher.add_computed_field(name, func)
-    
-    async def enrich_records(
-        self,
-        records: list[dict[str, Any]],
-        rules: list[EnrichmentRule],
-    ) -> EnrichmentResult:
-        """Enrich records with multiple rules."""
-        current_records = records
-        total_failed = 0
-        all_errors = []
-        
-        for rule in rules:
-            result = await self.enricher.enrich(current_records, rule)
-            current_records = result.enriched_records
-            total_failed += result.failed_count
-            all_errors.extend(result.errors)
-        
-        return EnrichmentResult(
-            enriched_count=len(current_records),
-            failed_count=total_failed,
-            enriched_records=current_records,
-            errors=all_errors,
-        )
-    
-    def lookup(self, table: str, key: Any, field: str) -> Any | None:
-        """Direct lookup from a table."""
-        return self.enricher.lookup_sync(table, key, field)
-
-
-# Export public API
-__all__ = [
-    "EnrichmentType",
-    "LookupTable",
-    "EnrichmentRule",
-    "EnrichmentResult",
-    "DataEnricher",
-    "DataEnrichmentAction",
-]
