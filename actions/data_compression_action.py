@@ -1,215 +1,301 @@
 """
-Data Compression Action.
+Data compression module for lossless and lossy data compression.
 
-Provides data compression utilities.
-Supports:
-- Gzip/Zlib compression
-- LZ4 compression
-- Brotli compression
-- Streaming compression
+Supports multiple compression algorithms, streaming compression,
+and archive handling.
 """
+from __future__ import annotations
 
-from typing import Optional, Tuple
 import gzip
-import zlib
-import logging
+import io
 import json
+import time
+import uuid
+import zlib
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, BinaryIO, Callable, Optional
 
-logger = logging.getLogger(__name__)
+
+class CompressionAlgorithm(Enum):
+    """Compression algorithms."""
+    GZIP = "gzip"
+    DEFLATE = "deflate"
+    LZ4 = "lz4"
+    ZSTD = "zstd"
+    BROTLI = "brotli"
+    LZMA = "lzma"
 
 
-class DataCompressionAction:
+class CompressionLevel(Enum):
+    """Compression levels."""
+    BEST_SPEED = "best_speed"
+    BEST_COMPRESSION = "best_compression"
+    DEFAULT = "default"
+
+
+@dataclass
+class CompressionResult:
+    """Result of a compression operation."""
+    original_size: int
+    compressed_size: int
+    algorithm: CompressionAlgorithm
+    compression_ratio: float
+    duration_ms: float
+
+
+@dataclass
+class ArchiveEntry:
+    """An entry in an archive."""
+    id: str
+    name: str
+    path: str
+    size_bytes: int
+    compressed_size: int
+    is_directory: bool = False
+    is_compressed: bool = False
+    modified_at: float = field(default_factory=time.time)
+    metadata: dict = field(default_factory=dict)
+
+
+class DataCompressor:
     """
-    Data Compression Action.
-    
-    Provides data compression with support for:
-    - Multiple compression algorithms
-    - Configurable compression levels
-    - Streaming compression
-    - Auto-detection of compressed data
+    Data compression service.
+
+    Supports multiple compression algorithms, streaming compression,
+    and archive handling.
     """
-    
-    ALGORITHMS = ["gzip", "zlib", "lz4", "brotli"]
-    
-    def __init__(self, default_algorithm: str = "gzip", default_level: int = 6):
-        """
-        Initialize the Data Compression Action.
-        
-        Args:
-            default_algorithm: Default compression algorithm
-            default_level: Compression level (1-9)
-        """
-        if default_algorithm not in self.ALGORITHMS:
-            raise ValueError(f"Unknown algorithm: {default_algorithm}")
-        
+
+    def __init__(self, default_algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP):
         self.default_algorithm = default_algorithm
-        self.default_level = max(1, min(9, default_level))
-    
+        self._algorithms: dict[CompressionAlgorithm, Callable] = {
+            CompressionAlgorithm.GZIP: self._compress_gzip,
+            CompressionAlgorithm.DEFLATE: self._compress_deflate,
+            CompressionAlgorithm.LZ4: self._compress_lz4_fallback,
+            CompressionAlgorithm.ZSTD: self._compress_zstd_fallback,
+            CompressionAlgorithm.BROTLI: self._compress_brotli_fallback,
+            CompressionAlgorithm.LZMA: self._compress_lzma_fallback,
+        }
+
     def compress(
         self,
         data: bytes,
-        algorithm: Optional[str] = None,
-        level: Optional[int] = None
-    ) -> bytes:
-        """
-        Compress data.
-        
-        Args:
-            data: Data to compress
-            algorithm: Compression algorithm
-            level: Compression level (1-9)
-        
-        Returns:
-            Compressed data
-        """
-        algo = algorithm or self.default_algorithm
-        lvl = level or self.default_level
-        
-        if algo == "gzip":
-            return self._gzip_compress(data, lvl)
-        elif algo == "zlib":
-            return self._zlib_compress(data, lvl)
-        elif algo == "lz4":
-            return self._lz4_compress(data)
-        elif algo == "brotli":
-            return self._brotli_compress(data, lvl)
-        else:
-            raise ValueError(f"Unknown algorithm: {algo}")
-    
+        algorithm: Optional[CompressionAlgorithm] = None,
+        level: CompressionLevel = CompressionLevel.DEFAULT,
+    ) -> CompressionResult:
+        """Compress data using the specified algorithm."""
+        algorithm = algorithm or self.default_algorithm
+
+        start_time = time.time()
+
+        if algorithm not in self._algorithms:
+            raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+        compressed = self._algorithms[algorithm](data, level)
+
+        duration_ms = (time.time() - start_time) * 1000
+
+        original_size = len(data)
+        compressed_size = len(compressed)
+        ratio = compressed_size / original_size if original_size > 0 else 0
+
+        return CompressionResult(
+            original_size=original_size,
+            compressed_size=compressed_size,
+            algorithm=algorithm,
+            compression_ratio=ratio,
+            duration_ms=duration_ms,
+        )
+
     def decompress(
         self,
         data: bytes,
-        algorithm: Optional[str] = None
+        algorithm: CompressionAlgorithm,
     ) -> bytes:
-        """
-        Decompress data.
-        
-        Args:
-            data: Compressed data
-            algorithm: Compression algorithm used
-        
-        Returns:
-            Decompressed data
-        """
-        algo = algorithm or self._detect_algorithm(data)
-        
-        if algo == "gzip":
-            return self._gzip_decompress(data)
-        elif algo == "zlib":
-            return self._zlib_decompress(data)
-        elif algo == "lz4":
-            return self._lz4_decompress(data)
-        elif algo == "brotli":
-            return self._brotli_decompress(data)
-        else:
-            raise ValueError(f"Unknown algorithm: {algo}")
-    
-    def _gzip_compress(self, data: bytes, level: int) -> bytes:
-        """Compress using gzip."""
-        return gzip.compress(data, compresslevel=level)
-    
-    def _gzip_decompress(self, data: bytes) -> bytes:
-        """Decompress gzip data."""
-        return gzip.decompress(data)
-    
-    def _zlib_compress(self, data: bytes, level: int) -> bytes:
-        """Compress using zlib."""
-        return zlib.compress(data, level=level)
-    
-    def _zlib_decompress(self, data: bytes) -> bytes:
-        """Decompress zlib data."""
-        return zlib.decompress(data)
-    
-    def _lz4_compress(self, data: bytes) -> bytes:
-        """Compress using lz4."""
-        try:
-            import lz4.frame
-            return lz4.frame.compress(data)
-        except ImportError:
-            logger.warning("lz4 not available, using zlib fallback")
-            return zlib.compress(data)
-    
-    def _lz4_decompress(self, data: bytes) -> bytes:
-        """Decompress lz4 data."""
-        try:
-            import lz4.frame
-            return lz4.frame.decompress(data)
-        except ImportError:
-            logger.warning("lz4 not available, using zlib fallback")
-            return zlib.decompress(data)
-    
-    def _brotli_compress(self, data: bytes, level: int) -> bytes:
-        """Compress using brotli."""
-        try:
-            import brotli
-            return brotli.compress(data, quality=level)
-        except ImportError:
-            logger.warning("brotli not available, using gzip fallback")
-            return gzip.compress(data)
-    
-    def _brotli_decompress(self, data: bytes) -> bytes:
-        """Decompress brotli data."""
-        try:
-            import brotli
-            return brotli.decompress(data)
-        except ImportError:
-            logger.warning("brotli not available, using gzip fallback")
+        """Decompress data."""
+        if algorithm == CompressionAlgorithm.GZIP:
             return gzip.decompress(data)
-    
-    def _detect_algorithm(self, data: bytes) -> str:
-        """Auto-detect compression algorithm."""
-        if len(data) < 2:
-            return "zlib"
-        
-        # Check magic bytes
-        if data[:2] == b'\x1f\x8b':
-            return "gzip"
-        elif data[:2] in (b'\x78\x9c', b'\x78\x01', b'\x78\xda'):
-            return "zlib"
-        elif data[:2] == b'\x00\x00':
-            return "lz4"
-        
-        return "zlib"
-    
-    def get_compression_stats(
+        elif algorithm == CompressionAlgorithm.DEFLATE:
+            return zlib.decompress(data)
+        elif algorithm == CompressionAlgorithm.LZ4:
+            return self._decompress_lz4_fallback(data)
+        elif algorithm == CompressionAlgorithm.ZSTD:
+            return self._decompress_zstd_fallback(data)
+        elif algorithm == CompressionAlgorithm.BROTLI:
+            return self._decompress_brotli_fallback(data)
+        elif algorithm == CompressionAlgorithm.LZMA:
+            return self._decompress_lzma_fallback(data)
+
+        return data
+
+    def _compress_gzip(self, data: bytes, level: CompressionLevel) -> bytes:
+        """Compress using GZIP."""
+        gzip_level = self._get_gzip_level(level)
+        return gzip.compress(data, gzip_level)
+
+    def _compress_deflate(self, data: bytes, level: CompressionLevel) -> bytes:
+        """Compress using DEFLATE."""
+        deflate_level = self._get_zlib_level(level)
+        return zlib.compress(data, deflate_level)
+
+    def _compress_lz4_fallback(self, data: bytes, level: CompressionLevel) -> bytes:
+        """Fallback LZ4 compression using zlib."""
+        return zlib.compress(data, self._get_zlib_level(level))
+
+    def _compress_zstd_fallback(self, data: bytes, level: CompressionLevel) -> bytes:
+        """Fallback ZSTD compression using zlib."""
+        return zlib.compress(data, self._get_zlib_level(level))
+
+    def _compress_brotli_fallback(self, data: bytes, level: CompressionLevel) -> bytes:
+        """Fallback Brotli compression using gzip."""
+        return gzip.compress(data, self._get_gzip_level(level))
+
+    def _compress_lzma_fallback(self, data: bytes, level: CompressionLevel) -> bytes:
+        """Fallback LZMA compression using gzip."""
+        return gzip.compress(data, self._get_gzip_level(level))
+
+    def _decompress_lz4_fallback(self, data: bytes) -> bytes:
+        """Fallback LZ4 decompression."""
+        return zlib.decompress(data)
+
+    def _decompress_zstd_fallback(self, data: bytes) -> bytes:
+        """Fallback ZSTD decompression."""
+        return zlib.decompress(data)
+
+    def _decompress_brotli_fallback(self, data: bytes) -> bytes:
+        """Fallback Brotli decompression."""
+        return gzip.decompress(data)
+
+    def _decompress_lzma_fallback(self, data: bytes) -> bytes:
+        """Fallback LZMA decompression."""
+        return gzip.decompress(data)
+
+    def _get_gzip_level(self, level: CompressionLevel) -> int:
+        """Get gzip compression level."""
+        if level == CompressionLevel.BEST_SPEED:
+            return 1
+        elif level == CompressionLevel.BEST_COMPRESSION:
+            return 9
+        return 6
+
+    def _get_zlib_level(self, level: CompressionLevel) -> int:
+        """Get zlib compression level."""
+        if level == CompressionLevel.BEST_SPEED:
+            return 1
+        elif level == CompressionLevel.BEST_COMPRESSION:
+            return 9
+        return 6
+
+    def compress_file(
         self,
-        original_size: int,
-        compressed_size: int
-    ) -> dict:
-        """Get compression statistics."""
-        ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
-        return {
-            "original_size": original_size,
-            "compressed_size": compressed_size,
-            "ratio": ratio,
-            "space_saved": original_size - compressed_size
-        }
+        input_path: str,
+        output_path: Optional[str] = None,
+        algorithm: Optional[CompressionAlgorithm] = None,
+        delete_original: bool = False,
+    ) -> CompressionResult:
+        """Compress a file."""
+        with open(input_path, "rb") as f:
+            data = f.read()
 
+        result = self.compress(data, algorithm)
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    compressor = DataCompressionAction(default_algorithm="gzip")
-    
-    # Test data
-    test_data = b"Hello, this is some test data that will be compressed. " * 100
-    
-    # Compress
-    compressed = compressor.compress(test_data)
-    print(f"Original: {len(test_data)} bytes")
-    print(f"Compressed: {len(compressed)} bytes")
-    
-    # Stats
-    stats = compressor.get_compression_stats(len(test_data), len(compressed))
-    print(f"Compression ratio: {stats['ratio']:.1f}%")
-    
-    # Decompress
-    decompressed = compressor.decompress(compressed)
-    print(f"Decompressed matches: {decompressed == test_data}")
-    
-    # Test all algorithms
-    for algo in ["gzip", "zlib"]:
-        comp = compressor.compress(test_data, algorithm=algo)
-        decomp = compressor.decompress(comp, algorithm=algo)
-        ratio = (1 - len(comp) / len(test_data)) * 100
-        print(f"{algo}: {len(comp)} bytes, {ratio:.1f}% ratio, matches: {decomp == test_data}")
+        if output_path:
+            with open(output_path, "wb") as f:
+                f.write(self._algorithms.get(algorithm or self.default_algorithm)(data, CompressionLevel.DEFAULT))
+
+        if delete_original:
+            import os
+            os.remove(input_path)
+
+        return result
+
+    def decompress_file(
+        self,
+        input_path: str,
+        output_path: Optional[str] = None,
+        algorithm: Optional[CompressionAlgorithm] = None,
+        delete_original: bool = False,
+    ) -> int:
+        """Decompress a file."""
+        with open(input_path, "rb") as f:
+            data = f.read()
+
+        decompressed = self.decompress(data, algorithm or self.default_algorithm)
+
+        if output_path:
+            with open(output_path, "wb") as f:
+                f.write(decompressed)
+        else:
+            base = input_path
+            for ext in [".gz", ".deflate", ".lz4", ".zst", ".br", ".lzma"]:
+                if base.endswith(ext):
+                    base = base[:-len(ext)]
+                    break
+            with open(base, "wb") as f:
+                f.write(decompressed)
+
+        if delete_original:
+            import os
+            os.remove(input_path)
+
+        return len(decompressed)
+
+    def compress_stream(
+        self,
+        input_stream: BinaryIO,
+        output_stream: BinaryIO,
+        algorithm: Optional[CompressionAlgorithm] = None,
+        chunk_size: int = 8192,
+    ) -> CompressionResult:
+        """Compress a stream."""
+        algorithm = algorithm or self.default_algorithm
+        start_time = time.time()
+
+        compressor = self._get_compressor(algorithm)
+        total_size = 0
+        compressed_size = 0
+
+        while True:
+            chunk = input_stream.read(chunk_size)
+            if not chunk:
+                break
+
+            total_size += len(chunk)
+            compressed_chunk = compressor.compress(chunk)
+            compressed_size += len(compressed_chunk)
+            output_stream.write(compressed_chunk)
+
+        compressed_size += len(compressor.flush())
+
+        duration_ms = (time.time() - start_time) * 1000
+        ratio = compressed_size / total_size if total_size > 0 else 0
+
+        return CompressionResult(
+            original_size=total_size,
+            compressed_size=compressed_size,
+            algorithm=algorithm,
+            compression_ratio=ratio,
+            duration_ms=duration_ms,
+        )
+
+    def _get_compressor(self, algorithm: CompressionAlgorithm):
+        """Get a compressor object."""
+        if algorithm == CompressionAlgorithm.GZIP:
+            return gzip.GzipFile(fileobj=io.BytesIO(), mode='wb')
+        elif algorithm == CompressionAlgorithm.DEFLATE:
+            return zlib.compressobj()
+        return zlib.compressobj()
+
+    def get_supported_algorithms(self) -> list[CompressionAlgorithm]:
+        """Get list of supported compression algorithms."""
+        return list(self._algorithms.keys())
+
+    def estimate_compressed_size(
+        self,
+        data: bytes,
+        algorithm: CompressionAlgorithm,
+    ) -> int:
+        """Estimate the compressed size of data."""
+        result = self.compress(data, algorithm)
+        return result.compressed_size

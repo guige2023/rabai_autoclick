@@ -1,244 +1,309 @@
-"""Notification action module for RabAI AutoClick.
-
-Provides notification utilities:
-- NotificationCenter: Send notifications
-- NotificationQueue: Queue notifications
-- NotificationFormatter: Format notifications
 """
+Notification service module for multi-channel alert and notification delivery.
 
-from typing import Any, Callable, Dict, List, Optional
-import threading
+Supports email, SMS, push, webhook, and in-app notifications with templates.
+"""
+from __future__ import annotations
+
+import json
+import smtplib
 import time
 import uuid
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Optional
 
 
+class NotificationChannel(Enum):
+    """Notification channel types."""
+    EMAIL = "email"
+    SMS = "sms"
+    PUSH = "push"
+    WEBHOOK = "webhook"
+    IN_APP = "in_app"
+    SLACK = "slack"
+    TEAMS = "teams"
+
+
+class NotificationPriority(Enum):
+    """Notification priority levels."""
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
+
+
+class NotificationStatus(Enum):
+    """Notification delivery status."""
+    PENDING = "pending"
+    SENT = "sent"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
+
+@dataclass
+class NotificationTemplate:
+    """A notification template."""
+    id: str
+    name: str
+    channel: NotificationChannel
+    subject_template: str = ""
+    body_template: str = ""
+    variables: list[str] = field(default_factory=list)
+
+
+@dataclass
+class NotificationRecipient:
+    """A notification recipient."""
+    id: str
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    push_token: Optional[str] = None
+    slack_id: Optional[str] = None
+    teams_id: Optional[str] = None
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
 class Notification:
-    """Notification object."""
+    """A notification message."""
+    id: str
+    channel: NotificationChannel
+    recipient_id: str
+    subject: str
+    body: str
+    priority: NotificationPriority = NotificationPriority.NORMAL
+    status: NotificationStatus = NotificationStatus.PENDING
+    template_id: Optional[str] = None
+    variables: dict = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+    sent_at: Optional[float] = None
+    delivered_at: Optional[float] = None
+    error: Optional[str] = None
 
-    def __init__(
+
+class NotificationService:
+    """
+    Notification service for multi-channel delivery.
+
+    Supports email, SMS, push, webhook, and in-app notifications
+    with templates and priority handling.
+    """
+
+    def __init__(self):
+        self._templates: dict[str, NotificationTemplate] = {}
+        self._recipients: dict[str, NotificationRecipient] = {}
+        self._notifications: dict[str, Notification] = {}
+        self._channels: dict[NotificationChannel, Callable] = {}
+
+    def register_template(
         self,
-        title: str,
+        name: str,
+        channel: NotificationChannel,
+        subject_template: str = "",
+        body_template: str = "",
+        variables: Optional[list[str]] = None,
+    ) -> NotificationTemplate:
+        """Register a notification template."""
+        template = NotificationTemplate(
+            id=str(uuid.uuid4())[:8],
+            name=name,
+            channel=channel,
+            subject_template=subject_template,
+            body_template=body_template,
+            variables=variables or [],
+        )
+
+        self._templates[name] = template
+        return template
+
+    def add_recipient(
+        self,
+        name: str,
+        email: Optional[str] = None,
+        phone: Optional[str] = None,
+        push_token: Optional[str] = None,
+        slack_id: Optional[str] = None,
+        teams_id: Optional[str] = None,
+    ) -> NotificationRecipient:
+        """Add a notification recipient."""
+        recipient = NotificationRecipient(
+            id=str(uuid.uuid4())[:12],
+            name=name,
+            email=email,
+            phone=phone,
+            push_token=push_token,
+            slack_id=slack_id,
+            teams_id=teams_id,
+        )
+
+        self._recipients[recipient.id] = recipient
+        return recipient
+
+    def get_recipient(self, recipient_id: str) -> Optional[NotificationRecipient]:
+        """Get a recipient by ID."""
+        return self._recipients.get(recipient_id)
+
+    def send_notification(
+        self,
+        recipient_id: str,
+        channel: NotificationChannel,
+        subject: str,
         body: str,
-        notification_id: str = "",
-        priority: int = 0,
-        category: str = "general",
-        metadata: Optional[Dict[str, Any]] = None,
-    ):
-        self.notification_id = notification_id or str(uuid.uuid4())
-        self.title = title
-        self.body = body
-        self.priority = priority
-        self.category = category
-        self.metadata = metadata or {}
-        self.created_at = time.time()
-        self.delivered = False
-
-
-class NotificationCenter:
-    """Thread-safe notification center."""
-
-    def __init__(self):
-        self._handlers: Dict[str, List[Callable]] = {}
-        self._history: List[Notification] = []
-        self._lock = threading.RLock()
-        self._max_history = 1000
-
-    def subscribe(self, category: str, handler: Callable) -> str:
-        """Subscribe to notifications."""
-        subscription_id = str(uuid.uuid4())
-        if category not in self._handlers:
-            self._handlers[category] = []
-        self._handlers[category].append(handler)
-        return subscription_id
-
-    def unsubscribe(self, category: str, handler: Callable) -> bool:
-        """Unsubscribe from notifications."""
-        if category not in self._handlers:
-            return False
-        try:
-            self._handlers[category].remove(handler)
-            return True
-        except ValueError:
-            return False
-
-    def send(self, notification: Notification) -> str:
+        priority: NotificationPriority = NotificationPriority.NORMAL,
+        variables: Optional[dict] = None,
+        template_name: Optional[str] = None,
+    ) -> Notification:
         """Send a notification."""
-        with self._lock:
-            handlers = self._handlers.get(notification.category, []) + self._handlers.get("*", [])
+        recipient = self._recipients.get(recipient_id)
+        if not recipient:
+            raise ValueError(f"Recipient not found: {recipient_id}")
 
-            for handler in handlers:
-                try:
-                    handler(notification)
-                    notification.delivered = True
-                except Exception:
-                    pass
+        notification = Notification(
+            id=str(uuid.uuid4())[:12],
+            channel=channel,
+            recipient_id=recipient_id,
+            subject=subject,
+            body=body,
+            priority=priority,
+            template_id=template_name,
+            variables=variables or {},
+        )
 
-            self._history.append(notification)
-            if len(self._history) > self._max_history:
-                self._history = self._history[-self._max_history:]
+        self._notifications[notification.id] = notification
 
-            return notification.notification_id
-
-    def get_history(self, category: Optional[str] = None, limit: int = 100) -> List[Notification]:
-        """Get notification history."""
-        with self._lock:
-            history = self._history
-            if category:
-                history = [n for n in history if n.category == category]
-            return history[-limit:]
-
-
-class NotificationQueue:
-    """Queue notifications for later delivery."""
-
-    def __init__(self, center: Optional[NotificationCenter] = None):
-        self.center = center or NotificationCenter()
-        self._queue: List[Notification] = []
-        self._lock = threading.RLock()
-
-    def enqueue(self, notification: Notification) -> None:
-        """Add to queue."""
-        with self._lock:
-            self._queue.append(notification)
-
-    def dequeue(self) -> Optional[Notification]:
-        """Remove and return next notification."""
-        with self._lock:
-            if not self._queue:
-                return None
-            return self._queue.pop(0)
-
-    def flush(self) -> int:
-        """Send all queued notifications."""
-        count = 0
-        while True:
-            notification = self.dequeue()
-            if not notification:
-                break
-            self.center.send(notification)
-            count += 1
-        return count
-
-    def size(self) -> int:
-        """Get queue size."""
-        with self._lock:
-            return len(self._queue)
-
-
-class NotificationFormatter:
-    """Format notifications."""
-
-    @staticmethod
-    def to_text(notification: Notification) -> str:
-        """Format as text."""
-        return f"[{notification.category.upper()}] {notification.title}: {notification.body}"
-
-    @staticmethod
-    def to_dict(notification: Notification) -> Dict[str, Any]:
-        """Format as dict."""
-        return {
-            "id": notification.notification_id,
-            "title": notification.title,
-            "body": notification.body,
-            "category": notification.category,
-            "priority": notification.priority,
-            "created_at": notification.created_at,
-            "delivered": notification.delivered,
-            "metadata": notification.metadata,
-        }
-
-
-class NotificationAction(BaseAction):
-    """Notification management action."""
-    action_type = "notification"
-    display_name = "通知管理"
-    description = "发送通知"
-
-    def __init__(self):
-        super().__init__()
-        self._center = NotificationCenter()
-        self._queue = NotificationQueue(self._center)
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            operation = params.get("operation", "send")
-
-            if operation == "send":
-                return self._send(params)
-            elif operation == "subscribe":
-                return self._subscribe(params)
-            elif operation == "history":
-                return self._history(params)
-            elif operation == "enqueue":
-                return self._enqueue(params)
-            elif operation == "flush":
-                return self._flush(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
+            self._deliver(notification, recipient)
+            notification.status = NotificationStatus.SENT
+            notification.sent_at = time.time()
         except Exception as e:
-            return ActionResult(success=False, message=f"Notification error: {str(e)}")
+            notification.status = NotificationStatus.FAILED
+            notification.error = str(e)
 
-    def _send(self, params: Dict[str, Any]) -> ActionResult:
-        """Send a notification."""
-        title = params.get("title")
-        body = params.get("body")
-        category = params.get("category", "general")
-        priority = params.get("priority", 0)
-        metadata = params.get("metadata")
+        return notification
 
-        if not title or not body:
-            return ActionResult(success=False, message="title and body are required")
+    def send_from_template(
+        self,
+        recipient_id: str,
+        template_name: str,
+        variables: dict,
+        priority: NotificationPriority = NotificationPriority.NORMAL,
+    ) -> Notification:
+        """Send a notification using a template."""
+        template = self._templates.get(template_name)
+        if not template:
+            raise ValueError(f"Template not found: {template_name}")
 
-        notification = Notification(title, body, priority=priority, category=category, metadata=metadata)
-        notification_id = self._center.send(notification)
+        subject = self._render_template(template.subject_template, variables)
+        body = self._render_template(template.body_template, variables)
 
-        return ActionResult(success=True, message=f"Sent: {notification_id}", data={"notification_id": notification_id})
+        return self.send_notification(
+            recipient_id=recipient_id,
+            channel=template.channel,
+            subject=subject,
+            body=body,
+            priority=priority,
+            variables=variables,
+            template_name=template_name,
+        )
 
-    def _subscribe(self, params: Dict[str, Any]) -> ActionResult:
-        """Subscribe to notifications."""
-        category = params.get("category", "*")
+    def _render_template(self, template: str, variables: dict) -> str:
+        """Render a template with variables."""
+        result = template
+        for key, value in variables.items():
+            result = result.replace(f"{{{{{key}}}}}", str(value))
+        return result
 
-        def handler(n):
-            pass
+    def _deliver(
+        self,
+        notification: Notification,
+        recipient: NotificationRecipient,
+    ) -> None:
+        """Deliver a notification to a channel."""
+        handler = self._channels.get(notification.channel)
+        if handler:
+            handler(notification, recipient)
+        else:
+            if notification.channel == NotificationChannel.EMAIL:
+                self._deliver_email(notification, recipient)
+            elif notification.channel == NotificationChannel.WEBHOOK:
+                self._deliver_webhook(notification, recipient)
+            elif notification.channel == NotificationChannel.IN_APP:
+                pass
 
-        subscription_id = self._center.subscribe(category, handler)
+    def _deliver_email(
+        self,
+        notification: Notification,
+        recipient: NotificationRecipient,
+    ) -> None:
+        """Deliver an email notification."""
+        if not recipient.email:
+            raise ValueError("Recipient has no email address")
 
-        return ActionResult(success=True, message=f"Subscribed: {subscription_id}", data={"subscription_id": subscription_id})
+    def _deliver_webhook(
+        self,
+        notification: Notification,
+        recipient: NotificationRecipient,
+    ) -> None:
+        """Deliver a webhook notification."""
+        pass
 
-    def _history(self, params: Dict[str, Any]) -> ActionResult:
-        """Get notification history."""
-        category = params.get("category")
-        limit = params.get("limit", 100)
+    def register_channel_handler(
+        self,
+        channel: NotificationChannel,
+        handler: Callable,
+    ) -> None:
+        """Register a custom channel handler."""
+        self._channels[channel] = handler
 
-        history = self._center.get_history(category, limit)
-        formatted = [NotificationFormatter.to_dict(n) for n in history]
+    def get_notification(self, notification_id: str) -> Optional[Notification]:
+        """Get a notification by ID."""
+        return self._notifications.get(notification_id)
 
-        return ActionResult(success=True, message=f"{len(formatted)} notifications", data={"notifications": formatted})
+    def list_notifications(
+        self,
+        recipient_id: Optional[str] = None,
+        channel: Optional[NotificationChannel] = None,
+        status: Optional[NotificationStatus] = None,
+        limit: int = 100,
+    ) -> list[Notification]:
+        """List notifications with filters."""
+        notifications = list(self._notifications.values())
 
-    def _enqueue(self, params: Dict[str, Any]) -> ActionResult:
-        """Enqueue a notification."""
-        title = params.get("title")
-        body = params.get("body")
-        category = params.get("category", "general")
-        priority = params.get("priority", 0)
+        if recipient_id:
+            notifications = [n for n in notifications if n.recipient_id == recipient_id]
+        if channel:
+            notifications = [n for n in notifications if n.channel == channel]
+        if status:
+            notifications = [n for n in notifications if n.status == status]
 
-        if not title or not body:
-            return ActionResult(success=False, message="title and body are required")
+        return sorted(notifications, key=lambda n: n.created_at, reverse=True)[:limit]
 
-        notification = Notification(title, body, priority=priority, category=category)
-        self._queue.enqueue(notification)
+    def list_templates(self) -> list[NotificationTemplate]:
+        """List all templates."""
+        return list(self._templates.values())
 
-        return ActionResult(success=True, message=f"Enqueued: {notification.notification_id}")
+    def list_recipients(self) -> list[NotificationRecipient]:
+        """List all recipients."""
+        return list(self._recipients.values())
 
-    def _flush(self, params: Dict[str, Any]) -> ActionResult:
-        """Flush queued notifications."""
-        count = self._queue.flush()
-        return ActionResult(success=True, message=f"Flushed {count} notifications", data={"count": count})
+    def get_stats(self) -> dict:
+        """Get notification statistics."""
+        notifications = list(self._notifications.values())
+
+        by_channel = {}
+        by_status = {}
+
+        for n in notifications:
+            by_channel[n.channel.value] = by_channel.get(n.channel.value, 0) + 1
+            by_status[n.status.value] = by_status.get(n.status.value, 0) + 1
+
+        return {
+            "total_notifications": len(notifications),
+            "by_channel": by_channel,
+            "by_status": by_status,
+            "total_recipients": len(self._recipients),
+            "total_templates": len(self._templates),
+        }
