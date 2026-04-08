@@ -1,107 +1,50 @@
-"""
-API Developer Portal Action Module.
-
-Generates developer portal content: API documentation, SDK code,
-interactive examples, and usage guides.
-"""
-from typing import Any, Optional
-from dataclasses import dataclass
-from actions.base_action import BaseAction
-
+"""API Developer Portal Action Module. Generates developer portal content."""
+import sys, os, json
+from typing import Any
+from dataclasses import dataclass, field
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 @dataclass
-class PortalContent:
-    """Generated portal content."""
-    docs: str
-    sdk_code: str
-    examples: list[dict[str, Any]]
-    guides: list[str]
-
+class EndpointDoc:
+    path: str; method: str; summary: str; description: str
+    parameters: list = field(default_factory=list)
+    samples: list = field(default_factory=list)
 
 class APIDeveloperPortalAction(BaseAction):
-    """Generate developer portal content."""
-
-    def __init__(self) -> None:
-        super().__init__("api_developer_portal")
-
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Generate developer portal content.
-
-        Args:
-            context: Execution context
-            params: Parameters:
-                - api_name: Name of the API
-                - endpoints: List of endpoint definitions
-                - language: SDK language (python, javascript, go, etc.)
-                - include_auth: Include authentication examples
-                - include_errors: Include error handling examples
-
-        Returns:
-            PortalContent with generated documentation and SDK code
-        """
-        api_name = params.get("api_name", "MyAPI")
-        endpoints = params.get("endpoints", [])
-        language = params.get("language", "python")
-        include_auth = params.get("include_auth", True)
-        include_errors = params.get("include_errors", True)
-
-        docs = self._generate_markdown_docs(api_name, endpoints)
-        sdk_code = self._generate_sdk_code(api_name, endpoints, language)
-        examples = self._generate_examples(api_name, endpoints, language, include_auth, include_errors)
-        guides = self._generate_guides(api_name, endpoints)
-
-        return PortalContent(
-            docs=docs,
-            sdk_code=sdk_code,
-            examples=examples,
-            guides=guides
-        ).__dict__
-
-    def _generate_markdown_docs(self, api_name: str, endpoints: list[dict]) -> str:
-        """Generate Markdown API documentation."""
-        lines = [f"# {api_name} API Documentation\n\n"]
-        for ep in endpoints:
-            method = ep.get("method", "GET").upper()
-            path = ep.get("path", "")
-            summary = ep.get("summary", "")
-            lines.append(f"## {method} {path}\n\n{summary}\n\n")
-            if ep.get("parameters"):
-                lines.append("### Parameters\n\n| Name | Type | Description |\n|------|------|-------------|\n")
-                for p in ep.get("parameters", []):
-                    lines.append(f"| {p.get('name','')} | {p.get('type','')} | {p.get('description','')} |\n")
-            lines.append("\n")
-        return "".join(lines)
-
-    def _generate_sdk_code(self, api_name: str, endpoints: list[dict], language: str) -> str:
-        """Generate SDK code."""
-        if language == "python":
-            lines = [f"class {api_name}Client:\n", "    def __init__(self, base_url: str, api_key: str):\n", "        self.base_url = base_url\n", "        self.api_key = api_key\n\n"]
-            for ep in endpoints:
-                method = ep.get("method", "get").lower()
-                path = ep.get("path", "").replace("/", "_").strip("_")
-                summary = ep.get("summary", "")
-                lines.append(f"    def {path}(self, **kwargs):\n        \"{summary}\"\n        return self._request('{ep.get('method','GET')}', '{ep.get('path','')}', **kwargs)\n\n")
-            return "".join(lines)
-        return f"// {language} SDK for {api_name}"
-
-    def _generate_examples(self, api_name: str, endpoints: list[dict], language: str, include_auth: bool, include_errors: bool) -> list[dict[str, Any]]:
-        """Generate code examples."""
-        examples = []
-        for ep in endpoints:
-            examples.append({
-                "title": f"{ep.get('method')} {ep.get('path')}",
-                "description": ep.get("summary", ""),
-                "code": f"# Example: {ep.get('method')} {ep.get('path')}\n"
-            })
-        return examples
-
-    def _generate_guides(self, api_name: str, endpoints: list[dict]) -> list[str]:
-        """Generate usage guides."""
-        return [
-            f"Getting Started with {api_name}",
-            f"Authentication Guide",
-            f"Rate Limiting and Best Practices",
-            f"Error Handling in {api_name}",
-            f"Webhooks Integration"
-        ]
+    action_type = "api_developer_portal"; display_name = "开发者门户"
+    description = "生成开发者门户"
+    def __init__(self) -> None: super().__init__(); self._endpoints = []
+    def _generate_samples(self, endpoint: EndpointDoc) -> list:
+        codes = {"python": f'import requests\\nresp = requests.{endpoint.method.lower()}("{endpoint.path}")\\nprint(resp.json())',
+                 "curl": f'curl -X {endpoint.method} "{endpoint.path}"',
+                 "javascript": f'const resp = await fetch("{endpoint.path}");\\nconst data = await resp.json();'}
+        return [{"language": lang, "code": code, "description": f"{endpoint.method} in {lang}"}
+                for lang, code in codes.items()]
+    def execute(self, context: Any, params: dict) -> ActionResult:
+        mode = params.get("mode", "generate")
+        if mode == "register":
+            ep = EndpointDoc(path=params.get("path","/"), method=params.get("method","GET").upper(),
+                            summary=params.get("summary",""), description=params.get("description",""),
+                            parameters=params.get("parameters",[]))
+            ep.samples = self._generate_samples(ep)
+            self._endpoints.append(ep)
+            return ActionResult(success=True, message=f"Registered {ep.method} {ep.path}")
+        sections = ["# API Developer Portal", "", f"This API provides {len(self._endpoints)} endpoints.", ""]
+        sections.append("## Endpoints")
+        for ep in self._endpoints:
+            sections.append(f"### {ep.method} {ep.path}")
+            sections.append(f"**{ep.summary}**")
+            if ep.description: sections.append(ep.description)
+            if ep.parameters:
+                sections.append("\n**Parameters:**")
+                for p in ep.parameters: sections.append(f"- `{p.get('name','param')}`: {p.get('description','')}")
+            sections.append("")
+            if ep.samples:
+                sections.append("**Code Samples:**")
+                for s in ep.samples:
+                    sections.append(f"\n**{s['language'].title()}:**")
+                    sections.append(f"```\\n{s['code']}\\n```")
+            sections.append("")
+        return ActionResult(success=True, message=f"Portal: {len(self._endpoints)} endpoints",
+                          data={"content": "\n".join(sections), "endpoints": len(self._endpoints)})
