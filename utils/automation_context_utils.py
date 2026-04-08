@@ -1,193 +1,332 @@
-"""Automation context utilities for managing automation workflow state.
+"""
+Automation context utilities for workflow state management.
 
-This module provides utilities for managing context during automation
-workflows, including context isolation, state preservation, and cleanup.
+Provides context isolation, state management, and
+variable passing between automation steps.
 """
 
 from __future__ import annotations
 
 import time
-import uuid
-from contextvars import ContextVar
+import threading
+from typing import Optional, Any, Dict, List, Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from enum import Enum
+import copy
 
 
-# Context variables for automation state
-automation_context: ContextVar[Optional["AutomationContext"]] = ContextVar(
-    "automation_context", default=None
-)
+class ContextScope(Enum):
+    """Context scope levels."""
+    GLOBAL = "global"
+    WORKFLOW = "workflow"
+    STEP = "step"
+    ACTION = "action"
 
 
 @dataclass
+class ContextEntry:
+    """Context entry with metadata."""
+    key: str
+    value: Any
+    scope: ContextScope
+    created_at: float
+    updated_at: float
+    readonly: bool = False
+    tags: Dict[str, str] = field(default_factory=dict)
+
+
 class AutomationContext:
-    """Context for an automation workflow execution.
+    """Manages automation workflow context."""
     
-    Provides isolation between concurrent automation runs and
-    maintains state throughout a workflow's lifetime.
-    """
-    id: str
-    name: str
-    start_time: float = field(default_factory=time.monotonic)
-    data: dict = field(default_factory=dict)
-    _running: bool = False
+    def __init__(self, name: str = "default"):
+        """
+        Initialize automation context.
+        
+        Args:
+            name: Context name.
+        """
+        self.name = name
+        self._global: Dict[str, ContextEntry] = {}
+        self._workflow: Dict[str, ContextEntry] = {}
+        self._step: Dict[str, ContextEntry] = {}
+        self._action: Dict[str, ContextEntry] = {}
+        self._lock = threading.RLock()
+        self._history: List[Dict[str, Any]] = []
+        self._max_history = 1000
     
-    def __post_init__(self):
-        self.id = self.id or str(uuid.uuid4())
+    def set(self, key: str, value: Any,
+            scope: ContextScope = ContextScope.STEP,
+            readonly: bool = False,
+            tags: Optional[Dict[str, str]] = None) -> None:
+        """
+        Set context value.
+        
+        Args:
+            key: Variable name.
+            value: Value to store.
+            scope: Scope level.
+            readonly: Whether value is immutable.
+            tags: Optional metadata tags.
+        """
+        with self._lock:
+            entry = ContextEntry(
+                key=key,
+                value=value,
+                scope=scope,
+                created_at=time.time(),
+                updated_at=time.time(),
+                readonly=readonly,
+                tags=tags or {}
+            )
+            
+            store = self._get_store(scope)
+            old_entry = store.get(key)
+            
+            if old_entry and old_entry.readonly:
+                raise ValueError(f"Cannot overwrite readonly key '{key}'")
+            
+            store[key] = entry
+            self._record_history('set', key, scope, value)
     
-    @property
-    def elapsed(self) -> float:
-        """Get elapsed time since context creation."""
-        return time.monotonic() - self.start_time
+    def get(self, key: str,
+            default: Any = None,
+            scopes: Optional[List[ContextScope]] = None) -> Any:
+        """
+        Get context value.
+        
+        Args:
+            key: Variable name.
+            default: Default if not found.
+            scopes: Scopes to search (ordered priority).
+            
+        Returns:
+            Value or default.
+        """
+        if scopes is None:
+            scopes = [ContextScope.ACTION, ContextScope.STEP,
+                     ContextScope.WORKFLOW, ContextScope.GLOBAL]
+        
+        with self._lock:
+            for scope in scopes:
+                store = self._get_store(scope)
+                entry = store.get(key)
+                if entry:
+                    return entry.value
+        
+        return default
     
-    @property
-    def is_running(self) -> bool:
-        """Check if the context is still running."""
-        return self._running
+    def get_entry(self, key: str) -> Optional[ContextEntry]:
+        """
+        Get context entry with metadata.
+        
+        Args:
+            key: Variable name.
+            
+        Returns:
+            ContextEntry or None.
+        """
+        with self._lock:
+            for store in [self._action, self._step, self._workflow, self._global]:
+                entry = store.get(key)
+                if entry:
+                    return entry
+        return None
     
-    def set(self, key: str, value: Any) -> None:
-        """Store a value in the context."""
-        self.data[key] = value
+    def delete(self, key: str, scope: Optional[ContextScope] = None) -> bool:
+        """
+        Delete context variable.
+        
+        Args:
+            key: Variable name.
+            scope: Specific scope to delete from, or all if None.
+            
+        Returns:
+            True if deleted, False if not found.
+        """
+        with self._lock:
+            if scope:
+                store = self._get_store(scope)
+                if key in store:
+                    del store[key]
+                    self._record_history('delete', key, scope, None)
+                    return True
+                return False
+            
+            for s in ContextScope:
+                store = self._get_store(s)
+                if key in store:
+                    del store[key]
+                    self._record_history('delete', key, s, None)
+                    return True
+            return False
     
-    def get(self, key: str, default: Any = None) -> Any:
-        """Retrieve a value from the context."""
-        return self.data.get(key, default)
+    def exists(self, key: str, scopes: Optional[List[ContextScope]] = None) -> bool:
+        """
+        Check if key exists.
+        
+        Args:
+            key: Variable name.
+            scopes: Scopes to check.
+            
+        Returns:
+            True if exists.
+        """
+        return self.get(key, scopes=scopes) is not None
     
-    def clear(self) -> None:
-        """Clear all stored data."""
-        self.data.clear()
+    def clear_scope(self, scope: ContextScope) -> None:
+        """
+        Clear all variables in scope.
+        
+        Args:
+            scope: Scope to clear.
+        """
+        with self._lock:
+            store = self._get_store(scope)
+            store.clear()
+            self._record_history('clear', '*', scope, None)
     
-    def enter(self) -> "AutomationContext":
-        """Enter this context (marks as running)."""
-        self._running = True
-        automation_context.set(self)
-        return self
+    def _get_store(self, scope: ContextScope) -> Dict[str, ContextEntry]:
+        """Get store dict for scope."""
+        return {
+            ContextScope.GLOBAL: self._global,
+            ContextScope.WORKFLOW: self._workflow,
+            ContextScope.STEP: self._step,
+            ContextScope.ACTION: self._action,
+        }[scope]
     
-    def exit(self) -> None:
-        """Exit this context (marks as stopped)."""
-        self._running = False
-        automation_context.set(None)
+    def _record_history(self, action: str, key: str, scope: ContextScope, value: Any) -> None:
+        """Record history entry."""
+        entry = {
+            'action': action,
+            'key': key,
+            'scope': scope.value,
+            'value': copy.deepcopy(value),
+            'timestamp': time.time()
+        }
+        self._history.append(entry)
+        
+        if len(self._history) > self._max_history:
+            self._history = self._history[-self._max_history:]
+    
+    def get_history(self, key: Optional[str] = None,
+                    limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get context history.
+        
+        Args:
+            key: Optional filter by key.
+            limit: Max entries.
+            
+        Returns:
+            List of history entries.
+        """
+        with self._lock:
+            history = self._history.copy()
+        
+        if key:
+            history = [h for h in history if h['key'] == key]
+        
+        return history[-limit:]
+    
+    def get_all(self, scope: Optional[ContextScope] = None) -> Dict[str, Any]:
+        """
+        Get all variables.
+        
+        Args:
+            scope: Optional scope filter.
+            
+        Returns:
+            Dict of key->value.
+        """
+        with self._lock:
+            if scope:
+                return {k: v.value for k, v in self._get_store(scope).items()}
+            
+            result = {}
+            for s in ContextScope:
+                for k, v in self._get_store(s).items():
+                    result[k] = v.value
+            return result
+    
+    def push_scope(self, scope: ContextScope) -> None:
+        """
+        Push current scope values to parent scope.
+        
+        Args:
+            scope: Target scope to push to.
+        """
+        with self._lock:
+            if scope == ContextScope.GLOBAL:
+                return
+            
+            current = self._step if scope == ContextScope.WORKFLOW else self._action
+            parent = self._workflow if scope == ContextScope.WORKFLOW else self._step
+            
+            for key, entry in current.items():
+                if key not in parent:
+                    parent[key] = entry
+    
+    def get_snapshot(self) -> Dict[str, Any]:
+        """
+        Get full context snapshot.
+        
+        Returns:
+            Dict with all scopes.
+        """
+        with self._lock:
+            return {
+                'name': self.name,
+                'global': {k: v.value for k, v in self._global.items()},
+                'workflow': {k: v.value for k, v in self._workflow.items()},
+                'step': {k: v.value for k, v in self._step.items()},
+                'action': {k: v.value for k, v in self._action.items()},
+            }
 
 
 class ContextManager:
-    """Manages automation contexts and provides context-sensitive operations."""
+    """Global context manager."""
+    
+    _instance: Optional['ContextManager'] = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
     
     def __init__(self):
-        self._contexts: dict[str, AutomationContext] = {}
-        self._cleanup_callbacks: list[Callable[[AutomationContext], None]] = []
+        if self._initialized:
+            return
+        self._contexts: Dict[str, AutomationContext] = {}
+        self._current: Optional[AutomationContext] = None
+        self._initialized = True
     
-    def create_context(self, name: str) -> AutomationContext:
-        """Create a new automation context.
-        
-        Args:
-            name: Name/identifier for the context.
-        
-        Returns:
-            New AutomationContext.
-        """
-        ctx = AutomationContext(
-            id=str(uuid.uuid4()),
-            name=name,
-        )
-        self._contexts[ctx.id] = ctx
+    def create(self, name: str) -> AutomationContext:
+        """Create new context."""
+        ctx = AutomationContext(name)
+        self._contexts[name] = ctx
+        self._current = ctx
         return ctx
     
-    def get_context(self, context_id: str) -> Optional[AutomationContext]:
-        """Get a context by ID."""
-        return self._contexts.get(context_id)
+    def get(self, name: str = "default") -> Optional[AutomationContext]:
+        """Get context by name."""
+        return self._contexts.get(name)
     
-    def get_current_context(self) -> Optional[AutomationContext]:
-        """Get the current active context."""
-        return automation_context.get()
-    
-    def destroy_context(self, context_id: str) -> bool:
-        """Destroy a context and run cleanup callbacks.
-        
-        Args:
-            context_id: ID of the context to destroy.
-        
-        Returns:
-            True if context was destroyed.
-        """
-        ctx = self._contexts.pop(context_id, None)
-        if ctx is not None:
-            ctx.exit()
-            for callback in self._cleanup_callbacks:
-                try:
-                    callback(ctx)
-                except Exception:
-                    pass
+    def set_current(self, name: str) -> bool:
+        """Set current context."""
+        if name in self._contexts:
+            self._current = self._contexts[name]
             return True
         return False
     
-    def on_cleanup(self, callback: Callable[[AutomationContext], None]) -> None:
-        """Register a cleanup callback.
-        
-        Args:
-            callback: Called when a context is destroyed.
-        """
-        self._cleanup_callbacks.append(callback)
-    
-    def get_all_contexts(self) -> list[AutomationContext]:
-        """Get all active contexts."""
-        return list(self._contexts.values())
-
-
-# Global context manager
-_global_context_manager: Optional[ContextManager] = None
-
-
-def get_context_manager() -> ContextManager:
-    """Get the global context manager."""
-    global _global_context_manager
-    if _global_context_manager is None:
-        _global_context_manager = ContextManager()
-    return _global_context_manager
-
-
-def create_automation_context(name: str) -> AutomationContext:
-    """Create and enter a new automation context.
-    
-    Args:
-        name: Name for the context.
-    
-    Returns:
-        The new AutomationContext, entered as current.
-    """
-    ctx = get_context_manager().create_context(name)
-    ctx.enter()
-    return ctx
-
-
-def get_current_context() -> Optional[AutomationContext]:
-    """Get the current automation context."""
-    return get_context_manager().get_current_context()
-
-
-def destroy_current_context() -> bool:
-    """Destroy the current context if one exists."""
-    ctx = get_current_context()
-    if ctx:
-        return get_context_manager().destroy_context(ctx.id)
-    return False
-
-
-class context:
-    """Context manager for automation context.
-    
-    Usage:
-        with automation_context("my_workflow") as ctx:
-            ctx.set("step", 1)
-            # ... automation code ...
-    """
-    
-    def __init__(self, name: str):
-        self.name = name
-        self._ctx: Optional[AutomationContext] = None
-    
-    def __enter__(self) -> AutomationContext:
-        self._ctx = create_automation_context(self.name)
-        return self._ctx
-    
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        destroy_current_context()
+    def delete(self, name: str) -> bool:
+        """Delete context."""
+        if name in self._contexts:
+            del self._contexts[name]
+            if self._current and self._current.name == name:
+                self._current = None
+            return True
+        return False
