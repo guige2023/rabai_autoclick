@@ -1,398 +1,244 @@
 """Notification action module for RabAI AutoClick.
 
-Provides notification operations:
-- NotificationSendAction: Send notification
-- NotificationEmailAction: Send email notification
-- NotificationSMSAction: Send SMS notification
-- NotificationSlackAction: Send Slack notification
-- NotificationWebhookAction: Send webhook notification
-- NotificationTemplateAction: Use notification templates
-- NotificationBatchAction: Batch notifications
-- NotificationHistoryAction: Notification history
+Provides notification utilities:
+- NotificationCenter: Send notifications
+- NotificationQueue: Queue notifications
+- NotificationFormatter: Format notifications
 """
 
-import json
-import os
-import sys
+from typing import Any, Callable, Dict, List, Optional
+import threading
 import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+import uuid
+
+import sys
+import os
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class NotificationStore:
-    """Notification history store."""
-    
-    _notifications: List[Dict[str, Any]] = []
-    
-    @classmethod
-    def add(cls, notification: Dict[str, Any]) -> None:
-        cls._notifications.append(notification)
-    
-    @classmethod
-    def list(cls, limit: int = 100) -> List[Dict[str, Any]]:
-        return cls._notifications[-limit:]
+class Notification:
+    """Notification object."""
+
+    def __init__(
+        self,
+        title: str,
+        body: str,
+        notification_id: str = "",
+        priority: int = 0,
+        category: str = "general",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        self.notification_id = notification_id or str(uuid.uuid4())
+        self.title = title
+        self.body = body
+        self.priority = priority
+        self.category = category
+        self.metadata = metadata or {}
+        self.created_at = time.time()
+        self.delivered = False
 
 
-class NotificationSendAction(BaseAction):
-    """Send notification."""
-    action_type = "notification_send"
-    display_name = "发送通知"
+class NotificationCenter:
+    """Thread-safe notification center."""
+
+    def __init__(self):
+        self._handlers: Dict[str, List[Callable]] = {}
+        self._history: List[Notification] = []
+        self._lock = threading.RLock()
+        self._max_history = 1000
+
+    def subscribe(self, category: str, handler: Callable) -> str:
+        """Subscribe to notifications."""
+        subscription_id = str(uuid.uuid4())
+        if category not in self._handlers:
+            self._handlers[category] = []
+        self._handlers[category].append(handler)
+        return subscription_id
+
+    def unsubscribe(self, category: str, handler: Callable) -> bool:
+        """Unsubscribe from notifications."""
+        if category not in self._handlers:
+            return False
+        try:
+            self._handlers[category].remove(handler)
+            return True
+        except ValueError:
+            return False
+
+    def send(self, notification: Notification) -> str:
+        """Send a notification."""
+        with self._lock:
+            handlers = self._handlers.get(notification.category, []) + self._handlers.get("*", [])
+
+            for handler in handlers:
+                try:
+                    handler(notification)
+                    notification.delivered = True
+                except Exception:
+                    pass
+
+            self._history.append(notification)
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
+
+            return notification.notification_id
+
+    def get_history(self, category: Optional[str] = None, limit: int = 100) -> List[Notification]:
+        """Get notification history."""
+        with self._lock:
+            history = self._history
+            if category:
+                history = [n for n in history if n.category == category]
+            return history[-limit:]
+
+
+class NotificationQueue:
+    """Queue notifications for later delivery."""
+
+    def __init__(self, center: Optional[NotificationCenter] = None):
+        self.center = center or NotificationCenter()
+        self._queue: List[Notification] = []
+        self._lock = threading.RLock()
+
+    def enqueue(self, notification: Notification) -> None:
+        """Add to queue."""
+        with self._lock:
+            self._queue.append(notification)
+
+    def dequeue(self) -> Optional[Notification]:
+        """Remove and return next notification."""
+        with self._lock:
+            if not self._queue:
+                return None
+            return self._queue.pop(0)
+
+    def flush(self) -> int:
+        """Send all queued notifications."""
+        count = 0
+        while True:
+            notification = self.dequeue()
+            if not notification:
+                break
+            self.center.send(notification)
+            count += 1
+        return count
+
+    def size(self) -> int:
+        """Get queue size."""
+        with self._lock:
+            return len(self._queue)
+
+
+class NotificationFormatter:
+    """Format notifications."""
+
+    @staticmethod
+    def to_text(notification: Notification) -> str:
+        """Format as text."""
+        return f"[{notification.category.upper()}] {notification.title}: {notification.body}"
+
+    @staticmethod
+    def to_dict(notification: Notification) -> Dict[str, Any]:
+        """Format as dict."""
+        return {
+            "id": notification.notification_id,
+            "title": notification.title,
+            "body": notification.body,
+            "category": notification.category,
+            "priority": notification.priority,
+            "created_at": notification.created_at,
+            "delivered": notification.delivered,
+            "metadata": notification.metadata,
+        }
+
+
+class NotificationAction(BaseAction):
+    """Notification management action."""
+    action_type = "notification"
+    display_name = "通知管理"
     description = "发送通知"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            title = params.get("title", "")
-            message = params.get("message", "")
-            channel = params.get("channel", "log")
-            recipients = params.get("recipients", [])
-            priority = params.get("priority", "normal")
-            metadata = params.get("metadata", {})
-            
-            if not title or not message:
-                return ActionResult(success=False, message="title and message required")
-            
-            notification = {
-                "id": len(NotificationStore._notifications) + 1,
-                "title": title,
-                "message": message,
-                "channel": channel,
-                "recipients": recipients,
-                "priority": priority,
-                "sent_at": time.time(),
-                "status": "sent",
-                **metadata
-            }
-            
-            NotificationStore.add(notification)
-            
-            return ActionResult(
-                success=True,
-                message=f"Sent notification: {title}",
-                data={"notification": notification}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Notification send failed: {str(e)}")
-
-
-class NotificationEmailAction(BaseAction):
-    """Send email notification."""
-    action_type = "notification_email"
-    display_name = "邮件通知"
-    description = "发送邮件通知"
+    def __init__(self):
+        super().__init__()
+        self._center = NotificationCenter()
+        self._queue = NotificationQueue(self._center)
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            to = params.get("to", [])
-            subject = params.get("subject", "")
-            body = params.get("body", "")
-            from_addr = params.get("from", "noreply@example.com")
-            
-            if not to or not subject:
-                return ActionResult(success=False, message="to and subject required")
-            
-            if isinstance(to, str):
-                to = [to]
-            
-            notification = {
-                "id": len(NotificationStore._notifications) + 1,
-                "type": "email",
-                "to": to,
-                "subject": subject,
-                "body": body,
-                "from": from_addr,
-                "sent_at": time.time(),
-                "status": "sent"
-            }
-            
-            NotificationStore.add(notification)
-            
-            return ActionResult(
-                success=True,
-                message=f"Email sent to {len(to)} recipients",
-                data={"notification": notification}
-            )
+            operation = params.get("operation", "send")
+
+            if operation == "send":
+                return self._send(params)
+            elif operation == "subscribe":
+                return self._subscribe(params)
+            elif operation == "history":
+                return self._history(params)
+            elif operation == "enqueue":
+                return self._enqueue(params)
+            elif operation == "flush":
+                return self._flush(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Email notification failed: {str(e)}")
+            return ActionResult(success=False, message=f"Notification error: {str(e)}")
 
+    def _send(self, params: Dict[str, Any]) -> ActionResult:
+        """Send a notification."""
+        title = params.get("title")
+        body = params.get("body")
+        category = params.get("category", "general")
+        priority = params.get("priority", 0)
+        metadata = params.get("metadata")
 
-class NotificationSMSAction(BaseAction):
-    """Send SMS notification."""
-    action_type = "notification_sms"
-    display_name = "短信通知"
-    description = "发送短信通知"
+        if not title or not body:
+            return ActionResult(success=False, message="title and body are required")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            phone = params.get("phone", "")
-            message = params.get("message", "")
-            
-            if not phone or not message:
-                return ActionResult(success=False, message="phone and message required")
-            
-            if len(message) > 160:
-                return ActionResult(
-                    success=False,
-                    message="SMS message exceeds 160 characters",
-                    data={"message_length": len(message), "max_length": 160}
-                )
-            
-            notification = {
-                "id": len(NotificationStore._notifications) + 1,
-                "type": "sms",
-                "phone": phone,
-                "message": message,
-                "sent_at": time.time(),
-                "status": "sent"
-            }
-            
-            NotificationStore.add(notification)
-            
-            return ActionResult(
-                success=True,
-                message=f"SMS sent to {phone}",
-                data={"notification": notification}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"SMS notification failed: {str(e)}")
+        notification = Notification(title, body, priority=priority, category=category, metadata=metadata)
+        notification_id = self._center.send(notification)
 
+        return ActionResult(success=True, message=f"Sent: {notification_id}", data={"notification_id": notification_id})
 
-class NotificationSlackAction(BaseAction):
-    """Send Slack notification."""
-    action_type = "notification_slack"
-    display_name = "Slack通知"
-    description = "发送Slack通知"
+    def _subscribe(self, params: Dict[str, Any]) -> ActionResult:
+        """Subscribe to notifications."""
+        category = params.get("category", "*")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            webhook_url = params.get("webhook_url", "")
-            channel = params.get("channel", "")
-            message = params.get("message", "")
-            username = params.get("username", "Aito Bot")
-            icon_emoji = params.get("icon_emoji", ":robot_face:")
-            
-            if not webhook_url and not message:
-                return ActionResult(success=False, message="webhook_url or message required")
-            
-            payload = {
-                "text": message,
-                "username": username,
-                "icon_emoji": icon_emoji
-            }
-            
-            if channel:
-                payload["channel"] = channel
-            
-            notification = {
-                "id": len(NotificationStore._notifications) + 1,
-                "type": "slack",
-                "channel": channel or "default",
-                "message": message,
-                "payload": payload,
-                "sent_at": time.time(),
-                "status": "sent"
-            }
-            
-            NotificationStore.add(notification)
-            
-            return ActionResult(
-                success=True,
-                message=f"Slack notification sent to {channel or 'default channel'}",
-                data={"notification": notification}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Slack notification failed: {str(e)}")
+        def handler(n):
+            pass
 
+        subscription_id = self._center.subscribe(category, handler)
 
-class NotificationWebhookAction(BaseAction):
-    """Send webhook notification."""
-    action_type = "notification_webhook"
-    display_name = "Webhook通知"
-    description = "发送Webhook通知"
+        return ActionResult(success=True, message=f"Subscribed: {subscription_id}", data={"subscription_id": subscription_id})
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            url = params.get("url", "")
-            method = params.get("method", "POST")
-            headers = params.get("headers", {})
-            body = params.get("body", {})
-            
-            if not url:
-                return ActionResult(success=False, message="url required")
-            
-            payload = {
-                "url": url,
-                "method": method,
-                "headers": headers,
-                "body": body,
-                "timestamp": time.time()
-            }
-            
-            notification = {
-                "id": len(NotificationStore._notifications) + 1,
-                "type": "webhook",
-                "url": url,
-                "method": method,
-                "sent_at": time.time(),
-                "status": "sent"
-            }
-            
-            NotificationStore.add(notification)
-            
-            return ActionResult(
-                success=True,
-                message=f"Webhook {method} sent to {url}",
-                data={"notification": notification}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Webhook notification failed: {str(e)}")
+    def _history(self, params: Dict[str, Any]) -> ActionResult:
+        """Get notification history."""
+        category = params.get("category")
+        limit = params.get("limit", 100)
 
+        history = self._center.get_history(category, limit)
+        formatted = [NotificationFormatter.to_dict(n) for n in history]
 
-class NotificationTemplateAction(BaseAction):
-    """Use notification templates."""
-    action_type = "notification_template"
-    display_name = "通知模板"
-    description = "使用通知模板"
+        return ActionResult(success=True, message=f"{len(formatted)} notifications", data={"notifications": formatted})
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            template = params.get("template", "")
-            variables = params.get("variables", {})
-            
-            templates = {
-                "alert": {
-                    "title": "Alert: {alert_type}",
-                    "message": "Alert '{alert_name}' triggered at {timestamp}",
-                    "priority": "high"
-                },
-                "info": {
-                    "title": "Information",
-                    "message": "{info_message}",
-                    "priority": "normal"
-                },
-                "warning": {
-                    "title": "Warning: {warning_type}",
-                    "message": "Warning: {warning_message}",
-                    "priority": "high"
-                },
-                "success": {
-                    "title": "Success",
-                    "message": "{success_message}",
-                    "priority": "normal"
-                },
-                "error": {
-                    "title": "Error: {error_type}",
-                    "message": "Error occurred: {error_message}",
-                    "priority": "urgent"
-                },
-                "daily_summary": {
-                    "title": "Daily Summary - {date}",
-                    "message": "Summary: {summary_content}",
-                    "priority": "normal"
-                }
-            }
-            
-            if not template:
-                return ActionResult(
-                    success=True,
-                    message=f"Available templates: {list(templates.keys())}",
-                    data={"templates": list(templates.keys())}
-                )
-            
-            if template not in templates:
-                return ActionResult(success=False, message=f"Template not found: {template}")
-            
-            tpl = templates[template]
-            title = tpl["title"].format(**variables)
-            message = tpl["message"].format(**variables)
-            priority = tpl["priority"]
-            
-            notification = {
-                "id": len(NotificationStore._notifications) + 1,
-                "template": template,
-                "title": title,
-                "message": message,
-                "priority": priority,
-                "sent_at": time.time(),
-                "status": "sent"
-            }
-            
-            NotificationStore.add(notification)
-            
-            return ActionResult(
-                success=True,
-                message=f"Sent notification from template '{template}'",
-                data={"notification": notification}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Notification template failed: {str(e)}")
+    def _enqueue(self, params: Dict[str, Any]) -> ActionResult:
+        """Enqueue a notification."""
+        title = params.get("title")
+        body = params.get("body")
+        category = params.get("category", "general")
+        priority = params.get("priority", 0)
 
+        if not title or not body:
+            return ActionResult(success=False, message="title and body are required")
 
-class NotificationBatchAction(BaseAction):
-    """Batch notifications."""
-    action_type = "notification_batch"
-    display_name = "批量通知"
-    description = "批量发送通知"
+        notification = Notification(title, body, priority=priority, category=category)
+        self._queue.enqueue(notification)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            notifications = params.get("notifications", [])
-            
-            if not notifications:
-                return ActionResult(success=False, message="notifications required")
-            
-            sent = 0
-            failed = 0
-            results = []
-            
-            for notif in notifications:
-                notification = {
-                    "id": len(NotificationStore._notifications) + 1,
-                    "title": notif.get("title", ""),
-                    "message": notif.get("message", ""),
-                    "channel": notif.get("channel", "log"),
-                    "sent_at": time.time(),
-                    "status": "sent"
-                }
-                NotificationStore.add(notification)
-                sent += 1
-                results.append(notification)
-            
-            return ActionResult(
-                success=True,
-                message=f"Batch: {sent} sent, {failed} failed",
-                data={"sent": sent, "failed": failed, "results": results}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Batch notification failed: {str(e)}")
+        return ActionResult(success=True, message=f"Enqueued: {notification.notification_id}")
 
-
-class NotificationHistoryAction(BaseAction):
-    """Get notification history."""
-    action_type = "notification_history"
-    display_name = "通知历史"
-    description = "获取通知历史"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            limit = params.get("limit", 100)
-            channel = params.get("channel", "")
-            status = params.get("status", "")
-            
-            notifications = NotificationStore.list(limit)
-            
-            if channel:
-                notifications = [n for n in notifications if n.get("channel") == channel]
-            if status:
-                notifications = [n for n in notifications if n.get("status") == status]
-            
-            return ActionResult(
-                success=True,
-                message=f"Found {len(notifications)} notifications",
-                data={"notifications": notifications, "count": len(notifications)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Notification history failed: {str(e)}")
+    def _flush(self, params: Dict[str, Any]) -> ActionResult:
+        """Flush queued notifications."""
+        count = self._queue.flush()
+        return ActionResult(success=True, message=f"Flushed {count} notifications", data={"count": count})
