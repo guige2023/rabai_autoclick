@@ -1,456 +1,304 @@
 """
-Data Validation Action Module
+Data Validation Action Module.
 
-Provides comprehensive data validation, schema enforcement, and quality checks.
+Provides comprehensive data validation with custom rules,
+cross-field validation, and validation error reporting.
 """
-from typing import Any, Optional, Callable, TypeVar, Generic
+
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import asyncio
+import logging
 import re
-import json
+
+logger = logging.getLogger(__name__)
 
 
 class ValidationType(Enum):
-    """Type of validation."""
+    """Validation types."""
+    REQUIRED = "required"
     TYPE = "type"
-    FORMAT = "format"
     RANGE = "range"
     PATTERN = "pattern"
+    ENUM = "enum"
     CUSTOM = "custom"
-    SCHEMA = "schema"
-    REFERENCE = "reference"
+    CROSS_FIELD = "cross_field"
 
 
-class Severity(Enum):
-    """Severity level for validation errors."""
+class ValidationSeverity(Enum):
+    """Validation severity."""
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
 
 
 @dataclass
-class ValidationRule:
-    """A single validation rule."""
-    name: str
-    validation_type: ValidationType
-    severity: Severity = Severity.ERROR
-    message: str = ""
-    params: dict[str, Any] = field(default_factory=dict)
-    validator: Optional[Callable[[Any], bool]] = None
-
-
-@dataclass
 class ValidationError:
-    """A single validation error."""
+    """Single validation error."""
     field: str
-    rule: str
+    error_type: ValidationType
     message: str
-    severity: Severity
+    severity: ValidationSeverity = ValidationSeverity.ERROR
     value: Any = None
-    timestamp: datetime = field(default_factory=datetime.now)
+    constraint: Any = None
 
 
 @dataclass
 class ValidationResult:
     """Result of validation."""
     valid: bool
-    errors: list[ValidationError]
-    warnings: list[ValidationError]
+    errors: List[ValidationError] = field(default_factory=list)
+    warnings: List[ValidationError] = field(default_factory=list)
     validated_at: datetime = field(default_factory=datetime.now)
-    duration_ms: float = 0
+
+    @property
+    def error_count(self) -> int:
+        return len(self.errors)
+
+    @property
+    def warning_count(self) -> int:
+        return len(self.warnings)
+
+    def get_errors_by_field(self, field: str) -> List[ValidationError]:
+        return [e for e in self.errors if e.field == field]
+
+    def get_field_errors(self, field: str) -> str:
+        """Get formatted error messages for field."""
+        return "; ".join(e.message for e in self.get_errors_by_field(field))
 
 
 @dataclass
-class SchemaField:
-    """Schema definition for a field."""
-    name: str
-    field_type: type
+class FieldValidator:
+    """Validator for a single field."""
+    field_name: str
+    validators: List[Tuple[ValidationType, Any, str]] = field(default_factory=list)
     required: bool = False
-    default: Any = None
-    nullable: bool = True
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    min_length: Optional[int] = None
-    max_length: Optional[int] = None
-    pattern: Optional[str] = None
-    enum_values: Optional[list[Any]] = None
-    custom_validators: list[Callable] = field(default_factory=list)
+    custom_validators: List[Callable] = field(default_factory=list)
 
-
-@dataclass
-class Schema:
-    """Data schema definition."""
-    name: str
-    fields: dict[str, SchemaField]
-    strict: bool = False  # Reject unknown fields
-
-
-class DataValidationAction:
-    """Main data validation action handler."""
-    
-    def __init__(self):
-        self._schemas: dict[str, Schema] = {}
-        self._rules: dict[str, list[ValidationRule]] = {}
-        self._custom_validators: dict[str, Callable] = {}
-    
-    def add_schema(self, schema: Schema) -> "DataValidationAction":
-        """Register a schema for validation."""
-        self._schemas[schema.name] = schema
-        return self
-    
-    def add_rule(
+    def add_validator(
         self,
-        schema_name: str,
-        rule: ValidationRule
-    ) -> "DataValidationAction":
-        """Add a validation rule to a schema."""
-        if schema_name not in self._rules:
-            self._rules[schema_name] = []
-        self._rules[schema_name].append(rule)
-        return self
-    
-    def register_custom_validator(
-        self,
-        name: str,
-        validator: Callable[[Any], bool]
-    ) -> "DataValidationAction":
-        """Register a custom validator function."""
-        self._custom_validators[name] = validator
-        return self
-    
-    async def validate(
-        self,
-        data: Any,
-        schema_name: Optional[str] = None,
-        rules: Optional[list[ValidationRule]] = None
-    ) -> ValidationResult:
-        """
-        Validate data against schema or rules.
-        
-        Args:
-            data: Data to validate
-            schema_name: Name of registered schema
-            rules: Optional inline validation rules
-            
-        Returns:
-            ValidationResult with errors and warnings
-        """
-        start_time = datetime.now()
+        validation_type: ValidationType,
+        constraint: Any,
+        message: str
+    ):
+        """Add a validator."""
+        self.validators.append((validation_type, constraint, message))
+
+    def validate(self, value: Any) -> List[ValidationError]:
+        """Validate a value."""
         errors = []
-        warnings = []
-        
-        if schema_name and schema_name in self._schemas:
-            errs, warns = await self._validate_with_schema(data, self._schemas[schema_name])
-            errors.extend(errs)
-            warnings.extend(warns)
-        
-        if rules:
-            for rule in rules:
-                errs, warns = await self._apply_rule(data, "", rule)
-                errors.extend(errs)
-                warnings.extend(warns)
-        
-        # Remove duplicates
-        errors = self._deduplicate_errors(errors)
-        warnings = self._deduplicate_errors(warnings)
-        
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return ValidationResult(
-            valid=len([e for e in errors if e.severity == Severity.ERROR]) == 0,
-            errors=errors,
-            warnings=warnings,
-            duration_ms=duration_ms
-        )
-    
-    async def validate_dict(
-        self,
-        data: dict[str, Any],
-        schema_name: str
-    ) -> ValidationResult:
-        """Validate a dictionary against a schema."""
-        start_time = datetime.now()
-        errors = []
-        warnings = []
-        
-        if schema_name not in self._schemas:
-            return ValidationResult(
-                valid=False,
-                errors=[ValidationError(
-                    field="__schema__",
-                    rule="schema_not_found",
-                    message=f"Schema '{schema_name}' not found",
-                    severity=Severity.ERROR
-                )],
-                warnings=[]
-            )
-        
-        schema = self._schemas[schema_name]
-        
-        # Check required fields
-        for field_name, field_def in schema.fields.items():
-            if field_def.required and field_name not in data:
-                if field_def.default is None:
-                    errors.append(ValidationError(
-                        field=field_name,
-                        rule="required",
-                        message=f"Required field '{field_name}' is missing",
-                        severity=Severity.ERROR
-                    ))
-        
-        # Validate each field
-        for field_name, value in data.items():
-            if field_name not in schema.fields:
-                if schema.strict:
-                    errors.append(ValidationError(
-                        field=field_name,
-                        rule="unknown_field",
-                        message=f"Unknown field '{field_name}' in strict mode",
-                        severity=Severity.ERROR
-                    ))
-                continue
-            
-            field_def = schema.fields[field_name]
-            field_errors, field_warnings = await self._validate_field(
-                field_name, value, field_def
-            )
-            errors.extend(field_errors)
-            warnings.extend(field_warnings)
-        
-        # Apply schema-level rules
-        if schema_name in self._rules:
-            for rule in self._rules[schema_name]:
-                rule_errors, rule_warnings = await self._apply_rule(data, "", rule)
-                errors.extend(rule_errors)
-                warnings.extend(rule_warnings)
-        
-        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-        
-        return ValidationResult(
-            valid=len([e for e in errors if e.severity == Severity.ERROR]) == 0,
-            errors=errors,
-            warnings=warnings,
-            duration_ms=duration_ms
-        )
-    
-    async def _validate_field(
-        self,
-        field_name: str,
-        value: Any,
-        field_def: SchemaField
-    ) -> tuple[list[ValidationError], list[ValidationError]]:
-        """Validate a single field."""
-        errors = []
-        warnings = []
-        
-        # None handling
-        if value is None:
-            if not field_def.nullable:
+
+        if value is None or value == "":
+            if self.required:
                 errors.append(ValidationError(
-                    field=field_name,
-                    rule="nullable",
-                    message=f"Field '{field_name}' cannot be null",
-                    severity=Severity.ERROR,
-                    value=value
+                    field=self.field_name,
+                    error_type=ValidationType.REQUIRED,
+                    message=f"{self.field_name} is required"
                 ))
-            return errors, warnings
-        
-        # Type checking
-        if not isinstance(value, field_def.field_type):
-            # Allow int for float
-            if field_def.field_type == float and isinstance(value, int):
-                return errors, warnings
-            
-            errors.append(ValidationError(
-                field=field_name,
-                rule="type",
-                message=f"Field '{field_name}' must be of type {field_def.field_type.__name__}",
-                severity=Severity.ERROR,
-                value=value
-            ))
-            return errors, warnings
-        
-        # Range validation for numeric types
-        if isinstance(value, (int, float)):
-            if field_def.min_value is not None and value < field_def.min_value:
-                errors.append(ValidationError(
-                    field=field_name,
-                    rule="min_value",
-                    message=f"Field '{field_name}' must be >= {field_def.min_value}",
-                    severity=Severity.ERROR,
-                    value=value
-                ))
-            if field_def.max_value is not None and value > field_def.max_value:
-                errors.append(ValidationError(
-                    field=field_name,
-                    rule="max_value",
-                    message=f"Field '{field_name}' must be <= {field_def.max_value}",
-                    severity=Severity.ERROR,
-                    value=value
-                ))
-        
-        # Length validation for sequences
-        if hasattr(value, "__len__"):
-            if field_def.min_length is not None and len(value) < field_def.min_length:
-                errors.append(ValidationError(
-                    field=field_name,
-                    rule="min_length",
-                    message=f"Field '{field_name}' length must be >= {field_def.min_length}",
-                    severity=Severity.ERROR,
-                    value=value
-                ))
-            if field_def.max_length is not None and len(value) > field_def.max_length:
-                errors.append(ValidationError(
-                    field=field_name,
-                    rule="max_length",
-                    message=f"Field '{field_name}' length must be <= {field_def.max_length}",
-                    severity=Severity.ERROR,
-                    value=value
-                ))
-        
-        # Pattern validation
-        if field_def.pattern and isinstance(value, str):
-            if not re.match(field_def.pattern, value):
-                errors.append(ValidationError(
-                    field=field_name,
-                    rule="pattern",
-                    message=f"Field '{field_name}' does not match pattern '{field_def.pattern}'",
-                    severity=Severity.ERROR,
-                    value=value
-                ))
-        
-        # Enum validation
-        if field_def.enum_values is not None:
-            if value not in field_def.enum_values:
-                errors.append(ValidationError(
-                    field=field_name,
-                    rule="enum",
-                    message=f"Field '{field_name}' must be one of {field_def.enum_values}",
-                    severity=Severity.ERROR,
-                    value=value
-                ))
-        
-        # Custom validators
-        for validator in field_def.custom_validators:
+            return errors
+
+        for val_type, constraint, message in self.validators:
+            error = self._validate_single(value, val_type, constraint, message)
+            if error:
+                errors.append(error)
+
+        for custom_validator in self.custom_validators:
             try:
-                if not validator(value):
+                if not custom_validator(value):
                     errors.append(ValidationError(
-                        field=field_name,
-                        rule="custom",
-                        message=f"Field '{field_name}' failed custom validation",
-                        severity=Severity.ERROR,
-                        value=value
+                        field=self.field_name,
+                        error_type=ValidationType.CUSTOM,
+                        message=f"{self.field_name} failed custom validation"
                     ))
             except Exception as e:
                 errors.append(ValidationError(
-                    field=field_name,
-                    rule="custom",
-                    message=f"Custom validator error: {e}",
-                    severity=Severity.ERROR,
-                    value=value
+                    field=self.field_name,
+                    error_type=ValidationType.CUSTOM,
+                    message=f"{self.field_name} validation error: {str(e)}"
                 ))
-        
-        return errors, warnings
-    
-    async def _validate_with_schema(
+
+        return errors
+
+    def _validate_single(
         self,
-        data: Any,
-        schema: Schema
-    ) -> tuple[list[ValidationError], list[ValidationError]]:
-        """Validate data with a full schema."""
-        if isinstance(data, dict):
-            return await self.validate_dict(data, schema.name)
-        return [], []
-    
-    async def _apply_rule(
+        value: Any,
+        validation_type: ValidationType,
+        constraint: Any,
+        message: str
+    ) -> Optional[ValidationError]:
+        """Validate with single constraint."""
+        if validation_type == ValidationType.TYPE:
+            if not isinstance(value, constraint):
+                return ValidationError(
+                    field=self.field_name,
+                    error_type=validation_type,
+                    message=message or f"Expected {constraint.__name__}",
+                    value=value,
+                    constraint=constraint
+                )
+
+        elif validation_type == ValidationType.RANGE:
+            if isinstance(value, (int, float)):
+                min_val, max_val = constraint
+                if value < min_val or value > max_val:
+                    return ValidationError(
+                        field=self.field_name,
+                        error_type=validation_type,
+                        message=message or f"Value must be between {min_val} and {max_val}",
+                        value=value,
+                        constraint=constraint
+                    )
+
+        elif validation_type == ValidationType.PATTERN:
+            if isinstance(value, str):
+                if not re.match(constraint, value):
+                    return ValidationError(
+                        field=self.field_name,
+                        error_type=validation_type,
+                        message=message or f"Pattern mismatch",
+                        value=value,
+                        constraint=constraint
+                    )
+
+        elif validation_type == ValidationType.ENUM:
+            if value not in constraint:
+                return ValidationError(
+                    field=self.field_name,
+                    error_type=validation_type,
+                    message=message or f"Value must be one of {constraint}",
+                    value=value,
+                    constraint=constraint
+                )
+
+        return None
+
+
+class SchemaValidator:
+    """Validates data against a schema."""
+
+    def __init__(self):
+        self.field_validators: Dict[str, FieldValidator] = {}
+        self.cross_field_validators: List[Tuple[str, str, Callable]] = []
+
+    def add_field(self, validator: FieldValidator):
+        """Add field validator."""
+        self.field_validators[validator.field_name] = validator
+
+    def add_cross_field_validator(
         self,
-        data: Any,
-        field_path: str,
-        rule: ValidationRule
-    ) -> tuple[list[ValidationError], list[ValidationError]]:
-        """Apply a validation rule."""
+        field1: str,
+        field2: str,
+        validator: Callable[[Any, Any], bool],
+        message: str
+    ):
+        """Add cross-field validator."""
+        self.cross_field_validators.append((field1, field2, validator, message))
+
+    def validate(self, data: Dict[str, Any]) -> ValidationResult:
+        """Validate data against schema."""
         errors = []
         warnings = []
-        
-        if rule.validation_type == ValidationType.CUSTOM:
-            if rule.validator:
-                try:
-                    if not rule.validator(data):
-                        errors.append(ValidationError(
-                            field=field_path,
-                            rule=rule.name,
-                            message=rule.message or f"Custom validation failed for {rule.name}",
-                            severity=rule.severity,
-                            value=data
-                        ))
-                except Exception as e:
+
+        for field_name, validator in self.field_validators.items():
+            value = data.get(field_name)
+            field_errors = validator.validate(value)
+            errors.extend(field_errors)
+
+        for field1, field2, validator, message in self.cross_field_validators:
+            value1 = data.get(field1)
+            value2 = data.get(field2)
+            try:
+                if not validator(value1, value2):
                     errors.append(ValidationError(
-                        field=field_path,
-                        rule=rule.name,
-                        message=f"Validator error: {e}",
-                        severity=Severity.ERROR,
-                        value=data
+                        field=f"{field1},{field2}",
+                        error_type=ValidationType.CROSS_FIELD,
+                        message=message
                     ))
-        
-        return errors, warnings
-    
-    def _deduplicate_errors(self, errors: list[ValidationError]) -> list[ValidationError]:
-        """Remove duplicate errors."""
-        seen = set()
-        result = []
-        for error in errors:
-            key = (error.field, error.rule, error.message)
-            if key not in seen:
-                seen.add(key)
-                result.append(error)
-        return result
-    
-    async def validate_json_schema(self, data: dict, schema: dict) -> ValidationResult:
-        """Validate data against a JSON schema (simple implementation)."""
-        errors = []
-        warnings = []
-        
-        # Simple JSON schema validation
-        if "required" in schema:
-            for field_name in schema["required"]:
-                if field_name not in data:
-                    errors.append(ValidationError(
-                        field=field_name,
-                        rule="required",
-                        message=f"Required field missing",
-                        severity=Severity.ERROR
-                    ))
-        
-        if "properties" in schema:
-            for field_name, field_schema in schema["properties"].items():
-                if field_name in data:
-                    value = data[field_name]
-                    
-                    # Type validation
-                    if "type" in field_schema:
-                        expected_type = field_schema["type"]
-                        type_map = {
-                            "string": str,
-                            "number": (int, float),
-                            "integer": int,
-                            "boolean": bool,
-                            "array": list,
-                            "object": dict
-                        }
-                        
-                        if expected_type in type_map:
-                            if not isinstance(value, type_map[expected_type]):
-                                errors.append(ValidationError(
-                                    field=field_name,
-                                    rule="type",
-                                    message=f"Must be {expected_type}",
-                                    severity=Severity.ERROR,
-                                    value=value
-                                ))
-        
+            except Exception as e:
+                errors.append(ValidationError(
+                    field=f"{field1},{field2}",
+                    error_type=ValidationType.CROSS_FIELD,
+                    message=f"Cross-field validation error: {str(e)}"
+                ))
+
         return ValidationResult(
-            valid=len([e for e in errors if e.severity == Severity.ERROR]) == 0,
+            valid=len(errors) == 0,
             errors=errors,
             warnings=warnings
         )
+
+
+class ValidationReporter:
+    """Reports validation results."""
+
+    def __init__(self):
+        self.history: List[ValidationResult] = []
+
+    def add_result(self, result: ValidationResult):
+        """Add validation result to history."""
+        self.history.append(result)
+
+    def get_summary(self, since: Optional[datetime] = None) -> Dict[str, Any]:
+        """Get validation summary."""
+        results = self.history
+        if since:
+            results = [r for r in results if r.validated_at >= since]
+
+        total = len(results)
+        valid_count = sum(1 for r in results if r.valid)
+
+        field_error_counts: Dict[str, int] = {}
+        for result in results:
+            for error in result.errors:
+                field_error_counts[error.field] = field_error_counts.get(error.field, 0) + 1
+
+        return {
+            "total_validations": total,
+            "valid_count": valid_count,
+            "invalid_count": total - valid_count,
+            "success_rate": valid_count / total if total > 0 else 0,
+            "top_error_fields": sorted(
+                field_error_counts.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:10]
+        }
+
+
+def main():
+    """Demonstrate data validation."""
+    schema = SchemaValidator()
+
+    schema.add_field(FieldValidator(
+        field_name="email",
+        required=True
+    ).add_validator(
+        ValidationType.PATTERN,
+        r"^[\w\.]+@[\w\.]+$",
+        "Invalid email format"
+    ))
+
+    schema.add_field(FieldValidator(
+        field_name="age",
+        required=True
+    ).add_validator(
+        ValidationType.TYPE,
+        int,
+        "Age must be an integer"
+    ).add_validator(
+        ValidationType.RANGE,
+        (0, 150),
+        "Age must be between 0 and 150"
+    ))
+
+    result = schema.validate({"email": "test@example.com", "age": 25})
+    print(f"Valid: {result.valid}, Errors: {result.error_count}")
+
+    result = schema.validate({"email": "invalid", "age": 200})
+    print(f"Valid: {result.valid}, Errors: {result.error_count}")
+
+
+if __name__ == "__main__":
+    main()
