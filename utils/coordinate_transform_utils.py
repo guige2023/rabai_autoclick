@@ -1,24 +1,15 @@
 """
-Coordinate transformation utilities for automation.
+Coordinate transform utilities for converting between coordinate spaces.
 
-Provides coordinate conversions between screen, display,
-window, and normalized coordinate systems.
+Handles transformations between screen, window, element, and
+image coordinate spaces with rotation and scaling support.
 """
 
 from __future__ import annotations
 
-from typing import Optional, List, Tuple, Dict, Any
+import math
 from dataclasses import dataclass
-from enum import Enum
-
-
-class CoordinateSystem(Enum):
-    """Coordinate system types."""
-    SCREEN = "screen"
-    DISPLAY = "display"
-    WINDOW = "window"
-    NORMALIZED = "normalized"
-    RELATIVE = "relative"
+from typing import Optional
 
 
 @dataclass
@@ -26,287 +17,183 @@ class Point:
     """2D point."""
     x: float
     y: float
-    
-    def __add__(self, other: "Point") -> "Point":
+
+    def __add__(self, other: Point) -> Point:
         return Point(self.x + other.x, self.y + other.y)
-    
-    def __sub__(self, other: "Point") -> "Point":
+
+    def __sub__(self, other: Point) -> Point:
         return Point(self.x - other.x, self.y - other.y)
-    
-    def __mul__(self, scalar: float) -> "Point":
+
+    def __mul__(self, scalar: float) -> Point:
         return Point(self.x * scalar, self.y * scalar)
-    
-    def to_tuple(self) -> Tuple[float, float]:
-        return (self.x, self.y)
+
+    def distance_to(self, other: Point) -> float:
+        return math.hypot(self.x - other.x, self.y - other.y)
 
 
 @dataclass
-class Rect:
-    """Rectangle bounds."""
-    x: float
-    y: float
-    width: float
-    height: float
-    
-    @property
-    def left(self) -> float:
-        return self.x
-    
-    @property
-    def top(self) -> float:
-        return self.y
-    
-    @property
-    def right(self) -> float:
-        return self.x + self.width
-    
-    @property
-    def bottom(self) -> float:
-        return self.y + self.height
-    
-    @property
-    def center(self) -> Point:
-        return Point(self.x + self.width / 2, self.y + self.height / 2)
-    
-    @property
-    def center_x(self) -> float:
-        return self.x + self.width / 2
-    
-    @property
-    def center_y(self) -> float:
-        return self.y + self.height / 2
-    
-    def contains(self, point: Point) -> bool:
-        return (self.x <= point.x < self.x + self.width and
-                self.y <= point.y < self.y + self.height)
-    
-    def to_tuple(self) -> Tuple[float, float, float, float]:
-        return (self.x, self.y, self.width, self.height)
+class Transform2D:
+    """2D affine transformation."""
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    rotation: float = 0.0  # radians
+    translate_x: float = 0.0
+    translate_y: float = 0.0
+    origin_x: float = 0.0
+    origin_y: float = 0.0
 
+    def transform_point(self, x: float, y: float) -> tuple[float, float]:
+        """Apply transformation to a point."""
+        # Translate to origin
+        px = x - self.origin_x
+        py = y - self.origin_y
 
-@dataclass
-class DisplayInfo:
-    """Display information."""
-    index: int
-    bounds: Rect
-    is_primary: bool
-    scale_factor: float = 1.0
+        # Scale
+        px *= self.scale_x
+        py *= self.scale_y
+
+        # Rotate
+        if self.rotation != 0:
+            cos_r = math.cos(self.rotation)
+            sin_r = math.sin(self.rotation)
+            rx = px * cos_r - py * sin_r
+            ry = px * sin_r + py * cos_r
+            px, py = rx, ry
+
+        # Translate back and apply offset
+        px += self.origin_x + self.translate_x
+        py += self.origin_y + self.translate_y
+
+        return (px, py)
+
+    def inverse(self) -> Transform2D:
+        """Get the inverse transformation."""
+        cos_r = math.cos(-self.rotation)
+        sin_r = math.sin(-self.rotation)
+
+        # Reverse translation
+        tx = -self.translate_x
+        ty = -self.translate_y
+
+        # Reverse scale
+        sx = 1.0 / self.scale_x if self.scale_x != 0 else 1.0
+        sy = 1.0 / self.scale_y if self.scale_y != 0 else 1.0
+
+        return Transform2D(
+            scale_x=sx,
+            scale_y=sy,
+            rotation=-self.rotation,
+            translate_x=tx,
+            translate_y=ty,
+            origin_x=self.origin_x,
+            origin_y=self.origin_y,
+        )
 
 
 class CoordinateTransformer:
-    """Transforms coordinates between systems."""
-    
+    """Transforms coordinates between different spaces."""
+
     def __init__(self):
-        self._displays: List[DisplayInfo] = []
-        self._primary_bounds: Optional[Rect] = None
-        self._refresh_displays()
-    
-    def _refresh_displays(self) -> None:
-        """Refresh display information."""
+        self._transforms: dict[str, Transform2D] = {}
+        self._parent_chain: list[str] = []
+
+    def add_space(self, name: str, transform: Optional[Transform2D] = None) -> None:
+        """Register a coordinate space."""
+        self._transforms[name] = transform or Transform2D()
+
+    def set_transform(self, name: str, transform: Transform2D) -> None:
+        self._transforms[name] = transform
+
+    def set_parent_chain(self, chain: list[str]) -> None:
+        """Set parent chain for coordinate space hierarchy.
+
+        Example: ["screen", "window", "element"]
+        """
+        self._parent_chain = chain
+
+    def transform(
+        self,
+        x: float,
+        y: float,
+        from_space: str,
+        to_space: str,
+    ) -> tuple[float, float]:
+        """Transform a point from one coordinate space to another."""
+        if from_space == to_space:
+            return (x, y)
+
+        # Find path in parent chain
         try:
-            import Quartz
-            self._displays = []
-            
-            for i, screen in enumerate(Quartz.NSScreen.screens()):
-                frame = screen.frame()
-                is_primary = (i == 0)
-                
-                self._displays.append(DisplayInfo(
-                    index=i,
-                    bounds=Rect(
-                        x=frame.origin.x,
-                        y=frame.origin.y,
-                        width=frame.size.width,
-                        height=frame.size.height
-                    ),
-                    is_primary=is_primary,
-                    scale_factor=screen.backingScaleFactor()
-                ))
-            
-            main = Quartz.NSScreen.main()
-            if main:
-                self._primary_bounds = Rect(
-                    x=main.frame().origin.x,
-                    y=main.frame().origin.y,
-                    width=main.frame().size.width,
-                    height=main.frame().size.height
-                )
-        except Exception:
-            self._displays = [
-                DisplayInfo(
-                    index=0,
-                    bounds=Rect(0, 0, 1920, 1080),
-                    is_primary=True
-                )
-            ]
-            self._primary_bounds = Rect(0, 0, 1920, 1080)
-    
-    def get_displays(self) -> List[DisplayInfo]:
-        """Get all displays."""
-        return self._displays.copy()
-    
-    def get_primary_bounds(self) -> Rect:
-        """Get primary display bounds."""
-        if self._primary_bounds:
-            return self._primary_bounds
-        return self._displays[0].bounds if self._displays else Rect(0, 0, 1920, 1080)
-    
-    def screen_to_normalized(self, x: float, y: float) -> Tuple[float, float]:
-        """
-        Convert screen coordinates to normalized [0,1].
-        
-        Args:
-            x: Screen X.
-            y: Screen Y.
-            
-        Returns:
-            Tuple of (norm_x, norm_y).
-        """
-        bounds = self.get_primary_bounds()
-        norm_x = (x - bounds.x) / bounds.width
-        norm_y = (y - bounds.y) / bounds.height
-        return (max(0.0, min(1.0, norm_x)), max(0.0, min(1.0, norm_y)))
-    
-    def normalized_to_screen(self, x: float, y: float) -> Tuple[int, int]:
-        """
-        Convert normalized [0,1] to screen coordinates.
-        
-        Args:
-            x: Normalized X (0-1).
-            y: Normalized Y (0-1).
-            
-        Returns:
-            Tuple of (screen_x, screen_y).
-        """
-        bounds = self.get_primary_bounds()
-        sx = int(bounds.x + x * bounds.width)
-        sy = int(bounds.y + y * bounds.height)
-        return (sx, sy)
-    
-    def screen_to_display(self, x: float, y: float, display_index: int = 0) -> Tuple[float, float]:
-        """
-        Convert screen coordinates to display-relative.
-        
-        Args:
-            x: Screen X.
-            y: Screen Y.
-            display_index: Target display index.
-            
-        Returns:
-            Tuple of (display_x, display_y).
-        """
-        if display_index < len(self._displays):
-            bounds = self._displays[display_index].bounds
-            return (x - bounds.x, y - bounds.y)
+            from_idx = self._parent_chain.index(from_space)
+            to_idx = self._parent_chain.index(to_space)
+        except ValueError:
+            return self._transform_direct(x, y, from_space, to_space)
+
+        if from_idx < to_idx:
+            # Moving down (parent to child) - apply inverse transforms
+            for i in range(from_idx, to_idx):
+                t = self._transforms.get(self._parent_chain[i + 1])
+                if t:
+                    x, y = t.inverse().transform_point(x, y)
+        else:
+            # Moving up (child to parent) - apply transforms
+            for i in range(from_idx, to_idx, -1):
+                t = self._transforms.get(self._parent_chain[i])
+                if t:
+                    x, y = t.transform_point(x, y)
+
         return (x, y)
-    
-    def display_to_screen(self, x: float, y: float, display_index: int = 0) -> Tuple[int, int]:
-        """
-        Convert display-relative to screen coordinates.
-        
-        Args:
-            x: Display X.
-            y: Display Y.
-            display_index: Source display index.
-            
-        Returns:
-            Tuple of (screen_x, screen_y).
-        """
-        if display_index < len(self._displays):
-            bounds = self._displays[display_index].bounds
-            return (int(bounds.x + x), int(bounds.y + y))
-        return (int(x), int(y))
-    
-    def window_to_screen(self, win_x: float, win_y: float,
-                         window_bounds: Rect) -> Tuple[int, int]:
-        """
-        Convert window-relative to screen coordinates.
-        
-        Args:
-            win_x: Window X.
-            win_y: Window Y.
-            window_bounds: Window bounds.
-            
-        Returns:
-            Tuple of (screen_x, screen_y).
-        """
-        return (int(window_bounds.x + win_x), int(window_bounds.y + win_y))
-    
-    def screen_to_window(self, scr_x: float, scr_y: float,
-                         window_bounds: Rect) -> Tuple[float, float]:
-        """
-        Convert screen to window-relative coordinates.
-        
-        Args:
-            scr_x: Screen X.
-            scr_y: Screen Y.
-            window_bounds: Window bounds.
-            
-        Returns:
-            Tuple of (win_x, win_y).
-        """
-        return (scr_x - window_bounds.x, scr_y - window_bounds.y)
-    
-    def transform_point(self, point: Point,
-                       from_system: CoordinateSystem,
-                       to_system: CoordinateSystem,
-                       context: Optional[Dict[str, Any]] = None) -> Point:
-        """
-        Transform point between coordinate systems.
-        
-        Args:
-            point: Source point.
-            from_system: Source coordinate system.
-            to_system: Target coordinate system.
-            context: Optional context (window_bounds, display_index, etc.).
-            
-        Returns:
-            Transformed Point.
-        """
-        x, y = point.x, point.y
-        
-        if from_system == to_system:
-            return Point(x, y)
-        
-        if from_system == CoordinateSystem.NORMALIZED:
-            nx, ny = x, y
-            x, y = self.normalized_to_screen(nx, ny)
-            from_system = CoordinateSystem.SCREEN
-        
-        if to_system == CoordinateSystem.NORMALIZED:
-            x, y = self.screen_to_normalized(x, y)
-            return Point(x, y)
-        
-        if to_system == CoordinateSystem.DISPLAY and context:
-            display_index = context.get('display_index', 0)
-            x, y = self.screen_to_display(x, y, display_index)
-        
-        return Point(x, y)
-    
-    def get_display_for_point(self, x: float, y: float) -> Optional[DisplayInfo]:
-        """
-        Get display containing point.
-        
-        Args:
-            x: Screen X.
-            y: Screen Y.
-            
-        Returns:
-            DisplayInfo or None.
-        """
-        for display in self._displays:
-            if display.bounds.contains(Point(x, y)):
-                return display
-        return None
-    
-    def get_union_bounds(self) -> Rect:
-        """Get union of all display bounds."""
-        if not self._displays:
-            return Rect(0, 0, 1920, 1080)
-        
-        min_x = min(d.bounds.x for d in self._displays)
-        min_y = min(d.bounds.y for d in self._displays)
-        max_x = max(d.bounds.right for d in self._displays)
-        max_y = max(d.bounds.bottom for d in self._displays)
-        
-        return Rect(min_x, min_y, max_x - min_x, max_y - min_y)
+
+    def _transform_direct(
+        self,
+        x: float,
+        y: float,
+        from_space: str,
+        to_space: str,
+    ) -> tuple[float, float]:
+        """Direct transformation between two spaces."""
+        t_from = self._transforms.get(from_space, Transform2D())
+        t_to = self._transforms.get(to_space, Transform2D())
+
+        # Compose: to^-1 o from
+        composed = Transform2D(
+            scale_x=t_from.scale_x / (t_to.scale_x if t_to.scale_x != 0 else 1),
+            scale_y=t_from.scale_y / (t_to.scale_y if t_to.scale_y != 0 else 1),
+            rotation=t_from.rotation - t_to.rotation,
+            translate_x=t_from.translate_x - t_to.translate_x,
+            translate_y=t_from.translate_y - t_to.translate_y,
+        )
+        return composed.transform_point(x, y)
+
+    def screen_to_image(
+        self,
+        x: float,
+        y: float,
+        screen_scale: float = 1.0,
+    ) -> tuple[float, float]:
+        """Convert screen coordinates to image coordinates."""
+        return (x * screen_scale, y * screen_scale)
+
+    def image_to_screen(
+        self,
+        x: float,
+        y: float,
+        screen_scale: float = 1.0,
+    ) -> tuple[float, float]:
+        """Convert image coordinates to screen coordinates."""
+        return (x / screen_scale if screen_scale != 0 else x,
+                y / screen_scale if screen_scale != 0 else y)
+
+
+def transform_bounds(
+    x: float, y: float,
+    width: float, height: float,
+    transform: Transform2D,
+) -> tuple[float, float, float, float]:
+    """Transform a bounding box with a 2D transform."""
+    x1, y1 = transform.transform_point(x, y)
+    x2, y2 = transform.transform_point(x + width, y + height)
+    return (x1, y1, x2 - x1, y2 - y1)
+
+
+__all__ = ["Point", "Transform2D", "CoordinateTransformer", "transform_bounds"]
