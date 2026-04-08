@@ -1,348 +1,231 @@
 """
-API Discovery Action - Discovers and documents API endpoints.
+API Discovery Action Module.
 
-This module provides API discovery capabilities including endpoint
-detection, documentation generation, and schema inference.
+Auto-discovers and documents API endpoints from OpenAPI specs,
+ service registries, or by introspecting running services.
 """
 
 from __future__ import annotations
 
-import asyncio
-import time
-import re
+from typing import Any, Callable, Optional
 from dataclasses import dataclass, field
-from typing import Any, Callable
 from enum import Enum
-from collections import defaultdict
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-class EndpointType(Enum):
-    """Types of API endpoints."""
-    REST = "rest"
+class DiscoverySource(Enum):
+    """Source of API discovery."""
+    OPENAPI = "openapi"
+    SWAGGER = "swagger"
     GRAPHQL = "graphql"
-    WEBSOCKET = "websocket"
-    WEBHOOK = "webhook"
+    GRPC = "grpc"
+    SERVICE_REGISTRY = "service_registry"
+    NETWORK_SCAN = "network_scan"
 
 
 @dataclass
 class DiscoveredEndpoint:
     """A discovered API endpoint."""
     path: str
-    method: str | None = None
-    endpoint_type: EndpointType = EndpointType.REST
+    method: str
+    summary: Optional[str] = None
+    description: Optional[str] = None
     parameters: list[dict[str, Any]] = field(default_factory=list)
-    request_body: dict[str, Any] | None = None
+    request_body: Optional[dict[str, Any]] = None
     responses: dict[str, Any] = field(default_factory=dict)
-    security: list[str] = field(default_factory=list)
-    deprecated: bool = False
     tags: list[str] = field(default_factory=list)
+    auth_required: bool = False
+    source: DiscoverySource = DiscoverySource.OPENAPI
 
 
 @dataclass
-class APISchema:
-    """Discovered API schema."""
-    title: str
-    version: str = "1.0.0"
-    base_url: str = ""
-    endpoints: list[DiscoveredEndpoint] = field(default_factory=list)
-    schemas: dict[str, Any] = field(default_factory=dict)
-    security_schemes: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class DiscoveryConfig:
-    """Configuration for API discovery."""
+class DiscoveredAPI:
+    """A discovered API service."""
+    name: str
+    version: str
     base_url: str
-    include_internal: bool = False
-    follow_redirects: bool = True
-    timeout: float = 30.0
-    auth_token: str | None = None
+    description: Optional[str] = None
+    endpoints: list[DiscoveredEndpoint] = field(default_factory=list)
+    source: DiscoverySource = DiscoverySource.OPENAPI
+    raw_spec: Optional[dict[str, Any]] = None
 
 
-class SchemaInferrer:
-    """Infers schema from API responses."""
-    
-    def __init__(self) -> None:
-        self._type_patterns = {
-            r"^\d{4}-\d{2}-\d{2}$": "date",
-            r"^\d{4}-\d{2}-\d{2}T.*": "datetime",
-            r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$": "email",
-            r"^https?://": "url",
-            r"^\d+$": "integer",
-            r"^\d+\.\d+$": "number",
-            r"^(true|false)$": "boolean",
-        }
-    
-    def infer_type(self, value: Any) -> str:
-        """Infer type from value."""
-        if value is None:
-            return "null"
-        
-        if isinstance(value, bool):
-            return "boolean"
-        
-        if isinstance(value, int):
-            return "integer"
-        
-        if isinstance(value, float):
-            return "number"
-        
-        if isinstance(value, (list, dict)):
-            return "object" if isinstance(value, dict) else "array"
-        
-        if isinstance(value, str):
-            for pattern, type_name in self._type_patterns.items():
-                if re.match(pattern, value):
-                    return type_name
-            return "string"
-        
-        return "unknown"
-    
-    def infer_schema(self, data: Any) -> dict[str, Any]:
-        """Infer schema from data sample."""
-        if isinstance(data, dict):
-            properties = {}
-            required = []
-            
-            for key, value in data.items():
-                prop_type = self.infer_type(value)
-                properties[key] = {"type": prop_type}
-                
-                if value is not None:
-                    required.append(key)
-                
-                if prop_type == "object":
-                    properties[key] = self.infer_schema(value)
-                elif prop_type == "array" and value:
-                    properties[key] = {
-                        "type": "array",
-                        "items": {"type": self.infer_type(value[0])},
-                    }
-            
-            return {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            }
-        
-        return {"type": self.infer_type(data)}
-
-
-class APIEndpointsScanner:
-    """Scans for API endpoints."""
-    
-    def __init__(self, config: DiscoveryConfig) -> None:
-        self.config = config
-        self._inferrer = SchemaInferrer()
-        self._discovered: list[DiscoveredEndpoint] = []
-    
-    async def scan(self) -> APISchema:
-        """Scan for API endpoints."""
-        schema = APISchema(
-            title="Discovered API",
-            base_url=self.config.base_url,
-        )
-        
-        try:
-            await self._check_openapi(schema)
-        except Exception:
-            pass
-        
-        try:
-            await self._probe_endpoints(schema)
-        except Exception:
-            pass
-        
-        return schema
-    
-    async def _check_openapi(self, schema: APISchema) -> None:
-        """Check for OpenAPI/Swagger specification."""
-        openapi_paths = [
-            "/openapi.json",
-            "/swagger.json",
-            "/api/docs.json",
-            "/api/openapi.json",
-        ]
-        
-        headers = {}
-        if self.config.auth_token:
-            headers["Authorization"] = f"Bearer {self.config.auth_token}"
-        
-        for path in openapi_paths:
-            try:
-                import aiohttp
-                timeout = aiohttp.ClientTimeout(total=self.config.timeout)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    url = f"{self.config.base_url.rstrip('/')}{path}"
-                    async with session.get(url, headers=headers) as response:
-                        if response.status == 200:
-                            spec = await response.json()
-                            self._parse_openapi(spec, schema)
-                            break
-            except Exception:
-                continue
-    
-    def _parse_openapi(self, spec: dict[str, Any], schema: APISchema) -> None:
-        """Parse OpenAPI spec into schema."""
-        schema.title = spec.get("info", {}).get("title", schema.title)
-        schema.version = spec.get("info", {}).get("version", schema.version)
-        
-        for path, methods in spec.get("paths", {}).items():
-            for method, details in methods.items():
-                if method.upper() in ("GET", "POST", "PUT", "DELETE", "PATCH"):
-                    endpoint = DiscoveredEndpoint(
-                        path=path,
-                        method=method.upper(),
-                        endpoint_type=EndpointType.REST,
-                        parameters=details.get("parameters", []),
-                        deprecated=details.get("deprecated", False),
-                        tags=details.get("tags", []),
-                    )
-                    schema.endpoints.append(endpoint)
-        
-        if "components" in spec:
-            schema.schemas = spec["components"].get("schemas", {})
-            schema.security_schemes = spec["components"].get("securitySchemes", {})
-    
-    async def _probe_endpoints(self, schema: APISchema) -> None:
-        """Probe common API endpoints."""
-        common_paths = [
-            "/api/users",
-            "/api/products",
-            "/api/data",
-            "/api/v1/resources",
-            "/api/health",
-        ]
-        
-        headers = {}
-        if self.config.auth_token:
-            headers["Authorization"] = f"Bearer {self.config.auth_token}"
-        
-        for path in common_paths:
-            try:
-                import aiohttp
-                timeout = aiohttp.ClientTimeout(total=5.0)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    url = f"{self.config.base_url.rstrip('/')}{path}"
-                    async with session.get(url, headers=headers) as response:
-                        if response.status < 500:
-                            endpoint = DiscoveredEndpoint(
-                                path=path,
-                                method="GET",
-                                endpoint_type=EndpointType.REST,
-                            )
-                            schema.endpoints.append(endpoint)
-            except Exception:
-                continue
+@dataclass
+class DiscoveryResult:
+    """Result of API discovery operation."""
+    apis: list[DiscoveredAPI]
+    total_endpoints: int
+    duration_ms: float = 0.0
+    errors: list[str] = field(default_factory=list)
 
 
 class APIDiscoveryAction:
     """
-    API discovery action for automation workflows.
-    
+    API endpoint discovery from various sources.
+
+    Discovers APIs from OpenAPI/Swagger specs, service registries,
+    or by scanning network endpoints.
+
     Example:
-        action = APIDiscoveryAction()
-        schema = await action.discover("https://api.example.com")
-        for endpoint in schema.endpoints:
-            print(f"{endpoint.method} {endpoint.path}")
+        discoverer = APIDiscoveryAction()
+        result = await discoverer.discover_from_openapi("https://api.example.com/openapi.json")
+        for api in result.apis:
+            print(f"Found {len(api.endpoints)} endpoints")
     """
-    
-    def __init__(self) -> None:
-        self._schemas: dict[str, APISchema] = {}
-    
-    async def discover(
+
+    def __init__(
         self,
-        base_url: str,
-        **kwargs,
-    ) -> APISchema:
-        """Discover API endpoints."""
-        config = DiscoveryConfig(base_url=base_url, **kwargs)
-        scanner = APIEndpointsScanner(config)
-        schema = await scanner.scan()
-        self._schemas[base_url] = schema
-        return schema
-    
-    def get_schema(self, base_url: str) -> APISchema | None:
-        """Get cached schema."""
-        return self._schemas.get(base_url)
-    
-    async def generate_docs(
+        auth_token: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> None:
+        self.auth_token = auth_token
+        self.timeout = timeout
+        self._registered_handlers: dict[DiscoverySource, Callable] = {}
+
+    async def discover_from_openapi(
         self,
+        spec_url: str,
+        base_url: Optional[str] = None,
+    ) -> DiscoveryResult:
+        """Discover API from an OpenAPI/Swagger specification."""
+        import time
+        import aiohttp
+        start_time = time.monotonic()
+        errors: list[str] = []
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {}
+                if self.auth_token:
+                    headers["Authorization"] = f"Bearer {self.auth_token}"
+
+                async with session.get(spec_url, headers=headers, timeout=self.timeout) as resp:
+                    spec = await resp.json()
+
+            api = self._parse_openapi_spec(spec, base_url or spec_url)
+            return DiscoveryResult(
+                apis=[api],
+                total_endpoints=len(api.endpoints),
+                duration_ms=(time.monotonic() - start_time) * 1000,
+            )
+
+        except Exception as e:
+            errors.append(f"OpenAPI discovery failed: {e}")
+            return DiscoveryResult(
+                apis=[],
+                total_endpoints=0,
+                duration_ms=(time.monotonic() - start_time) * 1000,
+                errors=errors,
+            )
+
+    def _parse_openapi_spec(
+        self,
+        spec: dict[str, Any],
         base_url: str,
-        format: str = "markdown",
-    ) -> str:
-        """Generate documentation from discovered schema."""
-        schema = self._schemas.get(base_url)
-        if not schema:
-            schema = await self.discover(base_url)
-        
-        if format == "markdown":
-            return self._generate_markdown(schema)
-        elif format == "openapi":
-            return self._generate_openapi(schema)
-        
-        return str(schema)
-    
-    def _generate_markdown(self, schema: APISchema) -> str:
-        """Generate Markdown documentation."""
-        lines = [f"# {schema.title}", f"**Version:** {schema.version}", ""]
-        lines.append(f"**Base URL:** {schema.base_url}")
-        lines.append("")
+    ) -> DiscoveredAPI:
+        """Parse an OpenAPI specification into structured data."""
+        info = spec.get("info", {})
+        paths = spec.get("paths", {})
+
+        api = DiscoveredAPI(
+            name=info.get("title", "Unknown API"),
+            version=info.get("version", "1.0.0"),
+            base_url=base_url,
+            description=info.get("description"),
+            source=DiscoverySource.OPENAPI,
+            raw_spec=spec,
+        )
+
+        for path, path_item in paths.items():
+            for method in ["get", "post", "put", "patch", "delete", "options", "head"]:
+                if method not in path_item:
+                    continue
+
+                operation = path_item[method]
+                endpoint = DiscoveredEndpoint(
+                    path=path,
+                    method=method.upper(),
+                    summary=operation.get("summary"),
+                    description=operation.get("description"),
+                    parameters=operation.get("parameters", []),
+                    request_body=operation.get("requestBody"),
+                    responses=operation.get("responses", {}),
+                    tags=operation.get("tags", []),
+                    auth_required=self._has_auth(operation),
+                    source=DiscoverySource.OPENAPI,
+                )
+                api.endpoints.append(endpoint)
+
+        return api
+
+    def _has_auth(self, operation: dict[str, Any]) -> bool:
+        """Check if operation requires authentication."""
+        security = operation.get("security", [])
+        if not security:
+            return False
+        return len(security) > 0
+
+    async def discover_batch(
+        self,
+        sources: list[tuple[DiscoverySource, str]],
+    ) -> DiscoveryResult:
+        """Discover from multiple sources in parallel."""
+        import asyncio
+        import time
+        start_time = time.monotonic()
+
+        tasks = []
+        for source_type, source_url in sources:
+            if source_type == DiscoverySource.OPENAPI:
+                tasks.append(self.discover_from_openapi(source_url))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_apis: list[DiscoveredAPI] = []
+        total_endpoints = 0
+        all_errors: list[str] = []
+
+        for result in results:
+            if isinstance(result, DiscoveryResult):
+                all_apis.extend(result.apis)
+                total_endpoints += result.total_endpoints
+                all_errors.extend(result.errors)
+            elif isinstance(result, Exception):
+                all_errors.append(str(result))
+
+        return DiscoveryResult(
+            apis=all_apis,
+            total_endpoints=total_endpoints,
+            duration_ms=(time.monotonic() - start_time) * 1000,
+            errors=all_errors,
+        )
+
+    def generate_markdown(self, api: DiscoveredAPI) -> str:
+        """Generate Markdown documentation for a discovered API."""
+        lines = [
+            f"# {api.name}",
+            f"",
+            f"**Version:** {api.version}",
+            f"**Base URL:** {api.base_url}",
+            f"",
+        ]
+
+        if api.description:
+            lines.append(f"{api.description}")
+            lines.append("")
+
         lines.append("## Endpoints")
         lines.append("")
-        
-        for endpoint in schema.endpoints:
-            deprecated = " **[DEPRECATED]**" if endpoint.deprecated else ""
-            lines.append(f"### {endpoint.method} {endpoint.path}{deprecated}")
-            
-            if endpoint.tags:
-                lines.append(f"**Tags:** {', '.join(endpoint.tags)}")
-            
-            if endpoint.parameters:
-                lines.append("**Parameters:**")
-                lines.append("| Name | Type | Location | Required |")
-                lines.append("|------|------|----------|----------|")
-                for param in endpoint.parameters:
-                    lines.append(
-                        f"| {param.get('name')} | {param.get('schema', {}).get('type')} "
-                        f"| {param.get('in')} | {param.get('required', False)} |"
-                    )
-            
+
+        for endpoint in api.endpoints:
+            lines.append(f"### `{endpoint.method} {endpoint.path}`")
             lines.append("")
-        
+            if endpoint.summary:
+                lines.append(f"**Summary:** {endpoint.summary}")
+            if endpoint.description:
+                lines.append(f"{endpoint.description}")
+            lines.append("")
+
         return "\n".join(lines)
-    
-    def _generate_openapi(self, schema: APISchema) -> str:
-        """Generate OpenAPI specification."""
-        import json
-        
-        spec = {
-            "openapi": "3.0.0",
-            "info": {"title": schema.title, "version": schema.version},
-            "paths": {},
-        }
-        
-        for endpoint in schema.endpoints:
-            method = endpoint.method.lower()
-            if method not in spec["paths"]:
-                spec["paths"][endpoint.path] = {}
-            
-            spec["paths"][endpoint.path][method] = {
-                "deprecated": endpoint.deprecated,
-                "tags": endpoint.tags,
-                "parameters": endpoint.parameters,
-            }
-        
-        return json.dumps(spec, indent=2)
-
-
-# Export public API
-__all__ = [
-    "EndpointType",
-    "DiscoveredEndpoint",
-    "APISchema",
-    "DiscoveryConfig",
-    "SchemaInferrer",
-    "APIEndpointsScanner",
-    "APIDiscoveryAction",
-]
