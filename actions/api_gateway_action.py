@@ -1,485 +1,372 @@
 """
-API Gateway Action.
+API gateway module for request routing, rate limiting, and authentication.
 
-Provides API gateway functionality.
-Supports:
-- Request routing
-- Protocol translation
-- Rate limiting
-- Request/response transformation
-- Circuit breaker
+Provides request routing, load balancing, circuit breaking,
+rate limiting, and authentication middleware.
 """
+from __future__ import annotations
 
-from typing import Dict, List, Optional, Any, Callable, Awaitable
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-import asyncio
-import logging
+import hashlib
 import json
 import time
-import hashlib
-import threading
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Optional
 
-logger = logging.getLogger(__name__)
+
+class LoadBalancingStrategy(Enum):
+    """Load balancing strategies."""
+    ROUND_ROBIN = "round_robin"
+    LEAST_CONNECTIONS = "least_connections"
+    IP_HASH = "ip_hash"
+    RANDOM = "random"
 
 
-class CircuitState(Enum):
-    """Circuit breaker states."""
-    CLOSED = "closed"
-    OPEN = "open"
-    HALF_OPEN = "half_open"
+class RateLimitAlgorithm(Enum):
+    """Rate limiting algorithms."""
+    TOKEN_BUCKET = "token_bucket"
+    SLIDING_WINDOW = "sliding_window"
+    FIXED_WINDOW = "fixed_window"
+    LEAKY_BUCKET = "leaky_bucket"
+
+
+@dataclass
+class Upstream:
+    """An upstream service endpoint."""
+    id: str
+    name: str
+    url: str
+    weight: int = 100
+    max_connections: int = 100
+    timeout_seconds: int = 30
+    healthy: bool = True
+    latency_ms: float = 0.0
+    failures: int = 0
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
 class Route:
-    """Route configuration."""
-    path_pattern: str
-    upstream_url: str
-    methods: List[str] = field(default_factory=lambda: ["GET"])
-    timeout: float = 30.0
-    retry_count: int = 0
+    """A routing rule."""
+    id: str
+    path: str
+    method: str
+    upstream_ids: list[str]
     strip_path: bool = False
-    headers: Dict[str, str] = field(default_factory=dict)
-    rate_limit: Optional[int] = None
+    prefix_rewrite: str = ""
+    timeout_seconds: int = 30
+    rate_limit_enabled: bool = True
+    auth_enabled: bool = True
 
 
 @dataclass
-class CircuitBreakerConfig:
-    """Circuit breaker configuration."""
-    failure_threshold: int = 5
-    success_threshold: int = 2
-    timeout: float = 60.0
-    half_open_requests: int = 3
+class RateLimitConfig:
+    """Rate limiting configuration."""
+    algorithm: RateLimitAlgorithm = RateLimitAlgorithm.TOKEN_BUCKET
+    requests_per_second: int = 100
+    burst_size: int = 200
+    block_duration_seconds: int = 60
 
 
 @dataclass
-class GatewayRequest:
-    """Gateway request context."""
+class AuthConfig:
+    """Authentication configuration."""
+    type: str = "none"
+    api_key_header: str = "X-API-Key"
+    jwt_secret: str = ""
+    jwt_issuer: str = ""
+    oauth2_audience: str = ""
+
+
+@dataclass
+class RequestLog:
+    """Log of a proxied request."""
+    id: str
+    route_id: str
+    upstream_id: str
+    client_ip: str
     method: str
     path: str
-    headers: Dict[str, str]
-    query_params: Dict[str, str]
-    body: Optional[bytes] = None
-    client_ip: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    request_id: str = ""
-    
-    def get_header(self, name: str, default: str = "") -> str:
-        """Get header value."""
-        return self.headers.get(name.lower(), default)
-
-
-@dataclass
-class GatewayResponse:
-    """Gateway response context."""
     status_code: int
-    headers: Dict[str, str] = field(default_factory=dict)
-    body: Optional[bytes] = None
-    error: Optional[str] = None
-    from_cache: bool = False
-    duration_ms: float = 0.0
+    latency_ms: float
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
-class RateLimitEntry:
-    """Rate limit tracking entry."""
-    count: int = 0
-    window_start: datetime = field(default_factory=datetime.utcnow)
+class CircuitState:
+    """Circuit breaker state."""
+    state: str = "closed"
+    failure_count: int = 0
+    success_count: int = 0
+    last_failure_time: Optional[float] = None
+    next_retry_time: Optional[float] = None
 
 
-class CircuitBreaker:
-    """Circuit breaker for upstream services."""
-    
-    def __init__(self, name: str, config: CircuitBreakerConfig):
-        self.name = name
-        self.config = config
-        self.state = CircuitState.CLOSED
-        self.failure_count = 0
-        self.success_count = 0
-        self.next_attempt_time: Optional[datetime] = None
-        self._lock = threading.RLock()
-    
-    def record_success(self) -> None:
-        """Record a successful request."""
-        with self._lock:
-            if self.state == CircuitState.HALF_OPEN:
-                self.success_count += 1
-                if self.success_count >= self.config.success_threshold:
-                    self._transition_to(CircuitState.CLOSED)
-            else:
-                self.failure_count = 0
-    
-    def record_failure(self) -> None:
-        """Record a failed request."""
-        with self._lock:
-            self.failure_count += 1
-            
-            if self.state == CircuitState.HALF_OPEN:
-                self._transition_to(CircuitState.OPEN)
-            elif self.failure_count >= self.config.failure_threshold:
-                self._transition_to(CircuitState.OPEN)
-    
-    def can_attempt(self) -> bool:
-        """Check if a request can be attempted."""
-        with self._lock:
-            if self.state == CircuitState.CLOSED:
-                return True
-            
-            if self.state == CircuitState.OPEN:
-                if self.next_attempt_time and datetime.utcnow() >= self.next_attempt_time:
-                    self._transition_to(CircuitState.HALF_OPEN)
-                    return True
-                return False
-            
-            return True  # HALF_OPEN
-    
-    def _transition_to(self, new_state: CircuitState) -> None:
-        """Transition to a new state."""
-        logger.info(f"Circuit breaker '{self.name}': {self.state.value} -> {new_state.value}")
-        self.state = new_state
-        
-        if new_state == CircuitState.OPEN:
-            self.next_attempt_time = datetime.utcnow() + timedelta(seconds=self.config.timeout)
-            self.failure_count = 0
-        elif new_state == CircuitState.HALF_OPEN:
-            self.success_count = 0
-        elif new_state == CircuitState.CLOSED:
-            self.failure_count = 0
-            self.success_count = 0
-            self.next_attempt_time = None
-
-
-class ApiGatewayAction:
+class APIGateway:
     """
-    API Gateway Action.
-    
-    Provides API gateway functionality with support for:
-    - Request routing
-    - Circuit breaker pattern
-    - Rate limiting
-    - Request/response transformation
-    - Caching
+    API gateway for request routing, rate limiting, and authentication.
+
+    Provides request routing, load balancing, circuit breaking,
+    rate limiting, and authentication middleware.
     """
-    
+
     def __init__(
         self,
-        circuit_breaker_config: Optional[CircuitBreakerConfig] = None
+        name: str = "api-gateway",
+        rate_limit: Optional[RateLimitConfig] = None,
+        auth: Optional[AuthConfig] = None,
     ):
-        """
-        Initialize the API Gateway Action.
-        
-        Args:
-            circuit_breaker_config: Circuit breaker configuration
-        """
-        self.circuit_breaker_config = circuit_breaker_config or CircuitBreakerConfig()
-        self.routes: List[Route] = []
-        self.circuit_breakers: Dict[str, CircuitBreaker] = {}
-        self.rate_limits: Dict[str, RateLimitEntry] = {}
-        self.cache: Dict[str, tuple] = {}  # (response, expiry)
-        self._cache_lock = threading.RLock()
-        self._rate_limit_lock = threading.RLock()
-        self.request_transformers: List[Callable[[GatewayRequest], GatewayRequest]] = []
-        self.response_transformers: List[Callable[[GatewayResponse], GatewayResponse]] = []
-    
-    def add_route(
-        self,
-        path_pattern: str,
-        upstream_url: str,
-        methods: Optional[List[str]] = None,
-        timeout: float = 30.0,
-        retry_count: int = 0,
-        strip_path: bool = False,
-        headers: Optional[Dict[str, str]] = None,
-        rate_limit: Optional[int] = None
-    ) -> "ApiGatewayAction":
-        """
-        Add a route.
-        
-        Args:
-            path_pattern: URL path pattern to match
-            upstream_url: Upstream service URL
-            methods: Allowed HTTP methods
-            timeout: Request timeout in seconds
-            retry_count: Number of retries
-            strip_path: Whether to strip the matched path prefix
-            headers: Headers to add/modify
-            rate_limit: Rate limit per window
-        
-        Returns:
-            Self for chaining
-        """
-        route = Route(
-            path_pattern=path_pattern,
-            upstream_url=upstream_url,
-            methods=methods or ["GET"],
-            timeout=timeout,
-            retry_count=retry_count,
-            strip_path=strip_path,
-            headers=headers or {},
-            rate_limit=rate_limit
-        )
-        self.routes.append(route)
-        
-        # Create circuit breaker for this upstream
-        cb_name = self._get_upstream_name(upstream_url)
-        self.circuit_breakers[cb_name] = CircuitBreaker(cb_name, self.circuit_breaker_config)
-        
-        logger.info(f"Added route: {path_pattern} -> {upstream_url}")
-        return self
-    
-    def add_request_transformer(
-        self,
-        transformer: Callable[[GatewayRequest], GatewayRequest]
-    ) -> "ApiGatewayAction":
-        """Add a request transformer."""
-        self.request_transformers.append(transformer)
-        return self
-    
-    def add_response_transformer(
-        self,
-        transformer: Callable[[GatewayResponse], GatewayResponse]
-    ) -> "ApiGatewayAction":
-        """Add a response transformer."""
-        self.response_transformers.append(transformer)
-        return self
-    
-    async def handle_request(self, request: GatewayRequest) -> GatewayResponse:
-        """
-        Handle an incoming request.
-        
-        Args:
-            request: Gateway request
-        
-        Returns:
-            Gateway response
-        """
-        start_time = time.time()
-        request.request_id = request.request_id or self._generate_request_id()
-        
-        # Find matching route
-        route = self._match_route(request)
-        if not route:
-            return GatewayResponse(
-                status_code=404,
-                body=b'{"error": "Route not found"}',
-                duration_ms=(time.time() - start_time) * 1000
-            )
-        
-        # Check rate limit
-        if route.rate_limit:
-            rate_result = self._check_rate_limit(request, route.rate_limit)
-            if not rate_result:
-                return GatewayResponse(
-                    status_code=429,
-                    body=b'{"error": "Rate limit exceeded"}',
-                    duration_ms=(time.time() - start_time) * 1000
-                )
-        
-        # Apply request transformers
-        for transformer in self.request_transformers:
-            request = transformer(request)
-        
-        # Get circuit breaker
-        cb_name = self._get_upstream_name(route.upstream_url)
-        cb = self.circuit_breakers.get(cb_name)
-        
-        # Check circuit breaker
-        if cb and not cb.can_attempt():
-            return GatewayResponse(
-                status_code=503,
-                body=b'{"error": "Service unavailable"}',
-                duration_ms=(time.time() - start_time) * 1000
-            )
-        
-        # Check cache
-        cache_key = self._get_cache_key(request, route)
-        cached_response = self._get_from_cache(cache_key)
-        if cached_response:
-            cached_response.from_cache = True
-            return cached_response
-        
-        # Forward request
-        try:
-            response = await self._forward_request(request, route)
-            
-            if cb:
-                cb.record_success()
-            
-            # Cache response
-            if response.status_code == 200:
-                self._put_in_cache(cache_key, response)
-            
-            # Apply response transformers
-            for transformer in self.response_transformers:
-                response = transformer(response)
-            
-            return response
-        
-        except Exception as e:
-            logger.error(f"Request failed: {e}")
-            
-            if cb:
-                cb.record_failure()
-            
-            return GatewayResponse(
-                status_code=502,
-                body=json.dumps({"error": str(e)}).encode(),
-                error=str(e),
-                duration_ms=(time.time() - start_time) * 1000
-            )
-    
-    async def _forward_request(
-        self,
-        request: GatewayRequest,
-        route: Route
-    ) -> GatewayResponse:
-        """Forward request to upstream."""
-        # This is a placeholder - would use httpx/aiohttp in production
-        await asyncio.sleep(0.01)  # Simulate network delay
-        
-        return GatewayResponse(
-            status_code=200,
-            body=b'{"message": "OK"}',
-            duration_ms=10.0
-        )
-    
-    def _match_route(self, request: GatewayRequest) -> Optional[Route]:
-        """Match request to a route."""
-        for route in self.routes:
-            if request.method not in route.methods:
+        self.name = name
+        self.rate_limit = rate_limit or RateLimitConfig()
+        self.auth = auth or AuthConfig()
+        self._upstreams: dict[str, Upstream] = {}
+        self._routes: dict[str, Route] = {}
+        self._circuit_breakers: dict[str, CircuitState] = {}
+        self._rate_limiters: dict[str, dict] = {}
+        self._request_logs: list[RequestLog] = []
+        self._round_robin_index: dict[str, int] = {}
+
+    def add_upstream(self, upstream: Upstream) -> None:
+        """Add an upstream service."""
+        self._upstreams[upstream.id] = upstream
+        self._circuit_breakers[upstream.id] = CircuitState()
+        self._round_robin_index[upstream.id] = 0
+
+    def get_upstream(self, upstream_id: str) -> Optional[Upstream]:
+        """Get an upstream by ID."""
+        return self._upstreams.get(upstream_id)
+
+    def add_route(self, route: Route) -> None:
+        """Add a routing rule."""
+        self._routes[route.id] = route
+
+    def get_route(self, route_id: str) -> Optional[Route]:
+        """Get a route by ID."""
+        return self._routes.get(route_id)
+
+    def find_route(self, method: str, path: str) -> Optional[Route]:
+        """Find a matching route for a request."""
+        for route in self._routes.values():
+            if route.method and route.method != method:
                 continue
-            
-            # Simple path matching (would use proper regex in production)
-            if self._path_matches(request.path, route.path_pattern):
+
+            if path.startswith(route.path):
                 return route
-        
+
         return None
-    
-    def _path_matches(self, path: str, pattern: str) -> bool:
-        """Check if path matches pattern."""
-        # Simplified - would support wildcards and regex in production
-        if pattern.endswith("*"):
-            return path.startswith(pattern[:-1])
-        return path == pattern or path.startswith(pattern.rstrip("/") + "/")
-    
-    def _check_rate_limit(self, request: GatewayRequest, limit: int) -> bool:
-        """Check rate limit for request."""
-        key = f"{request.client_ip}:{request.get_header('authorization', 'anonymous')}"
-        
-        with self._rate_limit_lock:
-            now = datetime.utcnow()
-            window = timedelta(seconds=60)
-            
-            if key not in self.rate_limits:
-                self.rate_limits[key] = RateLimitEntry()
-            
-            entry = self.rate_limits[key]
-            
-            # Reset window if expired
-            if now - entry.window_start > window:
-                entry.count = 0
-                entry.window_start = now
-            
-            # Check limit
-            if entry.count >= limit:
-                return False
-            
-            entry.count += 1
-            return True
-    
-    def _get_cache_key(self, request: GatewayRequest, route: Route) -> str:
-        """Generate cache key for request."""
-        data = f"{route.path_pattern}:{request.path}:{request.query_params}"
-        return hashlib.md5(data.encode()).hexdigest()
-    
-    def _get_from_cache(self, key: str) -> Optional[GatewayResponse]:
-        """Get response from cache."""
-        with self._cache_lock:
-            if key in self.cache:
-                response, expiry = self.cache[key]
-                if datetime.utcnow() < expiry:
-                    return response
-                del self.cache[key]
-        return None
-    
-    def _put_in_cache(self, key: str, response: GatewayResponse, ttl: int = 60) -> None:
-        """Put response in cache."""
-        with self._cache_lock:
-            self.cache[key] = (
-                response,
-                datetime.utcnow() + timedelta(seconds=ttl)
-            )
-    
-    def _get_upstream_name(self, url: str) -> str:
-        """Get upstream name from URL."""
-        return url.split("://")[1].split("/")[0] if "://" in url else url
-    
-    def _generate_request_id(self) -> str:
-        """Generate unique request ID."""
-        return f"req-{int(time.time() * 1000)}-{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get gateway statistics."""
-        with self._cache_lock:
-            cache_size = len(self.cache)
-        
-        return {
-            "routes_count": len(self.routes),
-            "circuit_breakers": {
-                name: {
-                    "state": cb.state.value,
-                    "failure_count": cb.failure_count
-                }
-                for name, cb in self.circuit_breakers.items()
-            },
-            "cache_size": cache_size,
-            "rate_limits_active": len(self.rate_limits)
+
+    def select_upstream(
+        self,
+        route: Route,
+        client_ip: str = "",
+        strategy: LoadBalancingStrategy = LoadBalancingStrategy.ROUND_ROBIN,
+    ) -> Optional[Upstream]:
+        """Select an upstream using load balancing strategy."""
+        available = [
+            u for u in self._upstreams.values()
+            if u.id in route.upstream_ids and u.healthy
+        ]
+
+        if not available:
+            return None
+
+        if strategy == LoadBalancingStrategy.ROUND_ROBIN:
+            upstream = available[self._round_robin_index[route.id] % len(available)]
+            self._round_robin_index[route.id] += 1
+            return upstream
+
+        elif strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
+            return min(available, key=lambda u: u.failures)
+
+        elif strategy == LoadBalancingStrategy.IP_HASH:
+            hash_val = int(hashlib.md5(client_ip.encode()).hexdigest(), 16)
+            return available[hash_val % len(available)]
+
+        elif strategy == LoadBalancingStrategy.RANDOM:
+            import random
+            return random.choice(available)
+
+        return available[0]
+
+    def check_rate_limit(
+        self,
+        key: str,
+        requests_per_second: Optional[int] = None,
+        burst_size: Optional[int] = None,
+    ) -> tuple[bool, dict]:
+        """Check if a request is within rate limits."""
+        rps = requests_per_second or self.rate_limit.requests_per_second
+        burst = burst_size or self.rate_limit.burst_size
+
+        if key not in self._rate_limiters:
+            self._rate_limiters[key] = {
+                "tokens": float(burst),
+                "last_update": time.time(),
+            }
+
+        limiter = self._rate_limiters[key]
+        now = time.time()
+        elapsed = now - limiter["last_update"]
+
+        limiter["tokens"] = min(burst, limiter["tokens"] + elapsed * rps)
+        limiter["last_update"] = now
+
+        if limiter["tokens"] >= 1:
+            limiter["tokens"] -= 1
+            return True, {
+                "allowed": True,
+                "remaining": int(limiter["tokens"]),
+                "reset_at": now + (burst - limiter["tokens"]) / rps,
+            }
+
+        return False, {
+            "allowed": False,
+            "remaining": 0,
+            "reset_at": now + 1 / rps,
         }
 
+    def check_circuit_breaker(self, upstream_id: str) -> bool:
+        """Check if circuit breaker allows requests."""
+        cb = self._circuit_breakers.get(upstream_id)
+        if not cb:
+            return True
 
-# Standalone execution
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    # Create gateway
-    gateway = ApiGatewayAction()
-    
-    # Add routes
-    gateway.add_route(
-        "/api/users/*",
-        "http://user-service:8001",
-        methods=["GET", "POST"],
-        timeout=10.0,
-        rate_limit=100
-    )
-    gateway.add_route(
-        "/api/orders/*",
-        "http://order-service:8002",
-        methods=["GET", "POST", "PUT", "DELETE"],
-        timeout=30.0,
-        rate_limit=50
-    )
-    
-    # Add transformers
-    gateway.add_request_transformer(
-        lambda req: req  # Add auth headers, etc.
-    )
-    
-    async def main():
-        # Simulate requests
-        for i in range(5):
-            request = GatewayRequest(
-                method="GET",
-                path="/api/users/123",
-                headers={"host": "api.example.com"},
-                query_params={},
-                client_ip="192.168.1.1"
-            )
-            
-            response = await gateway.handle_request(request)
-            print(f"Request {i}: {response.status_code} ({response.duration_ms:.1f}ms)")
-        
-        print(f"\nStats: {json.dumps(gateway.get_stats(), indent=2)}")
-    
-    asyncio.run(main())
+        if cb.state == "open":
+            if cb.next_retry_time and time.time() >= cb.next_retry_time:
+                cb.state = "half_open"
+                return True
+            return False
+
+        return True
+
+    def record_success(self, upstream_id: str) -> None:
+        """Record a successful request to an upstream."""
+        upstream = self._upstreams.get(upstream_id)
+        cb = self._circuit_breakers.get(upstream_id)
+
+        if upstream:
+            upstream.failures = 0
+
+        if cb:
+            cb.success_count += 1
+            cb.failure_count = 0
+            if cb.state == "half_open":
+                cb.state = "closed"
+
+    def record_failure(self, upstream_id: str, threshold: int = 5) -> None:
+        """Record a failed request to an upstream."""
+        upstream = self._upstreams.get(upstream_id)
+        cb = self._circuit_breakers.get(upstream_id)
+
+        if upstream:
+            upstream.failures += 1
+
+        if cb:
+            cb.failure_count += 1
+            cb.last_failure_time = time.time()
+
+            if cb.failure_count >= threshold:
+                cb.state = "open"
+                cb.next_retry_time = time.time() + 30
+
+    def authenticate_request(
+        self,
+        headers: dict,
+        auth_type: Optional[str] = None,
+    ) -> tuple[bool, Optional[str]]:
+        """Authenticate a request."""
+        auth_type = auth_type or self.auth.type
+
+        if auth_type == "none":
+            return True, None
+
+        elif auth_type == "api_key":
+            api_key = headers.get(self.auth.api_key_header)
+            if not api_key:
+                return False, "Missing API key"
+            return True, None
+
+        elif auth_type == "jwt":
+            import jwt
+            token = headers.get("Authorization", "").replace("Bearer ", "")
+            if not token:
+                return False, "Missing token"
+            try:
+                jwt.decode(token, self.auth.jwt_secret, algorithms=["HS256"])
+                return True, None
+            except jwt.InvalidTokenError as e:
+                return False, str(e)
+
+        return True, None
+
+    def log_request(
+        self,
+        route_id: str,
+        upstream_id: str,
+        client_ip: str,
+        method: str,
+        path: str,
+        status_code: int,
+        latency_ms: float,
+    ) -> None:
+        """Log a proxied request."""
+        log = RequestLog(
+            id=str(uuid.uuid4())[:8],
+            route_id=route_id,
+            upstream_id=upstream_id,
+            client_ip=client_ip,
+            method=method,
+            path=path,
+            status_code=status_code,
+            latency_ms=latency_ms,
+        )
+        self._request_logs.append(log)
+
+        if len(self._request_logs) > 10000:
+            self._request_logs = self._request_logs[-5000:]
+
+    def get_upstream_stats(self, upstream_id: str) -> dict:
+        """Get statistics for an upstream."""
+        upstream = self._upstreams.get(upstream_id)
+        cb = self._circuit_breakers.get(upstream_id)
+
+        logs = [l for l in self._request_logs if l.upstream_id == upstream_id]
+        total_requests = len(logs)
+        failed_requests = sum(1 for l in logs if l.status_code >= 500)
+
+        return {
+            "upstream_id": upstream_id,
+            "name": upstream.name if upstream else "",
+            "healthy": upstream.healthy if upstream else False,
+            "circuit_state": cb.state if cb else "unknown",
+            "total_requests": total_requests,
+            "failed_requests": failed_requests,
+            "failure_rate": failed_requests / total_requests if total_requests > 0 else 0,
+            "avg_latency_ms": sum(l.latency_ms for l in logs) / total_requests if logs else 0,
+        }
+
+    def list_routes(self) -> list[Route]:
+        """List all routes."""
+        return list(self._routes.values())
+
+    def list_upstreams(self) -> list[Upstream]:
+        """List all upstreams."""
+        return list(self._upstreams.values())
+
+    def get_request_logs(
+        self,
+        route_id: Optional[str] = None,
+        upstream_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[RequestLog]:
+        """Get request logs with optional filters."""
+        logs = self._request_logs
+
+        if route_id:
+            logs = [l for l in logs if l.route_id == route_id]
+        if upstream_id:
+            logs = [l for l in logs if l.upstream_id == upstream_id]
+
+        return logs[-limit:]

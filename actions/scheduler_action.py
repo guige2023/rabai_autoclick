@@ -1,303 +1,388 @@
-"""Scheduler action module for RabAI AutoClick.
-
-Provides scheduling utilities:
-- Scheduler: Task scheduler
-- CronJob: Cron-based job
-- IntervalJob: Interval-based job
 """
+Task scheduler module for cron-based and interval-based job scheduling.
 
-from typing import Any, Callable, Dict, List, Optional
-from dataclasses import dataclass
-import threading
+Supports cron expressions, interval scheduling, one-time tasks,
+task queuing, and execution persistence.
+"""
+from __future__ import annotations
+
 import time
 import uuid
-import croniter
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Callable, Optional
 
-import sys
-import os
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+class ScheduleType(Enum):
+    """Type of schedule."""
+    CRON = "cron"
+    INTERVAL = "interval"
+    ONE_TIME = "one_time"
+    DELAYED = "delayed"
+
+
+class TaskStatus(Enum):
+    """Task execution status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
 
 
 @dataclass
-class ScheduledJob:
-    """Scheduled job."""
-    job_id: str
+class Schedule:
+    """A task schedule definition."""
+    id: str
     name: str
-    func: Callable
-    schedule_type: str
-    schedule_value: str
+    task: Callable
+    schedule_type: ScheduleType
+    cron_expression: Optional[str] = None
+    interval_seconds: Optional[float] = None
+    run_at: Optional[float] = None
     enabled: bool = True
-    last_run: Optional[float] = None
-    next_run: Optional[float] = None
-    metadata: Dict[str, Any] = None
+    timezone: str = "UTC"
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(uuid.uuid4())[:8]
 
 
-class Scheduler:
-    """Task scheduler."""
+@dataclass
+class ScheduledTask:
+    """A scheduled task execution instance."""
+    id: str
+    schedule_id: str
+    status: TaskStatus = TaskStatus.PENDING
+    input_data: Any = None
+    output_data: Any = None
+    error: Optional[str] = None
+    scheduled_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    execution_time_ms: float = 0.0
+    retry_count: int = 0
+    max_retries: int = 0
 
-    def __init__(self):
-        self._jobs: Dict[str, ScheduledJob] = {}
-        self._lock = threading.RLock()
+
+@dataclass
+class CronField:
+    """A single cron field."""
+    name: str
+    min_value: int
+    max_value: int
+
+
+class CronParser:
+    """Parser for cron expressions."""
+
+    FIELDS = [
+        CronField("minute", 0, 59),
+        CronField("hour", 0, 23),
+        CronField("day", 1, 31),
+        CronField("month", 1, 12),
+        CronField("weekday", 0, 6),
+    ]
+
+    @staticmethod
+    def parse(expression: str) -> dict:
+        """Parse a cron expression into components."""
+        parts = expression.split()
+        if len(parts) != 5:
+            raise ValueError(f"Invalid cron expression: {expression}")
+
+        return {
+            "minute": parts[0],
+            "hour": parts[1],
+            "day": parts[2],
+            "month": parts[3],
+            "weekday": parts[4],
+        }
+
+    @staticmethod
+    def next_run(cron_expr: str, from_time: Optional[datetime] = None) -> datetime:
+        """Calculate the next run time for a cron expression."""
+        from datetime import datetime, timedelta
+
+        parts = cron_expr.split()
+        if len(parts) != 5:
+            raise ValueError(f"Invalid cron expression: {cron_expr}")
+
+        current = from_time or datetime.now()
+        current = current.replace(second=0, microsecond=0)
+
+        minute_str, hour_str, day_str, month_str, weekday_str = parts
+
+        for delta in range(366 * 24 * 60):
+            check_time = current + timedelta(minutes=delta)
+
+            if not CronParser._matches_field(minute_str, check_time.minute):
+                continue
+            if not CronParser._matches_field(hour_str, check_time.hour):
+                continue
+            if not CronParser._matches_field(day_str, check_time.day):
+                continue
+            if not CronParser._matches_field(month_str, check_time.month):
+                continue
+            if not CronParser._matches_field(weekday_str, check_time.weekday()):
+                continue
+
+            return check_time.replace(second=0, microsecond=0)
+
+        return current + timedelta(days=1)
+
+    @staticmethod
+    def _matches_field(field_expr: str, value: int) -> bool:
+        """Check if a value matches a cron field expression."""
+        if field_expr == "*":
+            return True
+
+        if "/" in field_expr:
+            base, step = field_expr.split("/")
+            step = int(step)
+            if base == "*":
+                return value % step == 0
+            base_val = int(base)
+            return (value - base_val) % step == 0
+
+        if "," in field_expr:
+            values = [int(v) for v in field_expr.split(",")]
+            return value in values
+
+        if "-" in field_expr:
+            start, end = field_expr.split("-")
+            return int(start) <= value <= int(end)
+
+        return int(field_expr) == value
+
+
+class TaskScheduler:
+    """
+    Task scheduler for cron-based and interval-based scheduling.
+
+    Supports cron expressions, interval scheduling, one-time tasks,
+    and task persistence.
+    """
+
+    def __init__(self, timezone: str = "UTC"):
+        self.timezone = timezone
+        self._schedules: dict[str, Schedule] = {}
+        self._tasks: dict[str, ScheduledTask] = {}
+        self._task_queue: deque = deque()
         self._running = False
-        self._thread: Optional[threading.Thread] = None
 
-    def add_cron_job(self, name: str, func: Callable, cron_expression: str, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """Add a cron job."""
-        job_id = str(uuid.uuid4())
+    def add_schedule(
+        self,
+        name: str,
+        task: Callable,
+        schedule_type: ScheduleType,
+        cron_expression: Optional[str] = None,
+        interval_seconds: Optional[float] = None,
+        run_at: Optional[float] = None,
+        enabled: bool = True,
+        metadata: Optional[dict] = None,
+    ) -> Schedule:
+        """Add a new schedule."""
+        schedule = Schedule(
+            id=str(uuid.uuid4())[:8],
+            name=name,
+            task=task,
+            schedule_type=schedule_type,
+            cron_expression=cron_expression,
+            interval_seconds=interval_seconds,
+            run_at=run_at,
+            enabled=enabled,
+            metadata=metadata or {},
+        )
+
+        self._schedules[schedule.id] = schedule
+        return schedule
+
+    def remove_schedule(self, schedule_id: str) -> bool:
+        """Remove a schedule."""
+        if schedule_id in self._schedules:
+            del self._schedules[schedule_id]
+            return True
+        return False
+
+    def enable_schedule(self, schedule_id: str) -> None:
+        """Enable a schedule."""
+        schedule = self._schedules.get(schedule_id)
+        if schedule:
+            schedule.enabled = True
+
+    def disable_schedule(self, schedule_id: str) -> None:
+        """Disable a schedule."""
+        schedule = self._schedules.get(schedule_id)
+        if schedule:
+            schedule.enabled = False
+
+    def execute_now(self, schedule_id: str, input_data: Any = None) -> ScheduledTask:
+        """Execute a schedule immediately."""
+        schedule = self._schedules.get(schedule_id)
+        if not schedule:
+            raise ValueError(f"Schedule not found: {schedule_id}")
+
+        return self._execute_task(schedule, input_data)
+
+    def _execute_task(
+        self,
+        schedule: Schedule,
+        input_data: Any = None,
+    ) -> ScheduledTask:
+        """Execute a scheduled task."""
+        task = ScheduledTask(
+            id=str(uuid.uuid4())[:8],
+            schedule_id=schedule.id,
+            input_data=input_data,
+        )
+
+        self._tasks[task.id] = task
+        task.status = TaskStatus.RUNNING
+        task.started_at = time.time()
 
         try:
-            cron = croniter.croniter(cron_expression, time.time())
-            next_run = cron.get_next(time.time)
-        except Exception:
-            next_run = None
+            result = schedule.task(input_data)
+            task.output_data = result
+            task.status = TaskStatus.COMPLETED
+        except Exception as e:
+            task.error = str(e)
+            task.status = TaskStatus.FAILED
 
-        job = ScheduledJob(
-            job_id=job_id,
-            name=name,
-            func=func,
-            schedule_type="cron",
-            schedule_value=cron_expression,
-            next_run=next_run,
-            metadata=metadata,
-        )
+            if task.retry_count < task.max_retries:
+                task.retry_count += 1
+                task.status = TaskStatus.PENDING
+                next_run = time.time() + 60 * task.retry_count
+                self._task_queue.append((task.id, next_run))
 
-        with self._lock:
-            self._jobs[job_id] = job
+        task.completed_at = time.time()
+        task.execution_time_ms = (task.completed_at - task.started_at) * 1000
 
-        return job_id
+        return task
 
-    def add_interval_job(self, name: str, func: Callable, interval_seconds: float, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """Add an interval job."""
-        job_id = str(uuid.uuid4())
+    def _get_next_run_time(self, schedule: Schedule) -> Optional[float]:
+        """Calculate the next run time for a schedule."""
+        if not schedule.enabled:
+            return None
 
-        job = ScheduledJob(
-            job_id=job_id,
-            name=name,
-            func=func,
-            schedule_type="interval",
-            schedule_value=str(interval_seconds),
-            next_run=time.time() + interval_seconds,
-            metadata=metadata,
-        )
+        if schedule.schedule_type == ScheduleType.CRON and schedule.cron_expression:
+            next_dt = CronParser.next_run(schedule.cron_expression)
+            return next_dt.timestamp()
 
-        with self._lock:
-            self._jobs[job_id] = job
+        elif schedule.schedule_type == ScheduleType.INTERVAL and schedule.interval_seconds:
+            return time.time() + schedule.interval_seconds
 
-        return job_id
+        elif schedule.schedule_type == ScheduleType.ONE_TIME and schedule.run_at:
+            return schedule.run_at if schedule.run_at > time.time() else None
 
-    def remove_job(self, job_id: str) -> bool:
-        """Remove a job."""
-        with self._lock:
-            if job_id in self._jobs:
-                del self._jobs[job_id]
-                return True
-            return False
+        elif schedule.schedule_type == ScheduleType.DELAYED and schedule.run_at:
+            return schedule.run_at if schedule.run_at > time.time() else None
 
-    def enable_job(self, job_id: str) -> bool:
-        """Enable a job."""
-        with self._lock:
-            if job_id in self._jobs:
-                self._jobs[job_id].enabled = True
-                return True
-            return False
+        return None
 
-    def disable_job(self, job_id: str) -> bool:
-        """Disable a job."""
-        with self._lock:
-            if job_id in self._jobs:
-                self._jobs[job_id].enabled = False
-                return True
-            return False
-
-    def get_due_jobs(self) -> List[ScheduledJob]:
-        """Get jobs that are due."""
+    def get_due_tasks(self) -> list[tuple[Schedule, float]]:
+        """Get tasks that are due to run."""
         now = time.time()
         due = []
 
-        with self._lock:
-            for job in self._jobs.values():
-                if not job.enabled:
-                    continue
-                if job.next_run and job.next_run <= now:
-                    due.append(job)
+        for schedule in self._schedules.values():
+            if not schedule.enabled:
+                continue
 
-        return due
+            next_run = self._get_next_run_time(schedule)
+            if next_run and next_run <= now:
+                due.append((schedule, next_run))
 
-    def run_job(self, job: ScheduledJob) -> None:
-        """Run a job."""
-        try:
-            job.func()
-            job.last_run = time.time()
-        except Exception:
-            pass
+        return sorted(due, key=lambda x: x[1])
 
-        if job.schedule_type == "cron":
-            try:
-                cron = croniter.croniter(job.schedule_value, time.time())
-                job.next_run = cron.get_next(time.time)
-            except Exception:
-                job.next_run = None
-        else:
-            try:
-                interval = float(job.schedule_value)
-                job.next_run = time.time() + interval
-            except Exception:
-                job.next_run = None
+    def run_once(self, timeout_seconds: float = 1.0) -> list[ScheduledTask]:
+        """Run due tasks once (call this in a loop)."""
+        due_tasks = self.get_due_tasks()
+        executed = []
 
-    def start(self) -> None:
-        """Start the scheduler."""
-        if self._running:
-            return
+        for schedule, _ in due_tasks:
+            task = self._execute_task(schedule)
+            executed.append(task)
 
-        self._running = True
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
+            if schedule.schedule_type != ScheduleType.INTERVAL:
+                schedule.enabled = False
 
-    def stop(self) -> None:
-        """Stop the scheduler."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        return executed
 
-    def _run_loop(self) -> None:
-        """Main scheduler loop."""
-        while self._running:
-            due_jobs = self.get_due_jobs()
-            for job in due_jobs:
-                threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
-            time.sleep(0.5)
+    def get_schedule(self, schedule_id: str) -> Optional[Schedule]:
+        """Get a schedule by ID."""
+        return self._schedules.get(schedule_id)
 
-    def get_jobs(self) -> List[Dict[str, Any]]:
-        """Get all jobs."""
-        with self._lock:
-            return [
-                {
-                    "job_id": j.job_id,
-                    "name": j.name,
-                    "schedule_type": j.schedule_type,
-                    "schedule_value": j.schedule_value,
-                    "enabled": j.enabled,
-                    "last_run": j.last_run,
-                    "next_run": j.next_run,
-                }
-                for j in self._jobs.values()
-            ]
+    def get_task(self, task_id: str) -> Optional[ScheduledTask]:
+        """Get a task execution by ID."""
+        return self._tasks.get(task_id)
 
+    def list_schedules(
+        self,
+        enabled: Optional[bool] = None,
+        schedule_type: Optional[ScheduleType] = None,
+    ) -> list[dict]:
+        """List all schedules with their next run times."""
+        schedules = list(self._schedules.values())
 
-class SchedulerAction(BaseAction):
-    """Scheduler management action."""
-    action_type = "scheduler"
-    display_name = "调度器"
-    description = "任务调度"
+        if enabled is not None:
+            schedules = [s for s in schedules if s.enabled == enabled]
+        if schedule_type:
+            schedules = [s for s in schedules if s.schedule_type == schedule_type]
 
-    def __init__(self):
-        super().__init__()
-        self._scheduler = Scheduler()
+        result = []
+        for schedule in schedules:
+            next_run = self._get_next_run_time(schedule)
+            result.append({
+                "id": schedule.id,
+                "name": schedule.name,
+                "type": schedule.schedule_type.value,
+                "enabled": schedule.enabled,
+                "next_run": next_run,
+                "metadata": schedule.metadata,
+            })
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "add_cron")
+        return result
 
-            if operation == "add_cron":
-                return self._add_cron(params)
-            elif operation == "add_interval":
-                return self._add_interval(params)
-            elif operation == "remove":
-                return self._remove(params)
-            elif operation == "enable":
-                return self._enable(params)
-            elif operation == "disable":
-                return self._disable(params)
-            elif operation == "list":
-                return self._list(params)
-            elif operation == "start":
-                return self._start(params)
-            elif operation == "stop":
-                return self._stop(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+    def list_tasks(
+        self,
+        schedule_id: Optional[str] = None,
+        status: Optional[TaskStatus] = None,
+        limit: int = 100,
+    ) -> list[ScheduledTask]:
+        """List task executions."""
+        tasks = list(self._tasks.values())
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Scheduler error: {str(e)}")
+        if schedule_id:
+            tasks = [t for t in tasks if t.schedule_id == schedule_id]
+        if status:
+            tasks = [t for t in tasks if t.status == status]
 
-    def _add_cron(self, params: Dict[str, Any]) -> ActionResult:
-        """Add cron job."""
-        name = params.get("name")
-        cron_expr = params.get("cron")
+        return sorted(tasks, key=lambda t: t.scheduled_at, reverse=True)[:limit]
 
-        if not name or not cron_expr:
-            return ActionResult(success=False, message="name and cron are required")
+    def cancel_task(self, task_id: str) -> bool:
+        """Cancel a pending task."""
+        task = self._tasks.get(task_id)
+        if not task or task.status != TaskStatus.PENDING:
+            return False
 
-        def job_func():
-            return {"executed": True}
+        task.status = TaskStatus.CANCELLED
+        return True
 
-        job_id = self._scheduler.add_cron_job(name, job_func, cron_expr)
+    def get_scheduler_stats(self) -> dict:
+        """Get scheduler statistics."""
+        tasks = list(self._tasks.values())
 
-        return ActionResult(success=True, message=f"Cron job added: {name}", data={"job_id": job_id})
-
-    def _add_interval(self, params: Dict[str, Any]) -> ActionResult:
-        """Add interval job."""
-        name = params.get("name")
-        interval = params.get("interval")
-
-        if not name or not interval:
-            return ActionResult(success=False, message="name and interval are required")
-
-        def job_func():
-            return {"executed": True}
-
-        job_id = self._scheduler.add_interval_job(name, job_func, interval)
-
-        return ActionResult(success=True, message=f"Interval job added: {name}", data={"job_id": job_id})
-
-    def _remove(self, params: Dict[str, Any]) -> ActionResult:
-        """Remove job."""
-        job_id = params.get("job_id")
-
-        if not job_id:
-            return ActionResult(success=False, message="job_id is required")
-
-        success = self._scheduler.remove_job(job_id)
-
-        return ActionResult(success=success, message="Removed" if success else "Job not found")
-
-    def _enable(self, params: Dict[str, Any]) -> ActionResult:
-        """Enable job."""
-        job_id = params.get("job_id")
-
-        if not job_id:
-            return ActionResult(success=False, message="job_id is required")
-
-        success = self._scheduler.enable_job(job_id)
-
-        return ActionResult(success=success, message="Enabled" if success else "Job not found")
-
-    def _disable(self, params: Dict[str, Any]) -> ActionResult:
-        """Disable job."""
-        job_id = params.get("job_id")
-
-        if not job_id:
-            return ActionResult(success=False, message="job_id is required")
-
-        success = self._scheduler.disable_job(job_id)
-
-        return ActionResult(success=success, message="Disabled" if success else "Job not found")
-
-    def _list(self, params: Dict[str, Any]) -> ActionResult:
-        """List all jobs."""
-        jobs = self._scheduler.get_jobs()
-
-        return ActionResult(success=True, message=f"{len(jobs)} jobs", data={"jobs": jobs})
-
-    def _start(self, params: Dict[str, Any]) -> ActionResult:
-        """Start scheduler."""
-        self._scheduler.start()
-        return ActionResult(success=True, message="Scheduler started")
-
-    def _stop(self, params: Dict[str, Any]) -> ActionResult:
-        """Stop scheduler."""
-        self._scheduler.stop()
-        return ActionResult(success=True, message="Scheduler stopped")
+        return {
+            "total_schedules": len(self._schedules),
+            "enabled_schedules": sum(1 for s in self._schedules.values() if s.enabled),
+            "total_tasks": len(tasks),
+            "pending_tasks": sum(1 for t in tasks if t.status == TaskStatus.PENDING),
+            "running_tasks": sum(1 for t in tasks if t.status == TaskStatus.RUNNING),
+            "completed_tasks": sum(1 for t in tasks if t.status == TaskStatus.COMPLETED),
+            "failed_tasks": sum(1 for t in tasks if t.status == TaskStatus.FAILED),
+        }
