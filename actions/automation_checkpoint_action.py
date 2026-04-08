@@ -1,211 +1,252 @@
 """
 Automation Checkpoint Action Module.
 
-Creates and manages checkpoints for long-running automation
- workflows with rollback and resume capabilities.
+Checkpoint and resume for long-running automation,
+persists state and allows recovery from failures.
 """
 
 from __future__ import annotations
 
-import os
-import json
-import time
 from typing import Any, Callable, Optional
 from dataclasses import dataclass, field
 import logging
+import json
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Checkpoint:
-    """A workflow checkpoint."""
+    """Checkpoint data."""
     checkpoint_id: str
-    workflow_id: str
+    task_name: str
     step: str
     state: dict[str, Any]
-    created_at: float
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class CheckpointResult:
-    """Result of checkpoint operations."""
-    success: bool
-    checkpoint: Optional[Checkpoint] = None
-    error: Optional[str] = None
+    timestamp: float
+    completed_steps: list[str]
 
 
 class AutomationCheckpointAction:
     """
-    Checkpoint management for workflow automation.
+    Checkpoint-based automation with state persistence.
 
-    Creates checkpoints during long-running workflows to enable
-    resumption after failures and rollback capabilities.
+    Saves state during execution for recovery
+    and resumption after failures.
 
     Example:
-        checkpoint = AutomationCheckpointAction(checkpoint_dir="/tmp/checkpoints")
-        checkpoint.save("workflow_001", "step_3", workflow_state)
-        restored = checkpoint.load_latest("workflow_001")
+        checkpoint = AutomationCheckpointAction(storage_path="./checkpoints")
+        checkpoint.save("step_1", {"progress": 50})
+        state = checkpoint.load("step_1")
     """
 
     def __init__(
         self,
-        checkpoint_dir: str = "/tmp/automation_checkpoints",
-        max_checkpoints: int = 10,
+        storage_path: str = "./checkpoints",
+        task_name: str = "automation",
+        max_checkpoints: int = 100,
     ) -> None:
-        self.checkpoint_dir = checkpoint_dir
+        self.storage_path = storage_path
+        self.task_name = task_name
         self.max_checkpoints = max_checkpoints
-        self._checkpoints: dict[str, list[Checkpoint]] = {}
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        self._current_checkpoint: Optional[Checkpoint] = None
+        self._ensure_storage_dir()
 
     def save(
         self,
-        workflow_id: str,
         step: str,
         state: dict[str, Any],
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> CheckpointResult:
-        """Save a checkpoint for a workflow."""
-        try:
-            checkpoint_id = f"{workflow_id}_{step}_{int(time.time() * 1000)}"
+        completed_steps: Optional[list[str]] = None,
+    ) -> str:
+        """Save a checkpoint."""
+        checkpoint_id = f"{self.task_name}_{step}_{int(time.time())}"
 
-            checkpoint = Checkpoint(
-                checkpoint_id=checkpoint_id,
-                workflow_id=workflow_id,
-                step=step,
-                state=state,
-                created_at=time.time(),
-                metadata=metadata or {},
-            )
+        checkpoint = Checkpoint(
+            checkpoint_id=checkpoint_id,
+            task_name=self.task_name,
+            step=step,
+            state=state,
+            timestamp=time.time(),
+            completed_steps=completed_steps or [],
+        )
 
-            if workflow_id not in self._checkpoints:
-                self._checkpoints[workflow_id] = []
+        self._current_checkpoint = checkpoint
+        self._write_checkpoint(checkpoint)
+        self._cleanup_old_checkpoints()
 
-            self._checkpoints[workflow_id].append(checkpoint)
+        logger.info("Checkpoint saved: %s at step '%s'", checkpoint_id, step)
 
-            self._trim_checkpoints(workflow_id)
-            self._persist_checkpoint(checkpoint)
-
-            return CheckpointResult(success=True, checkpoint=checkpoint)
-
-        except Exception as e:
-            logger.error(f"Failed to save checkpoint: {e}")
-            return CheckpointResult(success=False, error=str(e))
+        return checkpoint_id
 
     def load(
         self,
-        checkpoint_id: str,
+        step: Optional[str] = None,
+        checkpoint_id: Optional[str] = None,
     ) -> Optional[Checkpoint]:
-        """Load a specific checkpoint by ID."""
-        filepath = os.path.join(self.checkpoint_dir, f"{checkpoint_id}.json")
+        """Load a checkpoint."""
+        if checkpoint_id:
+            return self._read_checkpoint(checkpoint_id)
 
-        if not os.path.exists(filepath):
+        if step:
+            checkpoint_id = self._find_latest_for_step(step)
+            if checkpoint_id:
+                return self._read_checkpoint(checkpoint_id)
+
+        latest = self._find_latest_checkpoint()
+        if latest:
+            return self._read_checkpoint(latest)
+
+        return None
+
+    def resume(
+        self,
+        step: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Get state to resume from."""
+        checkpoint = self.load(step=step)
+        if checkpoint:
+            return checkpoint.state
+        return None
+
+    def get_last_step(self) -> Optional[str]:
+        """Get the last completed step."""
+        latest = self._find_latest_checkpoint()
+        if not latest:
+            return None
+
+        checkpoint = self._read_checkpoint(latest)
+        return checkpoint.step if checkpoint else None
+
+    def clear(self) -> None:
+        """Clear all checkpoints."""
+        if os.path.exists(self.storage_path):
+            for filename in os.listdir(self.storage_path):
+                if filename.endswith(".json"):
+                    os.remove(os.path.join(self.storage_path, filename))
+
+    def list_checkpoints(self) -> list[dict[str, Any]]:
+        """List all available checkpoints."""
+        if not os.path.exists(self.storage_path):
+            return []
+
+        checkpoints = []
+        for filename in os.listdir(self.storage_path):
+            if filename.endswith(".json"):
+                path = os.path.join(self.storage_path, filename)
+                stat = os.stat(path)
+                checkpoints.append({
+                    "filename": filename,
+                    "size_bytes": stat.st_size,
+                    "modified": stat.st_mtime,
+                })
+
+        checkpoints.sort(key=lambda x: x["modified"], reverse=True)
+        return checkpoints
+
+    def _ensure_storage_dir(self) -> None:
+        """Ensure storage directory exists."""
+        if not os.path.exists(self.storage_path):
+            os.makedirs(self.storage_path)
+
+    def _write_checkpoint(self, checkpoint: Checkpoint) -> None:
+        """Write checkpoint to disk."""
+        path = os.path.join(
+            self.storage_path,
+            f"{checkpoint.checkpoint_id}.json"
+        )
+
+        with open(path, "w") as f:
+            json.dump({
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "task_name": checkpoint.task_name,
+                "step": checkpoint.step,
+                "state": checkpoint.state,
+                "timestamp": checkpoint.timestamp,
+                "completed_steps": checkpoint.completed_steps,
+            }, f, indent=2, default=str)
+
+    def _read_checkpoint(self, checkpoint_id: str) -> Optional[Checkpoint]:
+        """Read checkpoint from disk."""
+        path = os.path.join(self.storage_path, f"{checkpoint_id}.json")
+
+        if not os.path.exists(path):
             return None
 
         try:
-            with open(filepath, "r") as f:
+            with open(path) as f:
                 data = json.load(f)
 
             return Checkpoint(
                 checkpoint_id=data["checkpoint_id"],
-                workflow_id=data["workflow_id"],
+                task_name=data["task_name"],
                 step=data["step"],
                 state=data["state"],
-                created_at=data["created_at"],
-                metadata=data.get("metadata", {}),
+                timestamp=data["timestamp"],
+                completed_steps=data.get("completed_steps", []),
             )
-
         except Exception as e:
-            logger.error(f"Failed to load checkpoint {checkpoint_id}: {e}")
+            logger.error("Failed to read checkpoint %s: %s", checkpoint_id, e)
             return None
 
-    def load_latest(
-        self,
-        workflow_id: str,
-    ) -> Optional[Checkpoint]:
-        """Load the latest checkpoint for a workflow."""
-        checkpoints = self._checkpoints.get(workflow_id, [])
+    def _find_latest_checkpoint(self) -> Optional[str]:
+        """Find the most recent checkpoint."""
+        if not os.path.exists(self.storage_path):
+            return None
+
+        checkpoints = [
+            f[:-5] for f in os.listdir(self.storage_path)
+            if f.endswith(".json")
+        ]
 
         if not checkpoints:
-            checkpoint_files = [
-                f for f in os.listdir(self.checkpoint_dir)
-                if f.startswith(workflow_id) and f.endswith(".json")
-            ]
+            return None
 
-            if not checkpoint_files:
-                return None
+        checkpoints_with_time = []
+        for cp_id in checkpoints:
+            checkpoint = self._read_checkpoint(cp_id)
+            if checkpoint:
+                checkpoints_with_time.append((cp_id, checkpoint.timestamp))
 
-            latest_file = sorted(checkpoint_files)[-1]
-            return self.load(latest_file.replace(".json", ""))
+        if not checkpoints_with_time:
+            return None
 
-        return checkpoints[-1]
+        checkpoints_with_time.sort(key=lambda x: x[1], reverse=True)
+        return checkpoints_with_time[0][0]
 
-    def list_checkpoints(
-        self,
-        workflow_id: str,
-    ) -> list[Checkpoint]:
-        """List all checkpoints for a workflow."""
-        return self._checkpoints.get(workflow_id, [])
+    def _find_latest_for_step(self, step: str) -> Optional[str]:
+        """Find latest checkpoint for a specific step."""
+        if not os.path.exists(self.storage_path):
+            return None
 
-    def delete(
-        self,
-        checkpoint_id: str,
-    ) -> bool:
-        """Delete a specific checkpoint."""
-        filepath = os.path.join(self.checkpoint_dir, f"{checkpoint_id}.json")
+        checkpoints = [
+            f[:-5] for f in os.listdir(self.storage_path)
+            if f.endswith(".json") and step in f
+        ]
 
-        try:
-            if os.path.exists(filepath):
-                os.remove(filepath)
+        if not checkpoints:
+            return None
 
-            for wf_checkpoints in self._checkpoints.values():
-                wf_checkpoints[:] = [
-                    c for c in wf_checkpoints if c.checkpoint_id != checkpoint_id
-                ]
+        latest = None
+        latest_time = 0
 
-            return True
+        for cp_id in checkpoints:
+            checkpoint = self._read_checkpoint(cp_id)
+            if checkpoint and checkpoint.step == step:
+                if checkpoint.timestamp > latest_time:
+                    latest_time = checkpoint.timestamp
+                    latest = cp_id
 
-        except Exception as e:
-            logger.error(f"Failed to delete checkpoint {checkpoint_id}: {e}")
-            return False
+        return latest
 
-    def delete_workflow_checkpoints(
-        self,
-        workflow_id: str,
-    ) -> int:
-        """Delete all checkpoints for a workflow."""
-        checkpoints = self._checkpoints.pop(workflow_id, [])
-        deleted = 0
+    def _cleanup_old_checkpoints(self) -> None:
+        """Remove old checkpoints exceeding max."""
+        if not os.path.exists(self.storage_path):
+            return
 
-        for checkpoint in checkpoints:
-            filepath = os.path.join(self.checkpoint_dir, f"{checkpoint.checkpoint_id}.json")
-            if os.path.exists(filepath):
-                os.remove(filepath)
-                deleted += 1
+        checkpoints = self.list_checkpoints()
 
-        return deleted
-
-    def _persist_checkpoint(self, checkpoint: Checkpoint) -> None:
-        """Write checkpoint to disk."""
-        filepath = os.path.join(self.checkpoint_dir, f"{checkpoint.checkpoint_id}.json")
-
-        data = {
-            "checkpoint_id": checkpoint.checkpoint_id,
-            "workflow_id": checkpoint.workflow_id,
-            "step": checkpoint.step,
-            "state": checkpoint.state,
-            "created_at": checkpoint.created_at,
-            "metadata": checkpoint.metadata,
-        }
-
-        with open(filepath, "w") as f:
-            json.dump(data, f)
-
-    def _trim_checkpoints(self, workflow_id: str) -> None:
-        """Trim old checkpoints to keep only max_checkpoints."""
-        checkpoints = self._checkpoints[workflow_id]
-
-        while len(checkpoints) > self.max_checkpoints:
-            oldest = checkpoints.pop(0)
-            self.delete(oldest.checkpoint_id)
+        if len(checkpoints) > self.max_checkpoints:
+            for cp in checkpoints[self.max_checkpoints:]:
+                path = os.path.join(self.storage_path, cp["filename"])
+                os.remove(path)
