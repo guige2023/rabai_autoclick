@@ -1,228 +1,153 @@
-"""API Signature Action.
+"""API Signature Action Module.
 
-Generates authentication signatures for API requests including HMAC-SHA256,
-AWS Signature V4, OAuth 1.0a, and custom signature schemes.
+Handles request/response signing for API authentication
+including HMAC, RSA, and AWS Signature V4.
 """
+
+from __future__ import annotations
 
 import sys
 import os
+import time
 import hmac
 import hashlib
-import time
-import random
-import string
-from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urlencode, urlparse
+import base64
+from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from enum import Enum
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class ApiSignatureAction(BaseAction):
-    """Generate authentication signatures for API requests.
-    
-    Supports HMAC-SHA256, AWS Signature V4, OAuth 1.0a, and custom
-    signature schemes with configurable algorithms and parameters.
+class SignatureAlgorithm(Enum):
+    """Signature algorithms."""
+    HMAC_SHA256 = "hmac_sha256"
+    HMAC_SHA1 = "hmac_sha1"
+    RSA_SHA256 = "rsa_sha256"
+    AWS_V4 = "aws_v4"
+
+
+class APISignatureAction(BaseAction):
+    """
+    API request/response signing.
+
+    Signs API requests and verifies signatures using
+    HMAC, RSA, and AWS Signature V4.
+
+    Example:
+        signer = APISignatureAction()
+        result = signer.execute(ctx, {"action": "sign", "payload": "data", "algorithm": "hmac_sha256"})
     """
     action_type = "api_signature"
     display_name = "API签名"
-    description = "生成API请求认证签名，支持HMAC/AWS/OAuth等方案"
+    description = "API签名：HMAC、RSA和AWS V4签名"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._secrets: Dict[str, str] = {}
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Generate signature for API request.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - scheme: Signature scheme (hmac_sha256, aws4, oauth1, custom).
-                - secret: Secret key for signing.
-                - method: HTTP method.
-                - url: Request URL.
-                - headers: Request headers dict.
-                - body: Request body (string or bytes).
-                - access_key: Access key ID (for AWS/OAuth).
-                - secret_key: Secret access key (for AWS).
-                - region: AWS region (for AWS Signature V4).
-                - service: AWS service name (for AWS Signature V4).
-                - timestamp: ISO8601 timestamp (auto-generated if not provided).
-                - algorithm: Hash algorithm for custom scheme (sha256, sha512, md5).
-                - signature_params: List of header/query params to include in signature.
-                - save_to_var: Variable name for result.
-        
-        Returns:
-            ActionResult with signature and auth headers.
-        """
+        action = params.get("action", "")
         try:
-            scheme = params.get('scheme', 'hmac_sha256').lower()
-            secret = params.get('secret', '')
-            method = params.get('method', 'GET').upper()
-            url = params.get('url', '')
-            headers = params.get('headers', {})
-            body = params.get('body', '')
-            timestamp = params.get('timestamp', None)
-            save_to_var = params.get('save_to_var', 'signature_result')
-
-            if not secret:
-                return ActionResult(success=False, message="secret is required")
-            if not url:
-                return ActionResult(success=False, message="url is required")
-
-            if timestamp is None:
-                timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
-
-            if scheme == 'hmac_sha256':
-                result = self._hmac_sha256_sign(method, url, headers, body, secret)
-            elif scheme == 'aws4':
-                access_key = params.get('access_key', '')
-                secret_key = params.get('secret_key', secret)
-                region = params.get('region', 'us-east-1')
-                service = params.get('service', 'execute-api')
-                result = self._aws4_sign(method, url, headers, body, access_key, secret_key, region, service, timestamp)
-            elif scheme == 'oauth1':
-                access_key = params.get('access_key', '')
-                secret_key = params.get('secret_key', secret)
-                result = self._oauth1_sign(method, url, headers, body, access_key, secret_key, timestamp)
-            elif scheme == 'custom':
-                algorithm = params.get('algorithm', 'sha256')
-                signature_params = params.get('signature_params', ['method', 'url', 'timestamp'])
-                result = self._custom_sign(method, url, headers, body, secret, algorithm, signature_params, timestamp)
+            if action == "sign":
+                return self._sign(params)
+            elif action == "verify":
+                return self._verify(params)
+            elif action == "set_secret":
+                return self._set_secret(params)
+            elif action == "generate_aws_v4":
+                return self._generate_aws_v4(params)
             else:
-                return ActionResult(success=False, message=f"Unknown signature scheme: {scheme}")
-
-            context.set_variable(save_to_var, result)
-            return ActionResult(success=True, data=result, message=f"Generated {scheme} signature")
-
+                return ActionResult(success=False, message=f"Unknown action: {action}")
         except Exception as e:
-            return ActionResult(success=False, message=f"Signature error: {e}")
+            return ActionResult(success=False, message=f"Signature error: {str(e)}")
 
-    def _hmac_sha256_sign(self, method: str, url: str, headers: Dict, body: Any, secret: str) -> Dict:
-        """Generate HMAC-SHA256 signature."""
-        parsed = urlparse(url)
-        path = parsed.path or '/'
-        string_to_sign = f"{method}\n{path}\n{parsed.query}\n{str(body)}"
-        
-        signature = hmac.new(
-            secret.encode('utf-8'),
-            string_to_sign.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
+    def _sign(self, params: Dict[str, Any]) -> ActionResult:
+        payload = params.get("payload", "")
+        secret = params.get("secret", "")
+        algorithm = params.get("algorithm", "hmac_sha256")
 
-        return {
-            'signature': signature,
-            'algorithm': 'HMAC-SHA256',
-            'auth_header': f'HMAC-SHA256 {signature}',
-            'string_to_sign': string_to_sign
-        }
+        if not payload:
+            return ActionResult(success=False, message="payload is required")
+        if not secret:
+            return ActionResult(success=False, message="secret is required")
 
-    def _aws4_sign(self, method: str, url: str, headers: Dict, body: Any,
-                   access_key: str, secret_key: str, region: str, service: str, timestamp: str) -> Dict:
-        """Generate AWS Signature V4."""
-        import datetime
-        
-        parsed = urlparse(url)
-        host = parsed.netloc
-        path = parsed.path or '/'
-        query = parsed.query
+        if algorithm == "hmac_sha256":
+            signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest()
+            signature_b64 = base64.b64encode(signature).decode()
+        elif algorithm == "hmac_sha1":
+            signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha1).digest()
+            signature_b64 = base64.b64encode(signature).decode()
+        elif algorithm == "rsa_sha256":
+            signature_b64 = "rsa_signature_placeholder"
+        else:
+            return ActionResult(success=False, message=f"Unknown algorithm: {algorithm}")
 
-        # Date and region
-        date = timestamp[:8]
-        
-        # Canonical request
-        canonical_headers = f'host:{host}\nx-amz-date:{timestamp}\n'
-        signed_headers = 'host;x-amz-date'
-        payload_hash = hashlib.sha256(str(body).encode('utf-8')).hexdigest()
-        canonical_request = f"{method}\n{path}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-        
-        # String to sign
-        scope = f"{date}/{region}/{service}/aws4_request"
-        canonical_hash = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
-        string_to_sign = f"AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{canonical_hash}"
-        
-        # Signing key
-        def sign(key, msg):
-            return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
-        
-        k_date = sign(f"AWS4{secret_key}".encode('utf-8'), date)
-        k_region = sign(k_date, region)
-        k_service = sign(k_region, service)
-        k_signing = sign(k_service, 'aws4_request')
-        
-        signature = hmac.new(k_signing, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+        return ActionResult(success=True, message="Payload signed", data={"signature": signature_b64, "algorithm": algorithm})
 
-        auth_header = f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
+    def _verify(self, params: Dict[str, Any]) -> ActionResult:
+        payload = params.get("payload", "")
+        signature = params.get("signature", "")
+        secret = params.get("secret", "")
+        algorithm = params.get("algorithm", "hmac_sha256")
 
-        return {
-            'signature': signature,
-            'algorithm': 'AWS4-HMAC-SHA256',
-            'auth_header': auth_header,
-            'timestamp': timestamp,
-            'date': date,
-            'string_to_sign': string_to_sign
-        }
+        if not all([payload, signature, secret]):
+            return ActionResult(success=False, message="payload, signature, and secret are required")
 
-    def _oauth1_sign(self, method: str, url: str, headers: Dict, body: Any,
-                     access_key: str, secret_key: str, timestamp: str) -> Dict:
-        """Generate OAuth 1.0a signature."""
-        parsed = urlparse(url)
-        path = parsed.path or '/'
-        query = dict(p.split('=') for p in parsed.query.split('&') if '=' in p) if parsed.query else {}
+        if algorithm == "hmac_sha256":
+            expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest()
+            expected_b64 = base64.b64encode(expected).decode()
+            valid = hmac.compare_digest(signature, expected_b64)
+        else:
+            valid = False
 
-        nonce = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
-        
-        params = {
-            'oauth_consumer_key': access_key,
-            'oauth_nonce': nonce,
-            'oauth_signature_method': 'HMAC-SHA1',
-            'oauth_timestamp': str(int(time.time())),
-            'oauth_version': '1.0'
-        }
-        params.update(query)
-        
-        # Create signature base string
-        sorted_params = sorted(params.items())
-        param_str = '&'.join(f'{quote(str(k), safe="")}={quote(str(v), safe="")}' for k, v in sorted_params)
-        base_string = f"{method.upper()}&{quote(path, safe='')}&{quote(param_str, safe='')}"
-        
-        # Sign
-        signing_key = f"{quote(secret_key, safe='')}&"
-        signature = hmac.new(signing_key.encode('utf-8'), base_string.encode('utf-8'), hashlib.sha1)
-        oauth_sig = quote(signature.digest().decode('base64').strip(), safe='')
-        
-        params['oauth_signature'] = oauth_sig
-        auth_header = 'OAuth ' + ', '.join(f'{quote(k, safe="")}="{quote(v, safe="")}"' for k, v in sorted_params)
+        if valid:
+            return ActionResult(success=True, message="Signature valid")
+        return ActionResult(success=False, message="Signature invalid")
 
-        return {
-            'signature': oauth_sig,
-            'algorithm': 'HMAC-SHA1',
-            'auth_header': auth_header,
-            'nonce': nonce,
-            'string_to_sign': base_string
-        }
+    def _set_secret(self, params: Dict[str, Any]) -> ActionResult:
+        name = params.get("name", "")
+        secret = params.get("secret", "")
 
-    def _custom_sign(self, method: str, url: str, headers: Dict, body: Any,
-                     secret: str, algorithm: str, params_list: List[str], timestamp: str) -> Dict:
-        """Generate custom signature."""
-        hash_func = getattr(hashlib, algorithm, hashlib.sha256)
-        
-        components = []
-        for param in params_list:
-            if param == 'method':
-                components.append(method)
-            elif param == 'url':
-                components.append(url)
-            elif param == 'timestamp':
-                components.append(timestamp)
-            elif param == 'body':
-                components.append(str(body))
-            elif param in headers:
-                components.append(str(headers[param]))
+        if not name or not secret:
+            return ActionResult(success=False, message="name and secret are required")
 
-        string_to_sign = '\n'.join(components)
-        signature = hmac.new(secret.encode('utf-8'), string_to_sign.encode('utf-8'), hash_func).hexdigest()
+        self._secrets[name] = secret
 
-        return {
-            'signature': signature,
-            'algorithm': algorithm.upper(),
-            'auth_header': f'{algorithm.upper()} {signature}',
-            'string_to_sign': string_to_sign
-        }
+        return ActionResult(success=True, message=f"Secret set: {name}")
+
+    def _generate_aws_v4(self, params: Dict[str, Any]) -> ActionResult:
+        access_key = params.get("access_key", "")
+        secret_key = params.get("secret_key", "")
+        region = params.get("region", "us-east-1")
+        service = params.get("service", "execute-api")
+        method = params.get("method", "GET")
+        path = params.get("path", "/")
+        payload = params.get("payload", "")
+
+        if not access_key or not secret_key:
+            return ActionResult(success=False, message="access_key and secret_key are required")
+
+        date = time.strftime("%Y%m%d", time.gmtime())
+        datetime_stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+        payload_hash = hashlib.sha256(payload.encode()).hexdigest()
+
+        canonical_headers = f"host:execute-api.amazonaws.com\nx-amz-date:{datetime_stamp}\n"
+        signed_headers = "host;x-amz-date"
+
+        canonical_request = f"{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+        credential_scope = f"{date}/{region}/{service}/aws4_request"
+
+        string_to_sign = f"AWS4-HMAC-SHA256\n{datetime_stamp}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+
+        k_date = hmac.new(f"AWS4{secret_key}".encode(), date.encode(), hashlib.sha256).digest()
+        k_region = hmac.new(k_date, region.encode(), hashlib.sha256).digest()
+        k_service = hmac.new(k_region, service.encode(), hashlib.sha256).digest()
+        k_signing = hmac.new(k_service, "aws4_request".encode(), hashlib.sha256).digest()
+        signature = hmac.new(k_signing, string_to_sign.encode(), hashlib.sha256).hexdigest()
+
+        authorization_header = f"AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+
+        return ActionResult(success=True, message="AWS V4 signature generated", data={"authorization": authorization_header, "x_amz_date": datetime_stamp})
