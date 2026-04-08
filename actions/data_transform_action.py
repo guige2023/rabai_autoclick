@@ -1,445 +1,477 @@
+"""Data transform action module for RabAI AutoClick.
+
+Provides data transformation operations:
+- DataTransformer: General data transformations
+- SchemaMapper: Map data between schemas
+- DataAggregator: Aggregate and group data
+- DataFilter: Filter and select data
+- DataSorter: Sort data by multiple keys
+- DataJoiner: Join multiple data sources
 """
-Data Processing and Transformation Action Module.
 
-Provides data cleaning, normalization, deduplication, aggregation,
-schema validation, and format conversion utilities.
+import time
+from typing import Any, Callable, Dict, List, Optional, Set, Union
+from dataclasses import dataclass
+from enum import Enum
 
-Example:
-    >>> from data_transform_action import DataTransformer, TransformConfig
-    >>> transformer = DataTransformer()
-    >>> cleaned = transformer.clean_records(records, remove_nulls=True)
-    >>> normalized = transformer.normalize_fields(cleaned, {"name": "title_case"})
-"""
-from __future__ import annotations
+import sys
+import os
 
-import re
-import json
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Callable, Optional, TypeVar, Generic
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-T = TypeVar("T")
+class TransformType(Enum):
+    """Transformation types."""
+    MAP = "map"
+    FILTER = "filter"
+    REDUCE = "reduce"
+    FLATTEN = "flatten"
+    GROUP = "group"
+    SORT = "sort"
+    JOIN = "join"
+    PIVOT = "pivot"
+    UNPIVOT = "unpivot"
 
 
 @dataclass
 class TransformConfig:
-    """Configuration for data transformation operations."""
-    remove_nulls: bool = False
-    trim_strings: bool = True
-    lowercase_keys: bool = True
-    dedupe: bool = False
-    dedupe_key: Optional[str] = None
-    sort_by: Optional[str] = None
-    reverse_sort: bool = False
-
-
-@dataclass
-class ProcessingStats:
-    """Statistics from a transformation operation."""
-    input_count: int = 0
-    output_count: int = 0
-    nulls_removed: int = 0
-    duplicates_removed: int = 0
-    errors: list[str] = field(default_factory=list)
+    """Configuration for transformations."""
+    transform_type: TransformType
+    source_field: Optional[str] = None
+    target_field: Optional[str] = None
+    expression: Optional[str] = None
+    keys: List[str] = None
+    ascending: bool = True
 
 
 class DataTransformer:
-    """Transform and clean structured data records."""
+    """General data transformer."""
 
     def __init__(self):
-        self._stats = ProcessingStats()
+        self._transforms: List[TransformConfig] = []
 
-    def clean_records(
-        self,
-        records: list[dict[str, Any]],
-        config: Optional[TransformConfig] = None,
-    ) -> list[dict[str, Any]]:
-        """
-        Clean a list of records with configurable rules.
+    def add_transform(self, config: TransformConfig) -> "DataTransformer":
+        """Add a transformation."""
+        self._transforms.append(config)
+        return self
 
-        Args:
-            records: Input list of dictionaries
-            config: TransformConfig with cleaning options
-
-        Returns:
-            Cleaned list of dictionaries
-        """
-        config = config or TransformConfig()
-        self._stats = ProcessingStats(input_count=len(records))
-
-        result: list[dict[str, Any]] = []
-
-        for record in records:
-            try:
-                cleaned = self._clean_record(record, config)
-                if cleaned is None:
-                    continue
-                if config.remove_nulls and self._is_all_null(cleaned):
-                    continue
-                result.append(cleaned)
-            except Exception as e:
-                self._stats.errors.append(f"Record error: {e}")
-
-        self._stats.output_count = len(result)
-        self._stats.nulls_removed = self._stats.input_count - self._stats.output_count
+    def apply(self, data: Any) -> Any:
+        """Apply all transformations."""
+        result = data
+        for transform in self._transforms:
+            result = self._apply_single(result, transform)
         return result
 
-    def _clean_record(self, record: dict[str, Any], config: TransformConfig) -> Optional[dict[str, Any]]:
-        if record is None:
+    def _apply_single(self, data: Any, config: TransformConfig) -> Any:
+        """Apply single transformation."""
+        if config.transform_type == TransformType.MAP:
+            return self._map(data, config)
+        elif config.transform_type == TransformType.FILTER:
+            return self._filter(data, config)
+        elif config.transform_type == TransformType.REDUCE:
+            return self._reduce(data, config)
+        elif config.transform_type == TransformType.FLATTEN:
+            return self._flatten(data)
+        elif config.transform_type == TransformType.GROUP:
+            return self._group(data, config)
+        elif config.transform_type == TransformType.SORT:
+            return self._sort(data, config)
+        return data
+
+    def _map(self, data: List[Dict], config: TransformConfig) -> List[Dict]:
+        """Apply mapping transformation."""
+        if not data:
+            return data
+
+        source = config.source_field or "value"
+        target = config.target_field or source
+        expr = config.expression
+
+        if expr:
+            try:
+                compiled = eval(f"lambda x: {expr}")
+                return [{**item, target: compiled(item.get(source))} for item in data]
+            except Exception:
+                return data
+        return [{**item, target: item.get(source)} for item in data]
+
+    def _filter(self, data: List[Dict], config: TransformConfig) -> List[Dict]:
+        """Apply filter transformation."""
+        if not data:
+            return data
+
+        expr = config.expression
+        if not expr:
+            return data
+
+        try:
+            compiled = eval(f"lambda x: {expr}")
+            return [item for item in data if compiled(item)]
+        except Exception:
+            return data
+
+    def _reduce(self, data: List[Any], config: TransformConfig) -> Any:
+        """Apply reduce transformation."""
+        if not data:
             return None
-        cleaned: dict[str, Any] = {}
-        for key, value in record.items():
-            new_key = key
-            if config.lowercase_keys:
-                new_key = key.lower().strip()
-            if value is None:
-                if not config.remove_nulls:
-                    cleaned[new_key] = None
-            elif isinstance(value, str) and config.trim_strings:
-                value = value.strip()
-                if not value:
-                    value = None
-                    if config.remove_nulls:
-                        continue
-                cleaned[new_key] = value
-            else:
-                cleaned[new_key] = value
-        return cleaned
 
-    def _is_all_null(self, record: dict[str, Any]) -> bool:
-        return all(v is None for v in record.values())
+        expr = config.expression
+        if not expr:
+            return data
 
-    def deduplicate(
-        self,
-        records: list[dict[str, Any]],
-        key: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
-        """
-        Remove duplicate records.
+        try:
+            compiled = eval(f"lambda acc, x: {expr}")
+            result = data[0]
+            for item in data[1:]:
+                result = compiled(result, item)
+            return result
+        except Exception:
+            return data
 
-        Args:
-            records: Input records
-            key: Field name to use for dedup comparison (None = entire record)
+    def _flatten(self, data: Any) -> List[Any]:
+        """Flatten nested structure."""
+        if isinstance(data, list):
+            result = []
+            for item in data:
+                result.extend(self._flatten(item))
+            return result
+        elif isinstance(data, dict):
+            result = []
+            for value in data.values():
+                result.extend(self._flatten(value))
+            return result
+        else:
+            return [data]
 
-        Returns:
-            Deduplicated records
-        """
-        seen: set[str] = set()
-        result: list[dict[str, Any]] = []
-        for record in records:
-            if key:
-                val = json.dumps(record.get(key), sort_keys=True, default=str)
-            else:
-                val = json.dumps(record, sort_keys=True, default=str)
-            if val not in seen:
-                seen.add(val)
-                result.append(record)
-        self._stats.duplicates_removed = len(records) - len(result)
+    def _group(self, data: List[Dict], config: TransformConfig) -> Dict[str, List[Dict]]:
+        """Group data by keys."""
+        if not data or not config.keys:
+            return {}
+
+        keys = config.keys
+        result = {}
+
+        for item in data:
+            key_values = tuple(item.get(k) for k in keys)
+            key_str = str(key_values)
+
+            if key_str not in result:
+                result[key_str] = []
+            result[key_str].append(item)
+
         return result
 
-    def normalize_fields(
-        self,
-        records: list[dict[str, Any]],
-        field_rules: dict[str, str],
-    ) -> list[dict[str, Any]]:
-        """
-        Normalize specific fields using named transformations.
+    def _sort(self, data: List[Dict], config: TransformConfig) -> List[Dict]:
+        """Sort data."""
+        if not data:
+            return data
+
+        keys = config.keys or ["value"]
+        ascending = config.ascending
+
+        try:
+            return sorted(data, key=lambda x: tuple(x.get(k) for k in keys), reverse=not ascending)
+        except Exception:
+            return data
+
+
+class SchemaMapper:
+    """Map data between schemas."""
+
+    def __init__(self, schema: Dict[str, str]):
+        """Initialize with schema mapping.
 
         Args:
-            records: Input records
-            field_rules: Map of field name to normalization type
-                         (lower, upper, title_case, strip, int, float, bool)
-
-        Returns:
-            Records with normalized fields
+            schema: Dict mapping target field to source expression
         """
-        result: list[dict[str, Any]] = []
-        for record in records:
-            new_record = dict(record)
-            for field_name, rule in field_rules.items():
-                if field_name not in new_record:
-                    continue
-                value = new_record[field_name]
-                new_record[field_name] = self._apply_normalization(value, rule)
-            result.append(new_record)
+        self.schema = schema
+
+    def map(self, data: Dict) -> Dict:
+        """Map data according to schema."""
+        result = {}
+        for target, source in self.schema.items():
+            try:
+                if isinstance(source, str) and source.startswith("="):
+                    result[target] = eval(f"lambda x: {source[1:]}", {"x": data})
+                else:
+                    result[target] = data.get(source, source if isinstance(source, str) else None)
+            except Exception:
+                result[target] = None
         return result
 
-    def _apply_normalization(self, value: Any, rule: str) -> Any:
-        if value is None:
-            return None
-        rule = rule.lower().strip()
-        if rule == "lower":
-            return str(value).lower().strip()
-        elif rule == "upper":
-            return str(value).upper().strip()
-        elif rule == "title_case":
-            return str(value).title().strip()
-        elif rule == "strip":
-            return str(value).strip()
-        elif rule == "int":
-            try:
-                return int(float(value))
-            except (TypeError, ValueError):
-                return value
-        elif rule == "float":
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return value
-        elif rule == "bool":
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return value.lower() in ("true", "1", "yes", "on")
-            return bool(value)
-        elif rule == "slug":
-            return self._to_slug(str(value))
-        elif rule == "email":
-            return self._normalize_email(str(value))
-        elif rule == "phone":
-            return self._normalize_phone(str(value))
-        return value
+    def map_list(self, data: List[Dict]) -> List[Dict]:
+        """Map list of data."""
+        return [self.map(item) for item in data]
 
-    def _to_slug(self, text: str) -> str:
-        text = text.lower().strip()
-        text = re.sub(r"[^\w\s-]", "", text)
-        text = re.sub(r"[_\s]+", "-", text)
-        return text.strip("-")
 
-    def _normalize_email(self, email: str) -> str:
-        email = email.lower().strip()
-        return email if "@" in email else ""
+class DataAggregator:
+    """Aggregate data."""
 
-    def _normalize_phone(self, phone: str) -> str:
-        digits = re.sub(r"\D", "", phone)
-        if len(digits) == 10:
-            return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
-        elif len(digits) == 11 and digits[0] == "1":
-            return f"+1 ({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
-        return phone
+    @staticmethod
+    def count(data: List[Dict], field: str) -> int:
+        """Count non-null values."""
+        return sum(1 for item in data if item.get(field) is not None)
 
-    def aggregate(
-        self,
-        records: list[dict[str, Any]],
-        group_by: str,
-        agg_field: str,
-        agg_func: str = "sum",
-    ) -> list[dict[str, Any]]:
-        """
-        Aggregate records by grouping field.
+    @staticmethod
+    def sum(data: List[Dict], field: str) -> Union[int, float]:
+        """Sum values."""
+        return sum(item.get(field, 0) for item in data if item.get(field) is not None)
 
-        Args:
-            records: Input records
-            group_by: Field to group by
-            agg_field: Field to aggregate
-            agg_func: Aggregation function (sum, count, avg, min, max, list)
+    @staticmethod
+    def average(data: List[Dict], field: str) -> float:
+        """Calculate average."""
+        values = [item.get(field) for item in data if item.get(field) is not None]
+        return sum(values) / len(values) if values else 0
 
-        Returns:
-            Aggregated records
-        """
-        groups: dict[str, list[Any]] = {}
-        for record in records:
-            key = str(record.get(group_by, ""))
-            val = record.get(agg_field)
+    @staticmethod
+    def min(data: List[Dict], field: str) -> Any:
+        """Get minimum value."""
+        values = [item.get(field) for item in data if item.get(field) is not None]
+        return min(values) if values else None
+
+    @staticmethod
+    def max(data: List[Dict], field: str) -> Any:
+        """Get maximum value."""
+        values = [item.get(field) for item in data if item.get(field) is not None]
+        return max(values) if values else None
+
+    @staticmethod
+    def group_aggregate(
+        data: List[Dict],
+        group_by: List[str],
+        aggregates: Dict[str, str],
+    ) -> List[Dict]:
+        """Group and aggregate."""
+        groups = {}
+        for item in data:
+            key = tuple(item.get(k) for k in group_by)
             if key not in groups:
                 groups[key] = []
-            groups[key].append(val)
+            groups[key].append(item)
 
-        result: list[dict[str, Any]] = []
-        for key, values in groups.items():
-            non_null = [v for v in values if v is not None]
-            if not non_null:
-                continue
-            if agg_func == "sum":
-                agg_val = sum(non_null)
-            elif agg_func == "count":
-                agg_val = len(non_null)
-            elif agg_func == "avg":
-                agg_val = sum(non_null) / len(non_null) if non_null else 0
-            elif agg_func == "min":
-                agg_val = min(non_null)
-            elif agg_func == "max":
-                agg_val = max(non_null)
-            elif agg_func == "list":
-                agg_val = non_null
-            else:
-                agg_val = non_null
-            result.append({group_by: key, agg_field: agg_val})
-        return result
+        results = []
+        for key, items in groups.items():
+            result = dict(zip(group_by, key))
+            for field, agg_func in aggregates.items():
+                if agg_func == "count":
+                    result[field] = len(items)
+                elif agg_func == "sum":
+                    result[field] = DataAggregator.sum(items, field)
+                elif agg_func == "avg":
+                    result[field] = DataAggregator.average(items, field)
+                elif agg_func == "min":
+                    result[field] = DataAggregator.min(items, field)
+                elif agg_func == "max":
+                    result[field] = DataAggregator.max(items, field)
+            results.append(result)
 
-    def pivot(
-        self,
-        records: list[dict[str, Any]],
-        index: str,
-        columns: str,
-        values: str,
-        agg_func: str = "first",
-    ) -> list[dict[str, Any]]:
-        """Pivot records from long to wide format."""
-        pivot: dict[str, dict[str, Any]] = {}
-        for record in records:
-            idx_val = str(record.get(index, ""))
-            col_val = str(record.get(columns, ""))
-            val = record.get(values)
-            if idx_val not in pivot:
-                pivot[idx_val] = {index: idx_val}
-            if agg_func == "first":
-                pivot[idx_val][col_val] = val
-            elif agg_func == "count":
-                pivot[idx_val][col_val] = pivot[idx_val].get(col_val, 0) + 1
-            elif agg_func == "sum" and val is not None:
-                pivot[idx_val][col_val] = (pivot[idx_val].get(col_val, 0)) + val
-        return list(pivot.values())
+        return results
 
-    def join_records(
-        self,
-        left: list[dict[str, Any]],
-        right: list[dict[str, Any]],
+
+class DataJoiner:
+    """Join multiple data sources."""
+
+    @staticmethod
+    def inner_join(
+        left: List[Dict],
+        right: List[Dict],
         left_key: str,
         right_key: str,
-        join_type: str = "inner",
-    ) -> list[dict[str, Any]]:
-        """
-        Join two record sets on keys (like SQL join).
+    ) -> List[Dict]:
+        """Inner join on key."""
+        right_index = {item[right_key]: item for item in right if right_key in item}
+        results = []
 
-        Args:
-            left: Left records
-            right: Right records
-            left_key: Key field in left records
-            right_key: Key field in right records
-            join_type: inner, left, right, full, cross
+        for left_item in left:
+            key_val = left_item.get(left_key)
+            if key_val in right_index:
+                results.append({**left_item, **right_index[key_val]})
 
-        Returns:
-            Joined records
-        """
-        if join_type == "cross":
-            return [{**l, **r} for l in left for r in right]
+        return results
 
-        right_index: dict[str, list[dict[str, Any]]] = {}
-        for r in right:
-            k = str(r.get(right_key, ""))
-            if k not in right_index:
-                right_index[k] = []
-            right_index[k].append(r)
+    @staticmethod
+    def left_join(
+        left: List[Dict],
+        right: List[Dict],
+        left_key: str,
+        right_key: str,
+    ) -> List[Dict]:
+        """Left join on key."""
+        right_index = {item[right_key]: item for item in right if right_key in item}
+        results = []
 
-        result: list[dict[str, Any]] = []
-        matched_right: set[int] = set()
-
-        for i, l in enumerate(left):
-            k = str(l.get(left_key, ""))
-            if k in right_index:
-                for r in right_index[k]:
-                    result.append({**l, **r})
-                    matched_right.add(id(r))
-            elif join_type in ("left", "full"):
-                result.append({**l})
-
-        if join_type in ("right", "full"):
-            for r in right:
-                if id(r) not in matched_right:
-                    result.append({r})
-
-        return result
-
-    def flatten_record(self, record: dict[str, Any], separator: str = ".") -> dict[str, Any]:
-        """Flatten nested records to dot-notation keys."""
-        result: dict[str, Any] = {}
-
-        def _flatten(obj: Any, prefix: str = "") -> None:
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    new_key = f"{prefix}{separator}{k}" if prefix else k
-                    _flatten(v, new_key)
-            elif isinstance(obj, list):
-                for i, item in enumerate(obj):
-                    _flatten(item, f"{prefix}[{i}]")
+        for left_item in left:
+            key_val = left_item.get(left_key)
+            if key_val in right_index:
+                results.append({**left_item, **right_index[key_val]})
             else:
-                result[prefix] = obj
+                results.append(left_item)
 
-        _flatten(record)
-        return result
+        return results
 
-    def unflatten_record(self, flat: dict[str, Any], separator: str = ".") -> dict[str, Any]:
-        """Unflatten dot-notation keys back to nested structure."""
-        result: dict[str, Any] = {}
-        for key, value in flat.items():
-            parts = re.split(r"[.\[\]]+", key)
-            parts = [p for p in parts if p]
-            current = result
-            for i, part in enumerate(parts[:-1]):
-                if part.isdigit():
-                    idx = int(part)
-                    if i == 0:
-                        current = result
-                    while len(current) <= idx:
-                        current.append({})
-                    if isinstance(current, list):
-                        current = current[idx]
-                    else:
-                        current = current.setdefault(idx, {})
-                else:
-                    if part not in current:
-                        current[part] = {}
-                    current = current[part]
-            last = parts[-1]
-            if last.isdigit():
-                idx = int(last)
-                while len(current) <= idx:
-                    current.append(None)
-                current[idx] = value
+    @staticmethod
+    def full_outer_join(
+        left: List[Dict],
+        right: List[Dict],
+        left_key: str,
+        right_key: str,
+    ) -> List[Dict]:
+        """Full outer join on key."""
+        right_index = {item[right_key]: item for item in right if right_key in item}
+        left_keys = set(item.get(left_key) for item in left)
+
+        results = list(left)
+        for right_item in right:
+            key_val = right_item.get(right_key)
+            if key_val not in left_keys:
+                results.append(right_item)
             else:
-                current[last] = value
-        return result
+                for i, left_item in enumerate(results):
+                    if left_item.get(left_key) == key_val:
+                        results[i] = {**left_item, **right_item}
+                        break
 
-    def validate_schema(
-        self,
-        records: list[dict[str, Any]],
-        required_fields: list[str],
-        field_types: Optional[dict[str, type]] = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-        """
-        Validate records against a schema.
+        return results
 
-        Returns:
-            Tuple of (valid_records, errors)
-        """
-        valid: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
 
-        for i, record in enumerate(records):
-            record_errors: list[str] = []
-            for field in required_fields:
-                if field not in record or record[field] is None:
-                    record_errors.append(f"Missing required field: {field}")
-            if field_types:
-                for field, expected_type in field_types.items():
-                    if field in record and record[field] is not None:
-                        if not isinstance(record[field], expected_type):
-                            record_errors.append(
-                                f"Field '{field}' has type {type(record[field]).__name__}, "
-                                f"expected {expected_type.__name__}"
-                            )
-            if record_errors:
-                errors.append({"index": str(i), "errors": "; ".join(record_errors)})
+class DataTransformAction(BaseAction):
+    """Data transformation action."""
+    action_type = "data_transform"
+    display_name = "数据转换"
+    description = "数据转换和映射"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "transform")
+            data = params.get("data", [])
+
+            if operation == "transform":
+                return self._transform(data, params)
+            elif operation == "map_schema":
+                return self._map_schema(data, params)
+            elif operation == "aggregate":
+                return self._aggregate(data, params)
+            elif operation == "join":
+                return self._join(data, params)
+            elif operation == "filter":
+                return self._filter(data, params)
+            elif operation == "sort":
+                return self._sort(data, params)
+            elif operation == "group":
+                return self._group(data, params)
             else:
-                valid.append(record)
-        return valid, errors
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-    def get_stats(self) -> ProcessingStats:
-        """Return processing statistics from last operation."""
-        return self._stats
+        except Exception as e:
+            return ActionResult(success=False, message=f"Transform error: {str(e)}")
 
+    def _transform(self, data: List[Dict], params: Dict) -> ActionResult:
+        """Apply transformations."""
+        transformer = DataTransformer()
 
-if __name__ == "__main__":
-    transformer = DataTransformer()
-    records = [
-        {"name": "  Alice  ", "age": 30, "score": 85},
-        {"name": "  bob  ", "age": 25, "score": 90},
-        {"name": "  Alice  ", "age": 30, "score": 85},
-        {"name": "  carol", "age": None, "score": 70},
-    ]
-    config = TransformConfig(remove_nulls=True, lowercase_keys=True)
-    cleaned = transformer.clean_records(records, config)
-    print(f"Cleaned: {len(cleaned)} records")
-    print(json.dumps(cleaned, indent=2))
+        transforms = params.get("transforms", [])
+        for t in transforms:
+            ttype = TransformType[t.get("type", "MAP").upper()]
+            config = TransformConfig(
+                transform_type=ttype,
+                source_field=t.get("source_field"),
+                target_field=t.get("target_field"),
+                expression=t.get("expression"),
+                keys=t.get("keys", []),
+                ascending=t.get("ascending", True),
+            )
+            transformer.add_transform(config)
+
+        result = transformer.apply(data)
+        return ActionResult(success=True, message=f"Transformed {len(data)} items", data={"result": result})
+
+    def _map_schema(self, data: List[Dict], params: Dict) -> ActionResult:
+        """Map data to schema."""
+        schema = params.get("schema", {})
+        mapper = SchemaMapper(schema)
+
+        if isinstance(data, list):
+            result = mapper.map_list(data)
+        else:
+            result = mapper.map(data)
+
+        return ActionResult(success=True, message="Schema mapped", data={"result": result})
+
+    def _aggregate(self, data: List[Dict], params: Dict) -> ActionResult:
+        """Aggregate data."""
+        group_by = params.get("group_by", [])
+        aggregates = params.get("aggregates", {})
+
+        if group_by:
+            result = DataAggregator.group_aggregate(data, group_by, aggregates)
+        else:
+            result = {}
+            for field, agg_func in aggregates.items():
+                if agg_func == "count":
+                    result[field] = DataAggregator.count(data, field)
+                elif agg_func == "sum":
+                    result[field] = DataAggregator.sum(data, field)
+                elif agg_func == "avg":
+                    result[field] = DataAggregator.average(data, field)
+                elif agg_func == "min":
+                    result[field] = DataAggregator.min(data, field)
+                elif agg_func == "max":
+                    result[field] = DataAggregator.max(data, field)
+
+        return ActionResult(success=True, message="Aggregated", data={"result": result})
+
+    def _join(self, data: List[Dict], params: Dict) -> ActionResult:
+        """Join data sources."""
+        left = data
+        right = params.get("right", [])
+        join_type = params.get("join_type", "inner")
+        left_key = params.get("left_key", "id")
+        right_key = params.get("right_key", "id")
+
+        if join_type == "inner":
+            result = DataJoiner.inner_join(left, right, left_key, right_key)
+        elif join_type == "left":
+            result = DataJoiner.left_join(left, right, left_key, right_key)
+        elif join_type == "full":
+            result = DataJoiner.full_outer_join(left, right, left_key, right_key)
+        else:
+            return ActionResult(success=False, message=f"Unknown join type: {join_type}")
+
+        return ActionResult(success=True, message=f"{join_type} join: {len(result)} results", data={"result": result})
+
+    def _filter(self, data: List[Dict], params: Dict) -> ActionResult:
+        """Filter data."""
+        expr = params.get("expression", "True")
+
+        try:
+            compiled = eval(f"lambda x: {expr}")
+            result = [item for item in data if compiled(item)]
+            return ActionResult(success=True, message=f"Filtered to {len(result)} items", data={"result": result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Filter error: {str(e)}")
+
+    def _sort(self, data: List[Dict], params: Dict) -> ActionResult:
+        """Sort data."""
+        keys = params.get("keys", [])
+        ascending = params.get("ascending", True)
+
+        if not keys:
+            return ActionResult(success=False, message="keys is required")
+
+        try:
+            result = sorted(data, key=lambda x: tuple(x.get(k) for k in keys), reverse=not ascending)
+            return ActionResult(success=True, message=f"Sorted by {keys}", data={"result": result})
+        except Exception as e:
+            return ActionResult(success=False, message=f"Sort error: {str(e)}")
+
+    def _group(self, data: List[Dict], params: Dict) -> ActionResult:
+        """Group data."""
+        keys = params.get("keys", [])
+
+        if not keys:
+            return ActionResult(success=False, message="keys is required")
+
+        result = DataAggregator.group_aggregate(data, keys, {"_count": "count"})
+        return ActionResult(success=True, message=f"Grouped by {keys}", data={"result": result})
