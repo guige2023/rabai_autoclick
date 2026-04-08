@@ -1,285 +1,196 @@
-"""Transactional Outbox action module for RabAI AutoClick.
+"""Outbox Pattern Action Module.
 
-Provides the transactional outbox pattern for reliable
-event publishing alongside database operations.
+Provides transactional outbox pattern for
+reliable message delivery.
 """
 
-import sys
-import os
-import json
 import time
-import uuid
+import threading
+import json
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+import sys
+import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
 class OutboxStatus(Enum):
-    """Status of an outbox entry."""
+    """Outbox message status."""
     PENDING = "pending"
-    PUBLISHED = "published"
+    SENT = "sent"
     FAILED = "failed"
-    EXPIRED = "expired"
 
 
 @dataclass
-class OutboxEntry:
-    """Represents an event in the transactional outbox."""
-    entry_id: str
-    aggregate_type: str
-    aggregate_id: str
-    event_type: str
-    payload: Dict[str, Any]
-    status: OutboxStatus
-    created_at: float
-    published_at: Optional[float] = None
-    attempts: int = 0
-    max_attempts: int = 3
+class OutboxMessage:
+    """Outbox message."""
+    message_id: str
+    channel: str
+    payload: Any
+    headers: Dict[str, str] = field(default_factory=dict)
+    status: OutboxStatus = OutboxStatus.PENDING
+    created_at: float = field(default_factory=time.time)
+    sent_at: Optional[float] = None
+    retry_count: int = 0
     last_error: Optional[str] = None
-    expires_at: float = 0.0
-    correlation_id: Optional[str] = None
-    causation_id: Optional[str] = None
 
 
-class TransactionalOutbox:
-    """Transactional outbox store for reliable event publishing."""
-    
-    def __init__(self, persistence_path: Optional[str] = None):
-        self._entries: Dict[str, OutboxEntry] = {}
-        self._publish_handlers: Dict[str, callable] = {}
-        self._persistence_path = persistence_path
-        self._load()
-    
-    def _load(self) -> None:
-        """Load outbox from persistence."""
-        if self._persistence_path and os.path.exists(self._persistence_path):
-            try:
-                with open(self._persistence_path, 'r') as f:
-                    data = json.load(f)
-                    for entry_data in data.get("entries", []):
-                        entry_data.pop('status', None)
-                        entry = OutboxEntry(
-                            status=OutboxStatus(entry_data.pop('_status')),
-                            **entry_data
-                        )
-                        self._entries[entry.entry_id] = entry
-            except (json.JSONDecodeError, TypeError, KeyError):
-                pass
-    
-    def _persist(self) -> None:
-        """Persist outbox entries."""
-        if self._persistence_path:
-            try:
-                data = {
-                    "entries": [
-                        {
-                            "_status": e.status.value,
-                            "entry_id": e.entry_id,
-                            "aggregate_type": e.aggregate_type,
-                            "aggregate_id": e.aggregate_id,
-                            "event_type": e.event_type,
-                            "payload": e.payload,
-                            "created_at": e.created_at,
-                            "published_at": e.published_at,
-                            "attempts": e.attempts,
-                            "max_attempts": e.max_attempts,
-                            "last_error": e.last_error,
-                            "expires_at": e.expires_at,
-                            "correlation_id": e.correlation_id,
-                            "causation_id": e.causation_id
-                        }
-                        for e in self._entries.values()
-                    ]
-                }
-                with open(self._persistence_path, 'w') as f:
-                    json.dump(data, f, indent=2, default=str)
-            except OSError:
-                pass
-    
-    def add_entry(
+class OutboxManager:
+    """Manages outbox pattern."""
+
+    def __init__(self):
+        self._messages: Dict[str, OutboxMessage] = {}
+        self._handlers: Dict[str, callable] = {}
+        self._lock = threading.RLock()
+
+    def register_handler(self, channel: str, handler: callable) -> None:
+        """Register message handler."""
+        self._handlers[channel] = handler
+
+    def add_message(
         self,
-        aggregate_type: str,
-        aggregate_id: str,
-        event_type: str,
-        payload: Dict[str, Any],
-        ttl_seconds: float = 86400.0,
-        correlation_id: Optional[str] = None,
-        causation_id: Optional[str] = None
+        channel: str,
+        payload: Any,
+        headers: Optional[Dict] = None
     ) -> str:
-        """Add an entry to the outbox atomically with data changes."""
-        entry_id = str(uuid.uuid4())
-        entry = OutboxEntry(
-            entry_id=entry_id,
-            aggregate_type=aggregate_type,
-            aggregate_id=aggregate_id,
-            event_type=event_type,
+        """Add message to outbox."""
+        message_id = f"outbox_{int(time.time() * 1000)}"
+
+        message = OutboxMessage(
+            message_id=message_id,
+            channel=channel,
             payload=payload,
-            status=OutboxStatus.PENDING,
-            created_at=time.time(),
-            expires_at=time.time() + ttl_seconds,
-            correlation_id=correlation_id or str(uuid.uuid4()),
-            causation_id=causation_id
+            headers=headers or {}
         )
-        self._entries[entry_id] = entry
-        self._persist()
-        return entry_id
-    
-    def register_handler(self, event_type: str, handler: callable) -> None:
-        """Register a handler for publishing an event type."""
-        self._publish_handlers[event_type] = handler
-    
-    def publish_entry(self, entry_id: str) -> tuple[bool, str]:
-        """Attempt to publish a single outbox entry."""
-        entry = self._entries.get(entry_id)
-        if not entry:
-            return False, "Entry not found"
-        
-        if entry.status == OutboxStatus.PUBLISHED:
-            return True, "Already published"
-        
-        entry.attempts += 1
-        handler = self._publish_handlers.get(entry.event_type)
-        
-        try:
-            if handler:
-                handler(entry.payload)
-            entry.status = OutboxStatus.PUBLISHED
-            entry.published_at = time.time()
-            self._persist()
-            return True, "Published successfully"
-        
-        except Exception as e:
-            entry.last_error = str(e)
-            if entry.attempts >= entry.max_attempts:
-                entry.status = OutboxStatus.FAILED
-            self._persist()
-            return False, str(e)
-    
-    def publish_batch(self, batch_size: int = 100) -> Dict[str, int]:
-        """Publish all pending entries in a batch."""
-        now = time.time()
-        stats = {"published": 0, "failed": 0, "expired": 0, "skipped": 0}
-        
-        pending = sorted(
-            [e for e in self._entries.values() if e.status == OutboxStatus.PENDING],
-            key=lambda x: x.created_at
-        )
-        
-        for entry in pending[:batch_size]:
-            if entry.expires_at < now:
-                entry.status = OutboxStatus.EXPIRED
-                stats["expired"] += 1
+
+        with self._lock:
+            self._messages[message_id] = message
+
+        return message_id
+
+    def send_pending(self, batch_size: int = 100) -> Dict[str, Any]:
+        """Send pending messages."""
+        with self._lock:
+            pending = [
+                m for m in self._messages.values()
+                if m.status == OutboxStatus.PENDING
+            ][:batch_size]
+
+        sent = 0
+        failed = 0
+
+        for message in pending:
+            handler = self._handlers.get(message.channel)
+
+            if not handler:
+                message.last_error = f"No handler for channel: {message.channel}"
+                failed += 1
                 continue
-            
-            success, _ = self.publish_entry(entry.entry_id)
-            if success:
-                stats["published"] += 1
-            else:
-                stats["failed"] += 1
-        
-        self._persist()
-        return stats
-    
-    def retry_failed(self, entry_id: str) -> bool:
-        """Reset a failed entry for retry."""
-        entry = self._entries.get(entry_id)
-        if not entry or entry.status != OutboxStatus.FAILED:
-            return False
-        entry.status = OutboxStatus.PENDING
-        entry.attempts = 0
-        entry.last_error = None
-        self._persist()
-        return True
-    
-    def get_pending_count(self) -> int:
-        """Get count of pending entries."""
-        return sum(1 for e in self._entries.values() if e.status == OutboxStatus.PENDING)
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get outbox statistics."""
-        by_status = {}
-        for e in self._entries.values():
-            status_name = e.status.value
-            by_status[status_name] = by_status.get(status_name, 0) + 1
-        
+
+            try:
+                handler(message.payload, message.headers)
+                message.status = OutboxStatus.SENT
+                message.sent_at = time.time()
+                sent += 1
+
+            except Exception as e:
+                message.last_error = str(e)
+                message.retry_count += 1
+
+                if message.retry_count >= 3:
+                    message.status = OutboxStatus.FAILED
+
+                failed += 1
+
         return {
-            "total_entries": len(self._entries),
-            "by_status": by_status,
-            "pending_count": self.get_pending_count()
+            "sent": sent,
+            "failed": failed,
+            "pending": len(pending) - sent - failed
         }
 
+    def get_pending(self, channel: Optional[str] = None) -> List[OutboxMessage]:
+        """Get pending messages."""
+        with self._lock:
+            pending = [
+                m for m in self._messages.values()
+                if m.status == OutboxStatus.PENDING
+            ]
 
-class TransactionalOutboxAction(BaseAction):
-    """Transactional outbox pattern for reliable event publishing.
-    
-    Ensures events are atomically stored with data changes
-    and reliably published to downstream consumers.
-    """
-    action_type = "transactional_outbox"
-    display_name = "事务发件箱"
-    description = "事务性发件箱，确保事件可靠发布"
-    
+            if channel:
+                pending = [m for m in pending if m.channel == channel]
+
+            return pending
+
+    def get_message(self, message_id: str) -> Optional[OutboxMessage]:
+        """Get message by ID."""
+        return self._messages.get(message_id)
+
+
+class OutboxPatternAction(BaseAction):
+    """Action for outbox pattern operations."""
+
     def __init__(self):
-        super().__init__()
-        self._outbox = TransactionalOutbox()
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute outbox operation."""
-        operation = params.get("operation", "")
-        
+        super().__init__("outbox_pattern")
+        self._manager = OutboxManager()
+
+    def execute(self, params: Dict) -> ActionResult:
+        """Execute outbox action."""
         try:
+            operation = params.get("operation", "add")
+
             if operation == "add":
-                return self._add_entry(params)
-            elif operation == "publish":
-                return self._publish(params)
-            elif operation == "publish_batch":
-                return self._publish_batch(params)
-            elif operation == "retry":
-                return self._retry(params)
-            elif operation == "get_stats":
-                return self._get_stats(params)
+                return self._add(params)
+            elif operation == "send":
+                return self._send(params)
+            elif operation == "pending":
+                return self._pending(params)
+            elif operation == "get":
+                return self._get(params)
             else:
                 return ActionResult(success=False, message=f"Unknown: {operation}")
+
         except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _add_entry(self, params: Dict[str, Any]) -> ActionResult:
-        """Add entry to outbox."""
-        entry_id = self._outbox.add_entry(
-            aggregate_type=params.get("aggregate_type", ""),
-            aggregate_id=params.get("aggregate_id", ""),
-            event_type=params.get("event_type", ""),
-            payload=params.get("payload", {}),
-            ttl_seconds=params.get("ttl_seconds", 86400.0)
+            return ActionResult(success=False, message=str(e))
+
+    def _add(self, params: Dict) -> ActionResult:
+        """Add message."""
+        message_id = self._manager.add_message(
+            channel=params.get("channel", ""),
+            payload=params.get("payload"),
+            headers=params.get("headers")
         )
-        return ActionResult(success=True, message=f"Added: {entry_id}",
-                         data={"entry_id": entry_id})
-    
-    def _publish(self, params: Dict[str, Any]) -> ActionResult:
-        """Publish a single entry."""
-        entry_id = params.get("entry_id", "")
-        success, msg = self._outbox.publish_entry(entry_id)
-        return ActionResult(success=success, message=msg)
-    
-    def _publish_batch(self, params: Dict[str, Any]) -> ActionResult:
-        """Publish pending entries."""
-        batch_size = params.get("batch_size", 100)
-        stats = self._outbox.publish_batch(batch_size)
-        return ActionResult(success=True, message="Batch complete",
-                         data={"published": stats["published"],
-                               "failed": stats["failed"],
-                               "expired": stats["expired"]})
-    
-    def _retry(self, params: Dict[str, Any]) -> ActionResult:
-        """Retry a failed entry."""
-        entry_id = params.get("entry_id", "")
-        retried = self._outbox.retry_failed(entry_id)
-        return ActionResult(success=retried, message="Retried" if retried else "Cannot retry")
-    
-    def _get_stats(self, params: Dict[str, Any]) -> ActionResult:
-        """Get outbox stats."""
-        stats = self._outbox.get_stats()
-        return ActionResult(success=True, message="Stats", data=stats)
+        return ActionResult(success=True, data={"message_id": message_id})
+
+    def _send(self, params: Dict) -> ActionResult:
+        """Send pending."""
+        result = self._manager.send_pending(params.get("batch_size", 100))
+        return ActionResult(success=True, data=result)
+
+    def _pending(self, params: Dict) -> ActionResult:
+        """Get pending."""
+        messages = self._manager.get_pending(params.get("channel"))
+        return ActionResult(success=True, data={
+            "messages": [
+                {
+                    "message_id": m.message_id,
+                    "channel": m.channel,
+                    "created_at": m.created_at
+                }
+                for m in messages
+            ]
+        })
+
+    def _get(self, params: Dict) -> ActionResult:
+        """Get message."""
+        message = self._manager.get_message(params.get("message_id", ""))
+        if not message:
+            return ActionResult(success=False, message="Not found")
+        return ActionResult(success=True, data={
+            "message_id": message.message_id,
+            "channel": message.channel,
+            "status": message.status.value,
+            "retry_count": message.retry_count
+        })
