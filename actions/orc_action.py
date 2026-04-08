@@ -1,432 +1,226 @@
-"""ORC action module for RabAI AutoClick.
+"""OCR action module for RabAI AutoClick.
 
-Provides actions for reading, writing, and manipulating ORC format data.
-Supports schema evolution and data type handling.
+Provides OCR (Optical Character Recognition) capabilities
+for text extraction from images and screenshots.
 """
 
 import sys
 import os
-import json
-from typing import Any, Dict, List, Optional, Union
+import tempfile
+from typing import Any, Dict, List, Optional, Union, Callable
+import subprocess
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
-try:
-    import pyorc
-    HAS_ORC = True
-except ImportError:
-    HAS_ORC = False
+
+class OCREngine(Enum):
+    """OCR engine types."""
+    TESSERACT = "tesseract"
+    PYTESSERACT = "pytesseract"
+    EASYOCR = "easyocr"
 
 
-class OrcReadAction(BaseAction):
-    """Read data from ORC format files.
+class OCRResult:
+    """Represents an OCR result."""
     
-    Parses ORC files with schema support.
-    """
-    action_type = "orc_read"
-    display_name = "读取ORC"
-    description = "从ORC文件读取数据"
+    def __init__(
+        self,
+        text: str,
+        confidence: float = 0.0,
+        boxes: Optional[List[Dict[str, Any]]] = None
+    ):
+        self.text = text
+        self.confidence = confidence
+        self.boxes = boxes or []
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'text': self.text,
+            'confidence': self.confidence,
+            'boxes': self.boxes
+        }
 
+
+class OCRAction(BaseAction):
+    """OCR text extraction from images.
+    
+    Supports Tesseract OCR with multiple languages,
+    region-based extraction, and confidence scoring.
+    """
+    action_type = "ocr"
+    display_name = "OCR识别"
+    description = "图像文字识别"
+    DEFAULT_LANG = 'eng'
+    
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Read ORC file.
+        """Execute OCR operations.
         
         Args:
             context: Execution context.
-            params: Dict with keys: file_path, columns, limit,
-                   stripe_index.
+            params: Dict with keys: image_path, image_data, lang,
+                   region, engine.
         
         Returns:
-            ActionResult with parsed records.
+            ActionResult with OCR result.
         """
-        if not HAS_ORC:
+        image_path = params.get('image_path')
+        image_data = params.get('image_data')
+        lang = params.get('lang', self.DEFAULT_LANG)
+        region = params.get('region')
+        
+        if not image_path and not image_data:
             return ActionResult(
                 success=False,
-                message="pyorc library not installed. Run: pip install pyorc"
+                message="image_path or image_data is required"
             )
-
-        file_path = params.get('file_path', '')
-        columns = params.get('columns', None)
-        limit = params.get('limit', 0)
-        stripe_index = params.get('stripe_index', None)
-
-        if not file_path:
-            return ActionResult(success=False, message="file_path is required")
-
+        
         try:
-            records = []
-            count = 0
-
-            with open(file_path, 'rb') as f:
-                reader = pyorc.Reader(f)
-                schema = reader.schema
-                
-                if stripe_index is not None:
-                    reader = pyorc.Reader(f, stripe=str(stripe_index)
-
-                for row in reader:
-                    if columns:
-                        if isinstance(row, tuple):
-                            row = {name: row[i] for i, name in enumerate(schema.names) if name in columns}
-                        elif isinstance(row, dict):
-                            row = {k: v for k, v in row.items() if k in columns}
-                    
-                    records.append(row)
-                    count += 1
-                    
-                    if limit > 0 and count >= limit:
-                        break
-
+            result = self._perform_ocr(
+                image_path=image_path,
+                image_data=image_data,
+                lang=lang,
+                region=region,
+                params=params
+            )
+            
             return ActionResult(
                 success=True,
-                message=f"Read {len(records)} records",
-                data={
-                    'records': records,
-                    'count': len(records),
-                    'schema': schema.names,
-                    'file_path': file_path
-                }
+                message=f"OCR completed: {len(result.text)} chars",
+                data=result.to_dict()
             )
-
-        except FileNotFoundError:
-            return ActionResult(success=False, message=f"File not found: {file_path}")
+            
         except Exception as e:
-            return ActionResult(success=False, message=f"Failed to read ORC: {str(e)}")
-
-
-class OrcWriteAction(BaseAction):
-    """Write data to ORC format files.
-    
-    Serializes records with schema support.
-    """
-    action_type = "orc_write"
-    display_name = "写入ORC"
-    description = "写入数据到ORC文件"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Write ORC file.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: file_path, records, schema,
-                   compression, batch_size.
-        
-        Returns:
-            ActionResult with write status.
-        """
-        if not HAS_ORC:
             return ActionResult(
                 success=False,
-                message="pyorc library not installed. Run: pip install pyorc"
+                message=f"OCR failed: {e}"
             )
-
-        file_path = params.get('file_path', '')
-        records = params.get('records', [])
-        schema = params.get('schema', None)
-        compression = params.get('compression', 'zlib')
-        batch_size = params.get('batch_size', 1024)
-
-        if not file_path:
-            return ActionResult(success=False, message="file_path is required")
-        if not records:
-            return ActionResult(success=False, message="records list is required")
-
+    
+    def _perform_ocr(
+        self,
+        image_path: Optional[str],
+        image_data: Optional[str],
+        lang: str,
+        region: Optional[Dict[str, Any]],
+        params: Dict[str, Any]
+    ) -> OCRResult:
+        """Perform OCR using available engine."""
         try:
-            os.makedirs(os.path.dirname(file_path) or '.', exist_ok=True)
-
-            if schema:
-                if isinstance(schema, str):
-                    schema_obj = pyorc.parse_schema(schema)
+            import pytesseract
+            from PIL import Image
+            
+            if image_path:
+                image = Image.open(image_path)
+            elif image_data:
+                import base64
+                if isinstance(image_data, str):
+                    image_data_bytes = base64.b64decode(image_data)
                 else:
-                    schema_obj = pyorc.parse_schema(json.dumps(schema))
+                    image_data_bytes = image_data
+                
+                import io
+                image = Image.open(io.BytesIO(image_data_bytes))
             else:
-                if records:
-                    schema_obj = self._infer_schema(records[0])
-                else:
-                    return ActionResult(success=False, message="schema or records required")
-
-            with open(file_path, 'wb') as f:
-                writer = pyorc.Writer(f, schema_obj, compression=compression)
-                
-                with writer:
-                    for record in records:
-                        writer.write(record)
-                
-                if writer:
-                    writer.close()
-
-            file_size = os.path.getsize(file_path)
-
-            return ActionResult(
-                success=True,
-                message=f"Wrote {len(records)} records",
-                data={
-                    'file_path': file_path,
-                    'record_count': len(records),
-                    'file_size': file_size,
-                    'compression': compression
-                }
+                raise ValueError("No image source provided")
+            
+            if region:
+                x = region.get('x', 0)
+                y = region.get('y', 0)
+                w = region.get('width', image.width)
+                h = region.get('height', image.height)
+                image = image.crop((x, y, x + w, y + h))
+            
+            custom_config = params.get('config', '--psm 6')
+            
+            text = pytesseract.image_to_string(
+                image,
+                lang=lang,
+                config=custom_config
             )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Failed to write ORC: {str(e)}")
-
-    def _infer_schema(self, record: Dict) -> 'Schema':
-        """Infer ORC schema from record."""
-        struct_fields = []
-        for key, value in record.items():
-            if isinstance(value, bool):
-                orc_type = 'boolean'
-            elif isinstance(value, int):
-                orc_type = 'bigint'
-            elif isinstance(value, float):
-                orc_type = 'double'
-            elif isinstance(value, str):
-                orc_type = 'string'
-            elif isinstance(value, bytes):
-                orc_type = 'binary'
-            elif isinstance(value, list):
-                orc_type = 'array<string>'
-            elif isinstance(value, dict):
-                orc_type = 'map<string,string>'
-            else:
-                orc_type = 'string'
-            struct_fields.append(f"{key}:{orc_type}")
-        
-        return pyorc.parse_schema(f"struct<{','.join(struct_fields)}>")
-
-
-class OrcSchemaAction(BaseAction):
-    """Work with ORC schemas.
-    
-    Handles schema parsing, validation, and conversion.
-    """
-    action_type = "orc_schema"
-    display_name = "ORC Schema"
-    description = "ORC Schema处理"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Process ORC schema.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: schema_string, operation,
-                   file_path.
-        
-        Returns:
-            ActionResult with schema info.
-        """
-        if not HAS_ORC:
-            return ActionResult(
-                success=False,
-                message="pyorc library not installed. Run: pip install pyorc"
-            )
-
-        schema_string = params.get('schema_string', '')
-        operation = params.get('operation', 'parse')
-        file_path = params.get('file_path', '')
-
-        try:
-            if operation == 'parse':
-                if file_path:
-                    with open(file_path, 'rb') as f:
-                        reader = pyorc.Reader(f)
-                        schema = reader.schema
-                        return ActionResult(
-                            success=True,
-                            message=f"Schema: {schema}",
-                            data={
-                                'schema': str(schema),
-                                'names': schema.names,
-                                'types': [str(schema[name]) for name in schema.names]
-                            }
-                        )
-                elif schema_string:
-                    schema = pyorc.parse_schema(schema_string)
-                    return ActionResult(
-                        success=True,
-                        message=f"Schema parsed: {schema}",
-                        data={
-                            'schema': str(schema),
-                            'names': schema.names
-                        }
-                    )
-                return ActionResult(success=False, message="schema_string or file_path required")
-
-            elif operation == 'to_json':
-                if file_path:
-                    with open(file_path, 'rb') as f:
-                        reader = pyorc.Reader(f)
-                        schema = reader.schema
-                        return ActionResult(
-                            success=True,
-                            message="Schema converted to JSON",
-                            data={'json': json.dumps({'names': schema.names})}
-                        )
-                return ActionResult(success=False, message="file_path required")
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Schema error: {str(e)}")
-
-
-class OrcStatsAction(BaseAction):
-    """Get ORC file statistics.
-    
-    Returns file metadata and statistics.
-    """
-    action_type = "orc_stats"
-    display_name = "ORC统计"
-    description = "ORC文件统计"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Get ORC stats.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: file_path.
-        
-        Returns:
-            ActionResult with file statistics.
-        """
-        if not HAS_ORC:
-            return ActionResult(
-                success=False,
-                message="pyorc library not installed. Run: pip install pyorc"
-            )
-
-        file_path = params.get('file_path', '')
-
-        if not file_path:
-            return ActionResult(success=False, message="file_path is required")
-
-        try:
-            with open(file_path, 'rb') as f:
-                reader = pyorc.Reader(f)
-                schema = reader.schema
-                
-                file_size = os.path.getsize(file_path)
-                
-                stats = {
-                    'file_path': file_path,
-                    'file_size': file_size,
-                    'file_size_mb': round(file_size / 1024 / 1024, 2),
-                    'schema': str(schema),
-                    'column_names': schema.names,
-                    'compression': str(reader.compression),
-                    'writer_version': str(reader.writer_version),
-                }
-
-                try:
-                    stats['row_count'] = reader.row_count
-                except:
-                    pass
-
-                try:
-                    stats['stripe_count'] = reader.stripe_count
-                except:
-                    pass
-
-                return ActionResult(
-                    success=True,
-                    message=f"Stats for {file_path}",
-                    data=stats
+            
+            try:
+                data = pytesseract.image_to_data(
+                    image,
+                    lang=lang,
+                    config=custom_config,
+                    output_type=pytesseract.Output.DICT
                 )
-
+                
+                confidence_scores = [
+                    float(conf) for conf in data.get('conf', [])
+                    if conf != '-1'
+                ]
+                avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
+            except Exception:
+                avg_confidence = 0.0
+            
+            boxes = self._extract_boxes(data) if 'conf' in data else []
+            
+            return OCRResult(
+                text=text.strip(),
+                confidence=avg_confidence,
+                boxes=boxes
+            )
+            
+        except ImportError:
+            return self._perform_ocr_fallback(image_path, image_data, lang)
+    
+    def _perform_ocr_fallback(
+        self,
+        image_path: Optional[str],
+        image_data: Optional[str],
+        lang: str
+    ) -> OCRResult:
+        """Fallback OCR using tesseract CLI."""
+        if not image_path:
+            raise ValueError("image_path required for fallback OCR")
+        
+        try:
+            result = subprocess.run(
+                ['tesseract', image_path, 'stdout', '-l', lang],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                raise ValueError(f"Tesseract failed: {result.stderr}")
+            
+            return OCRResult(
+                text=result.stdout.strip(),
+                confidence=0.0,
+                boxes=[]
+            )
+            
         except FileNotFoundError:
-            return ActionResult(success=False, message=f"File not found: {file_path}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stats failed: {str(e)}")
-
-
-class OrcConvertAction(BaseAction):
-    """Convert data to/from ORC format.
+            raise ValueError("Tesseract not installed and pytesseract not available")
+        except subprocess.TimeoutExpired:
+            raise ValueError("Tesseract OCR timed out")
     
-    Handles format conversion for ORC data.
-    """
-    action_type = "orc_convert"
-    display_name = "ORC转换"
-    description = "ORC格式转换"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Convert to/from ORC.
+    def _extract_boxes(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract bounding boxes from OCR data."""
+        boxes = []
+        n_boxes = len(data.get('text', []))
         
-        Args:
-            context: Execution context.
-            params: Dict with keys: data, format, schema.
-                   format: 'from_json', 'to_json', 'from_csv'.
+        for i in range(n_boxes):
+            text = data['text'][i]
+            if text.strip():
+                boxes.append({
+                    'text': text,
+                    'x': data['left'][i],
+                    'y': data['top'][i],
+                    'width': data['width'][i],
+                    'height': data['height'][i],
+                    'confidence': float(data['conf'][i]) if data['conf'][i] != '-1' else 0.0
+                })
         
-        Returns:
-            ActionResult with converted data.
-        """
-        if not HAS_ORC:
-            return ActionResult(
-                success=False,
-                message="pyorc library not installed. Run: pip install pyorc"
-            )
+        return boxes
 
-        data = params.get('data', [])
-        format_type = params.get('format', 'from_json')
-        schema = params.get('schema', None)
 
-        try:
-            if format_type == 'from_json':
-                if isinstance(data, str):
-                    data = json.loads(data)
-                
-                if not isinstance(data, list):
-                    data = [data]
-                
-                return ActionResult(
-                    success=True,
-                    message=f"Converted JSON to ORC-ready records",
-                    data={'records': data, 'count': len(data), 'schema': schema}
-                )
-
-            elif format_type == 'to_json':
-                if isinstance(data, list) and data:
-                    return ActionResult(
-                        success=True,
-                        message=f"Converted {len(data)} ORC records to JSON",
-                        data={'json': json.dumps(data, ensure_ascii=False)}
-                    )
-                return ActionResult(success=False, message="No data to convert")
-
-            elif format_type == 'from_csv':
-                if isinstance(data, str):
-                    import csv
-                    import io
-                    reader = csv.DictReader(io.StringIO(data))
-                    data = list(reader)
-                
-                return ActionResult(
-                    success=True,
-                    message=f"Converted CSV to {len(data)} records",
-                    data={'records': data, 'count': len(data)}
-                )
-
-            return ActionResult(success=False, message=f"Unknown format: {format_type}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Conversion failed: {str(e)}")
+from enum import Enum
