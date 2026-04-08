@@ -1,69 +1,69 @@
+"""Message queue action module for RabAI AutoClick.
+
+Provides message queue operations:
+- QueueEnqueueAction: Enqueue a message
+- QueueDequeueAction: Dequeue a message
+- QueuePeekAction: Peek at queue messages
+- QueueStatsAction: Get queue statistics
 """
-Queue and message broker utilities - RabbitMQ, Kafka, Redis queue, task queue patterns.
-"""
-from typing import Any, Dict, List, Optional, Callable
-import json
-import logging
+
+import threading
+import uuid
 import time
+from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass, field
+from datetime import datetime
 from collections import deque
-from threading import Lock
-
-logger = logging.getLogger(__name__)
+import queue
 
 
-class BaseAction:
-    """Base class for all actions."""
+import sys
+import os
 
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        raise NotImplementedError
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class InMemoryQueue:
-    """Simple in-memory FIFO queue with optional persistence simulation."""
+@dataclass
+class QueueMessage:
+    """Represents a queue message."""
+    message_id: str
+    payload: Any
+    priority: int = 0
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    acknowledged: bool = False
 
-    def __init__(self, name: str = "default") -> None:
-        self.name = name
-        self._queue: deque = deque()
-        self._dead_letter: deque = deque()
-        self._lock = Lock()
-        self._max_size = 10000
-        self._retry_limit = 3
 
-    def enqueue(self, item: Any, priority: int = 0) -> bool:
+class PriorityQueue:
+    """Thread-safe priority queue."""
+    def __init__(self, maxsize: int = 0):
+        self._queue: List[QueueMessage] = []
+        self._lock = threading.RLock()
+        self._maxsize = maxsize
+
+    def put(self, item: QueueMessage, block: bool = True, timeout: Optional[float] = None) -> bool:
         with self._lock:
-            if len(self._queue) >= self._max_size:
-                return False
-            if priority != 0:
-                self._queue.appendleft((priority, item))
-                self._queue = deque(sorted(self._queue, key=lambda x: x[0], reverse=True))
-            else:
-                self._queue.append(item)
+            if self._maxsize > 0 and len(self._queue) >= self._maxsize:
+                if not block:
+                    return False
+            self._queue.append(item)
+            self._queue.sort(key=lambda m: m.priority, reverse=True)
             return True
 
-    def dequeue(self) -> Optional[Any]:
+    def get(self, block: bool = True, timeout: Optional[float] = None) -> Optional[QueueMessage]:
         with self._lock:
-            if self._queue:
-                item = self._queue.popleft()
-                if isinstance(item, tuple):
-                    return item[1]
-                return item
-            return None
+            if not self._queue:
+                return None
+            return self._queue.pop(0)
 
-    def peek(self) -> Optional[Any]:
+    def peek(self, count: int = 1) -> List[QueueMessage]:
         with self._lock:
-            if self._queue:
-                item = self._queue[0]
-                if isinstance(item, tuple):
-                    return item[1]
-                return item
-            return None
+            return list(self._queue[:count])
 
     def size(self) -> int:
         with self._lock:
             return len(self._queue)
-
-    def is_empty(self) -> bool:
-        return self.size() == 0
 
     def clear(self) -> int:
         with self._lock:
@@ -71,191 +71,187 @@ class InMemoryQueue:
             self._queue.clear()
             return count
 
-    def to_list(self) -> List[Any]:
+
+class QueueManager:
+    """Manages multiple queues."""
+    def __init__(self):
+        self._queues: Dict[str, PriorityQueue] = {}
+        self._lock = threading.Lock()
+        self._stats: Dict[str, Dict[str, int]] = {}
+
+    def get_or_create(self, name: str, maxsize: int = 0) -> PriorityQueue:
         with self._lock:
-            return [item[1] if isinstance(item, tuple) else item for item in self._queue]
+            if name not in self._queues:
+                self._queues[name] = PriorityQueue(maxsize=maxsize)
+                self._stats[name] = {"enqueued": 0, "dequeued": 0, "peeked": 0}
+            return self._queues[name]
 
-
-class MessageBus:
-    """In-memory message bus with pub/sub pattern."""
-
-    def __init__(self) -> None:
-        self._subscribers: Dict[str, List[Callable]] = {}
-        self._lock = Lock()
-        self._history: Dict[str, List[Dict[str, Any]]] = {}
-        self._max_history = 100
-
-    def publish(self, topic: str, message: Dict[str, Any]) -> int:
+    def enqueue(self, queue_name: str, payload: Any, priority: int = 0) -> str:
+        q = self.get_or_create(queue_name)
+        message_id = str(uuid.uuid4())
+        message = QueueMessage(message_id=message_id, payload=payload, priority=priority)
+        q.put(message)
         with self._lock:
-            if topic not in self._subscribers:
-                return 0
-            count = 0
-            for callback in self._subscribers[topic]:
-                try:
-                    callback(message)
-                    count += 1
-                except Exception as e:
-                    logger.error(f"Subscriber error on topic {topic}: {e}")
-            if topic not in self._history:
-                self._history[topic] = []
-            self._history[topic].append(message)
-            if len(self._history[topic]) > self._max_history:
-                self._history[topic].pop(0)
-            return count
+            if queue_name in self._stats:
+                self._stats[queue_name]["enqueued"] += 1
+        return message_id
 
-    def subscribe(self, topic: str, callback: Callable) -> None:
+    def dequeue(self, queue_name: str) -> Optional[QueueMessage]:
+        q = self.get_or_create(queue_name)
+        msg = q.get()
+        if msg:
+            with self._lock:
+                if queue_name in self._stats:
+                    self._stats[queue_name]["dequeued"] += 1
+        return msg
+
+    def peek(self, queue_name: str, count: int = 1) -> List[QueueMessage]:
+        q = self.get_or_create(queue_name)
+        msgs = q.peek(count)
         with self._lock:
-            if topic not in self._subscribers:
-                self._subscribers[topic] = []
-            self._subscribers[topic].append(callback)
+            if queue_name in self._stats:
+                self._stats[queue_name]["peeked"] += len(msgs)
+        return msgs
 
-    def unsubscribe(self, topic: str, callback: Callable) -> bool:
+    def size(self, queue_name: str) -> int:
+        q = self.get_or_create(queue_name)
+        return q.size()
+
+    def clear(self, queue_name: str) -> int:
+        q = self.get_or_create(queue_name)
+        return q.clear()
+
+    def get_stats(self) -> Dict[str, Any]:
         with self._lock:
-            if topic in self._subscribers:
-                try:
-                    self._subscribers[topic].remove(callback)
-                    return True
-                except ValueError:
-                    pass
-            return False
-
-    def history(self, topic: str) -> List[Dict[str, Any]]:
-        with self._lock:
-            return list(self._history.get(topic, []))
-
-
-class RateLimiter:
-    """Token bucket rate limiter."""
-
-    def __init__(self, rate: float, capacity: int) -> None:
-        self.rate = rate
-        self.capacity = capacity
-        self.tokens = float(capacity)
-        self.last_update = time.time()
-        self._lock = Lock()
-
-    def allow_request(self, tokens: int = 1) -> bool:
-        with self._lock:
-            now = time.time()
-            elapsed = now - self.last_update
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            self.last_update = now
-            if self.tokens >= tokens:
-                self.tokens -= tokens
-                return True
-            return False
-
-    def wait_time(self, tokens: int = 1) -> float:
-        with self._lock:
-            if self.tokens >= tokens:
-                return 0.0
-            return (tokens - self.tokens) / self.rate
+            return {
+                "queues": {
+                    name: {
+                        "size": q.size(),
+                        "stats": self._stats.get(name, {})
+                    }
+                    for name, q in self._queues.items()
+                },
+                "total_queues": len(self._queues)
+            }
 
 
-class QueueAction(BaseAction):
-    """Queue and message broker operations.
+_manager = QueueManager()
 
-    Provides in-memory queue, message bus with pub/sub, rate limiting.
-    """
 
-    def __init__(self) -> None:
-        self._queues: Dict[str, InMemoryQueue] = {}
-        self._bus = MessageBus()
-        self._rate_limiters: Dict[str, RateLimiter] = {}
+class QueueEnqueueAction(BaseAction):
+    """Enqueue a message."""
+    action_type = "queue_enqueue"
+    display_name = "入队"
+    description = "将消息加入队列"
 
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        operation = params.get("operation", "enqueue")
-        queue_name = params.get("queue", "default")
-        topic = params.get("topic", "default")
-        item = params.get("item")
-        limiter_name = params.get("limiter", "default")
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            if operation == "enqueue":
-                if queue_name not in self._queues:
-                    self._queues[queue_name] = InMemoryQueue(queue_name)
-                priority = int(params.get("priority", 0))
-                success = self._queues[queue_name].enqueue(item, priority)
-                return {"success": success, "queue": queue_name, "size": self._queues[queue_name].size()}
+            queue_name = params.get("queue_name", "default")
+            payload = params.get("payload", {})
+            priority = params.get("priority", 0)
 
-            elif operation == "dequeue":
-                if queue_name not in self._queues:
-                    return {"success": True, "item": None, "queue": queue_name}
-                item = self._queues[queue_name].dequeue()
-                return {"success": True, "item": item, "queue": queue_name, "size": self._queues[queue_name].size()}
+            message_id = _manager.enqueue(queue_name, payload, priority)
 
-            elif operation == "peek":
-                if queue_name not in self._queues:
-                    return {"success": True, "item": None, "queue": queue_name}
-                item = self._queues[queue_name].peek()
-                return {"success": True, "item": item, "queue": queue_name}
-
-            elif operation == "size":
-                if queue_name not in self._queues:
-                    return {"success": True, "size": 0, "queue": queue_name}
-                return {"success": True, "size": self._queues[queue_name].size(), "queue": queue_name}
-
-            elif operation == "clear":
-                if queue_name not in self._queues:
-                    return {"success": True, "cleared": 0}
-                cleared = self._queues[queue_name].clear()
-                return {"success": True, "cleared": cleared, "queue": queue_name}
-
-            elif operation == "list_queues":
-                return {"success": True, "queues": list(self._queues.keys()), "counts": {k: v.size() for k, v in self._queues.items()}}
-
-            elif operation == "publish":
-                message = params.get("message", {})
-                count = self._bus.publish(topic, message)
-                return {"success": True, "topic": topic, "subscribers_notified": count}
-
-            elif operation == "history":
-                messages = self._bus.history(topic)
-                return {"success": True, "topic": topic, "messages": messages, "count": len(messages)}
-
-            elif operation == "rate_limit_create":
-                rate = float(params.get("rate", 10))
-                capacity = int(params.get("capacity", 10))
-                self._rate_limiters[limiter_name] = RateLimiter(rate, capacity)
-                return {"success": True, "limiter": limiter_name, "rate": rate, "capacity": capacity}
-
-            elif operation == "rate_limit_allow":
-                if limiter_name not in self._rate_limiters:
-                    return {"success": False, "error": f"Limiter {limiter_name} not found"}
-                tokens = int(params.get("tokens", 1))
-                allowed = self._rate_limiters[limiter_name].allow_request(tokens)
-                wait_time = self._rate_limiters[limiter_name].wait_time(tokens) if not allowed else 0.0
-                return {"success": True, "allowed": allowed, "limiter": limiter_name, "wait_time": wait_time}
-
-            elif operation == "batch":
-                items = params.get("items", [])
-                results = []
-                for it in items:
-                    if queue_name not in self._queues:
-                        self._queues[queue_name] = InMemoryQueue(queue_name)
-                    self._queues[queue_name].enqueue(it)
-                    results.append(it)
-                return {"success": True, "enqueued": len(results), "queue": queue_name, "items": results}
-
-            elif operation == "drain":
-                if queue_name not in self._queues:
-                    return {"success": True, "items": [], "drained": 0}
-                items = []
-                q = self._queues[queue_name]
-                while not q.is_empty():
-                    item = q.dequeue()
-                    if item:
-                        items.append(item)
-                return {"success": True, "items": items, "drained": len(items), "queue": queue_name}
-
-            else:
-                return {"success": False, "error": f"Unknown operation: {operation}"}
+            return ActionResult(
+                success=True,
+                message=f"Enqueued message to '{queue_name}'",
+                data={"message_id": message_id, "queue_name": queue_name, "priority": priority}
+            )
 
         except Exception as e:
-            logger.error(f"QueueAction error: {e}")
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"Queue enqueue failed: {str(e)}")
 
 
-def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-    """Entry point for queue operations."""
-    return QueueAction().execute(context, params)
+class QueueDequeueAction(BaseAction):
+    """Dequeue a message."""
+    action_type = "queue_dequeue"
+    display_name = "出队"
+    description = "从队列取出消息"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            queue_name = params.get("queue_name", "default")
+            block = params.get("block", False)
+            timeout = params.get("timeout", 5.0)
+
+            if block:
+                start = time.time()
+                while time.time() - start < timeout:
+                    msg = _manager.dequeue(queue_name)
+                    if msg:
+                        return ActionResult(
+                            success=True,
+                            message=f"Dequeued message from '{queue_name}'",
+                            data={"message_id": msg.message_id, "payload": msg.payload, "priority": msg.priority}
+                        )
+                    time.sleep(0.1)
+                return ActionResult(success=False, message=f"Queue '{queue_name}' empty after {timeout}s")
+
+            msg = _manager.dequeue(queue_name)
+            if msg:
+                return ActionResult(
+                    success=True,
+                    message=f"Dequeued message from '{queue_name}'",
+                    data={"message_id": msg.message_id, "payload": msg.payload, "priority": msg.priority}
+                )
+            return ActionResult(success=False, message=f"Queue '{queue_name}' empty")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Queue dequeue failed: {str(e)}")
+
+
+class QueuePeekAction(BaseAction):
+    """Peek at queue messages."""
+    action_type = "queue_peek"
+    display_name = "队列窥视"
+    description = "查看队列消息不取出"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            queue_name = params.get("queue_name", "default")
+            count = params.get("count", 5)
+
+            messages = _manager.peek(queue_name, count)
+            return ActionResult(
+                success=True,
+                message=f"Peeked {len(messages)} messages from '{queue_name}'",
+                data={
+                    "messages": [
+                        {"message_id": m.message_id, "payload": m.payload, "priority": m.priority}
+                        for m in messages
+                    ],
+                    "count": len(messages),
+                    "queue_name": queue_name
+                }
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Queue peek failed: {str(e)}")
+
+
+class QueueStatsAction(BaseAction):
+    """Get queue statistics."""
+    action_type = "queue_stats"
+    display_name = "队列统计"
+    description = "获取队列统计信息"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            queue_name = params.get("queue_name", None)
+            stats = _manager.get_stats()
+
+            if queue_name:
+                return ActionResult(
+                    success=True,
+                    message=f"Stats for queue '{queue_name}'",
+                    data=stats["queues"].get(queue_name, {"size": 0, "stats": {}})
+                )
+
+            return ActionResult(
+                success=True,
+                message=f"{stats['total_queues']} queues",
+                data=stats
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Queue stats failed: {str(e)}")
