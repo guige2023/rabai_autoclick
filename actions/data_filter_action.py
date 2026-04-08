@@ -1,428 +1,112 @@
-"""Data filter action module for RabAI AutoClick.
+# Copyright (c) 2024. coded by claude
+"""Data Filter Action Module.
 
-Provides data filtering:
-- DataFilter: General data filter
-- FilterExpression: Filter expression parser
-- FilterChain: Chain multiple filters
-- FilterBuilder: Build complex filters
+Filters API response data with support for complex predicates,
+field selection, and result transformation.
 """
-
-import re
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Callable, Set
+from dataclasses import dataclass, field
 from enum import Enum
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
 class FilterOperator(Enum):
-    """Filter operators."""
     EQ = "eq"
     NE = "ne"
     GT = "gt"
-    GTE = "gte"
+    GE = "ge"
     LT = "lt"
-    LTE = "lte"
-    IN = "in"
-    NOT_IN = "not_in"
+    LE = "le"
     CONTAINS = "contains"
-    NOT_CONTAINS = "not_contains"
     STARTS_WITH = "starts_with"
     ENDS_WITH = "ends_with"
-    REGEX = "regex"
+    IN = "in"
+    NOT_IN = "not_in"
     IS_NULL = "is_null"
     IS_NOT_NULL = "is_not_null"
 
 
 @dataclass
-class FilterRule:
-    """Filter rule."""
+class FilterCondition:
     field: str
     operator: FilterOperator
     value: Any
 
 
 @dataclass
-class FilterResult:
-    """Filter result."""
-    total: int
-    filtered: int
-    removed: int
-    data: List[Any]
-
-
-class FilterExpression:
-    """Filter expression parser and evaluator."""
-
-    def __init__(self):
-        self._operators = {
-            "==": FilterOperator.EQ,
-            "!=": FilterOperator.NE,
-            ">": FilterOperator.GT,
-            ">=": FilterOperator.GTE,
-            "<": FilterOperator.LT,
-            "<=": FilterOperator.LTE,
-            "in": FilterOperator.IN,
-            "not in": FilterOperator.NOT_IN,
-            "contains": FilterOperator.CONTAINS,
-            "startswith": FilterOperator.STARTS_WITH,
-            "endswith": FilterOperator.ENDS_WITH,
-            "regex": FilterOperator.REGEX,
-        }
-
-    def parse(self, expression: str) -> Optional[FilterRule]:
-        """Parse filter expression."""
-        for op_str, op_enum in self._operators.items():
-            if op_str in expression:
-                parts = expression.split(op_str, 1)
-                if len(parts) == 2:
-                    field = parts[0].strip()
-                    value = parts[1].strip().strip("'\"")
-                    return FilterRule(field=field, operator=op_enum, value=value)
-        return None
-
-    def evaluate(self, item: Dict, rule: FilterRule) -> bool:
-        """Evaluate filter rule on item."""
-        value = item.get(rule.field)
-
-        if rule.operator == FilterOperator.EQ:
-            return value == rule.value
-        elif rule.operator == FilterOperator.NE:
-            return value != rule.value
-        elif rule.operator == FilterOperator.GT:
-            return value is not None and value > rule.value
-        elif rule.operator == FilterOperator.GTE:
-            return value is not None and value >= rule.value
-        elif rule.operator == FilterOperator.LT:
-            return value is not None and value < rule.value
-        elif rule.operator == FilterOperator.LTE:
-            return value is not None and value <= rule.value
-        elif rule.operator == FilterOperator.IN:
-            return value in (rule.value if isinstance(rule.value, list) else [rule.value])
-        elif rule.operator == FilterOperator.NOT_IN:
-            return value not in (rule.value if isinstance(rule.value, list) else [rule.value])
-        elif rule.operator == FilterOperator.CONTAINS:
-            return value is not None and str(rule.value) in str(value)
-        elif rule.operator == FilterOperator.NOT_CONTAINS:
-            return value is not None and str(rule.value) not in str(value)
-        elif rule.operator == FilterOperator.STARTS_WITH:
-            return value is not None and str(value).startswith(str(rule.value))
-        elif rule.operator == FilterOperator.ENDS_WITH:
-            return value is not None and str(value).endswith(str(rule.value))
-        elif rule.operator == FilterOperator.REGEX:
-            try:
-                return value is not None and bool(re.match(str(rule.value), str(value)))
-            except Exception:
-                return False
-        elif rule.operator == FilterOperator.IS_NULL:
-            return value is None
-        elif rule.operator == FilterOperator.IS_NOT_NULL:
-            return value is not None
-
-        return True
+class FilterConfig:
+    conditions: List[FilterCondition] = field(default_factory=list)
+    combine_with: str = "AND"
+    select_fields: Optional[Set[str]] = None
+    exclude_fields: Optional[Set[str]] = None
 
 
 class DataFilter:
-    """General data filter."""
+    def __init__(self, config: Optional[FilterConfig] = None):
+        self.config = config or FilterConfig()
 
-    def __init__(self):
-        self.expression_parser = FilterExpression()
-        self._custom_filters: Dict[str, Callable] = {}
+    def filter(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self.config.conditions:
+            return self._apply_field_selection(items)
+        filtered = [item for item in items if self._matches_conditions(item)]
+        return self._apply_field_selection(filtered)
 
-    def add_filter(self, name: str, filter_fn: Callable[[Dict], bool]) -> "DataFilter":
-        """Add custom filter."""
-        self._custom_filters[name] = filter_fn
-        return self
+    def _matches_conditions(self, item: Dict[str, Any]) -> bool:
+        if self.config.combine_with == "AND":
+            return all(self._evaluate_condition(item, cond) for cond in self.config.conditions)
+        return any(self._evaluate_condition(item, cond) for cond in self.config.conditions)
 
-    def filter(
-        self,
-        data: List[Dict],
-        rules: Union[str, List[FilterRule], Callable],
-        mode: str = "all",
-    ) -> FilterResult:
-        """Filter data."""
-        if not data:
-            return FilterResult(total=0, filtered=0, removed=0, data=[])
-
-        filtered = []
-        removed = 0
-
-        for item in data:
-            if self._matches(item, rules, mode):
-                filtered.append(item)
-            else:
-                removed += 1
-
-        return FilterResult(
-            total=len(data),
-            filtered=len(filtered),
-            removed=removed,
-            data=filtered,
-        )
-
-    def _matches(self, item: Dict, rules: Union[str, List[FilterRule], Callable], mode: str) -> bool:
-        """Check if item matches rules."""
-        if callable(rules):
-            try:
-                return rules(item)
-            except Exception:
-                return False
-
-        if isinstance(rules, str):
-            parsed = self.expression_parser.parse(rules)
-            if parsed:
-                return self.expression_parser.evaluate(item, parsed)
-            return True
-
-        if isinstance(rules, list):
-            if mode == "all":
-                for rule in rules:
-                    if isinstance(rule, str):
-                        parsed = self.expression_parser.parse(rule)
-                        if parsed and not self.expression_parser.evaluate(item, parsed):
-                            return False
-                    elif isinstance(rule, FilterRule):
-                        if not self.expression_parser.evaluate(item, rule):
-                            return False
-                return True
-            elif mode == "any":
-                for rule in rules:
-                    if isinstance(rule, str):
-                        parsed = self.expression_parser.parse(rule)
-                        if parsed and self.expression_parser.evaluate(item, parsed):
-                            return True
-                    elif isinstance(rule, FilterRule):
-                        if self.expression_parser.evaluate(item, rule):
-                            return True
-                return False
-
+    def _evaluate_condition(self, item: Dict[str, Any], condition: FilterCondition) -> bool:
+        value = item.get(condition.field)
+        op = condition.operator
+        if op == FilterOperator.EQ:
+            return value == condition.value
+        elif op == FilterOperator.NE:
+            return value != condition.value
+        elif op == FilterOperator.GT:
+            return value is not None and value > condition.value
+        elif op == FilterOperator.GE:
+            return value is not None and value >= condition.value
+        elif op == FilterOperator.LT:
+            return value is not None and value < condition.value
+        elif op == FilterOperator.LE:
+            return value is not None and value <= condition.value
+        elif op == FilterOperator.CONTAINS:
+            return value is not None and str(condition.value) in str(value)
+        elif op == FilterOperator.STARTS_WITH:
+            return value is not None and str(value).startswith(str(condition.value))
+        elif op == FilterOperator.ENDS_WITH:
+            return value is not None and str(value).endswith(str(condition.value))
+        elif op == FilterOperator.IN:
+            return value in condition.value if isinstance(condition.value, list) else value == condition.value
+        elif op == FilterOperator.NOT_IN:
+            return value not in condition.value if isinstance(condition.value, list) else value != condition.value
+        elif op == FilterOperator.IS_NULL:
+            return value is None
+        elif op == FilterOperator.IS_NOT_NULL:
+            return value is not None
         return True
 
-    def exclude(
-        self,
-        data: List[Dict],
-        rules: Union[str, List[FilterRule], Callable],
-    ) -> FilterResult:
-        """Exclude items matching rules."""
-        if not data:
-            return FilterResult(total=0, filtered=0, removed=0, data=[])
-
-        filtered = []
-        removed = 0
-
-        for item in data:
-            if self._matches(item, rules, "all"):
-                removed += 1
+    def _apply_field_selection(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self.config.select_fields and not self.config.exclude_fields:
+            return items
+        result = []
+        for item in items:
+            if self.config.select_fields:
+                result.append({k: v for k, v in item.items() if k in self.config.select_fields})
+            elif self.config.exclude_fields:
+                result.append({k: v for k, v in item.items() if k not in self.config.exclude_fields})
             else:
-                filtered.append(item)
-
-        return FilterResult(
-            total=len(data),
-            filtered=len(filtered),
-            removed=removed,
-            data=filtered,
-        )
-
-
-class FilterChain:
-    """Chain multiple filters."""
-
-    def __init__(self):
-        self._filters: List[Tuple[Callable, str]] = []
-
-    def add_filter(self, filter_fn: Callable, mode: str = "all") -> "FilterChain":
-        """Add filter to chain."""
-        self._filters.append((filter_fn, mode))
-        return self
-
-    def apply(self, data: List[Dict]) -> List[Dict]:
-        """Apply all filters."""
-        result = data
-
-        for filter_fn, mode in self._filters:
-            if mode == "all":
-                result = [item for item in result if filter_fn(item)]
-            elif mode == "any":
-                result = result
-
+                result.append(item)
         return result
 
+    def add_condition(self, condition: FilterCondition) -> None:
+        self.config.conditions.append(condition)
 
-class FilterBuilder:
-    """Build complex filters."""
+    def clear_conditions(self) -> None:
+        self.config.conditions.clear()
 
-    def __init__(self):
-        self._rules: List[FilterRule] = []
-        self._mode = "all"
-
-    def where(self, field: str, operator: FilterOperator, value: Any) -> "FilterBuilder":
-        """Add filter rule."""
-        self._rules.append(FilterRule(field=field, operator=operator, value=value))
-        return self
-
-    def where_eq(self, field: str, value: Any) -> "FilterBuilder":
-        """Add equals filter."""
-        return self.where(field, FilterOperator.EQ, value)
-
-    def where_ne(self, field: str, value: Any) -> "FilterBuilder":
-        """Add not equals filter."""
-        return self.where(field, FilterOperator.NE, value)
-
-    def where_gt(self, field: str, value: Any) -> "FilterBuilder":
-        """Add greater than filter."""
-        return self.where(field, FilterOperator.GT, value)
-
-    def where_gte(self, field: str, value: Any) -> "FilterBuilder":
-        """Add greater than or equals filter."""
-        return self.where(field, FilterOperator.GTE, value)
-
-    def where_lt(self, field: str, value: Any) -> "FilterBuilder":
-        """Add less than filter."""
-        return self.where(field, FilterOperator.LT, value)
-
-    def where_lte(self, field: str, value: Any) -> "FilterBuilder":
-        """Add less than or equals filter."""
-        return self.where(field, FilterOperator.LTE, value)
-
-    def where_contains(self, field: str, value: Any) -> "FilterBuilder":
-        """Add contains filter."""
-        return self.where(field, FilterOperator.CONTAINS, value)
-
-    def where_in(self, field: str, values: List) -> "FilterBuilder":
-        """Add in filter."""
-        return self.where(field, FilterOperator.IN, values)
-
-    def where_not_null(self, field: str) -> "FilterBuilder":
-        """Add is not null filter."""
-        return self.where(field, FilterOperator.IS_NOT_NULL, None)
-
-    def mode_any(self) -> "FilterBuilder":
-        """Set mode to any."""
-        self._mode = "any"
-        return self
-
-    def mode_all(self) -> "FilterBuilder":
-        """Set mode to all."""
-        self._mode = "all"
-        return self
-
-    def build(self, data: List[Dict]) -> FilterResult:
-        """Build and apply filter."""
-        if not self._rules:
-            return FilterResult(total=len(data), filtered=len(data), removed=0, data=data)
-
-        filter_expr = FilterExpression()
-        data_filter = DataFilter()
-
-        return data_filter.filter(data, self._rules, self._mode)
-
-
-class DataFilterAction(BaseAction):
-    """Data filter action."""
-    action_type = "data_filter"
-    display_name = "数据过滤器"
-    description = "数据过滤和筛选"
-
-    def __init__(self):
-        super().__init__()
-        self._filter = DataFilter()
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "filter")
-
-            if operation == "filter":
-                return self._filter_data(params)
-            elif operation == "exclude":
-                return self._exclude_data(params)
-            elif operation == "parse":
-                return self._parse_expression(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Filter error: {str(e)}")
-
-    def _filter_data(self, params: Dict) -> ActionResult:
-        """Filter data."""
-        data = params.get("data", [])
-        rules_data = params.get("rules", [])
-        mode = params.get("mode", "all")
-
-        rules = []
-        for r in rules_data:
-            try:
-                operator = FilterOperator[r.get("operator", "EQ").upper()]
-                rules.append(FilterRule(
-                    field=r.get("field", ""),
-                    operator=operator,
-                    value=r.get("value"),
-                ))
-            except KeyError:
-                pass
-
-        result = self._filter.filter(data, rules, mode)
-
-        return ActionResult(
-            success=True,
-            message=f"Filtered {result.removed}/{result.total} items",
-            data={
-                "total": result.total,
-                "filtered": result.filtered,
-                "removed": result.removed,
-            },
-        )
-
-    def _exclude_data(self, params: Dict) -> ActionResult:
-        """Exclude data."""
-        data = params.get("data", [])
-        rules_data = params.get("rules", [])
-
-        rules = []
-        for r in rules_data:
-            try:
-                operator = FilterOperator[r.get("operator", "EQ").upper()]
-                rules.append(FilterRule(
-                    field=r.get("field", ""),
-                    operator=operator,
-                    value=r.get("value"),
-                ))
-            except KeyError:
-                pass
-
-        result = self._filter.exclude(data, rules)
-
-        return ActionResult(
-            success=True,
-            message=f"Excluded {result.removed}/{result.total} items",
-            data={
-                "total": result.total,
-                "filtered": result.filtered,
-                "removed": result.removed,
-            },
-        )
-
-    def _parse_expression(self, params: Dict) -> ActionResult:
-        """Parse filter expression."""
-        expression = params.get("expression", "")
-
-        parser = FilterExpression()
-        rule = parser.parse(expression)
-
-        if rule:
-            return ActionResult(
-                success=True,
-                message="Expression parsed",
-                data={
-                    "field": rule.field,
-                    "operator": rule.operator.value,
-                    "value": rule.value,
-                },
-            )
-        else:
-            return ActionResult(success=False, message="Failed to parse expression")
+    def filter_by_function(self, items: List[Dict[str, Any]], predicate: Callable[[Dict[str, Any]], bool]) -> List[Dict[str, Any]]:
+        return [item for item in items if predicate(item)]
