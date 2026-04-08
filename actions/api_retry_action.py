@@ -1,157 +1,172 @@
-"""API Retry Action.
+"""
+API Retry Action Module.
 
-Implements configurable retry logic for API calls with exponential backoff,
-jitter, circuit breaker pattern, and status code-based retry decisions.
+Provides configurable retry logic for API requests with exponential
+ backoff, jitter, and status-code-aware handling.
 """
 
-import sys
-import os
-import time
+from __future__ import annotations
+
+import asyncio
 import random
-from typing import Any, Dict, List, Optional, Callable
+import time
+from typing import Any, Callable, Optional, Set
+from dataclasses import dataclass, field
+import logging
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ApiRetryAction(BaseAction):
-    """Retry failed API calls with exponential backoff and jitter.
-    
-    Supports configurable retry count, base delay, max delay, jitter,
-    retryable status codes, and circuit breaker integration.
+@dataclass
+class RetryConfig:
+    """Configuration for retry behavior."""
+    max_attempts: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    jitter_factor: float = 0.2
+    retryable_status_codes: Set[int] = field(default_factory=lambda: {408, 429, 500, 502, 503, 504})
+    retryable_exceptions: tuple[type[Exception], ...] = (TimeoutError, ConnectionError, asyncio.TimeoutError)
+    fatal_status_codes: Set[int] = field(default_factory=lambda: {400, 401, 403, 404})
+
+
+@dataclass
+class RetryResult:
+    """Result of a retry operation."""
+    success: bool
+    data: Optional[Any] = None
+    attempts: int = 0
+    total_time_ms: float = 0.0
+    error: Optional[str] = None
+    last_status_code: Optional[int] = None
+
+
+class APIMockClient:
+    """Mock HTTP client for demonstration."""
+
+    def __init__(self) -> None:
+        self.request_count = 0
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> tuple[int, Any]:
+        self.request_count += 1
+        await asyncio.sleep(0.01)
+        return (200, {"status": "ok", "request_num": self.request_count})
+
+
+class APIRetryAction:
     """
-    action_type = "api_retry"
-    display_name = "API重试"
-    description = "对失败的API调用进行指数退避重试，支持抖动和熔断"
+    Retry wrapper for API requests.
 
-    DEFAULT_RETRYABLE_CODES = {408, 429, 500, 502, 503, 504}
+    Automatically retries failed requests with configurable backoff
+    and status-code-aware decision making.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute API call with retry logic.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - api_call_fn: Callable that performs the API call.
-                - max_retries: Max retry attempts (default: 3).
-                - base_delay: Initial delay in seconds (default: 1.0).
-                - max_delay: Max delay cap in seconds (default: 60.0).
-                - exponential_base: Exponential base (default: 2.0).
-                - jitter: Add random jitter (default: True).
-                - retryable_codes: Set of HTTP status codes to retry.
-                - retryable_exceptions: List of exception types to retry.
-                - save_to_var: Variable to store result.
-                - on_retry: Callback function called before each retry (receives attempt count and error).
-        
-        Returns:
-            ActionResult with API call result or final error.
-        """
-        try:
-            api_call_fn = params.get('api_call_fn')
-            max_retries = params.get('max_retries', 3)
-            base_delay = params.get('base_delay', 1.0)
-            max_delay = params.get('max_delay', 60.0)
-            exponential_base = params.get('exponential_base', 2.0)
-            jitter = params.get('jitter', True)
-            retryable_codes = params.get('retryable_codes', self.DEFAULT_RETRYABLE_CODES)
-            retryable_exceptions = params.get('retryable_exceptions', [Exception])
-            save_to_var = params.get('save_to_var', 'retry_result')
-            on_retry = params.get('on_retry', None)
+    Example:
+        client = APIMockClient()
+        retry = APIRetryAction(client, RetryConfig(max_attempts=5))
+        result = await retry.execute("GET", "https://api.example.com/data")
+    """
 
-            if api_call_fn is None:
-                return ActionResult(success=False, message="api_call_fn is required")
+    def __init__(
+        self,
+        client: Any,
+        config: Optional[RetryConfig] = None,
+    ) -> None:
+        self.client = client
+        self.config = config or RetryConfig()
 
-            last_error = None
-            attempt = 0
+    async def execute(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> RetryResult:
+        """Execute request with automatic retries."""
+        start_time = time.monotonic()
+        last_error = None
+        last_status = None
 
-            while attempt <= max_retries:
-                try:
-                    result = api_call_fn()
-                    context.set_variable(save_to_var, result)
-                    if attempt > 0:
-                        return ActionResult(success=True, data=result, 
-                                           message=f"Success on attempt {attempt + 1}")
-                    return ActionResult(success=True, data=result, message="Success on first attempt")
-                except Exception as e:
-                    last_error = e
-                    # Check if retryable
-                    if not self._is_retryable(e, retryable_codes, retryable_exceptions):
-                        return ActionResult(success=False, message=f"Non-retryable error: {e}")
+        for attempt in range(1, self.config.max_attempts + 1):
+            try:
+                status, data = await self.client.request(method, url, **kwargs)
+                last_status = status
 
-                    if attempt >= max_retries:
-                        break
+                if status in self.config.fatal_status_codes:
+                    return RetryResult(
+                        success=False,
+                        attempts=attempt,
+                        total_time_ms=(time.monotonic() - start_time) * 1000,
+                        error=f"Fatal status code: {status}",
+                        last_status_code=status,
+                    )
 
-                    # Calculate delay
-                    delay = min(base_delay * (exponential_base ** attempt), max_delay)
-                    if jitter:
-                        delay = delay * (0.5 + random.random())
+                if status < 400:
+                    return RetryResult(
+                        success=True,
+                        data=data,
+                        attempts=attempt,
+                        total_time_ms=(time.monotonic() - start_time) * 1000,
+                        last_status_code=status,
+                    )
 
-                    if on_retry:
-                        try:
-                            on_retry(attempt + 1, str(e), delay)
-                        except Exception:
-                            pass
+                if status not in self.config.retryable_status_codes:
+                    return RetryResult(
+                        success=False,
+                        data=data,
+                        attempts=attempt,
+                        total_time_ms=(time.monotonic() - start_time) * 1000,
+                        error=f"Unexpected status: {status}",
+                        last_status_code=status,
+                    )
 
-                    time.sleep(delay)
-                    attempt += 1
+                last_error = f"Retryable status: {status}"
 
-            return ActionResult(success=False, message=f"All retries exhausted: {last_error}")
+            except self.config.retryable_exceptions as e:
+                last_error = str(e)
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Retry setup error: {e}")
+            except Exception as e:
+                return RetryResult(
+                    success=False,
+                    attempts=attempt,
+                    total_time_ms=(time.monotonic() - start_time) * 1000,
+                    error=f"Non-retryable error: {e}",
+                )
 
-    def _is_retryable(self, error: Exception, codes: set, exception_types: List) -> bool:
-        """Check if an error is retryable."""
-        if not exception_types:
-            return False
-        for exc_type in exception_types:
-            if isinstance(error, exc_type):
-                # Check if it's a status code error with retryable code
-                if hasattr(error, 'response') and hasattr(error.response, 'status_code'):
-                    return error.response.status_code in codes
-                return True
-        return False
+            if attempt < self.config.max_attempts:
+                delay = self._calculate_delay(attempt)
+                logger.debug(f"Attempt {attempt} failed, retrying in {delay:.2f}s: {last_error}")
+                await asyncio.sleep(delay)
 
+        return RetryResult(
+            success=False,
+            attempts=self.config.max_attempts,
+            total_time_ms=(time.monotonic() - start_time) * 1000,
+            error=last_error or "Max retries exceeded",
+            last_status_code=last_status,
+        )
 
-class CircuitBreakerOpen(Exception):
-    """Exception raised when circuit breaker is open."""
-    pass
+    def _calculate_delay(self, attempt: int) -> float:
+        """Calculate delay for the given attempt number."""
+        delay = min(
+            self.config.base_delay * (self.config.exponential_base ** (attempt - 1)),
+            self.config.max_delay,
+        )
 
+        if self.config.jitter:
+            jitter_range = delay * self.config.jitter_factor
+            delay += random.uniform(-jitter_range, jitter_range)
 
-class CircuitBreaker:
-    """Simple circuit breaker implementation."""
-    
-    def __init__(self, failure_threshold: int = 5, timeout: float = 60.0, recovery_timeout: float = 30.0):
-        self.failure_threshold = failure_threshold
-        self.timeout = timeout
-        self.recovery_timeout = recovery_timeout
-        self.failure_count = 0
-        self.last_failure_time: Optional[float] = None
-        self.state = 'closed'  # closed, open, half_open
+        return max(0, delay)
 
-    def call(self, fn: Callable, *args, **kwargs) -> Any:
-        """Execute function with circuit breaker protection."""
-        if self.state == 'open':
-            if time.time() - self.last_failure_time >= self.recovery_timeout:
-                self.state = 'half_open'
-            else:
-                raise CircuitBreakerOpen("Circuit breaker is open")
-
-        try:
-            result = fn(*args, **kwargs)
-            if self.state == 'half_open':
-                self.state = 'closed'
-                self.failure_count = 0
-            return result
-        except Exception as e:
-            self.failure_count += 1
-            self.last_failure_time = time.time()
-            if self.failure_count >= self.failure_threshold:
-                self.state = 'open'
-            raise e
-
-    def reset(self):
-        """Reset circuit breaker to closed state."""
-        self.failure_count = 0
-        self.last_failure_time = None
-        self.state = 'closed'
+    async def execute_batch(
+        self,
+        requests: list[tuple[str, str]],
+    ) -> list[RetryResult]:
+        """Execute multiple requests with retries in parallel."""
+        tasks = [self.execute(method, url) for method, url in requests]
+        return await asyncio.gather(*tasks)
