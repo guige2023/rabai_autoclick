@@ -1,129 +1,83 @@
 """YAML utilities for RabAI AutoClick.
 
 Provides:
-- YAML parsing and dumping
-- Safe loading
+- YAML parsing and serialization
+- Safe loading of untrusted YAML
 """
 
-import yaml
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
 
 
-def load_yaml(path: Union[str, Path]) -> Optional[Dict[str, Any]]:
-    """Load YAML file.
+def load_yaml(yaml_string: str) -> Optional[Any]:
+    """Parse a YAML string.
+
+    Args:
+        yaml_string: YAML content.
+
+    Returns:
+        Parsed Python object or None on error.
+    """
+    try:
+        import yaml
+        return yaml.safe_load(yaml_string)
+    except Exception:
+        return None
+
+
+def dump_yaml(data: Any) -> str:
+    """Serialize data to YAML string.
+
+    Args:
+        data: Python object to serialize.
+
+    Returns:
+        YAML string.
+    """
+    import yaml
+    return yaml.safe_dump(data, default_flow_style=False)
+
+
+def load_yaml_file(path: str) -> Optional[Any]:
+    """Load YAML from a file.
 
     Args:
         path: Path to YAML file.
 
     Returns:
-        Parsed YAML as dict or None.
+        Parsed Python object or None on error.
     """
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        import yaml
+        with open(path, "r") as f:
             return yaml.safe_load(f)
     except Exception:
         return None
 
 
-def dump_yaml(data: Any, path: Optional[Union[str, Path]] = None, indent: int = 2) -> Optional[str]:
-    """Dump data to YAML string or file.
+def dump_yaml_file(path: str, data: Any) -> bool:
+    """Write data to a YAML file.
 
     Args:
-        data: Data to serialize.
-        path: Optional file path to write.
-        indent: Indentation level.
+        path: Output file path.
+        data: Python object to serialize.
 
     Returns:
-        YAML string if path not provided, else None.
+        True on success.
     """
     try:
-        yaml_str = yaml.dump(data, indent=indent, allow_unicode=True, default_flow_style=False)
-
-        if path:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(yaml_str)
-            return None
-
-        return yaml_str
+        import yaml
+        with open(path, "w") as f:
+            yaml.safe_dump(data, f, default_flow_style=False)
+        return True
     except Exception:
-        return None
+        return False
 
 
-def safe_load_yaml(path: Union[str, Path]) -> Optional[Dict[str, Any]]:
-    """Safely load YAML file (only basic Python objects).
-
-    Args:
-        path: Path to YAML file.
-
-    Returns:
-        Parsed YAML or None.
-    """
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    except Exception:
-        return None
-
-
-def load_yaml_or_json(path: Union[str, Path]) -> Optional[Dict[str, Any]]:
-    """Load YAML or JSON file based on extension.
-
-    Args:
-        path: Path to file.
-
-    Returns:
-        Parsed data or None.
-    """
-    path = Path(path)
-
-    if path.suffix in ('.yaml', '.yml'):
-        return load_yaml(path)
-    elif path.suffix == '.json':
-        import json
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return None
-
-    return None
-
-
-def merge_yaml(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Deep merge two YAML/dict structures.
-
-    Args:
-        base: Base configuration.
-        override: Override configuration.
-
-    Returns:
-        Merged configuration.
-    """
-    result = base.copy()
-
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = merge_yaml(result[key], value)
-        else:
-            result[key] = value
-
-    return result
-
-
-def validate_yaml_schema(data: Dict[str, Any], schema: Dict[str, type]) -> bool:
-    """Validate YAML data against simple schema.
-
-    Args:
-        data: Parsed YAML data.
-        schema: Dict mapping keys to expected types.
-
-    Returns:
-        True if valid.
-    """
-    for key, expected_type in schema.items():
-        if key not in data:
-            return False
-        if not isinstance(data[key], expected_type):
-            return False
-    return True
+__all__ = [
+    "load_yaml",
+    "dump_yaml",
+    "load_yaml_file",
+    "dump_yaml_file",
+]
