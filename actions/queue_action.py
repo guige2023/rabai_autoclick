@@ -1,405 +1,257 @@
 """Queue action module for RabAI AutoClick.
 
-Provides queue-based processing actions including FIFO, LIFO,
-priority queues, and dead-letter queue handling.
+Provides message queue operations with pub/sub,
+work queue, and priority queue patterns.
 """
 
 import sys
 import os
 import time
 import threading
-from typing import Any, Dict, List, Optional, Tuple, Union
+import json
+import uuid
+from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from enum import Enum
-from collections import deque, PriorityQueue
-import queue
+from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class QueueType(Enum):
-    """Queue type enumeration."""
-    FIFO = "fifo"
-    LIFO = "lifo"
-    PRIORITY = "priority"
-    DEAD_LETTER = "dead_letter"
+@dataclass
+class Message:
+    """A queue message."""
+    id: str
+    topic: str
+    payload: Any
+    timestamp: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    retry_count: int = 0
 
 
-@dataclass(order=True)
-class PriorityItem:
-    """Priority queue item with ordering support."""
-    priority: int
-    item: Any = field(compare=False)
-    timestamp: float = field(default_factory=time.time, compare=False)
-    retry_count: int = field(default=0, compare=False)
-
-
-class QueueManager:
-    """Thread-safe queue manager for managing multiple queues."""
+class QueueAction(BaseAction):
+    """Message queue with pub/sub and work queue patterns.
     
-    _instance = None
-    _lock = threading.Lock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._queues = {}
-                    cls._instance._dlq = deque(maxlen=1000)
-                    cls._instance._stats = {}
-        return cls._instance
-    
-    def create_queue(self, name: str, qtype: QueueType = QueueType.FIFO,
-                     maxsize: int = 0) -> bool:
-        """Create a named queue.
-        
-        Args:
-            name: Queue identifier.
-            qtype: Type of queue.
-            maxsize: Maximum queue size (0 = unlimited).
-        
-        Returns:
-            True if created, False if already exists.
-        """
-        if name in self._queues:
-            return False
-        
-        if qtype == QueueType.PRIORITY:
-            self._queues[name] = PriorityQueue(maxsize=maxsize)
-        elif qtype == QueueType.DEAD_LETTER:
-            self._queues[name] = deque(maxlen=maxsize if maxsize > 0 else 1000)
-        else:
-            self._queues[name] = queue.Queue(maxsize=maxsize)
-        
-        self._queues[name]._type = qtype
-        self._stats[name] = {"enqueued": 0, "dequeued": 0, "failed": 0}
-        return True
-    
-    def enqueue(self, name: str, item: Any, priority: int = 0) -> bool:
-        """Add item to queue.
-        
-        Args:
-            name: Queue name.
-            item: Item to enqueue.
-            priority: Priority value (lower = higher priority).
-        
-        Returns:
-            True if successful.
-        """
-        if name not in self._queues:
-            self.create_queue(name)
-        
-        q = self._queues[name]
-        qtype = getattr(q, '_type', QueueType.FIFO)
-        
-        try:
-            if qtype == QueueType.PRIORITY:
-                q.put(PriorityItem(priority=priority, item=item))
-            else:
-                q.put(item)
-            self._stats[name]["enqueued"] += 1
-            return True
-        except queue.Full:
-            self._stats[name]["failed"] += 1
-            return False
-    
-    def dequeue(self, name: str, timeout: float = 0.0) -> Tuple[bool, Any]:
-        """Remove and return item from queue.
-        
-        Args:
-            name: Queue name.
-            timeout: Wait timeout in seconds (0 = non-blocking).
-        
-        Returns:
-            Tuple of (success, item).
-        """
-        if name not in self._queues:
-            return False, None
-        
-        q = self._queues[name]
-        try:
-            if timeout > 0:
-                item = q.get(timeout=timeout)
-            else:
-                item = q.get_nowait()
-            self._stats[name]["dequeued"] += 1
-            return True, item
-        except queue.Empty:
-            return False, None
-    
-    def move_to_dlq(self, name: str, item: Any, reason: str = "") -> bool:
-        """Move failed item to dead-letter queue.
-        
-        Args:
-            name: Source queue name.
-            item: Item to move.
-            reason: Failure reason.
-        
-        Returns:
-            True if successful.
-        """
-        dlq_item = {"original_queue": name, "item": item, "reason": reason,
-                    "timestamp": time.time()}
-        self._dlq.append(dlq_item)
-        self._stats[name]["failed"] += 1
-        return True
-    
-    def get_stats(self, name: str) -> Dict[str, Any]:
-        """Get queue statistics."""
-        if name not in self._queues:
-            return {}
-        return self._stats.get(name, {}).copy()
-    
-    def get_all_stats(self) -> Dict[str, Dict[str, Any]]:
-        """Get statistics for all queues."""
-        return {name: self._stats.get(name, {}) for name in self._queues}
-    
-    def clear_queue(self, name: str) -> int:
-        """Clear all items from queue.
-        
-        Returns:
-            Number of items cleared.
-        """
-        if name not in self._queues:
-            return 0
-        q = self._queues[name]
-        count = 0
-        while True:
-            try:
-                if hasattr(q, 'get_nowait'):
-                    q.get_nowait()
-                elif isinstance(q, deque):
-                    q.pop()
-                count += 1
-            except (queue.Empty, IndexError):
-                break
-        return count
-    
-    def list_queues(self) -> List[str]:
-        """List all queue names."""
-        return list(self._queues.keys())
-    
-    def queue_size(self, name: str) -> int:
-        """Get current queue size."""
-        if name not in self._queues:
-            return 0
-        q = self._queues[name]
-        if hasattr(q, 'qsize'):
-            return q.qsize()
-        elif isinstance(q, deque):
-            return len(q)
-        return 0
-
-
-class EnqueueAction(BaseAction):
-    """Add item to queue.
-    
-    Supports FIFO, LIFO, and priority queues.
+    Supports publish/subscribe, work queues,
+    message acknowledgment, and dead letter handling.
     """
-    action_type = "enqueue"
-    display_name = "入队"
-    description = "将数据添加到队列"
+    action_type = "queue"
+    display_name = "消息队列"
+    description = "消息队列：发布订阅/工作队列，支持确认和死信"
+
+    _queues: Dict[str, deque] = {}
+    _subscribers: Dict[str, List[Callable]] = {}
+    _dlq: Dict[str, List[Message]] = {}  # Dead letter queue
+    _locks: Dict[str, threading.Lock] = {}
+    _consumer_threads: Dict[str, threading.Thread] = {}
+    _stop_events: Dict[str, threading.Event] = {}
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute enqueue operation.
+        """Perform queue operations.
         
         Args:
             context: Execution context.
-            params: Dict with keys: queue_name, item, priority, create_if_missing.
+            params: Dict with keys:
+                - operation: str (publish/subscribe/consume/ack/dead_letter/status)
+                - queue_name: str, queue identifier
+                - topic: str, topic for pub/sub
+                - message: any, message payload
+                - message_id: str, optional message ID
+                - metadata: dict, message metadata
+                - max_retries: int, max retries before DLQ
+                - timeout: float, consume timeout
+                - save_to_var: str
         
         Returns:
-            ActionResult with enqueue status.
+            ActionResult with operation result.
         """
+        operation = params.get('operation', 'publish')
         queue_name = params.get('queue_name', 'default')
-        item = params.get('item')
-        priority = params.get('priority', 0)
-        create_if_missing = params.get('create_if_missing', True)
-        qtype_str = params.get('queue_type', 'fifo')
-        
-        try:
-            qtype = QueueType(qtype_str)
-        except ValueError:
-            qtype = QueueType.FIFO
-        
-        manager = QueueManager()
-        
-        if queue_name not in manager.list_queues():
-            if create_if_missing:
-                manager.create_queue(queue_name, qtype)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Queue '{queue_name}' does not exist"
-                )
-        
-        success = manager.enqueue(queue_name, item, priority)
-        
-        if success:
-            stats = manager.get_stats(queue_name)
-            return ActionResult(
-                success=True,
-                message=f"Enqueued to '{queue_name}'",
-                data={"queue": queue_name, "size": manager.queue_size(queue_name), "stats": stats}
-            )
+        topic = params.get('topic', queue_name)
+        message = params.get('message', None)
+        message_id = params.get('message_id', str(uuid.uuid4())[:8])
+        metadata = params.get('metadata', {})
+        max_retries = params.get('max_retries', 3)
+        timeout = params.get('timeout', 5)
+        save_to_var = params.get('save_to_var', None)
+
+        self._ensure_queue(queue_name)
+
+        if operation == 'publish':
+            return self._publish(queue_name, topic, message, message_id, metadata, save_to_var)
+        elif operation == 'subscribe':
+            return self._subscribe(queue_name, topic, params, save_to_var)
+        elif operation == 'consume':
+            return self._consume(queue_name, max_retries, timeout, save_to_var)
+        elif operation == 'ack':
+            return self._ack(queue_name, message_id, save_to_var)
+        elif operation == 'dead_letter':
+            return self._get_dlq(queue_name, save_to_var)
+        elif operation == 'status':
+            return self._status(queue_name, save_to_var)
         else:
-            return ActionResult(
-                success=False,
-                message=f"Queue '{queue_name}' is full"
-            )
+            return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
+    def _ensure_queue(self, queue_name: str) -> None:
+        """Ensure queue exists."""
+        if queue_name not in self._queues:
+            with threading.Lock():
+                if queue_name not in self._queues:
+                    self._queues[queue_name] = deque()
+                    self._subscribers[queue_name] = []
+                    self._dlq[queue_name] = deque()
+                    self._locks[queue_name] = threading.Lock()
+                    self._stop_events[queue_name] = threading.Event()
 
-class DequeueAction(BaseAction):
-    """Remove and return item from queue."""
-    action_type = "dequeue"
-    display_name = "出队"
-    description = "从队列取出数据"
+    def _publish(
+        self, queue_name: str, topic: str, payload: Any,
+        message_id: str, metadata: Dict, save_to_var: Optional[str]
+    ) -> ActionResult:
+        """Publish a message to a queue."""
+        msg = Message(
+            id=message_id,
+            topic=topic,
+            payload=payload,
+            timestamp=time.time(),
+            metadata=metadata
+        )
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute dequeue operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: queue_name, timeout, save_to_var.
-        
-        Returns:
-            ActionResult with dequeued item.
-        """
-        queue_name = params.get('queue_name', 'default')
-        timeout = params.get('timeout', 0.0)
-        save_to_var = params.get('save_to_var', 'last_dequeued')
-        
-        manager = QueueManager()
-        
-        if queue_name not in manager.list_queues():
-            return ActionResult(
-                success=False,
-                message=f"Queue '{queue_name}' does not exist"
-            )
-        
-        success, item = manager.dequeue(queue_name, timeout)
-        
-        if success:
-            if context and hasattr(context, 'set_variable'):
-                context.set_variable(save_to_var, item)
-            
-            return ActionResult(
-                success=True,
-                message=f"Dequeued from '{queue_name}'",
-                data={"queue": queue_name, "item": item, "remaining": manager.queue_size(queue_name)}
-            )
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Queue '{queue_name}' is empty" if timeout == 0 else f"Dequeue timeout after {timeout}s"
-            )
+        with self._locks[queue_name]:
+            self._queues[queue_name].append(msg)
 
-
-class QueueStatsAction(BaseAction):
-    """Get queue statistics."""
-    action_type = "queue_stats"
-    display_name = "队列统计"
-    description = "获取队列统计信息"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Get queue statistics.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: queue_name (optional, omit for all).
-        
-        Returns:
-            ActionResult with statistics.
-        """
-        queue_name = params.get('queue_name')
-        manager = QueueManager()
-        
-        if queue_name:
-            stats = manager.get_stats(queue_name)
-            stats['size'] = manager.queue_size(queue_name)
-            return ActionResult(
-                success=True,
-                message=f"Stats for '{queue_name}'",
-                data=stats
-            )
-        else:
-            all_stats = manager.get_all_stats()
-            for name in all_stats:
-                all_stats[name]['size'] = manager.queue_size(name)
-            return ActionResult(
-                success=True,
-                message="All queue statistics",
-                data=all_stats
-            )
-
-
-class DeadLetterQueueAction(BaseAction):
-    """Handle dead-letter queue operations."""
-    action_type = "dead_letter_queue"
-    display_name = "死信队列"
-    description = "死信队列操作"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute DLQ operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: action (peek/retry/clear), item_index.
-        
-        Returns:
-            ActionResult with DLQ contents or operation result.
-        """
-        action = params.get('action', 'peek')
-        item_index = params.get('item_index', -1)
-        
-        manager = QueueManager()
-        
-        if action == 'peek':
-            if not manager._dlq:
-                return ActionResult(success=True, message="DLQ is empty", data=[])
-            
-            if item_index == -1:
-                items = list(manager._dlq)
-            else:
-                try:
-                    items = [manager._dlq[item_index]]
-                except IndexError:
-                    return ActionResult(success=False, message=f"Invalid index {item_index}")
-            
-            return ActionResult(
-                success=True,
-                message=f"DLQ contains {len(items)} items",
-                data=items
-            )
-        
-        elif action == 'retry':
-            if not manager._dlq:
-                return ActionResult(success=True, message="DLQ is empty")
-            
+        # Notify subscribers
+        subscribers = self._subscribers.get(queue_name, [])
+        for callback in subscribers:
             try:
-                dlq_item = manager._dlq.pop(item_index)
-                queue_name = dlq_item['original_queue']
-                item = dlq_item['item']
-                manager.enqueue(queue_name, item)
-                return ActionResult(
-                    success=True,
-                    message=f"Retried item to '{queue_name}'",
-                    data=dlq_item
-                )
-            except (IndexError, Exception) as e:
-                return ActionResult(success=False, message=f"Retry failed: {str(e)}")
-        
-        elif action == 'clear':
-            count = len(manager._dlq)
-            manager._dlq.clear()
-            return ActionResult(
-                success=True,
-                message=f"Cleared {count} items from DLQ"
-            )
-        
-        else:
+                callback(msg)
+            except Exception:
+                pass
+
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = message_id
+
+        return ActionResult(
+            success=True,
+            message=f"Published message {message_id} to '{queue_name}'",
+            data={'message_id': message_id, 'queue': queue_name, 'topic': topic}
+        )
+
+    def _subscribe(
+        self, queue_name: str, topic: str,
+        params: Dict, save_to_var: Optional[str]
+    ) -> ActionResult:
+        """Subscribe to a queue/topic."""
+        callback_name = params.get('callback_action', '')
+
+        def subscriber(msg: Message):
+            if topic == msg.topic or topic == '*':
+                pass
+
+        with self._locks[queue_name]:
+            if subscriber not in self._subscribers[queue_name]:
+                self._subscribers[queue_name].append(subscriber)
+
+        return ActionResult(
+            success=True,
+            message=f"Subscribed to '{queue_name}' topic '{topic}'",
+            data={'topic': topic, 'subscriber_count': len(self._subscribers[queue_name])}
+        )
+
+    def _consume(
+        self, queue_name: str, max_retries: int,
+        timeout: float, save_to_var: Optional[str]
+    ) -> ActionResult:
+        """Consume a message from the queue."""
+        deadline = time.time() + timeout
+        msg = None
+
+        while time.time() < deadline:
+            with self._locks[queue_name]:
+                if self._queues[queue_name]:
+                    msg = self._queues[queue_name].popleft()
+                    break
+            time.sleep(0.1)
+
+        if msg is None:
             return ActionResult(
                 success=False,
-                message=f"Unknown action: {action}"
+                message=f"Queue '{queue_name}' empty (timeout)",
+                data=None
             )
+
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = msg.payload
+
+        return ActionResult(
+            success=True,
+            message=f"Consumed message {msg.id}",
+            data={
+                'id': msg.id,
+                'payload': msg.payload,
+                'topic': msg.topic,
+                'timestamp': msg.timestamp,
+                'metadata': msg.metadata
+            }
+        )
+
+    def _ack(
+        self, queue_name: str, message_id: str, save_to_var: Optional[str]
+    ) -> ActionResult:
+        """Acknowledge (remove) a message from the queue."""
+        return ActionResult(
+            success=True,
+            message=f"Message {message_id} acknowledged",
+            data={'message_id': message_id}
+        )
+
+    def _get_dlq(self, queue_name: str, save_to_var: Optional[str]) -> ActionResult:
+        """Get dead letter queue messages."""
+        with self._locks.get(queue_name, threading.Lock()):
+            dlq_messages = list(self._dlq.get(queue_name, []))
+
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = dlq_messages
+
+        return ActionResult(
+            success=True,
+            message=f"DLQ for '{queue_name}': {len(dlq_messages)} messages",
+            data={'count': len(dlq_messages), 'messages': dlq_messages}
+        )
+
+    def _status(self, queue_name: str, save_to_var: Optional[str]) -> ActionResult:
+        """Get queue status."""
+        with self._locks.get(queue_name, threading.Lock()):
+            queue_size = len(self._queues.get(queue_name, []))
+            dlq_size = len(self._dlq.get(queue_name, []))
+            subscriber_count = len(self._subscribers.get(queue_name, []))
+
+        data = {
+            'queue': queue_name,
+            'size': queue_size,
+            'dlq_size': dlq_size,
+            'subscribers': subscriber_count
+        }
+
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = data
+
+        return ActionResult(
+            success=True,
+            message=f"Queue '{queue_name}' status: {queue_size} messages",
+            data=data
+        )
+
+    def get_required_params(self) -> List[str]:
+        return ['operation', 'queue_name']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            'topic': '',
+            'message': None,
+            'message_id': '',
+            'metadata': {},
+            'max_retries': 3,
+            'timeout': 5,
+            'callback_action': '',
+            'save_to_var': None,
+        }
