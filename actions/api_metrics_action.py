@@ -1,223 +1,275 @@
-"""API metrics and instrumentation action module for RabAI AutoClick.
+"""
+API Metrics Action Module.
 
-Provides API metrics operations:
-- MetricsCollectAction: Collect API metrics
-- MetricsHistogramAction: Record histogram metrics
-- MetricsCounterAction: Increment/decrement counters
-- MetricsGaugeAction: Set gauge values
-- MetricsExportAction: Export metrics to monitoring system
-- MetricsAlertAction: Create metric-based alerts
+Provides API metrics collection and monitoring
+including latency, throughput, and error rates.
 """
 
+from typing import Any, Callable, Dict, List, Optional, Set
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+import asyncio
+import logging
 import time
-import uuid
-from typing import Any, Dict, List, Optional
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class MetricsCollectAction(BaseAction):
-    """Collect API metrics."""
-    action_type = "metrics_collect"
-    display_name = "指标采集"
-    description = "采集API性能指标"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            metric_names = params.get("metric_names", [])
-            start_time = params.get("start_time", time.time() - 60)
-            end_time = params.get("end_time", time.time())
-
-            if not metric_names:
-                return ActionResult(success=False, message="metric_names is required")
-
-            metrics = {}
-            for name in metric_names:
-                metrics[name] = {
-                    "count": 100,
-                    "sum": 5000.0,
-                    "avg": 50.0,
-                    "min": 10.0,
-                    "max": 100.0,
-                    "p50": 48.0,
-                    "p95": 90.0,
-                    "p99": 98.0,
-                }
-
-            return ActionResult(
-                success=True,
-                data={"metrics": metrics, "start_time": start_time, "end_time": end_time},
-                message=f"Collected {len(metrics)} metrics",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Metrics collect failed: {e}")
+class MetricType(Enum):
+    """Metric types."""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+    TIMER = "timer"
+    SUMMARY = "summary"
 
 
-class MetricsHistogramAction(BaseAction):
-    """Record histogram metrics."""
-    action_type = "metrics_histogram"
-    display_name = "直方图指标"
-    description = "记录直方图分布指标"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            value = params.get("value", 0.0)
-            labels = params.get("labels", {})
-            buckets = params.get("buckets", [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
-
-            if not name:
-                return ActionResult(success=False, message="name is required")
-
-            bucket_key = next((b for b in sorted(buckets) if value <= b), buckets[-1])
-
-            return ActionResult(
-                success=True,
-                data={"name": name, "value": value, "labels": labels, "bucket": bucket_key},
-                message=f"Histogram recorded: {name}={value}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Histogram record failed: {e}")
+@dataclass
+class Metric:
+    """Base metric."""
+    name: str
+    metric_type: MetricType
+    value: float
+    labels: Dict[str, str] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
-class MetricsCounterAction(BaseAction):
-    """Increment/decrement counter metrics."""
-    action_type = "metrics_counter"
-    display_name = "计数器指标"
-    description = "递增/递减计数器指标"
+@dataclass
+class Counter:
+    """Counter metric."""
+    name: str
+    value: int = 0
+    labels: Dict[str, str] = field(default_factory=dict)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            increment = params.get("increment", 1)
-            labels = params.get("labels", {})
-            rate = params.get("rate", False)
-
-            if not name:
-                return ActionResult(success=False, message="name is required")
-
-            if not hasattr(context, "counters"):
-                context.counters = {}
-            if name not in context.counters:
-                context.counters[name] = 0
-            context.counters[name] += increment
-
-            return ActionResult(
-                success=True,
-                data={"name": name, "value": context.counters[name], "labels": labels, "rate": rate},
-                message=f"Counter {name} = {context.counters[name]}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Counter update failed: {e}")
+    def increment(self, amount: int = 1):
+        """Increment counter."""
+        self.value += amount
 
 
-class MetricsGaugeAction(BaseAction):
-    """Set gauge metric values."""
-    action_type = "metrics_gauge"
-    display_name = "仪表指标"
-    description = "设置仪表盘指标值"
+@dataclass
+class Gauge:
+    """Gauge metric."""
+    name: str
+    value: float = 0.0
+    labels: Dict[str, str] = field(default_factory=dict)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            value = params.get("value", 0.0)
-            labels = params.get("labels", {})
-            operation = params.get("operation", "set")
+    def set(self, value: float):
+        """Set gauge value."""
+        self.value = value
 
-            if not name:
-                return ActionResult(success=False, message="name is required")
+    def increment(self, amount: float = 1.0):
+        """Increment gauge."""
+        self.value += amount
 
-            if not hasattr(context, "gauges"):
-                context.gauges = {}
-            current = context.gauges.get(name, 0.0)
-
-            if operation == "set":
-                context.gauges[name] = value
-            elif operation == "inc":
-                context.gauges[name] = current + value
-            elif operation == "dec":
-                context.gauges[name] = current - value
-
-            return ActionResult(
-                success=True,
-                data={"name": name, "value": context.gauges[name], "labels": labels},
-                message=f"Gauge {name} = {context.gauges[name]}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Gauge update failed: {e}")
+    def decrement(self, amount: float = 1.0):
+        """Decrement gauge."""
+        self.value -= amount
 
 
-class MetricsExportAction(BaseAction):
-    """Export metrics to monitoring system."""
-    action_type = "metrics_export"
-    display_name = "指标导出"
-    description = "导出指标到监控系统"
+@dataclass
+class Histogram:
+    """Histogram metric."""
+    name: str
+    buckets: Dict[float, int] = field(default_factory=dict)
+    sum: float = 0.0
+    count: int = 0
+    labels: Dict[str, str] = field(default_factory=dict)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            format_type = params.get("format", "prometheus")
-            endpoint = params.get("endpoint", "")
-            job_name = params.get("job_name", "rabai_autoclick")
+    def __post_init__(self):
+        if not self.buckets:
+            self.buckets = {0.005: 0, 0.01: 0, 0.025: 0, 0.05: 0, 0.1: 0,
+                           0.25: 0, 0.5: 0, 1.0: 0, 2.5: 0, 5.0: 0, 10.0: 0}
 
-            if not endpoint:
-                return ActionResult(success=False, message="endpoint is required")
+    def observe(self, value: float):
+        """Observe a value."""
+        self.sum += value
+        self.count += 1
+        for bucket_limit in sorted(self.buckets.keys()):
+            if value <= bucket_limit:
+                self.buckets[bucket_limit] += 1
 
-            if format_type == "prometheus":
-                output = f'# HELP {job_name}_api_requests API requests\n# TYPE {job_name}_api_requests counter\n'
-            elif format_type == "json":
-                output = '{"metrics": []}'
-            else:
-                return ActionResult(success=False, message=f"Unsupported format: {format_type}")
+    def get_percentile(self, percentile: float) -> float:
+        """Calculate percentile."""
+        if self.count == 0:
+            return 0.0
 
-            return ActionResult(
-                success=True,
-                data={"format": format_type, "endpoint": endpoint, "exported": True},
-                message=f"Metrics exported to {endpoint}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Metrics export failed: {e}")
+        sorted_buckets = sorted(self.buckets.items())
+        threshold = self.count * percentile / 100.0
+
+        cumulative = 0
+        for bucket_limit, count in sorted_buckets:
+            cumulative += count
+            if cumulative >= threshold:
+                return bucket_limit
+
+        return sorted_buckets[-1][0] if sorted_buckets else 0.0
 
 
-class MetricsAlertAction(BaseAction):
-    """Create metric-based alerts."""
-    action_type = "metrics_alert"
-    display_name = "指标告警"
-    description = "基于指标创建告警"
+class MetricsCollector:
+    """Collects and manages metrics."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            metric_name = params.get("metric_name", "")
-            threshold = params.get("threshold", 0.0)
-            operator = params.get("operator", "gt")
-            duration = params.get("duration", 60)
-            severity = params.get("severity", "warning")
+    def __init__(self):
+        self.counters: Dict[str, Counter] = {}
+        self.gauges: Dict[str, Gauge] = {}
+        self.histograms: Dict[str, Histogram] = {}
+        self.timers: Dict[str, List[float]] = {}
 
-            if not metric_name:
-                return ActionResult(success=False, message="metric_name is required")
-            if operator not in ("gt", "lt", "eq", "ge", "le"):
-                return ActionResult(success=False, message="operator must be gt, lt, eq, ge, or le")
-            if severity not in ("info", "warning", "critical"):
-                return ActionResult(success=False, message="severity must be info, warning, or critical")
+    def get_counter(self, name: str, labels: Optional[Dict[str, str]] = None) -> Counter:
+        """Get or create counter."""
+        key = self._make_key(name, labels or {})
+        if key not in self.counters:
+            self.counters[key] = Counter(name=name, labels=labels or {})
+        return self.counters[key]
 
-            alert_id = str(uuid.uuid4())[:8]
-            triggered = True
+    def get_gauge(self, name: str, labels: Optional[Dict[str, str]] = None) -> Gauge:
+        """Get or create gauge."""
+        key = self._make_key(name, labels or {})
+        if key not in self.gauges:
+            self.gauges[key] = Gauge(name=name, labels=labels or {})
+        return self.gauges[key]
 
-            return ActionResult(
-                success=True,
-                data={
-                    "alert_id": alert_id,
-                    "metric_name": metric_name,
-                    "threshold": threshold,
-                    "operator": operator,
-                    "severity": severity,
-                    "triggered": triggered,
-                },
-                message=f"Alert {alert_id} created for {metric_name}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Alert creation failed: {e}")
+    def get_histogram(self, name: str, labels: Optional[Dict[str, str]] = None) -> Histogram:
+        """Get or create histogram."""
+        key = self._make_key(name, labels or {})
+        if key not in self.histograms:
+            self.histograms[key] = Histogram(name=name, labels=labels or {})
+        return self.histograms[key]
+
+    def _make_key(self, name: str, labels: Dict[str, str]) -> str:
+        """Make unique key for metric."""
+        label_str = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+        return f"{name}{{{label_str}}}" if label_str else name
+
+    def increment(self, name: str, amount: int = 1, labels: Optional[Dict[str, str]] = None):
+        """Increment counter."""
+        counter = self.get_counter(name, labels)
+        counter.increment(amount)
+
+    def decrement(self, name: str, amount: int = 1, labels: Optional[Dict[str, str]] = None):
+        """Decrement counter."""
+        counter = self.get_counter(name, labels)
+        counter.increment(-amount)
+
+    def set_gauge(self, name: str, value: float, labels: Optional[Dict[str, str]] = None):
+        """Set gauge value."""
+        gauge = self.get_gauge(name, labels)
+        gauge.set(value)
+
+    def observe(self, name: str, value: float, labels: Optional[Dict[str, str]] = None):
+        """Observe value for histogram."""
+        histogram = self.get_histogram(name, labels)
+        histogram.observe(value)
+
+    def start_timer(self, name: str, labels: Optional[Dict[str, str]] = None) -> float:
+        """Start a timer."""
+        key = self._make_key(name, labels or {})
+        if key not in self.timers:
+            self.timers[key] = []
+        start_time = time.perf_counter()
+        return start_time
+
+    def stop_timer(self, name: str, start_time: float, labels: Optional[Dict[str, str]] = None):
+        """Stop timer and record duration."""
+        duration = time.perf_counter() - start_time
+        key = self._make_key(name, labels or {})
+        if key not in self.timers:
+            self.timers[key] = []
+        self.timers[key].append(duration)
+        self.observe(name, duration, labels)
+
+
+class APIMetrics:
+    """API-specific metrics collection."""
+
+    def __init__(self, collector: MetricsCollector):
+        self.collector = collector
+        self._active_requests: Dict[str, float] = {}
+
+    def record_request(
+        self,
+        method: str,
+        path: str,
+        status_code: int,
+        duration: float
+    ):
+        """Record API request metrics."""
+        labels = {"method": method, "path": path, "status": str(status_code)}
+
+        self.collector.increment("api_requests_total", labels=labels)
+        self.collector.observe("api_request_duration_seconds", duration, labels=labels)
+
+        if status_code >= 500:
+            self.collector.increment("api_errors_total", labels={"method": method, "type": "server"})
+        elif status_code >= 400:
+            self.collector.increment("api_errors_total", labels={"method": method, "type": "client"})
+
+    def record_active_requests(self, delta: int = 1):
+        """Record active requests."""
+        gauge = self.collector.get_gauge("api_active_requests")
+        gauge.increment(delta)
+
+    def record_request_size(self, method: str, path: str, size: int):
+        """Record request size."""
+        labels = {"method": method, "path": path}
+        self.collector.observe("api_request_size_bytes", float(size), labels=labels)
+
+    def record_response_size(self, method: str, path: str, size: int):
+        """Record response size."""
+        labels = {"method": method, "path": path}
+        self.collector.observe("api_response_size_bytes", float(size), labels=labels)
+
+
+class MetricsAggregator:
+    """Aggregates metrics over time windows."""
+
+    def __init__(self, collector: MetricsCollector):
+        self.collector = collector
+
+    def get_summary(self, window: timedelta = timedelta(minutes=5)) -> Dict[str, Any]:
+        """Get metrics summary."""
+        summary = {
+            "timestamp": datetime.now(),
+            "window": str(window),
+            "counters": {},
+            "gauges": {},
+            "histograms": {}
+        }
+
+        for key, counter in self.collector.counters.items():
+            summary["counters"][key] = counter.value
+
+        for key, gauge in self.collector.gauges.items():
+            summary["gauges"][key] = gauge.value
+
+        for key, histogram in self.collector.histograms.items():
+            summary["histograms"][key] = {
+                "count": histogram.count,
+                "sum": histogram.sum,
+                "avg": histogram.sum / histogram.count if histogram.count > 0 else 0,
+                "p50": histogram.get_percentile(50),
+                "p90": histogram.get_percentile(90),
+                "p99": histogram.get_percentile(99)
+            }
+
+        return summary
+
+
+def main():
+    """Demonstrate API metrics."""
+    collector = MetricsCollector()
+    api_metrics = APIMetrics(collector)
+
+    api_metrics.record_request("GET", "/api/users", 200, 0.05)
+    api_metrics.record_request("GET", "/api/users", 200, 0.03)
+    api_metrics.record_request("POST", "/api/users", 201, 0.10)
+
+    aggregator = MetricsAggregator(collector)
+    summary = aggregator.get_summary()
+
+    print(f"Total requests: {summary['counters'].get('api_requests_total', 0)}")
+    print(f"Active requests: {summary['gauges'].get('api_active_requests', 0)}")
+
+
+if __name__ == "__main__":
+    main()
