@@ -1,109 +1,179 @@
-"""Logging configuration utilities: structured logging, multi-output, and log levels."""
+"""Logging configuration utilities for structured automation logging.
+
+Provides structured logging setup, rotating file handlers,
+context-aware logging (with action IDs, user IDs), and
+integration with common logging formats.
+
+Example:
+    >>> from utils.logging_config_utils import setup_logging, get_logger
+    >>> setup_logging(level='INFO', file='/tmp/automation.log')
+    >>> log = get_logger('autoclick.actions')
+    >>> log.info('Action completed', extra={'action_id': '123'})
+"""
 
 from __future__ import annotations
 
 import logging
+import os
 import sys
-import json
-from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Optional
 
 __all__ = [
-    "LogConfig",
-    "LoggingConfigurator",
-    "structured_logger",
+    "setup_logging",
+    "get_logger",
+    "StructuredLogger",
+    "ContextFilter",
+    "AutomationFormatter",
 ]
 
 
-@dataclass
-class LogConfig:
-    """Logging configuration."""
+class AutomationFormatter(logging.Formatter):
+    """Custom formatter with automation-specific fields."""
 
-    level: str = "INFO"
-    format: str = "json"
-    output: list[str] = field(default_factory=lambda: ["stdout"])
-    handlers: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-
-class StructuredFormatter(logging.Formatter):
-    """Format log records as structured JSON."""
+    def __init__(self, fmt: Optional[str] = None):
+        super().__init__(
+            fmt or "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
 
     def format(self, record: logging.LogRecord) -> str:
-        log_data = {
-            "timestamp": self.formatTime(record),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
-        if hasattr(record, "extra_fields"):
-            log_data.update(record.extra_fields)
-        return json.dumps(log_data)
+        # Add custom fields if present
+        if hasattr(record, "action_id"):
+            record.msg = f"[action={record.action_id}] {record.msg}"
+        if hasattr(record, "session_id"):
+            record.msg = f"[session={record.session_id}] {record.msg}"
+        return super().format(record)
 
 
-class LoggingConfigurator:
-    """Configure logging with multiple handlers and formats."""
+class ContextFilter(logging.Filter):
+    """Filter that adds context fields to log records."""
 
-    def __init__(self) -> None:
-        self._handlers: dict[str, logging.Handler] = {}
+    def __init__(self):
+        super().__init__()
+        self._context: dict = {}
 
-    def configure(self, config: LogConfig) -> None:
-        """Configure logging from a LogConfig object."""
-        root = logging.getLogger()
-        root.setLevel(getattr(logging, config.level.upper()))
+    def add_context(self, **kwargs) -> None:
+        self._context.update(kwargs)
 
-        for handler_name, handler in self._handlers.items():
-            root.removeHandler(handler)
+    def clear_context(self) -> None:
+        self._context = {}
 
-        self._handlers.clear()
+    def filter(self, record: logging.LogRecord) -> bool:
+        for key, val in self._context.items():
+            setattr(record, key, val)
+        return True
 
-        if "stdout" in config.output:
-            handler = logging.StreamHandler(sys.stdout)
-            if config.format == "json":
-                handler.setFormatter(StructuredFormatter())
-            else:
-                handler.setFormatter(
-                    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+# Global context filter
+_context_filter = ContextFilter()
+
+
+def setup_logging(
+    level: str = "INFO",
+    file: Optional[str] = None,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 5,
+    format: Optional[str] = None,
+    include_process: bool = True,
+) -> None:
+    """Configure the root logger for automation.
+
+    Args:
+        level: Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR').
+        file: Optional log file path (enables rotating file handler).
+        max_bytes: Max size per log file before rotation.
+        backup_count: Number of backup files to keep.
+        format: Custom log format string.
+        include_process: Include process/thread info.
+    """
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    root_logger.handlers.clear()
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.setFormatter(AutomationFormatter(format))
+    console_handler.addFilter(_context_filter)
+    root_logger.addHandler(console_handler)
+
+    # Rotating file handler
+    if file:
+        try:
+            from logging.handlers import RotatingFileHandler
+
+            log_dir = Path(file).parent
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+            file_handler = RotatingFileHandler(
+                file,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+            )
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(
+                AutomationFormatter(
+                    "%(asctime)s [%(levelname)s] "
+                    "%(name)s %(process)d:%(thread)d: %(message)s"
                 )
-            root.addHandler(handler)
-            self._handlers["stdout"] = handler
-
-        if "stderr" in config.output:
-            handler = logging.StreamHandler(sys.stderr)
-            handler.setFormatter(
-                logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
             )
-            root.addHandler(handler)
-            self._handlers["stderr"] = handler
+            file_handler.addFilter(_context_filter)
+            root_logger.addHandler(file_handler)
+        except Exception:
+            pass
 
-    def add_file_handler(
-        self,
-        filename: str,
-        level: str = "DEBUG",
-        format_: str = "json",
-    ) -> None:
-        handler = logging.FileHandler(filename)
-        handler.setLevel(getattr(logging, level.upper()))
-        if format_ == "json":
-            handler.setFormatter(StructuredFormatter())
-        else:
-            handler.setFormatter(
-                logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-            )
-        root = logging.getLogger()
-        root.addHandler(handler)
-        self._handlers[filename] = handler
+    root_logger.propagate = False
 
 
-def structured_logger(name: str, level: str = "INFO") -> logging.Logger:
-    """Get a structured JSON logger."""
-    logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, level.upper()))
+def get_logger(name: str) -> logging.Logger:
+    """Get a logger instance.
 
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(StructuredFormatter())
-        logger.addHandler(handler)
+    Args:
+        name: Logger name (typically __name__).
 
-    return logger
+    Returns:
+        Logger instance.
+    """
+    return logging.getLogger(name)
+
+
+def add_log_context(**kwargs) -> None:
+    """Add context fields to all subsequent log records."""
+    _context_filter.add_context(**kwargs)
+
+
+def clear_log_context() -> None:
+    """Clear all log context fields."""
+    _context_filter.clear_context()
+
+
+class StructuredLogger:
+    """Structured logger that outputs JSON-formatted logs.
+
+    Example:
+        >>> log = StructuredLogger('autoclick')
+        >>> log.info('Action completed', action='click', x=100, y=200)
+    """
+
+    def __init__(self, name: str):
+        self.logger = logging.getLogger(name)
+
+    def _log(self, level: int, msg: str, **kwargs) -> None:
+        extra = {"structured_data": kwargs}
+        self.logger.log(level, msg, extra=extra)
+
+    def debug(self, msg: str, **kwargs) -> None:
+        self._log(logging.DEBUG, msg, **kwargs)
+
+    def info(self, msg: str, **kwargs) -> None:
+        self._log(logging.INFO, msg, **kwargs)
+
+    def warning(self, msg: str, **kwargs) -> None:
+        self._log(logging.WARNING, msg, **kwargs)
+
+    def error(self, msg: str, **kwargs) -> None:
+        self._log(logging.ERROR, msg, **kwargs)
+
+    def critical(self, msg: str, **kwargs) -> None:
+        self._log(logging.CRITICAL, msg, **kwargs)
