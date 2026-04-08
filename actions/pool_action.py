@@ -1,377 +1,212 @@
-"""pool action module for rabai_autoclick.
+"""Object pool action module for RabAI AutoClick.
 
-Provides object pooling, connection pooling, and resource pooling
-with configurable sizing, eviction, and health checking.
+Provides object pool operations:
+- PoolAcquireAction: Acquire object from pool
+- PoolReleaseAction: Release object back to pool
+- PoolStatsAction: Get pool statistics
+- PoolResizeAction: Resize pool
 """
-
-from __future__ import annotations
 
 import threading
 import time
-import weakref
-from collections import deque
-from contextlib import contextmanager
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Generic, Optional, TypeVar, Protocol
-from concurrent.futures import Future
-
-__all__ = [
-    "Pool",
-    "ObjectPool",
-    "ConnectionPool",
-    "PooledObject",
-    "EvictionPolicy",
-    "PoolExhaustedError",
-    "PooledConnection",
-    "create_pool",
-    "pool_context",
-]
+from datetime import datetime
 
 
-T = TypeVar("T")
+import sys
+import os
 
-
-class EvictionPolicy(Enum):
-    """Object eviction strategies."""
-    LRU = auto()
-    LFU = auto()
-    FIFO = auto()
-    LIFO = auto()
-    RANDOM = auto()
-
-
-class PoolExhaustedError(Exception):
-    """Raised when pool has no available objects."""
-    pass
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
 @dataclass
-class PooledObject(Generic[T]):
-    """Wrapper around a pooled object with metadata."""
-    obj: T
-    created_at: float = field(default_factory=time.perf_counter)
-    last_used: float = field(default_factory=time.perf_counter)
-    use_count: int = 0
+class PooledObject:
+    """Represents a pooled object."""
+    obj_id: str
+    obj: Any
     in_use: bool = False
-
-    def touch(self) -> None:
-        """Update last_used timestamp and increment counter."""
-        self.last_used = time.perf_counter()
-        self.use_count += 1
-
-    def age(self) -> float:
-        """Return seconds since creation."""
-        return time.perf_counter() - self.created_at
-
-    def idle_time(self) -> float:
-        """Return seconds since last use."""
-        return time.perf_counter() - self.last_used
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    last_used: datetime = field(default_factory=datetime.utcnow)
+    use_count: int = 0
 
 
-class ObjectPool(Generic[T]):
-    """Generic object pool with configurable eviction and sizing."""
-
-    def __init__(
-        self,
-        factory: Callable[[], T],
-        min_size: int = 0,
-        max_size: int = 10,
-        max_idle_seconds: float = 300.0,
-        eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
-        validator: Optional[Callable[[T], bool]] = None,
-        destroyer: Optional[Callable[[T], None]] = None,
-    ) -> None:
-        self.factory = factory
-        self.min_size = min_size
-        self.max_size = max_size
-        self.max_idle_seconds = max_idle_seconds
-        self.eviction_policy = eviction_policy
-        self.validator = validator
-        self.destroyer = destroyer or (lambda x: None)
-
-        self._pool: deque[PooledObject[T]] = deque()
+class ObjectPool:
+    """Thread-safe object pool."""
+    def __init__(self, factory: Optional[Callable] = None, max_size: int = 10):
+        self._factory = factory or (lambda: None)
+        self._max_size = max_size
+        self._pool: List[PooledObject] = []
         self._lock = threading.RLock()
-        self._cond = threading.Condition(self._lock)
-        self._total_created = 0
-        self._total_destroyed = 0
-        self._eviction_running = False
-        self._closed = False
+        self._total_acquired = 0
+        self._total_released = 0
 
-        for _ in range(min_size):
-            self._create_object()
+    def acquire(self, timeout: Optional[float] = None) -> Optional[Any]:
+        start = time.time()
+        while True:
+            with self._lock:
+                for pooled in self._pool:
+                    if not pooled.in_use:
+                        pooled.in_use = True
+                        pooled.last_used = datetime.utcnow()
+                        pooled.use_count += 1
+                        self._total_acquired += 1
+                        return pooled.obj
 
-    def _create_object(self) -> Optional[PooledObject[T]]:
-        with self._lock:
-            if len(self._pool) >= self.max_size:
-                return None
-            try:
-                obj = self.factory()
-                pooled = PooledObject(obj=obj)
-                self._pool.append(pooled)
-                self._total_created += 1
-                return pooled
-            except Exception:
-                return None
-
-    def acquire(self, timeout: Optional[float] = None) -> T:
-        """Acquire an object from the pool.
-
-        Args:
-            timeout: Max seconds to wait (None = infinite).
-
-        Returns:
-            Pooled object instance.
-
-        Raises:
-            PoolExhaustedError: If timeout expires.
-        """
-        if self._closed:
-            raise RuntimeError("Pool is closed")
-
-        deadline = None if timeout is None else time.monotonic() + timeout
-
-        with self._cond:
-            while True:
-                obj = self._try_get_available()
-                if obj is not None:
+                if len(self._pool) < self._max_size:
+                    obj = self._factory()
+                    pooled = PooledObject(obj_id=str(id(obj)), obj=obj, in_use=True)
+                    self._pool.append(pooled)
+                    self._total_acquired += 1
                     return obj
 
-                if self._total_created < self.max_size:
-                    created = self._create_object()
-                    if created is not None:
-                        created.in_use = True
-                        return created.obj
+            if timeout and (time.time() - start) >= timeout:
+                return None
+            time.sleep(0.01)
 
-                if timeout is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise PoolExhaustedError(f"Pool exhausted after {timeout}s")
-                    self._cond.wait(timeout=remaining)
-                else:
-                    self._cond.wait()
-
-    def release(self, obj: T) -> None:
-        """Return an object to the pool."""
+    def release(self, obj: Any) -> bool:
         with self._lock:
             for pooled in self._pool:
-                if pooled.obj is obj:
+                if pooled.obj is obj and pooled.in_use:
                     pooled.in_use = False
-                    pooled.touch()
-                    self._cond.notify()
-                    return
+                    pooled.last_used = datetime.utcnow()
+                    self._total_released += 1
+                    return True
+        return False
 
-    @contextmanager
-    def connection(self, timeout: Optional[float] = None):
-        """Context manager for acquiring and releasing objects.
-
-        Usage:
-            with pool.connection() as obj:
-                obj.do_something()
-        """
-        obj = self.acquire(timeout=timeout)
-        try:
-            yield obj
-        finally:
-            self.release(obj)
-
-    def _try_get_available(self) -> Optional[T]:
-        """Find an available, valid object in the pool."""
-        candidates = []
-        for pooled in self._pool:
-            if pooled.in_use:
-                continue
-            if pooled.obj is None:
-                continue
-            if self.validator is not None and not self.validator(pooled.obj):
-                candidates.append(pooled)
-                continue
-            pooled.in_use = True
-            return pooled.obj
-
-        for pooled in candidates:
-            self._evict_object(pooled)
-
-        for pooled in self._pool:
-            if not pooled.in_use and pooled.obj is not None:
-                if self.validator is None or self.validator(pooled.obj):
-                    pooled.in_use = True
-                    return pooled.obj
-
-        return None
-
-    def _evict_object(self, pooled: PooledObject[T]) -> None:
-        """Remove a specific object from the pool."""
-        try:
-            self._pool.remove(pooled)
-            self.destroyer(pooled.obj)
-            self._total_destroyed += 1
-        except ValueError:
-            pass
-
-    def evict_expired(self) -> int:
-        """Evict objects idle longer than max_idle_seconds.
-
-        Returns:
-            Number of objects evicted.
-        """
-        with self._lock:
-            evicted = 0
-            for pooled in list(self._pool):
-                if not pooled.in_use and pooled.idle_time() > self.max_idle_seconds:
-                    self._evict_object(pooled)
-                    evicted += 1
-        return evicted
-
-    def evict_by_policy(self, count: int = 1) -> int:
-        """Evict objects according to eviction policy.
-
-        Args:
-            count: Maximum number to evict.
-
-        Returns:
-            Number of objects evicted.
-        """
-        with self._lock:
-            available = [p for p in self._pool if not p.in_use]
-            if len(available) <= self.min_size:
-                return 0
-
-            if self.eviction_policy == EvictionPolicy.LRU:
-                sorted_pool = sorted(available, key=lambda p: p.last_used)
-            elif self.eviction_policy == EvictionPolicy.LFU:
-                sorted_pool = sorted(available, key=lambda p: p.use_count)
-            elif self.eviction_policy == EvictionPolicy.FIFO:
-                sorted_pool = sorted(available, key=lambda p: p.created_at)
-            elif self.eviction_policy == EvictionPolicy.LIFO:
-                sorted_pool = sorted(available, key=lambda p: p.created_at, reverse=True)
-            else:
-                import random
-                sorted_pool = list(available)
-                random.shuffle(sorted_pool)
-
-            to_evict = sorted_pool[:min(count, len(available) - self.min_size)]
-            for pooled in to_evict:
-                self._evict_object(pooled)
-            return len(to_evict)
-
-    def close(self) -> None:
-        """Close pool and destroy all objects."""
-        with self._lock:
-            self._closed = True
-            while self._pool:
-                pooled = self._pool.popleft()
-                try:
-                    self.destroyer(pooled.obj)
-                    self._total_destroyed += 1
-                except Exception:
-                    pass
-            self._cond.notify_all()
-
-    def stats(self) -> dict[str, Any]:
-        """Return pool statistics."""
+    def get_stats(self) -> Dict[str, Any]:
         with self._lock:
             in_use = sum(1 for p in self._pool if p.in_use)
+            available = len(self._pool) - in_use
             return {
-                "total": len(self._pool),
+                "max_size": self._max_size,
+                "total_objects": len(self._pool),
                 "in_use": in_use,
-                "available": len(self._pool) - in_use,
-                "total_created": self._total_created,
-                "total_destroyed": self._total_destroyed,
-                "max_size": self.max_size,
-                "closed": self._closed,
+                "available": available,
+                "total_acquired": self._total_acquired,
+                "total_released": self._total_released
             }
 
-    def __enter__(self) -> "ObjectPool[T]":
-        return self
 
-    def __exit__(self, *args: Any) -> None:
-        self.close()
+_pools: Dict[str, ObjectPool] = {}
+_pools_lock = threading.Lock()
 
 
-class PooledConnection(Generic[T]):
-    """Wrapper that provides context-manager semantics for pooled objects."""
+class PoolAcquireAction(BaseAction):
+    """Acquire object from pool."""
+    action_type = "pool_acquire"
+    display_name = "获取池对象"
+    description = "从对象池获取对象"
 
-    def __init__(self, pool: ObjectPool[T], timeout: Optional[float] = None) -> None:
-        self._pool = pool
-        self._timeout = timeout
-        self._obj: Optional[T] = None
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            pool_name = params.get("pool_name", "default")
+            timeout = params.get("timeout", 30.0)
 
-    def __enter__(self) -> T:
-        self._obj = self._pool.acquire(timeout=self._timeout)
-        return self._obj
+            with _pools_lock:
+                if pool_name not in _pools:
+                    _pools[pool_name] = ObjectPool()
 
-    def __exit__(self, *args: Any) -> None:
-        if self._obj is not None:
-            self._pool.release(self._obj)
+            obj = _pools[pool_name].acquire(timeout=timeout)
 
+            if obj is None:
+                return ActionResult(success=False, message=f"Failed to acquire from pool '{pool_name}' (timeout)")
 
-class ConnectionPool(ObjectPool[T]):
-    """Specialized pool for database/network connections with ping/health check."""
+            return ActionResult(
+                success=True,
+                message=f"Acquired from pool '{pool_name}'",
+                data={"pool_name": pool_name, "acquired": True}
+            )
 
-    def __init__(
-        self,
-        factory: Callable[[], T],
-        min_size: int = 0,
-        max_size: int = 10,
-        max_idle_seconds: float = 300.0,
-        health_check: Optional[Callable[[T], bool]] = None,
-        reconnect: Optional[Callable[[T], T]] = None,
-    ) -> None:
-        self._health_check = health_check
-        self._reconnect = reconnect
-        super().__init__(
-            factory=factory,
-            min_size=min_size,
-            max_size=max_size,
-            max_idle_seconds=max_idle_seconds,
-            validator=health_check,
-        )
-
-    def health_check(self, obj: T) -> bool:
-        """Check if connection is still healthy."""
-        if self._health_check is not None:
-            return self._health_check(obj)
-        return True
-
-    def ensure_healthy(self, obj: T) -> T:
-        """Ensure object is healthy, reconnect if needed."""
-        if not self.health_check(obj):
-            if self._reconnect:
-                return self._reconnect(obj)
-            raise RuntimeError("Connection unhealthy and no reconnect available")
-        return obj
+        except Exception as e:
+            return ActionResult(success=False, message=f"Pool acquire failed: {str(e)}")
 
 
-def create_pool(
-    factory: Callable,
-    min_size: int = 0,
-    max_size: int = 10,
-    pool_type: str = "object",
-    **kwargs: Any,
-) -> ObjectPool:
-    """Factory function to create a pool.
+class PoolReleaseAction(BaseAction):
+    """Release object back to pool."""
+    action_type = "pool_release"
+    display_name = "释放池对象"
+    description = "释放对象回对象池"
 
-    Args:
-        factory: Object/connection factory.
-        min_size: Minimum pool size.
-        max_size: Maximum pool size.
-        pool_type: Type of pool ("object" or "connection").
-        **kwargs: Additional pool options.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            pool_name = params.get("pool_name", "default")
+            obj = params.get("obj", None)
 
-    Returns:
-        Configured pool instance.
-    """
-    if pool_type == "connection":
-        return ConnectionPool(factory, min_size=min_size, max_size=max_size, **kwargs)
-    return ObjectPool(factory, min_size=min_size, max_size=max_size, **kwargs)
+            if pool_name not in _pools:
+                return ActionResult(success=False, message=f"Pool '{pool_name}' not found")
+
+            if obj is None:
+                return ActionResult(success=False, message="obj is required")
+
+            released = _pools[pool_name].release(obj)
+
+            return ActionResult(
+                success=released,
+                message=f"Released to pool '{pool_name}': {released}",
+                data={"pool_name": pool_name, "released": released}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Pool release failed: {str(e)}")
 
 
-@contextmanager
-def pool_context(pool: ObjectPool[T], timeout: Optional[float] = None):
-    """Context manager for working with any pool."""
-    obj = pool.acquire(timeout=timeout)
-    try:
-        yield obj
-    finally:
-        pool.release(obj)
+class PoolStatsAction(BaseAction):
+    """Get pool statistics."""
+    action_type = "pool_stats"
+    display_name = "池统计"
+    description = "获取对象池统计"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            pool_name = params.get("pool_name", None)
+
+            if pool_name:
+                if pool_name not in _pools:
+                    return ActionResult(success=False, message=f"Pool '{pool_name}' not found")
+                stats = _pools[pool_name].get_stats()
+            else:
+                all_stats = {name: pool.get_stats() for name, pool in _pools.items()}
+                return ActionResult(
+                    success=True,
+                    message=f"{len(all_stats)} pools",
+                    data={"pools": all_stats, "count": len(all_stats)}
+                )
+
+            return ActionResult(
+                success=True,
+                message=f"Pool '{pool_name}' stats",
+                data=stats
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Pool stats failed: {str(e)}")
+
+
+class PoolResizeAction(BaseAction):
+    """Resize pool."""
+    action_type = "pool_resize"
+    display_name = "调整池大小"
+    description = "调整对象池大小"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            pool_name = params.get("pool_name", "default")
+            new_size = params.get("new_size", 10)
+
+            with _pools_lock:
+                if pool_name not in _pools:
+                    _pools[pool_name] = ObjectPool(max_size=new_size)
+                else:
+                    _pools[pool_name]._max_size = new_size
+
+            return ActionResult(
+                success=True,
+                message=f"Pool '{pool_name}' resized to {new_size}",
+                data={"pool_name": pool_name, "new_size": new_size}
+            )
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Pool resize failed: {str(e)}")
