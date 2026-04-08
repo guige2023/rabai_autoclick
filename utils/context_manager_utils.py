@@ -1,244 +1,246 @@
-"""Context manager utilities for RabAI AutoClick.
+"""
+Context Manager Utilities
 
-Provides:
-- Async context managers
-- Reusable context managers
-- Context manager factories
-- Nested context managers
+Decorator-based and factory context managers for common
+resource management patterns: timeout, retry, rolling window.
+
+License: MIT
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
+import threading
+import time
+import functools
 from typing import (
     Any,
-    AsyncIterator,
     Callable,
-    Generator,
-    Iterator,
-    Optional,
     TypeVar,
+    Generic,
+    Optional,
+    Union,
+    Iterator,
+    ContextManager,
 )
-
+from contextlib import contextmanager, ExitStack
+from dataclasses import dataclass, field
+import queue
 
 T = TypeVar("T")
 
 
-class Timer(contextlib.ContextDecorator):
-    """Context manager that measures execution time.
+class TimeoutError(Exception):
+    """Raised when a context block exceeds its time limit."""
+    pass
 
+
+@contextmanager
+def timeout_context(seconds: float, error_msg: str | None = None):
+    """Context manager that raises TimeoutError if block exceeds time.
+    
     Example:
-        with Timer() as t:
-            do_work()
-
-        print(f"Took {t.elapsed:.2f}s")
+        with timeout_context(5.0):
+            data = slow_operation()
     """
-
-    def __init__(self) -> None:
-        self.start: float = 0
-        self.end: float = 0
-        self.elapsed: float = 0
-
-    def __enter__(self) -> Timer:
-        import time
-        self.start = time.perf_counter()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        import time
-        self.end = time.perf_counter()
-        self.elapsed = self.end - self.start
+    start = time.monotonic()
+    yield
+    elapsed = time.monotonic() - start
+    if elapsed > seconds:
+        raise TimeoutError(error_msg or f"Block exceeded {seconds}s limit")
 
 
-class AsyncTimer(contextlib.AbstractAsyncContextManager):
-    """Async context manager for measuring execution time."""
-
-    def __init__(self) -> None:
-        self.start: float = 0
-        self.end: float = 0
-        self.elapsed: float = 0
-
-    async def __aenter__(self) -> AsyncTimer:
-        self.start = asyncio.get_event_loop().time()
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        self.end = asyncio.get_event_loop().time()
-        self.elapsed = self.end - self.start
-
-
-class ResourceTracker(contextlib.ContextDecorator):
-    """Track resources acquired within a context.
-
+@contextmanager
+def retry_context(
+    max_attempts: int = 3,
+    delay: float = 1.0,
+    backoff: float = 2.0,
+    exceptions: tuple = (Exception,),
+):
+    """Context manager that retries the block on exception.
+    
     Example:
-        with ResourceTracker() as tracker:
-            f = open("file.txt")
-            tracker.add_resource(lambda: f.close(), f)
-
-        # All tracked resources are cleaned up on exit
+        with retry_context(max_attempts=5, delay=1.0, backoff=2.0):
+            unstable_operation()
     """
+    attempt = 0
+    current_delay = delay
+    while True:
+        try:
+            attempt += 1
+            yield
+            return
+        except exceptions as e:
+            if attempt >= max_attempts:
+                raise
+            time.sleep(current_delay)
+            current_delay *= backoff
 
-    def __init__(self) -> None:
-        self._resources: List[tuple[Callable[[], None], Any]] = []
-        self._entered = False
 
-    def add_resource(
-        self,
-        cleanup: Callable[[], None],
-        resource: Any = None,
-    ) -> None:
-        if not self._entered:
-            raise RuntimeError("Cannot add resource before entering context")
-        self._resources.append((cleanup, resource))
+@contextmanager
+def sliding_window_context(
+    max_size: int = 100,
+    ttl_seconds: float = 60.0,
+):
+    """Context manager that maintains a sliding window of items.
+    
+    Removes items older than ttl_seconds and enforces max_size.
+    """
+    window: list[tuple[float, Any]] = []
+    try:
+        yield window
+    finally:
+        cutoff = time.monotonic() - ttl_seconds
+        window[:] = [(t, v) for t, v in window if t > cutoff]
+        if len(window) > max_size:
+            window[:] = window[-max_size:]
 
-    def __enter__(self) -> ResourceTracker:
-        self._entered = True
-        return self
 
-    def __exit__(self, *args: Any) -> None:
-        for cleanup, _ in reversed(self._resources):
+@contextmanager
+def bounded_queue_context(maxsize: int = 100, timeout: float = 1.0):
+    """Context manager for a bounded queue with backpressure."""
+    q: queue.Queue[Any] = queue.Queue(maxsize=maxsize)
+    try:
+        yield q
+    finally:
+        while not q.empty():
             try:
-                cleanup()
-            except Exception:
+                q.get_nowait()
+            except queue.Empty:
                 pass
-        self._resources.clear()
-        self._entered = False
 
 
-@contextlib.contextmanager
-def temp_override(
-    target: dict,
-    updates: dict,
-) -> Generator[None, None, None]:
-    """Temporarily override dictionary values.
-
+@dataclass
+class RateLimiter(ContextManager):
+    """Token bucket rate limiter as context manager.
+    
     Example:
-        config = {"debug": False}
-        with temp_override(config, {"debug": True}):
-            # config["debug"] is True here
-            pass
-        # config["debug"] is False again
+        with RateLimiter(rate=10, capacity=20) as limiter:
+            if limiter.acquire():
+                do_ratelimited_operation()
     """
-    original = {}
-    for key, value in updates.items():
-        original[key] = target.get(key)
-        target[key] = value
+    rate: float  # tokens per second
+    capacity: float  # max tokens
+    _tokens: float = field(default=0.0, init=False)
+    _last_update: float = field(default=0.0, init=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    
+    def __post_init__(self) -> None:
+        self._tokens = self._capacity
+        self._last_update = time.monotonic()
+    
+    @property
+    def _max_tokens(self) -> float:
+        return self._capacity
+    
+    def _refill(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_update
+        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+        self._last_update = now
+    
+    def acquire(self, tokens: float = 1.0, blocking: bool = True, timeout: float | None = None) -> bool:
+        """Attempt to acquire tokens, returns True if successful."""
+        deadline = time.monotonic() + timeout if timeout else None
+        with self._lock:
+            while True:
+                self._refill()
+                if self._tokens >= tokens:
+                    self._tokens -= tokens
+                    return True
+                if not blocking:
+                    return False
+                wait_time = (tokens - self._tokens) / self._rate
+                if deadline and time.monotonic() + wait_time > deadline:
+                    return False
+                time.sleep(min(wait_time, 0.1))
+    
+    def __enter__(self) -> RateLimiter:
+        return self
+    
+    def __exit__(self, *args: Any) -> bool:
+        return False
 
+
+@contextmanager
+def conditional_context(condition: bool, *contexts):
+    """Conditionally enter one or more context managers.
+    
+    Example:
+        with conditional_context(debug_mode, open_log(), track_timing()):
+            do_something()
+    """
+    with ExitStack() as stack:
+        if condition:
+            for ctx in contexts:
+                stack.enter_context(ctx)
+        yield
+
+
+@contextmanager  
+def resource_monitor(threshold_mb: float = 1000.0):
+    """Monitor memory usage within a context."""
+    import resource
+    start_rusage = resource.getrusage(resource.RUSAGE_SELF)
+    start_mb = start_rusage.ru_maxrss / 1024
+    yield start_mb
+    end_rusage = resource.getrusage(resource.RUSAGE_SELF)
+    end_mb = end_rusage.ru_maxrss / 1024
+    if end_mb - start_mb > threshold_mb:
+        import warnings
+        warnings.warn(f"Memory increased by {end_mb - start_mb:.1f}MB, threshold: {threshold_mb}MB")
+
+
+@contextmanager
+def lock_context(lock: threading.Lock, timeout: float | None = None):
+    """Acquire a lock as a context manager with optional timeout."""
+    acquired = lock.acquire(timeout=timeout)
+    if not acquired:
+        raise TimeoutError(f"Could not acquire lock within {timeout}s")
     try:
         yield
     finally:
-        for key, original_value in original.items():
-            if original_value is None:
-                target.pop(key, None)
-            else:
-                target[key] = original_value
+        lock.release()
 
 
-@contextlib.contextmanager
-def temp_cwd(
-    path: str,
-) -> Generator[None, None, None]:
-    """Temporarily change working directory.
-
-    Example:
-        with temp_cwd("/tmp"):
-            # Work in /tmp
-            pass
-    """
-    import os
-    original = os.getcwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(original)
-
-
-@contextlib.contextmanager
-def swallow_exceptions(
-    *exception_types: type,
-) -> Generator[bool, None, None]:
-    """Context manager that suppresses specified exceptions.
-
-    Example:
-        with swallow_exceptions(ValueError, TypeError) as suppressed:
-            risky_operation()
-
-        if suppressed:
-            print("Exception was suppressed")
-    """
-    suppressed = False
-    try:
-        yield suppressed
-    except exception_types:  # type: ignore
-        suppressed = True
-
-    if suppressed:
-        suppressed = True
-    return suppress
-
-
-@contextlib.contextmanager
-def timed_block(
-    name: str,
-    logger: Optional[Callable[[str], None]] = None,
-) -> Generator[None, None, None]:
-    """Context manager that logs entry and exit of a block.
-
-    Example:
-        with timed_block("database_query", print):
-            query_database()
-    """
-    import time
-    if logger:
-        logger(f"Entering: {name}")
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        elapsed = time.perf_counter() - start
-        if logger:
-            logger(f"Exiting: {name} ({elapsed:.4f}s)")
-
-
-class BoundedSemaphore(contextlib.ContextDecorator):
-    """Semaphore with bounded concurrency limit."""
-
-    def __init__(self, limit: int) -> None:
-        self._semaphore: Optional[asyncio.Semaphore] = None
-        self._limit = limit
-
-    def __enter__(self) -> BoundedSemaphore:
-        self._semaphore = asyncio.Semaphore(self._limit)
-        return self._semaphore.__enter__()
-
-    def __exit__(self, *args: Any) -> None:
-        if self._semaphore:
-            self._semaphore.__exit__(*args)
-
-
-async def asynccontextmanager(
-    func: Callable[[], AsyncIterator[T]],
-) -> Callable[[], AsyncIterator[T]]:
-    """Decorator to convert async generator to async context manager."""
+def context_manager(func: Callable[..., Iterator[T]]) -> Callable[..., ContextManager[T]]:
+    """Decorator to convert a generator function to a context manager."""
     @functools.wraps(func)
-    async def wrapper() -> AsyncIterator[T]:
-        async for item in func():
-            yield item
+    def wrapper(*args: Any, **kwargs: Any) -> ContextManager[T]:
+        return func(*args, **kwargs)
     return wrapper
 
 
-import functools
+@dataclass
+class Timer(ContextManager):
+    """Timer context manager that tracks elapsed time."""
+    _start: float = field(default=0.0, init=False)
+    _end: float = field(default=0.0, init=False)
+    _elapsed: float = field(default=0.0, init=False)
+    
+    def __enter__(self) -> Timer:
+        self._start = time.perf_counter()
+        return self
+    
+    def __exit__(self, *args: Any) -> bool:
+        self._end = time.perf_counter()
+        self._elapsed = self._end - self._start
+        return False
+    
+    @property
+    def elapsed_seconds(self) -> float:
+        return self._elapsed
 
 
-@contextlib.contextmanager
-def closing(
-    resource: Any,
-) -> Generator[Any, None, None]:
-    """Context manager that closes resource on exit."""
-    try:
-        yield resource
-    finally:
-        if hasattr(resource, "close"):
-            resource.close()
+__all__ = [
+    "TimeoutError",
+    "timeout_context",
+    "retry_context",
+    "sliding_window_context",
+    "bounded_queue_context",
+    "RateLimiter",
+    "conditional_context",
+    "resource_monitor",
+    "lock_context",
+    "context_manager",
+    "Timer",
+]
