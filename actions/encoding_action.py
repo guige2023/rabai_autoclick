@@ -1,244 +1,116 @@
-"""Encoding/decoding action module for RabAI AutoClick.
-
-Provides encoding operations:
-- EncodeBase64Action: Base64 encode/decode
-- EncodeHexAction: Hex encode/decode
-- EncodeUrlAction: URL encode/decode
-- EncodeHtmlAction: HTML encode/decode
-- EncodeJsonAction: JSON encode/decode
-- EncodeUnicodeAction: Unicode normalization
 """
-
-import base64
-import urllib.parse
-import html
-import unicodedata
-import json
+Encoding utilities - base64, hex, URL encoding, unicode normalization, compression.
+"""
 from typing import Any, Dict, List, Optional
+import base64
+import zlib
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class EncodeBase64Action(BaseAction):
-    """Base64 encode/decode."""
-    action_type = "encode_base64"
-    display_name = "Base64编码"
-    description = "Base64编码/解码"
+class BaseAction:
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+class EncodingAction(BaseAction):
+    """Encoding and decoding operations.
+
+    Provides base64, hex, URL encoding, gzip compression, unicode normalization.
+    """
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "base64_encode")
+        text = params.get("text", "")
+
         try:
-            text = params.get("text", "")
-            action = params.get("action", "encode")
+            if operation == "base64_encode":
+                data = text.encode() if isinstance(text, str) else text
+                return {"success": True, "encoded": base64.b64encode(data).decode()}
 
-            if not text:
-                return ActionResult(success=False, message="text is required")
-
-            if action == "encode":
-                encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-                return ActionResult(success=True, message="Base64 encoded", data={"result": encoded})
-
-            elif action == "decode":
+            elif operation == "base64_decode":
                 try:
-                    decoded = base64.b64decode(text.encode("ascii")).decode("utf-8")
-                    return ActionResult(success=True, message="Base64 decoded", data={"result": decoded})
+                    decoded = base64.b64decode(text.encode())
+                    return {"success": True, "decoded": decoded.decode("utf-8", errors="replace")}
                 except Exception as e:
-                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+                    return {"success": False, "error": f"Base64 decode error: {e}"}
 
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
+            elif operation == "base64_url_encode":
+                data = text.encode() if isinstance(text, str) else text
+                return {"success": True, "encoded": base64.urlsafe_b64encode(data).decode().rstrip("=")}
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Base64 error: {str(e)}")
-
-
-class EncodeHexAction(BaseAction):
-    """Hex encode/decode."""
-    action_type = "encode_hex"
-    display_name = "Hex编码"
-    description = "Hex编码/解码"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            action = params.get("action", "encode")
-            separator = params.get("separator", "")
-
-            if not text:
-                return ActionResult(success=False, message="text is required")
-
-            if action == "encode":
-                if separator:
-                    hex_str = separator.join(f"{ord(c):02x}" for c in text)
-                else:
-                    hex_str = text.encode("utf-8").hex()
-                return ActionResult(success=True, message="Hex encoded", data={"result": hex_str})
-
-            elif action == "decode":
+            elif operation == "base64_url_decode":
                 try:
-                    clean_hex = text.replace(separator, "") if separator else text
-                    decoded = bytes.fromhex(clean_hex).decode("utf-8")
-                    return ActionResult(success=True, message="Hex decoded", data={"result": decoded})
+                    padded = text + "=" * (4 - len(text) % 4)
+                    decoded = base64.urlsafe_b64decode(padded)
+                    return {"success": True, "decoded": decoded.decode("utf-8", errors="replace")}
                 except Exception as e:
-                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+                    return {"success": False, "error": f"URL-safe base64 decode error: {e}"}
 
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
+            elif operation == "hex_encode":
+                data = text.encode() if isinstance(text, str) else text
+                return {"success": True, "encoded": data.hex()}
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Hex error: {str(e)}")
-
-
-class EncodeUrlAction(BaseAction):
-    """URL encode/decode."""
-    action_type = "encode_url"
-    display_name = "URL编码"
-    description = "URL编码/解码"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            action = params.get("action", "encode")
-            safe_chars = params.get("safe_chars", "")
-
-            if not text:
-                return ActionResult(success=False, message="text is required")
-
-            if action == "encode":
-                encoded = urllib.parse.quote(text, safe=safe_chars)
-                return ActionResult(success=True, message="URL encoded", data={"result": encoded})
-
-            elif action == "decode":
+            elif operation == "hex_decode":
                 try:
-                    decoded = urllib.parse.unquote(text)
-                    return ActionResult(success=True, message="URL decoded", data={"result": decoded})
+                    decoded = bytes.fromhex(text)
+                    return {"success": True, "decoded": decoded.decode("utf-8", errors="replace")}
                 except Exception as e:
-                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+                    return {"success": False, "error": f"Hex decode error: {e}"}
 
-            elif action == "encode_component":
-                encoded = urllib.parse.quote_plus(text)
-                return ActionResult(success=True, message="URL component encoded", data={"result": encoded})
+            elif operation == "gzip_compress":
+                data = text.encode() if isinstance(text, str) else text
+                compressed = zlib.compress(data, level=9)
+                return {"success": True, "compressed": base64.b64encode(compressed).decode(), "size_original": len(data), "size_compressed": len(compressed)}
 
-            elif action == "decode_component":
+            elif operation == "gzip_decompress":
                 try:
-                    decoded = urllib.parse.unquote_plus(text)
-                    return ActionResult(success=True, message="URL component decoded", data={"result": decoded})
+                    compressed = base64.b64decode(text)
+                    decompressed = zlib.decompress(compressed)
+                    return {"success": True, "decompressed": decompressed.decode("utf-8", errors="replace"), "size": len(decompressed)}
                 except Exception as e:
-                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+                    return {"success": False, "error": f"Gzip decompress error: {e}"}
 
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
+            elif operation == "deflate":
+                data = text.encode() if isinstance(text, str) else text
+                compressed = zlib.compress(data)[2:-4]
+                return {"success": True, "compressed": base64.b64encode(compressed).decode()}
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"URL encode error: {str(e)}")
-
-
-class EncodeHtmlAction(BaseAction):
-    """HTML encode/decode."""
-    action_type = "encode_html"
-    display_name = "HTML编码"
-    description = "HTML编码/解码"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            action = params.get("action", "encode")
-
-            if not text:
-                return ActionResult(success=False, message="text is required")
-
-            if action == "encode":
-                encoded = html.escape(text)
-                return ActionResult(success=True, message="HTML encoded", data={"result": encoded})
-
-            elif action == "decode":
+            elif operation == "inflate":
                 try:
-                    decoded = html.unescape(text)
-                    return ActionResult(success=True, message="HTML decoded", data={"result": decoded})
-                except Exception as e:
-                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
-
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"HTML encode error: {str(e)}")
-
-
-class EncodeJsonAction(BaseAction):
-    """JSON encode/decode."""
-    action_type = "encode_json"
-    display_name = "JSON编码"
-    description = "JSON编码/解码"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", "")
-            action = params.get("action", "encode")
-            indent = params.get("indent", 2)
-
-            if action == "encode":
-                if isinstance(data, str):
+                    compressed = base64.b64decode(text)
+                    decompressed = zlib.decompress(compressed, -zlib.MAX_WBITS)
+                    return {"success": True, "decompressed": decompressed.decode("utf-8", errors="replace")}
+                except Exception:
                     try:
-                        data = json.loads(data)
-                    except:
-                        return ActionResult(success=False, message="Invalid JSON string")
+                        decompressed = zlib.decompress(compressed)
+                        return {"success": True, "decompressed": decompressed.decode("utf-8", errors="replace")}
+                    except Exception as e:
+                        return {"success": False, "error": f"Inflate error: {e}"}
 
-                encoded = json.dumps(data, indent=indent, ensure_ascii=False)
-                return ActionResult(success=True, message="JSON encoded", data={"result": encoded})
+            elif operation == "unicode_normalize":
+                import unicodedata
+                form = params.get("form", "NFC")
+                normalized = unicodedata.normalize(form, text)
+                return {"success": True, "normalized": normalized, "form": form}
 
-            elif action == "decode":
-                if not isinstance(data, str):
-                    data = str(data)
+            elif operation == "bytes_to_list":
+                data = text.encode() if isinstance(text, str) else text
+                return {"success": True, "bytes": list(data), "length": len(data)}
 
-                try:
-                    decoded = json.loads(data)
-                    return ActionResult(success=True, message="JSON decoded", data={"result": decoded})
-                except json.JSONDecodeError as e:
-                    return ActionResult(success=False, message=f"Decode error: {str(e)}")
+            elif operation == "list_to_bytes":
+                byte_list = params.get("bytes", [])
+                result = bytes(byte_list)
+                return {"success": True, "data": result.decode("utf-8", errors="replace") if all(b < 128 for b in byte_list) else result.hex()}
 
             else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
+                return {"success": False, "error": f"Unknown operation: {operation}"}
 
         except Exception as e:
-            return ActionResult(success=False, message=f"JSON encode error: {str(e)}")
+            logger.error(f"EncodingAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-class EncodeUnicodeAction(BaseAction):
-    """Unicode normalization."""
-    action_type = "encode_unicode"
-    display_name = "Unicode规范化"
-    description = "Unicode规范化"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            text = params.get("text", "")
-            form = params.get("form", "NFC")
-
-            if not text:
-                return ActionResult(success=False, message="text is required")
-
-            form_map = {
-                "NFC": unicodedata.normalize("NFC", text),
-                "NFD": unicodedata.normalize("NFD", text),
-                "NFKC": unicodedata.normalize("NFKC", text),
-                "NFKD": unicodedata.normalize("NFKD", text)
-            }
-
-            if form not in form_map:
-                return ActionResult(success=False, message=f"Unknown form: {form}")
-
-            normalized = form_map[form]
-
-            return ActionResult(
-                success=True,
-                message=f"Unicode normalized to {form}",
-                data={"result": normalized, "form": form}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Unicode error: {str(e)}")
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    return EncodingAction().execute(context, params)
