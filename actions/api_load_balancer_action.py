@@ -1,210 +1,226 @@
-"""API Load Balancer action module for RabAI AutoClick.
+"""API Load Balancer Action Module.
 
-Provides load balancing operations:
-- LBRoundRobinAction: Round-robin balancing
-- LBWeightedAction: Weighted balancing
-- LBConsistentHashAction: Consistent hash balancing
-- LBHealthAction: Health-based balancing
+Provides round-robin, weighted, and least-connection load balancing
+strategies for API endpoint distribution.
 """
-
 from __future__ import annotations
 
-import sys
-import os
+import asyncio
 import hashlib
-from typing import Any, Dict, List, Optional
-from collections import defaultdict
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, TypeVar
+from random import random, choice
+from heapq import heappush, heappop
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class LBRoundRobinAction(BaseAction):
-    """Round-robin balancing."""
-    action_type = "lb_round_robin"
-    display_name = "轮询负载"
-    description = "轮询负载均衡"
-    version = "1.0"
-
-    def __init__(self):
-        super().__init__()
-        self._counters = defaultdict(int)
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute round-robin selection."""
-        servers = params.get('servers', [])
-        key = params.get('key', 'default')
-        output_var = params.get('output_var', 'selected_server')
-
-        if not servers:
-            return ActionResult(success=False, message="servers list is required")
-
-        try:
-            resolved_servers = context.resolve_value(servers) if context else servers
-
-            counter = self._counters[key]
-            selected = resolved_servers[counter % len(resolved_servers)]
-            self._counters[key] = counter + 1
-
-            result = {
-                'selected': selected,
-                'index': counter % len(resolved_servers),
-                'total_servers': len(resolved_servers),
-                'strategy': 'round_robin',
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Selected server {counter % len(resolved_servers) + 1}/{len(resolved_servers)}: {selected}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Round-robin error: {e}")
+T = TypeVar("T")
 
 
-class LBWeightedAction(BaseAction):
-    """Weighted balancing."""
-    action_type = "lb_weighted"
-    display_name = "加权负载"
-    description = "加权负载均衡"
-    version = "1.0"
-
-    def __init__(self):
-        super().__init__()
-        self._weights = defaultdict(list)
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute weighted selection."""
-        servers = params.get('servers', [])
-        weights = params.get('weights', [])
-        key = params.get('key', 'default')
-        output_var = params.get('output_var', 'selected_server')
-
-        if not servers or not weights:
-            return ActionResult(success=False, message="servers and weights are required")
-
-        try:
-            resolved_servers = context.resolve_value(servers) if context else servers
-            resolved_weights = context.resolve_value(weights) if context else weights
-
-            expanded = []
-            for server, weight in zip(resolved_servers, resolved_weights):
-                expanded.extend([server] * weight)
-
-            import random
-            selected = random.choice(expanded)
-
-            result = {
-                'selected': selected,
-                'weights': dict(zip(resolved_servers, resolved_weights)),
-                'strategy': 'weighted',
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Selected (weighted): {selected}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Weighted balancing error: {e}")
+class LoadBalanceStrategy(Enum):
+    """Load balancing strategy."""
+    ROUND_ROBIN = "round_robin"
+    WEIGHTED = "weighted"
+    LEAST_CONNECTIONS = "least_connections"
+    IP_HASH = "ip_hash"
+    RANDOM = "random"
+    FAIR = "fair"
 
 
-class LBConsistentHashAction(BaseAction):
-    """Consistent hash balancing."""
-    action_type = "lb_consistent_hash"
-    display_name = "一致性哈希负载"
-    description = "一致性哈希负载均衡"
-    version = "1.0"
+@dataclass
+class Endpoint:
+    """API endpoint."""
+    url: str
+    weight: int = 1
+    max_connections: int = 100
+    timeout: float = 30.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def __init__(self):
-        super().__init__()
-        self._ring = {}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute consistent hash selection."""
-        servers = params.get('servers', [])
-        request_key = params.get('request_key', '')
-        output_var = params.get('output_var', 'selected_server')
+@dataclass
+class EndpointStats:
+    """Endpoint statistics."""
+    endpoint: Endpoint
+    active_connections: int = 0
+    total_requests: int = 0
+    failed_requests: int = 0
+    total_latency: float = 0.0
+    last_used: float = 0.0
 
-        if not servers or not request_key:
-            return ActionResult(success=False, message="servers and request_key are required")
+
+class APILoadBalancerAction:
+    """Load balancer for API endpoints.
+
+    Example:
+        lb = APILoadBalancerAction()
+        lb.add_endpoint(Endpoint("http://api1.example.com", weight=2))
+        lb.add_endpoint(Endpoint("http://api2.example.com", weight=1))
+
+        result = await lb.execute(make_request, "/api/data")
+    """
+
+    def __init__(
+        self,
+        strategy: LoadBalanceStrategy = LoadBalanceStrategy.ROUND_ROBIN,
+    ) -> None:
+        self.strategy = strategy
+        self.endpoints: List[Endpoint] = []
+        self._stats: Dict[str, EndpointStats] = {}
+        self._round_robin_index = 0
+        self._fair_heap: List[tuple] = []
+        self._lock = asyncio.Lock()
+
+    def add_endpoint(self, endpoint: Endpoint) -> None:
+        """Add endpoint to load balancer."""
+        self.endpoints.append(endpoint)
+        self._stats[endpoint.url] = EndpointStats(endpoint=endpoint)
+
+    def remove_endpoint(self, url: str) -> None:
+        """Remove endpoint from load balancer."""
+        self.endpoints = [e for e in self.endpoints if e.url != url]
+        if url in self._stats:
+            del self._stats[url]
+
+    async def execute(
+        self,
+        func: Callable[..., T],
+        path: str,
+        *args: Any,
+        client_ip: Optional[str] = None,
+        **kwargs: Any,
+    ) -> T:
+        """Execute request through load balancer.
+
+        Args:
+            func: Request function(endpoint, path, *args, **kwargs)
+            path: API path
+            *args: Additional positional args
+            client_ip: Client IP for IP_HASH strategy
+            **kwargs: Additional keyword args
+
+        Returns:
+            Result from selected endpoint
+        """
+        endpoint = await self._select_endpoint(client_ip)
+        async with self._lock:
+            self._stats[endpoint.url].active_connections += 1
+            self._stats[endpoint.url].total_requests += 1
+            self._stats[endpoint.url].last_used = asyncio.get_event_loop().time()
 
         try:
-            resolved_servers = context.resolve_value(servers) if context else servers
-            resolved_key = context.resolve_value(request_key) if context else request_key
-
-            hash_value = int(hashlib.md5(resolved_key.encode()).hexdigest(), 16)
-
-            positions = sorted([int(hashlib.md5(s.encode()).hexdigest(), 16) for s in resolved_servers])
-
-            selected_idx = 0
-            for pos in positions:
-                if hash_value <= pos:
-                    selected_idx = positions.index(pos)
-                    break
-
-            selected = resolved_servers[selected_idx]
-
-            result = {
-                'selected': selected,
-                'request_key': resolved_key,
-                'hash': hash_value,
-                'strategy': 'consistent_hash',
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Consistent hash selected: {selected}"
+            result = await asyncio.wait_for(
+                func(endpoint, path, *args, **kwargs),
+                timeout=endpoint.timeout
             )
+            return result
         except Exception as e:
-            return ActionResult(success=False, message=f"Consistent hash error: {e}")
+            async with self._lock:
+                self._stats[endpoint.url].failed_requests += 1
+            raise
+        finally:
+            async with self._lock:
+                self._stats[endpoint.url].active_connections -= 1
+
+    async def _select_endpoint(self, client_ip: Optional[str]) -> Endpoint:
+        """Select endpoint based on strategy."""
+        if not self.endpoints:
+            raise NoEndpointsAvailableError("No endpoints available")
+
+        if self.strategy == LoadBalanceStrategy.ROUND_ROBIN:
+            return self._round_robin()
+        elif self.strategy == LoadBalanceStrategy.WEIGHTED:
+            return await self._weighted_select()
+        elif self.strategy == LoadBalanceStrategy.LEAST_CONNECTIONS:
+            return self._least_connections()
+        elif self.strategy == LoadBalanceStrategy.IP_HASH:
+            return self._ip_hash(client_ip or "unknown")
+        elif self.strategy == LoadBalanceStrategy.RANDOM:
+            return choice(self.endpoints)
+        elif self.strategy == LoadBalanceStrategy.FAIR:
+            return await self._fair_select()
+        return self._round_robin()
+
+    def _round_robin(self) -> Endpoint:
+        """Round-robin selection."""
+        endpoint = self.endpoints[self._round_robin_index]
+        self._round_robin_index = (self._round_robin_index + 1) % len(self.endpoints)
+        return endpoint
+
+    async def _weighted_select(self) -> Endpoint:
+        """Weighted selection."""
+        total_weight = sum(e.weight for e in self.endpoints)
+        r = random() * total_weight
+        cumulative = 0
+
+        for endpoint in self.endpoints:
+            cumulative += endpoint.weight
+            if r <= cumulative:
+                return endpoint
+        return self.endpoints[-1]
+
+    def _least_connections(self) -> Endpoint:
+        """Select endpoint with least active connections."""
+        return min(
+            self.endpoints,
+            key=lambda e: self._stats[e.url].active_connections
+        )
+
+    def _ip_hash(self, ip: str) -> Endpoint:
+        """IP hash based selection."""
+        hash_value = int(hashlib.md5(ip.encode()).hexdigest(), 16)
+        index = hash_value % len(self.endpoints)
+        return self.endpoints[index]
+
+    async def _fair_select(self) -> Endpoint:
+        """Fair scheduling selection."""
+        await self._update_fair_heap()
+        if not self._fair_heap:
+            return choice(self.endpoints)
+
+        _, endpoint_url = heappop(self._fair_heap)
+        endpoint = next(e for e in self.endpoints if e.url == endpoint_url)
+
+        latency = self._stats[endpoint_url].total_latency / max(1, self._stats[endpoint_url].total_requests)
+        heappush(self._fair_heap, (latency, endpoint_url))
+
+        return endpoint
+
+    async def _update_fair_heap(self) -> None:
+        """Update fair scheduling heap."""
+        self._fair_heap.clear()
+        for endpoint in self.endpoints:
+            stats = self._stats[endpoint.url]
+            avg_latency = stats.total_latency / max(1, stats.total_requests)
+            heappush(self._fair_heap, (avg_latency, endpoint.url))
+
+    def get_healthy_endpoints(self) -> List[Endpoint]:
+        """Get list of healthy endpoints."""
+        return [
+            e for e in self.endpoints
+            if self._stats[e.url].active_connections < e.max_connections
+        ]
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get load balancer statistics."""
+        return {
+            "strategy": self.strategy.value,
+            "total_endpoints": len(self.endpoints),
+            "healthy_endpoints": len(self.get_healthy_endpoints()),
+            "endpoints": [
+                {
+                    "url": stats.endpoint.url,
+                    "active_connections": stats.active_connections,
+                    "total_requests": stats.total_requests,
+                    "failed_requests": stats.failed_requests,
+                    "success_rate": (
+                        (stats.total_requests - stats.failed_requests)
+                        / max(1, stats.total_requests)
+                    ),
+                }
+                for stats in self._stats.values()
+            ],
+        }
 
 
-class LBHealthAction(BaseAction):
-    """Health-based balancing."""
-    action_type = "lb_health"
-    display_name = "健康负载"
-    description = "健康检测负载均衡"
-    version = "1.0"
-
-    def __init__(self):
-        super().__init__()
-        self._health = defaultdict(lambda: {'healthy': True, 'latency': 0, 'failures': 0})
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute health-based selection."""
-        servers = params.get('servers', [])
-        key = params.get('key', 'default')
-        output_var = params.get('output_var', 'selected_server')
-
-        if not servers:
-            return ActionResult(success=False, message="servers list is required")
-
-        try:
-            resolved_servers = context.resolve_value(servers) if context else servers
-
-            healthy = [s for s in resolved_servers if self._health[s]['healthy']]
-
-            if not healthy:
-                healthy = resolved_servers
-
-            import random
-            selected = random.choice(healthy)
-
-            result = {
-                'selected': selected,
-                'healthy_count': len(healthy),
-                'total_count': len(resolved_servers),
-                'strategy': 'health_based',
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Health-based selected: {selected} ({len(healthy)}/{len(resolved_servers)} healthy)"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Health balancing error: {e}")
+class NoEndpointsAvailableError(Exception):
+    """Raised when no endpoints are available."""
+    pass

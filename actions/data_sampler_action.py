@@ -1,301 +1,213 @@
-"""Data sampler action module for RabAI AutoClick.
+"""Data Sampler Action Module.
 
-Provides data sampling operations:
-- DataSamplerAction: Sample data from datasets
-- StratifiedSamplerAction: Stratified sampling
-- ClusterSamplerAction: Cluster-based sampling
-- SequentialSamplerAction: Sequential sampling
+Provides statistical sampling: random, stratified,
+systematic, and reservoir sampling for large datasets.
 """
+from __future__ import annotations
 
 import random
-import math
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 from collections import defaultdict
-from datetime import datetime
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
 
 
-class DataSamplerAction(BaseAction):
-    """Sample data from datasets."""
-    action_type = "data_sampler"
-    display_name = "数据采样器"
-    description = "从数据集中采样"
+class SamplingStrategy(Enum):
+    """Sampling strategy."""
+    RANDOM = "random"
+    STRATIFIED = "stratified"
+    SYSTEMATIC = "systematic"
+    RESERVOIR = "reservoir"
+    CLUSTER = "cluster"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            sample_size = params.get("sample_size", 10)
-            sampling_method = params.get("sampling_method", "random")
-            replace = params.get("replace", False)
-            seed = params.get("seed")
 
-            if not isinstance(data, list):
-                data = [data]
+from enum import Enum
 
-            if not data:
-                return ActionResult(success=False, message="No data to sample")
 
-            if seed is not None:
-                random.seed(seed)
+@dataclass
+class SamplingConfig:
+    """Sampling configuration."""
+    strategy: SamplingStrategy
+    sample_size: int
+    random_seed: Optional[int] = None
+    stratify_field: Optional[str] = None
+    stratify_ratios: Optional[Dict[str, float]] = None
+    replace: bool = False
 
-            if sample_size > len(data) and not replace:
-                sample_size = len(data)
 
-            if sampling_method == "random":
-                sampled = random.sample(data, sample_size) if not replace else [random.choice(data) for _ in range(sample_size)]
+class DataSamplerAction:
+    """Data sampler with multiple strategies.
 
-            elif sampling_method == "first":
-                sampled = data[:sample_size]
+    Example:
+        sampler = DataSamplerAction()
 
-            elif sampling_method == "last":
-                sampled = data[-sample_size:]
-
-            elif sampling_method == "systematic":
-                interval = max(1, len(data) // sample_size)
-                sampled = [data[i] for i in range(0, len(data), interval)][:sample_size]
-
-            elif sampling_method == "reservoir":
-                sampled = self._reservoir_sampling(data, sample_size)
-
-            else:
-                sampled = random.sample(data, min(sample_size, len(data)))
-
-            return ActionResult(
-                success=True,
-                data={
-                    "sampled": sampled,
-                    "sample_size": len(sampled),
-                    "original_size": len(data),
-                    "sampling_method": sampling_method,
-                    "replace": replace
-                },
-                message=f"Sampled {len(sampled)} items from {len(data)} using {sampling_method}"
+        sample = sampler.sample(
+            data=list(range(1000)),
+            config=SamplingConfig(
+                strategy=SamplingStrategy.RANDOM,
+                sample_size=100
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Data sampler error: {str(e)}")
+        )
+    """
 
-    def _reservoir_sampling(self, data: List, k: int) -> List:
+    def __init__(self) -> None:
+        self._rng = random.Random()
+
+    def sample(
+        self,
+        data: List[T],
+        config: SamplingConfig,
+    ) -> List[T]:
+        """Sample data using specified strategy.
+
+        Args:
+            data: Data to sample from
+            config: Sampling configuration
+
+        Returns:
+            Sampled data
+        """
+        if config.random_seed is not None:
+            self._rng.seed(config.random_seed)
+
+        if config.strategy == SamplingStrategy.RANDOM:
+            return self._random_sample(data, config)
+        elif config.strategy == SamplingStrategy.STRATIFIED:
+            return self._stratified_sample(data, config)
+        elif config.strategy == SamplingStrategy.SYSTEMATIC:
+            return self._systematic_sample(data, config)
+        elif config.strategy == SamplingStrategy.RESERVOIR:
+            return self._reservoir_sample(data, config)
+        elif config.strategy == SamplingStrategy.CLUSTER:
+            return self._cluster_sample(data, config)
+
+        return data[:config.sample_size]
+
+    def _random_sample(
+        self,
+        data: List[T],
+        config: SamplingConfig,
+    ) -> List[T]:
+        """Random sampling with optional replacement."""
+        if config.replace:
+            return [self._rng.choice(data) for _ in range(config.sample_size)]
+
+        indices = self._rng.sample(range(len(data)), min(config.sample_size, len(data)))
+        return [data[i] for i in indices]
+
+    def _stratified_sample(
+        self,
+        data: List[Dict],
+        config: SamplingConfig,
+    ) -> List[Dict]:
+        """Stratified sampling by field."""
+        if not config.stratify_field:
+            return self._random_sample(data, config)
+
+        strata: Dict[str, List[Dict]] = defaultdict(list)
+        for record in data:
+            key = str(record.get(config.stratify_field, "unknown"))
+            strata[key].append(record)
+
+        samples: List[Dict] = []
+        total_size = len(data)
+        ratios = config.stratify_ratios or {}
+
+        for key, stratum in strata.items():
+            ratio = ratios.get(key, len(stratum) / total_size)
+            stratum_size = max(1, int(config.sample_size * ratio))
+            stratum_sample = self._rng.sample(stratum, min(stratum_size, len(stratum)))
+            samples.extend(stratum_sample)
+
+        return samples
+
+    def _systematic_sample(
+        self,
+        data: List[T],
+        config: SamplingConfig,
+    ) -> List[T]:
+        """Systematic sampling (every k-th element)."""
+        if len(data) <= config.sample_size:
+            return data
+
+        step = len(data) // config.sample_size
+        start = self._rng.randint(0, step - 1)
+
+        return data[start::step][:config.sample_size]
+
+    def _reservoir_sample(
+        self,
+        data: List[T],
+        config: SamplingConfig,
+    ) -> List[T]:
+        """Reservoir sampling for large streams."""
+        k = min(config.sample_size, len(data))
         reservoir = data[:k]
+
         for i in range(k, len(data)):
-            j = random.randint(0, i)
+            j = self._rng.randint(0, i)
             if j < k:
                 reservoir[j] = data[i]
+
         return reservoir
 
-    def get_required_params(self) -> List[str]:
-        return ["data"]
+    def _cluster_sample(
+        self,
+        data: List[Dict],
+        config: SamplingConfig,
+    ) -> List[Dict]:
+        """Cluster sampling (randomly select clusters)."""
+        if not config.stratify_field:
+            return self._random_sample(data, config)
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"sample_size": 10, "sampling_method": "random", "replace": False, "seed": None}
+        clusters: Dict[str, List[Dict]] = defaultdict(list)
+        for record in data:
+            key = str(record.get(config.stratify_field, "unknown"))
+            clusters[key].append(record)
 
+        cluster_keys = list(clusters.keys())
+        num_clusters = max(1, min(config.sample_size, len(cluster_keys)))
+        selected_keys = self._rng.sample(cluster_keys, num_clusters)
 
-class StratifiedSamplerAction(BaseAction):
-    """Stratified sampling."""
-    action_type = "data_stratified_sampler"
-    display_name = "分层采样器"
-    description = "分层采样"
+        return [record for key in selected_keys for record in clusters[key]]
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            stratum_field = params.get("stratum_field", "")
-            sample_per_stratum = params.get("sample_per_stratum", 5)
-            sampling_method = params.get("sampling_method", "proportional")
+    def split(
+        self,
+        data: List[T],
+        ratios: List[float],
+        random_seed: Optional[int] = None,
+    ) -> List[List[T]]:
+        """Split data into multiple samples by ratios.
 
-            if not isinstance(data, list):
-                data = [data]
+        Args:
+            data: Data to split
+            ratios: List of ratios (must sum to 1.0)
+            random_seed: Optional random seed
 
-            if not data:
-                return ActionResult(success=False, message="No data to sample")
+        Returns:
+            List of split datasets
+        """
+        if abs(sum(ratios) - 1.0) > 0.001:
+            raise ValueError("Ratios must sum to 1.0")
 
-            if not stratum_field:
-                return ActionResult(success=False, message="stratum_field is required")
+        if random_seed is not None:
+            self._rng.seed(random_seed)
 
-            strata = defaultdict(list)
-            for item in data:
-                if isinstance(item, dict):
-                    stratum_value = item.get(stratum_field, "unknown")
-                else:
-                    stratum_value = "unknown"
-                strata[stratum_value].append(item)
+        shuffled = data.copy()
+        self._rng.shuffle(shuffled)
 
-            sampled = []
-            stratum_info = {}
+        boundaries = []
+        cumulative = 0
+        for ratio in ratios[:-1]:
+            cumulative += ratio
+            boundaries.append(int(len(data) * cumulative))
 
-            total_records = len(data)
+        splits = []
+        prev = 0
+        for boundary in boundaries:
+            splits.append(shuffled[prev:boundary])
+            prev = boundary
+        splits.append(shuffled[prev:])
 
-            for stratum_value, stratum_data in strata.items():
-                if sampling_method == "proportional":
-                    proportion = len(stratum_data) / total_records
-                    n = max(1, int(proportion * sample_per_stratum * len(strata)))
-                    n = min(n, len(stratum_data))
-                else:
-                    n = min(sample_per_stratum, len(stratum_data))
-
-                stratum_sample = random.sample(stratum_data, n)
-                sampled.extend(stratum_sample)
-                stratum_info[stratum_value] = {
-                    "original_size": len(stratum_data),
-                    "sampled_size": len(stratum_sample)
-                }
-
-            return ActionResult(
-                success=True,
-                data={
-                    "sampled": sampled,
-                    "sample_size": len(sampled),
-                    "original_size": len(data),
-                    "stratum_info": stratum_info,
-                    "strata_count": len(strata),
-                    "sampling_method": sampling_method
-                },
-                message=f"Stratified sample: {len(sampled)} from {len(data)} across {len(strata)} strata"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stratified sampler error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["data"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"stratum_field": "", "sample_per_stratum": 5, "sampling_method": "proportional"}
-
-
-class ClusterSamplerAction(BaseAction):
-    """Cluster-based sampling."""
-    action_type = "data_cluster_sampler"
-    display_name = "聚类采样器"
-    description = "基于聚类的采样"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            num_clusters = params.get("num_clusters", 5)
-            samples_per_cluster = params.get("samples_per_cluster", 2)
-            cluster_by = params.get("cluster_by")
-            method = params.get("method", "kmeans_simulation")
-
-            if not isinstance(data, list):
-                data = [data]
-
-            if not data:
-                return ActionResult(success=False, message="No data to sample")
-
-            if len(data) < num_clusters:
-                num_clusters = len(data)
-
-            if method == "kmeans_simulation":
-                clusters = self._simulate_kmeans_clusters(data, num_clusters, cluster_by)
-            elif method == "sequential":
-                clusters = self._sequential_clusters(data, num_clusters)
-            else:
-                clusters = self._simulate_kmeans_clusters(data, num_clusters, cluster_by)
-
-            sampled = []
-            cluster_info = {}
-
-            for cluster_id, cluster_data in clusters.items():
-                n = min(samples_per_cluster, len(cluster_data))
-                cluster_sample = random.sample(cluster_data, n)
-                sampled.extend(cluster_sample)
-                cluster_info[cluster_id] = {
-                    "original_size": len(cluster_data),
-                    "sampled_size": n
-                }
-
-            return ActionResult(
-                success=True,
-                data={
-                    "sampled": sampled,
-                    "sample_size": len(sampled),
-                    "original_size": len(data),
-                    "num_clusters": num_clusters,
-                    "cluster_info": cluster_info
-                },
-                message=f"Cluster sample: {len(sampled)} from {len(data)} in {num_clusters} clusters"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cluster sampler error: {str(e)}")
-
-    def _simulate_kmeans_clusters(self, data: List, num_clusters: int, cluster_by: str) -> Dict:
-        clusters = defaultdict(list)
-        for i, item in enumerate(data):
-            if cluster_by and isinstance(item, dict):
-                cluster_id = hash(item.get(cluster_by, i)) % num_clusters
-            else:
-                cluster_id = i % num_clusters
-            clusters[cluster_id].append(item)
-        return clusters
-
-    def _sequential_clusters(self, data: List, num_clusters: int) -> Dict:
-        cluster_size = math.ceil(len(data) / num_clusters)
-        clusters = defaultdict(list)
-        for i, item in enumerate(data):
-            cluster_id = i // cluster_size
-            if cluster_id >= num_clusters:
-                cluster_id = num_clusters - 1
-            clusters[cluster_id].append(item)
-        return clusters
-
-    def get_required_params(self) -> List[str]:
-        return ["data"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"num_clusters": 5, "samples_per_cluster": 2, "cluster_by": None, "method": "kmeans_simulation"}
-
-
-class SequentialSamplerAction(BaseAction):
-    """Sequential sampling."""
-    action_type = "data_sequential_sampler"
-    display_name = "顺序采样器"
-    description = "顺序采样"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            start_index = params.get("start_index", 0)
-            end_index = params.get("end_index")
-            step = params.get("step", 1)
-            every_nth = params.get("every_nth")
-
-            if not isinstance(data, list):
-                data = [data]
-
-            if not data:
-                return ActionResult(success=False, message="No data to sample")
-
-            if end_index is None:
-                end_index = len(data)
-
-            if every_nth:
-                sampled = data[start_index:min(end_index, len(data)):every_nth]
-            else:
-                sampled = data[start_index:min(end_index, len(data)):step]
-
-            return ActionResult(
-                success=True,
-                data={
-                    "sampled": sampled,
-                    "sample_size": len(sampled),
-                    "original_size": len(data),
-                    "start_index": start_index,
-                    "end_index": min(end_index, len(data)),
-                    "step": step,
-                    "every_nth": every_nth
-                },
-                message=f"Sequential sample: indices {start_index}-{min(end_index, len(data))}, step={step}, got {len(sampled)}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Sequential sampler error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["data"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"start_index": 0, "end_index": None, "step": 1, "every_nth": None}
+        return splits

@@ -1,214 +1,218 @@
-"""Data enricher action module for RabAI AutoClick.
+"""Data Enricher Action Module.
 
-Provides data enrichment operations:
-- EnrichLookupAction: Lookup enrichment
-- EnrichComputeAction: Compute enrichment
-- EnrichJoinAction: Join enrichment
-- EnrichDefaultAction: Default enrichment
-- EnrichBatchAction: Batch enrichment
+Provides data enrichment with lookup tables, external APIs,
+computed fields, and cross-reference joins.
 """
+from __future__ import annotations
 
-from typing import Any, Dict, List
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Set
+from enum import Enum
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class EnrichLookupAction(BaseAction):
-    """Lookup-based enrichment."""
-    action_type = "enrich_lookup"
-    display_name = "查找丰富"
-    description = "基于查找表的数据丰富"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            lookup_table = params.get("lookup_table", {})
-            key_field = params.get("key_field", "id")
-            enrich_fields = params.get("enrich_fields", [])
-            lookup_key = params.get("lookup_key", "id")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if isinstance(lookup_table, list):
-                lookup_dict = {item.get(lookup_key): item for item in lookup_table}
-            else:
-                lookup_dict = lookup_table
-
-            enriched = []
-            hits = 0
-            for item in data:
-                key = item.get(key_field)
-                new_item = item.copy()
-                if key in lookup_dict:
-                    lookup_row = lookup_dict[key]
-                    for ef in enrich_fields:
-                        new_item[ef] = lookup_row.get(ef)
-                    hits += 1
-                enriched.append(new_item)
-
-            return ActionResult(
-                success=True,
-                data={"enriched": enriched, "enrich_count": hits, "miss_count": len(data) - hits, "total": len(data)},
-                message=f"Lookup enrich: {hits}/{len(data)} records enriched",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Enrich lookup failed: {e}")
+logger = logging.getLogger(__name__)
 
 
-class EnrichComputeAction(BaseAction):
-    """Compute-based enrichment."""
-    action_type = "enrich_compute"
-    display_name = "计算丰富"
-    description = "基于计算的数据丰富"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            computed_fields = params.get("computed_fields", [])
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            enriched = []
-            for item in data:
-                new_item = item.copy()
-                for cf in computed_fields:
-                    field_name = cf.get("name", "computed")
-                    source_fields = cf.get("sources", [])
-                    operation = cf.get("operation", "add")
-
-                    if operation == "add" and len(source_fields) == 2:
-                        new_item[field_name] = item.get(source_fields[0], 0) + item.get(source_fields[1], 0)
-                    elif operation == "subtract" and len(source_fields) == 2:
-                        new_item[field_name] = item.get(source_fields[0], 0) - item.get(source_fields[1], 0)
-                    elif operation == "multiply" and len(source_fields) == 2:
-                        new_item[field_name] = item.get(source_fields[0], 0) * item.get(source_fields[1], 0)
-                    elif operation == "concat":
-                        new_item[field_name] = "".join(str(item.get(sf, "")) for sf in source_fields)
-                    elif operation == "upper":
-                        new_item[field_name] = str(item.get(source_fields[0], "")).upper()
-                    elif operation == "lower":
-                        new_item[field_name] = str(item.get(source_fields[0], "")).lower()
-                enriched.append(new_item)
-
-            return ActionResult(
-                success=True,
-                data={"enriched": enriched, "computed_fields": len(computed_fields), "count": len(enriched)},
-                message=f"Computed enrich: added {len(computed_fields)} fields to {len(enriched)} records",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Enrich compute failed: {e}")
+class EnrichmentSource(Enum):
+    """Enrichment source type."""
+    LOOKUP_TABLE = "lookup_table"
+    EXTERNAL_API = "external_api"
+    COMPUTED = "computed"
+    CROSS_REFERENCE = "cross_reference"
 
 
-class EnrichJoinAction(BaseAction):
-    """Join-based enrichment."""
-    action_type = "enrich_join"
-    display_name = "连接丰富"
-    description = "基于连接的数据丰富"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            join_data = params.get("join_data", [])
-            left_key = params.get("left_key", "id")
-            right_key = params.get("right_key", "id")
-            prefix = params.get("prefix", "enriched_")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            right_index = {item.get(right_key): item for item in join_data}
-            enriched = []
-            for item in data:
-                new_item = item.copy()
-                key = item.get(left_key)
-                if key in right_index:
-                    join_row = right_index[key]
-                    for k, v in join_row.items():
-                        if k != right_key:
-                            new_item[f"{prefix}{k}"] = v
-                enriched.append(new_item)
-
-            return ActionResult(
-                success=True,
-                data={"enriched": enriched, "join_count": len(enriched), "total": len(data)},
-                message=f"Join enrich: enriched {len(enriched)} records with prefix '{prefix}'",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Enrich join failed: {e}")
+@dataclass
+class EnrichmentConfig:
+    """Enrichment configuration."""
+    source_type: EnrichmentSource
+    source: Any
+    key_field: str
+    enrichment_fields: List[str]
+    cache_ttl: float = 300.0
 
 
-class EnrichDefaultAction(BaseAction):
-    """Default value enrichment."""
-    action_type = "enrich_default"
-    display_name = "默认值丰富"
-    description = "填充默认值丰富"
+class DataEnricherAction:
+    """Data enricher with multiple source types.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            default_values = params.get("default_values", {})
+    Example:
+        enricher = DataEnricherAction()
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+        enricher.add_lookup(
+            key_field="country_code",
+            lookup_table={
+                "US": {"country": "United States", "currency": "USD"},
+                "UK": {"country": "United Kingdom", "currency": "GBP"},
+            },
+            enrichment_fields=["country", "currency"]
+        )
 
-            enriched = []
-            for item in data:
-                new_item = item.copy()
-                for field, default in default_values.items():
-                    if field not in new_item or new_item[field] is None:
-                        new_item[field] = default
-                enriched.append(new_item)
+        result = enricher.enrich({"country_code": "US", "name": "John"})
+        # result = {"country_code": "US", "name": "John", "country": "United States", "currency": "USD"}
+    """
 
-            return ActionResult(
-                success=True,
-                data={"enriched": enriched, "default_fields": len(default_values), "count": len(enriched)},
-                message=f"Default enrich: filled {len(default_values)} default fields for {len(enriched)} records",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Enrich default failed: {e}")
+    def __init__(self) -> None:
+        self._enrichments: List[EnrichmentConfig] = []
+        self._cache: Dict[str, Dict] = {}
+        self._cache_times: Dict[str, float] = {}
+        import time
+        self._time = time.time
 
+    def add_lookup(
+        self,
+        key_field: str,
+        lookup_table: Dict[Any, Dict],
+        enrichment_fields: List[str],
+    ) -> "DataEnricherAction":
+        """Add lookup table enrichment."""
+        self._enrichments.append(EnrichmentConfig(
+            source_type=EnrichmentSource.LOOKUP_TABLE,
+            source=lookup_table,
+            key_field=key_field,
+            enrichment_fields=enrichment_fields,
+        ))
+        return self
 
-class EnrichBatchAction(BaseAction):
-    """Batch enrichment."""
-    action_type = "enrich_batch"
-    display_name = "批量丰富"
-    description = "批量数据丰富"
+    def add_api_enrichment(
+        self,
+        key_field: str,
+        api_func: Callable[[str], Dict],
+        enrichment_fields: List[str],
+        cache_ttl: float = 300.0,
+    ) -> "DataEnricherAction":
+        """Add external API enrichment."""
+        self._enrichments.append(EnrichmentConfig(
+            source_type=EnrichmentSource.EXTERNAL_API,
+            source=api_func,
+            key_field=key_field,
+            enrichment_fields=enrichment_fields,
+            cache_ttl=cache_ttl,
+        ))
+        return self
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            enrichment_operations = params.get("enrichment_operations", [])
+    def add_computed_fields(
+        self,
+        field_definitions: Dict[str, Callable],
+    ) -> "DataEnricherAction":
+        """Add computed field enrichment."""
+        self._enrichments.append(EnrichmentConfig(
+            source_type=EnrichmentSource.COMPUTED,
+            source=field_definitions,
+            key_field="",
+            enrichment_fields=list(field_definitions.keys()),
+        ))
+        return self
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+    def enrich(
+        self,
+        record: Dict[str, Any],
+        only_fields: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Enrich single record.
 
-            enriched = data
-            for op in enrichment_operations:
-                op_type = op.get("type", "")
-                if op_type == "lookup":
-                    lookup_result = EnrichLookupAction().execute(context, {"data": enriched, **op})
-                    if lookup_result.success:
-                        enriched = lookup_result.data.get("enriched", enriched)
-                elif op_type == "compute":
-                    compute_result = EnrichComputeAction().execute(context, {"data": enriched, **op})
-                    if compute_result.success:
-                        enriched = compute_result.data.get("enriched", enriched)
-                elif op_type == "default":
-                    default_result = EnrichDefaultAction().execute(context, {"data": enriched, **op})
-                    if default_result.success:
-                        enriched = default_result.data.get("enriched", enriched)
+        Args:
+            record: Input record
+            only_fields: Optional list of specific fields to enrich
 
-            return ActionResult(
-                success=True,
-                data={"enriched": enriched, "operations_applied": len(enrichment_operations), "count": len(enriched)},
-                message=f"Batch enrich: applied {len(enrichment_operations)} operations to {len(enriched)} records",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Enrich batch failed: {e}")
+        Returns:
+            Enriched record
+        """
+        result = dict(record)
+
+        for config in self._enrichments:
+            if only_fields and not any(f in config.enrichment_fields for f in only_fields):
+                continue
+
+            if config.source_type == EnrichmentSource.LOOKUP_TABLE:
+                self._enrich_from_lookup(result, config)
+            elif config.source_type == EnrichmentSource.COMPUTED:
+                self._enrich_from_computed(result, config)
+
+        return result
+
+    def enrich_batch(
+        self,
+        records: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Enrich batch of records."""
+        return [self.enrich(record) for record in records]
+
+    async def enrich_async(
+        self,
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Enrich record with async API calls."""
+        result = dict(record)
+        import time
+        now = time.time()
+
+        for config in self._enrichments:
+            if config.source_type == EnrichmentSource.EXTERNAL_API:
+                key_value = record.get(config.key_field)
+                if not key_value:
+                    continue
+
+                cache_key = f"{config.key_field}:{key_value}"
+
+                if cache_key in self._cache:
+                    cached_time = self._cache_times.get(cache_key, 0)
+                    if now - cached_time < config.cache_ttl:
+                        cached_data = self._cache[cache_key]
+                        for field_name in config.enrichment_fields:
+                            if field_name in cached_data:
+                                result[field_name] = cached_data[field_name]
+                        continue
+
+                try:
+                    api_func = config.source
+                    if asyncio.iscoroutinefunction(api_func):
+                        enriched_data = await api_func(key_value)
+                    else:
+                        enriched_data = api_func(key_value)
+
+                    self._cache[cache_key] = enriched_data
+                    self._cache_times[cache_key] = now
+
+                    for field_name in config.enrichment_fields:
+                        if field_name in enriched_data:
+                            result[field_name] = enriched_data[field_name]
+
+                except Exception as e:
+                    logger.error(f"API enrichment failed for {cache_key}: {e}")
+
+        return result
+
+    def _enrich_from_lookup(
+        self,
+        record: Dict[str, Any],
+        config: EnrichmentConfig,
+    ) -> None:
+        """Enrich from lookup table."""
+        key_value = record.get(config.key_field)
+        if key_value is None:
+            return
+
+        lookup_table = config.source
+        if key_value in lookup_table:
+            lookup_data = lookup_table[key_value]
+            for field_name in config.enrichment_fields:
+                if field_name in lookup_data:
+                    record[field_name] = lookup_data[field_name]
+
+    def _enrich_from_computed(
+        self,
+        record: Dict[str, Any],
+        config: EnrichmentConfig,
+    ) -> None:
+        """Enrich from computed fields."""
+        field_definitions = config.source
+        for field_name, func in field_definitions.items():
+            try:
+                record[field_name] = func(record)
+            except Exception as e:
+                logger.error(f"Computed field '{field_name}' failed: {e}")
+
+    def clear_cache(self) -> None:
+        """Clear enrichment cache."""
+        self._cache.clear()
+        self._cache_times.clear()

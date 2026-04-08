@@ -1,164 +1,242 @@
-# Copyright (c) 2024. coded by claude
 """Automation Scheduler Action Module.
 
-Schedules and manages automation task execution with support for
-cron expressions, intervals, and priority-based queuing.
+Provides task scheduling with cron-like expressions,
+periodic execution, and dependency management.
 """
-from typing import Optional, Dict, Any, List, Callable
+from __future__ import annotations
+
+import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-import asyncio
-import logging
+from typing import Any, Callable, Dict, List, Optional, Set
 from croniter import croniter
+import logging
 
 logger = logging.getLogger(__name__)
 
 
 class ScheduleType(Enum):
+    """Schedule type."""
     ONCE = "once"
-    INTERVAL = "interval"
+    PERIODIC = "periodic"
     CRON = "cron"
-    DAILY = "daily"
-    WEEKLY = "weekly"
+    DELAYED = "delayed"
 
 
 @dataclass
 class ScheduleConfig:
-    name: str
+    """Schedule configuration."""
     schedule_type: ScheduleType
-    enabled: bool = True
-    cron_expression: Optional[str] = None
     interval_seconds: Optional[float] = None
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
+    cron_expression: Optional[str] = None
+    run_at: Optional[datetime] = None
     max_runs: Optional[int] = None
+    name: str = ""
 
 
 @dataclass
 class ScheduledTask:
+    """Scheduled task."""
     task_id: str
+    func: Callable
     config: ScheduleConfig
-    last_run: Optional[datetime] = None
-    next_run: Optional[datetime] = None
+    next_run: float
+    last_run: Optional[float] = None
     run_count: int = 0
+    enabled: bool = True
 
 
-@dataclass
-class SchedulerEvent:
-    task_id: str
-    event_type: str
-    timestamp: datetime
-    data: Dict[str, Any] = field(default_factory=dict)
+class AutomationSchedulerAction:
+    """Task scheduler with multiple schedule types.
 
+    Example:
+        scheduler = AutomationSchedulerAction()
 
-class AutomationScheduler:
-    def __init__(self):
+        scheduler.schedule(
+            task_id="daily_report",
+            func=generate_report,
+            config=ScheduleConfig(
+                schedule_type=ScheduleType.CRON,
+                cron_expression="0 9 * * *"
+            )
+        )
+
+        await scheduler.start()
+    """
+
+    def __init__(self) -> None:
         self._tasks: Dict[str, ScheduledTask] = {}
         self._running = False
-        self._scheduler_task: Optional[asyncio.Task] = None
-        self._task_handlers: Dict[str, Callable] = {}
-        self._event_listeners: List[Callable] = []
+        self._task_handle: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
+        self._results: Dict[str, Any] = {}
 
-    def add_task(self, task: ScheduledTask, handler: Callable) -> None:
-        self._tasks[task.task_id] = task
-        self._task_handlers[task.task_id] = handler
-        self._calculate_next_run(task)
+    async def schedule(
+        self,
+        task_id: str,
+        func: Callable,
+        config: ScheduleConfig,
+    ) -> None:
+        """Schedule a task.
 
-    def remove_task(self, task_id: str) -> bool:
-        if task_id in self._tasks:
-            del self._tasks[task_id]
-            if task_id in self._task_handlers:
-                del self._task_handlers[task_id]
-            return True
-        return False
+        Args:
+            task_id: Unique task identifier
+            func: Async or sync function to execute
+            config: Schedule configuration
+        """
+        async with self._lock:
+            next_run = self._calculate_next_run(config)
+            task = ScheduledTask(
+                task_id=task_id,
+                func=func,
+                config=config,
+                next_run=next_run,
+            )
+            self._tasks[task_id] = task
+            logger.info(f"Scheduled task {task_id}, next run: {datetime.fromtimestamp(next_run)}")
 
-    def enable_task(self, task_id: str) -> bool:
-        if task_id in self._tasks:
-            self._tasks[task_id].config.enabled = True
-            return True
-        return False
+    async def unschedule(self, task_id: str) -> None:
+        """Remove a scheduled task."""
+        async with self._lock:
+            self._tasks.pop(task_id, None)
+            self._results.pop(task_id, None)
 
-    def disable_task(self, task_id: str) -> bool:
-        if task_id in self._tasks:
-            self._tasks[task_id].config.enabled = False
-            return True
-        return False
+    async def enable(self, task_id: str) -> None:
+        """Enable a task."""
+        async with self._lock:
+            if task_id in self._tasks:
+                self._tasks[task_id].enabled = True
+
+    async def disable(self, task_id: str) -> None:
+        """Disable a task."""
+        async with self._lock:
+            if task_id in self._tasks:
+                self._tasks[task_id].enabled = False
+
+    async def run_now(self, task_id: str) -> Any:
+        """Run task immediately regardless of schedule."""
+        async with self._lock:
+            if task_id not in self._tasks:
+                raise ValueError(f"Task {task_id} not found")
+            task = self._tasks[task_id]
+
+        return await self._execute_task(task)
 
     async def start(self) -> None:
-        if self._running:
-            return
+        """Start the scheduler."""
         self._running = True
-        self._scheduler_task = asyncio.create_task(self._run_scheduler())
+        self._task_handle = asyncio.create_task(self._run_loop())
+        logger.info("Scheduler started")
 
     async def stop(self) -> None:
+        """Stop the scheduler."""
         self._running = False
-        if self._scheduler_task:
-            self._scheduler_task.cancel()
+        if self._task_handle:
+            self._task_handle.cancel()
             try:
-                await self._scheduler_task
+                await self._task_handle
             except asyncio.CancelledError:
                 pass
+        logger.info("Scheduler stopped")
 
-    async def _run_scheduler(self) -> None:
+    async def _run_loop(self) -> None:
+        """Main scheduler loop."""
         while self._running:
-            now = datetime.now()
-            for task in self._tasks.values():
-                if not task.config.enabled:
-                    continue
-                if task.next_run and now >= task.next_run:
-                    await self._execute_task(task)
-            await asyncio.sleep(1)
-
-    async def _execute_task(self, task: ScheduledTask) -> None:
-        if task.task_id not in self._task_handlers:
-            return
-        handler = self._task_handlers[task.task_id]
-        try:
-            result = handler()
-            if asyncio.iscoroutine(result):
-                await result
-            task.last_run = datetime.now()
-            task.run_count += 1
-            self._emit_event(task.task_id, "executed", {"run_count": task.run_count})
-        except Exception as e:
-            logger.error(f"Task execution failed: {e}")
-            self._emit_event(task.task_id, "failed", {"error": str(e)})
-        self._calculate_next_run(task)
-
-    def _calculate_next_run(self, task: ScheduledTask) -> None:
-        config = task.config
-        if config.schedule_type == ScheduleType.INTERVAL and config.interval_seconds:
-            if task.last_run:
-                task.next_run = task.last_run + timedelta(seconds=config.interval_seconds)
-            else:
-                task.next_run = datetime.now()
-        elif config.schedule_type == ScheduleType.CRON and config.cron_expression:
-            cron = croniter(config.cron_expression, datetime.now())
-            task.next_run = cron.get_next(datetime)
-        elif config.schedule_type == ScheduleType.ONCE and config.start_time:
-            task.next_run = config.start_time
-        else:
-            task.next_run = None
-
-    def _emit_event(self, task_id: str, event_type: str, data: Dict[str, Any]) -> None:
-        event = SchedulerEvent(task_id=task_id, event_type=event_type, timestamp=datetime.now(), data=data)
-        for listener in self._event_listeners:
             try:
-                listener(event)
+                await self._process_due_tasks()
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error(f"Event listener failed: {e}")
+                logger.error(f"Scheduler error: {e}")
 
-    def add_event_listener(self, listener: Callable) -> None:
-        self._event_listeners.append(listener)
+    async def _process_due_tasks(self) -> None:
+        """Process all tasks that are due."""
+        now = time.time()
+        due_tasks = [
+            task for task in self._tasks.values()
+            if task.enabled and task.next_run <= now
+        ]
 
-    def get_task_status(self) -> Dict[str, Any]:
+        for task in due_tasks:
+            asyncio.create_task(self._execute_and_reschedule(task))
+
+    async def _execute_and_reschedule(self, task: ScheduledTask) -> None:
+        """Execute task and reschedule if recurring."""
+        try:
+            result = await self._execute_task(task)
+            self._results[task.task_id] = result
+
+            if task.config.schedule_type != ScheduleType.ONCE:
+                task.next_run = self._calculate_next_run(task.config)
+                task.run_count += 1
+
+                if task.config.max_runs and task.run_count >= task.config.max_runs:
+                    async with self._lock:
+                        self._tasks.pop(task.task_id, None)
+                    logger.info(f"Task {task.task_id} completed max runs")
+
+        except Exception as e:
+            logger.error(f"Task {task.task_id} failed: {e}")
+            task.next_run = time.time() + 60
+
+    async def _execute_task(self, task: ScheduledTask) -> Any:
+        """Execute a single task."""
+        task.last_run = time.time()
+        logger.debug(f"Executing task {task.task_id}")
+
+        if asyncio.iscoroutinefunction(task.func):
+            return await task.func()
+        else:
+            return task.func()
+
+    def _calculate_next_run(self, config: ScheduleConfig) -> float:
+        """Calculate next run time based on schedule type."""
+        now = time.time()
+
+        if config.schedule_type == ScheduleType.ONCE:
+            if config.run_at:
+                return config.run_at.timestamp()
+            return now
+
+        elif config.schedule_type == ScheduleType.DELAYED:
+            return now + (config.interval_seconds or 0)
+
+        elif config.schedule_type == ScheduleType.PERIODIC:
+            interval = config.interval_seconds or 60.0
+            return now + interval
+
+        elif config.schedule_type == ScheduleType.CRON:
+            if config.cron_expression:
+                cron = croniter(config.cron_expression, datetime.now())
+                return cron.get_next_timestamp()
+
+        return now + 60
+
+    def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Get status of a task."""
+        if task_id not in self._tasks:
+            return None
+
+        task = self._tasks[task_id]
         return {
-            task_id: {
-                "enabled": task.config.enabled,
-                "last_run": task.last_run.isoformat() if task.last_run else None,
-                "next_run": task.next_run.isoformat() if task.next_run else None,
-                "run_count": task.run_count,
-            }
-            for task_id, task in self._tasks.items()
+            "task_id": task.task_id,
+            "schedule_type": task.config.schedule_type.value,
+            "enabled": task.enabled,
+            "next_run": datetime.fromtimestamp(task.next_run) if task.next_run else None,
+            "last_run": datetime.fromtimestamp(task.last_run) if task.last_run else None,
+            "run_count": task.run_count,
         }
+
+    def get_all_tasks(self) -> List[Dict[str, Any]]:
+        """Get all scheduled tasks."""
+        return [
+            self.get_task_status(task_id)
+            for task_id in self._tasks
+        ]
+
+    def get_result(self, task_id: str) -> Optional[Any]:
+        """Get last result of a task."""
+        return self._results.get(task_id)

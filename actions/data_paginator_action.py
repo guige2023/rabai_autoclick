@@ -1,127 +1,234 @@
-# Copyright (c) 2024. coded by claude
 """Data Paginator Action Module.
 
-Provides pagination utilities for API responses with support for
-offset, cursor-based, and keyset pagination strategies.
+Provides data pagination with offset, cursor, and page-based
+strategies for large datasets.
 """
-from typing import Optional, Dict, Any, List, Tuple
+from __future__ import annotations
+
+import hashlib
 from dataclasses import dataclass, field
-from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 import logging
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 
 class PaginationStrategy(Enum):
+    """Pagination strategy."""
     OFFSET = "offset"
     CURSOR = "cursor"
-    KEYSET = "keyset"
+    PAGE = "page"
+
+
+from enum import Enum
 
 
 @dataclass
 class Page:
-    items: List[Dict[str, Any]]
+    """Pagination page result."""
+    items: List[Any]
     page_number: int
     page_size: int
     total_items: int
     total_pages: int
     has_next: bool
-    has_previous: bool
-    next_cursor: Optional[str] = None
-    previous_cursor: Optional[str] = None
+    has_prev: bool
 
 
 @dataclass
-class PaginationConfig:
-    strategy: PaginationStrategy = PaginationStrategy.OFFSET
-    default_page_size: int = 20
-    max_page_size: int = 100
-    cursor_field: Optional[str] = None
+class CursorPage:
+    """Cursor pagination result."""
+    items: List[Any]
+    cursor: Optional[str]
+    has_more: bool
 
 
-class DataPaginator:
-    def __init__(self, config: Optional[PaginationConfig] = None):
-        self.config = config or PaginationConfig()
+class DataPaginatorAction:
+    """Data paginator with multiple strategies.
 
-    def paginate_offset(self, items: List[Dict[str, Any]], page: int = 1, page_size: Optional[int] = None) -> Page:
-        page_size = self._normalize_page_size(page_size)
-        total_items = len(items)
-        total_pages = (total_items + page_size - 1) // page_size if total_items > 0 else 1
-        page = max(1, min(page, total_pages))
-        start = (page - 1) * page_size
-        end = start + page_size
-        page_items = items[start:end]
+    Example:
+        paginator = DataPaginatorAction()
+
+        page = paginator.paginate(
+            data=list(range(1000)),
+            strategy=PaginationStrategy.OFFSET,
+            page=1,
+            page_size=20
+        )
+
+        print(page.items)      # [0, 1, ..., 19]
+        print(page.total_pages)  # 50
+    """
+
+    def __init__(self) -> None:
+        pass
+
+    def paginate(
+        self,
+        data: List[T],
+        strategy: PaginationStrategy,
+        page: Optional[int] = None,
+        page_size: int = 20,
+        cursor: Optional[str] = None,
+        sort_field: Optional[str] = None,
+        sort_order: str = "asc",
+    ) -> Union[Page, CursorPage]:
+        """Paginate data.
+
+        Args:
+            data: Data to paginate
+            strategy: Pagination strategy
+            page: Page number (for OFFSET/PAGE)
+            page_size: Items per page
+            cursor: Cursor value (for CURSOR)
+            sort_field: Field to sort by
+            sort_order: Sort order (asc/desc)
+
+        Returns:
+            Page or CursorPage result
+        """
+        if sort_field:
+            data = self._sort_data(data, sort_field, sort_order)
+
+        if strategy == PaginationStrategy.OFFSET or strategy == PaginationStrategy.PAGE:
+            return self._paginate_offset(data, page or 1, page_size)
+        elif strategy == PaginationStrategy.CURSOR:
+            return self._paginate_cursor(data, cursor, page_size)
+
+        return self._paginate_offset(data, 1, page_size)
+
+    def _paginate_offset(
+        self,
+        data: List[T],
+        page: int,
+        page_size: int,
+    ) -> Page:
+        """Offset-based pagination."""
+        total_items = len(data)
+        total_pages = (total_items + page_size - 1) // page_size if page_size > 0 else 0
+
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+
+        items = data[start_idx:end_idx]
+
         return Page(
-            items=page_items,
+            items=items,
             page_number=page,
             page_size=page_size,
             total_items=total_items,
             total_pages=total_pages,
             has_next=page < total_pages,
-            has_previous=page > 1,
+            has_prev=page > 1,
         )
 
-    def paginate_cursor(self, items: List[Dict[str, Any]], cursor: Optional[str] = None, page_size: Optional[int] = None) -> Page:
-        page_size = self._normalize_page_size(page_size)
-        start_index = 0
-        if cursor and self.config.cursor_field:
-            for i, item in enumerate(items):
-                if str(item.get(self.config.cursor_field)) == cursor:
-                    start_index = i + 1
-                    break
-        end_index = min(start_index + page_size, len(items))
-        page_items = items[start_index:end_index]
-        next_cursor = None
-        if end_index < len(items) and page_items:
-            last_item = page_items[-1]
-            next_cursor = str(last_item.get(self.config.cursor_field, ""))
-        previous_cursor = None
-        if start_index > 0 and page_items:
-            first_item = page_items[0]
-            previous_cursor = str(first_item.get(self.config.cursor_field, ""))
-        total_pages = (len(items) + page_size - 1) // page_size if len(items) > 0 else 1
-        current_page = start_index // page_size + 1
+    def _paginate_cursor(
+        self,
+        data: List[T],
+        cursor: Optional[str],
+        page_size: int,
+    ) -> CursorPage:
+        """Cursor-based pagination."""
+        start_idx = 0
+
+        if cursor:
+            try:
+                start_idx = int(cursor)
+            except ValueError:
+                logger.warning(f"Invalid cursor: {cursor}")
+
+        items = data[start_idx:start_idx + page_size + 1]
+        has_more = len(items) > page_size
+        items = items[:page_size]
+
+        next_cursor = str(start_idx + page_size) if has_more else None
+
+        return CursorPage(
+            items=items,
+            cursor=next_cursor,
+            has_more=has_more,
+        )
+
+    def _sort_data(
+        self,
+        data: List[Dict],
+        sort_field: str,
+        sort_order: str,
+    ) -> List[Dict]:
+        """Sort data by field."""
+        reverse = sort_order.lower() == "desc"
+        return sorted(
+            data,
+            key=lambda x: x.get(sort_field, ""),
+            reverse=reverse,
+        )
+
+    def paginate_lazy(
+        self,
+        fetch_fn: Callable[[int, int], Tuple[List, int]],
+        page: int,
+        page_size: int,
+    ) -> Page:
+        """Lazy pagination with data fetching callback.
+
+        Args:
+            fetch_fn: Function(offset, limit) -> (items, total_count)
+            page: Page number
+            page_size: Page size
+
+        Returns:
+            Page result
+        """
+        offset = (page - 1) * page_size
+        items, total_items = fetch_fn(offset, page_size)
+        total_pages = (total_items + page_size - 1) // page_size if page_size > 0 else 0
+
         return Page(
-            items=page_items,
-            page_number=current_page,
+            items=items,
+            page_number=page,
             page_size=page_size,
-            total_items=len(items),
+            total_items=total_items,
             total_pages=total_pages,
-            has_next=end_index < len(items),
-            has_previous=start_index > 0,
-            next_cursor=next_cursor,
-            previous_cursor=previous_cursor,
+            has_next=page < total_pages,
+            has_prev=page > 1,
         )
 
-    def paginate_keyset(self, items: List[Dict[str, Any]], last_key: Optional[Any] = None, page_size: Optional[int] = None, sort_field: str = "id") -> Page:
-        page_size = self._normalize_page_size(page_size)
-        filtered_items = items
-        if last_key is not None:
-            filtered_items = [item for item in items if item.get(sort_field, "") > last_key]
-        page_items = filtered_items[:page_size]
-        next_key = None
-        if len(page_items) == page_size and len(filtered_items) > page_size:
-            next_key = page_items[-1].get(sort_field)
-        total_pages = (len(items) + page_size - 1) // page_size if len(items) > 0 else 1
-        return Page(
-            items=page_items,
-            page_number=1,
-            page_size=page_size,
-            total_items=len(items),
-            total_pages=total_pages,
-            has_next=next_key is not None,
-            has_previous=last_key is not None,
-        )
+    def get_page_numbers(
+        self,
+        current: int,
+        total: int,
+        delta: int = 2,
+    ) -> List[int]:
+        """Get page numbers for navigation display.
 
-    def paginate(self, items: List[Dict[str, Any]], page: Optional[int] = None, cursor: Optional[str] = None, page_size: Optional[int] = None) -> Page:
-        if self.config.strategy == PaginationStrategy.OFFSET:
-            return self.paginate_offset(items, page or 1, page_size)
-        elif self.config.strategy == PaginationStrategy.CURSOR:
-            return self.paginate_cursor(items, cursor, page_size)
-        else:
-            return self.paginate_offset(items, page or 1, page_size)
+        Args:
+            current: Current page number
+            total: Total number of pages
+            delta: Pages to show on each side of current
 
-    def _normalize_page_size(self, page_size: Optional[int]) -> int:
-        if page_size is None:
-            return self.config.default_page_size
-        return max(1, min(page_size, self.config.max_page_size))
+        Returns:
+            List of page numbers to display
+        """
+        if total <= 7:
+            return list(range(1, total + 1))
+
+        pages: List[int] = []
+
+        left = max(1, current - delta)
+        right = min(total, current + delta)
+
+        if left > 1:
+            pages.append(1)
+            if left > 2:
+                pages.append(-1)
+
+        pages.extend(range(left, right + 1))
+
+        if right < total:
+            if right < total - 1:
+                pages.append(-1)
+            pages.append(total)
+
+        return pages

@@ -1,279 +1,281 @@
-"""Data joiner action module for RabAI AutoClick.
+"""Data Joiner Action Module.
 
-Provides data joining operations:
-- DataJoinerAction: Join multiple data sources
-- JoinConfigAction: Configure join parameters
-- JoinValidatorAction: Validate join operations
-- MultiJoinAction: Perform multiple joins
-- JoinOptimizerAction: Optimize join operations
+Provides SQL-style joins (inner, left, right, full, cross)
+for data records with key matching and conflict resolution.
 """
+from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class DataJoinerAction(BaseAction):
-    """Join multiple data sources."""
-    action_type = "data_joiner"
-    display_name = "数据连接"
-    description = "连接多个数据源"
+class JoinType(Enum):
+    """Join type."""
+    INNER = "inner"
+    LEFT = "left"
+    RIGHT = "right"
+    FULL = "full"
+    CROSS = "cross"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            left_data = params.get("left_data", [])
-            right_data = params.get("right_data", [])
-            join_type = params.get("join_type", "inner")
-            left_key = params.get("left_key", "id")
-            right_key = params.get("right_key", "id")
-            how = params.get("how", "inner")
 
-            if not left_data:
-                return ActionResult(success=False, message="left_data is required")
-            if not right_data:
-                return ActionResult(success=False, message="right_data is required")
+@dataclass
+class JoinConfig:
+    """Join configuration."""
+    join_type: JoinType
+    left_key: Union[str, Callable]
+    right_key: Union[str, Callable]
+    left_fields: Optional[List[str]] = None
+    right_fields: Optional[List[str]] = None
+    field_mapping: Optional[Dict[str, str]] = None
+    conflict_resolver: Optional[Callable[[Any, Any], Any]] = None
 
-            joined = []
 
-            if how == "inner":
-                for left in left_data:
-                    for right in right_data:
-                        if self._keys_match(left, left_key, right, right_key):
-                            joined.append(self._merge_records(left, right))
-            elif how == "left":
-                for left in left_data:
-                    matched = False
-                    for right in right_data:
-                        if self._keys_match(left, left_key, right, right_key):
-                            joined.append(self._merge_records(left, right))
-                            matched = True
-                    if not matched:
-                        joined.append({**left, **{f"{right_key}_right": None}})
-            elif how == "right":
-                for right in right_data:
-                    matched = False
-                    for left in left_data:
-                        if self._keys_match(left, left_key, right, right_key):
-                            joined.append(self._merge_records(left, right))
-                            matched = True
-                    if not matched:
-                        joined.append({**{f"{left_key}_left": None}, **right})
-            elif how == "full":
-                seen_pairs = set()
-                for left in left_data:
-                    for right in right_data:
-                        if self._keys_match(left, left_key, right, right_key):
-                            joined.append(self._merge_records(left, right))
-                            seen_pairs.add(id(left))
-                for left in left_data:
-                    if id(left) not in seen_pairs:
-                        joined.append({**left, **{f"{right_key}_right": None}})
-                for right in right_data:
-                    matched = False
-                    for left in left_data:
-                        if self._keys_match(left, left_key, right, right_key):
-                            matched = True
-                            break
-                    if not matched:
-                        joined.append({**{f"{left_key}_left": None}, **right})
+class DataJoinerAction:
+    """Data joiner with multiple join strategies.
 
-            return ActionResult(
-                success=True,
-                data={
-                    "join_type": join_type,
-                    "how": how,
-                    "left_count": len(left_data),
-                    "right_count": len(right_data),
-                    "joined_count": len(joined),
-                    "joined": joined
-                },
-                message=f"Join completed: {len(joined)} records (type: {join_type})"
+    Example:
+        joiner = DataJoinerAction()
+
+        result = joiner.join(
+            left_data=[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}],
+            right_data=[{"user_id": 1, "email": "alice@example.com"}, {"user_id": 3, "email": "charlie@example.com"}],
+            config=JoinConfig(
+                join_type=JoinType.LEFT,
+                left_key="id",
+                right_key="user_id",
+                field_mapping={"id": "id", "name": "name", "email": "email"}
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Data joiner error: {str(e)}")
+        )
+    """
 
-    def _keys_match(self, left: Dict, left_key: str, right: Dict, right_key: str) -> bool:
-        left_val = left.get(left_key)
-        right_val = right.get(right_key)
-        return left_val == right_val
+    def __init__(self) -> None:
+        self._index_cache: Dict[str, Dict] = {}
 
-    def _merge_records(self, left: Dict, right: Dict) -> Dict:
-        merged = {}
-        for k, v in left.items():
-            merged[k] = v
-        for k, v in right.items():
-            if k not in merged:
-                merged[k] = v
+    def join(
+        self,
+        left_data: List[Dict[str, Any]],
+        right_data: List[Dict[str, Any]],
+        config: JoinConfig,
+    ) -> List[Dict[str, Any]]:
+        """Join two datasets.
+
+        Args:
+            left_data: Left dataset
+            right_data: Right dataset
+            config: Join configuration
+
+        Returns:
+            Joined records
+        """
+        if config.join_type == JoinType.CROSS:
+            return self._cross_join(left_data, right_data, config)
+
+        right_index = self._build_index(right_data, config.right_key)
+
+        if config.join_type == JoinType.INNER:
+            return self._inner_join(left_data, right_index, config)
+        elif config.join_type == JoinType.LEFT:
+            return self._left_join(left_data, right_index, config)
+        elif config.join_type == JoinType.RIGHT:
+            return self._right_join(left_data, right_index, right_data, config)
+        elif config.join_type == JoinType.FULL:
+            return self._full_join(left_data, right_index, right_data, config)
+
+        return []
+
+    def _build_index(
+        self,
+        data: List[Dict[str, Any]],
+        key: Union[str, Callable],
+    ) -> Dict[Any, List[Dict[str, Any]]]:
+        """Build lookup index for right dataset."""
+        index: Dict[Any, List[Dict[str, Any]]] = {}
+
+        for record in data:
+            key_value = self._extract_key(record, key)
+            if key_value not in index:
+                index[key_value] = []
+            index[key_value].append(record)
+
+        return index
+
+    def _extract_key(
+        self,
+        record: Dict[str, Any],
+        key: Union[str, Callable],
+    ) -> Any:
+        """Extract key value from record."""
+        if callable(key):
+            return key(record)
+        return record.get(key)
+
+    def _inner_join(
+        self,
+        left_data: List[Dict[str, Any]],
+        right_index: Dict,
+        config: JoinConfig,
+    ) -> List[Dict[str, Any]]:
+        """Perform inner join."""
+        results: List[Dict[str, Any]] = []
+
+        for left_record in left_data:
+            key_value = self._extract_key(left_record, config.left_key)
+            right_matches = right_index.get(key_value, [])
+
+            for right_record in right_matches:
+                joined = self._merge_records(
+                    left_record, right_record, config
+                )
+                results.append(joined)
+
+        return results
+
+    def _left_join(
+        self,
+        left_data: List[Dict[str, Any]],
+        right_index: Dict,
+        config: JoinConfig,
+    ) -> List[Dict[str, Any]]:
+        """Perform left join."""
+        results: List[Dict[str, Any]] = []
+
+        for left_record in left_data:
+            key_value = self._extract_key(left_record, config.left_key)
+            right_matches = right_index.get(key_value, [])
+
+            if right_matches:
+                for right_record in right_matches:
+                    joined = self._merge_records(left_record, right_record, config)
+                    results.append(joined)
             else:
-                merged[f"{k}_right"] = v
-        return merged
+                results.append(self._pad_right_record(left_record, config))
 
+        return results
 
-class JoinConfigAction(BaseAction):
-    """Configure join parameters."""
-    action_type = "join_config"
-    display_name = "连接配置"
-    description = "配置连接参数"
+    def _right_join(
+        self,
+        left_data: List[Dict[str, Any]],
+        right_index: Dict,
+        right_data: List[Dict[str, Any]],
+        config: JoinConfig,
+    ) -> List[Dict[str, Any]]:
+        """Perform right join."""
+        results: List[Dict[str, Any]] = []
+        left_index = self._build_index(left_data, config.left_key)
+        used_left_keys: set = set()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            join_type = params.get("join_type", "inner")
-            keys = params.get("keys", [])
-            select_fields = params.get("select_fields", None)
-            where = params.get("where", None)
-            order_by = params.get("order_by", None)
-            limit = params.get("limit", None)
+        for right_record in right_data:
+            key_value = self._extract_key(right_record, config.right_key)
+            left_matches = left_index.get(key_value, [])
 
-            config = {
-                "join_type": join_type,
-                "keys": keys,
-                "select_fields": select_fields,
-                "where": where,
-                "order_by": order_by,
-                "limit": limit,
-                "configured_at": datetime.now().isoformat()
-            }
+            if left_matches:
+                for left_record in left_matches:
+                    joined = self._merge_records(left_record, right_record, config)
+                    results.append(joined)
+                    used_left_keys.add(key_value)
+            else:
+                results.append(self._pad_left_record(right_record, config))
 
-            return ActionResult(
-                success=True,
-                data=config,
-                message=f"Join config: type={join_type}, keys={keys}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Join config error: {str(e)}")
+        return results
 
+    def _full_join(
+        self,
+        left_data: List[Dict[str, Any]],
+        right_index: Dict,
+        right_data: List[Dict[str, Any]],
+        config: JoinConfig,
+    ) -> List[Dict[str, Any]]:
+        """Perform full outer join."""
+        left_index = self._build_index(left_data, config.left_key)
+        results: List[Dict[str, Any]] = []
+        matched_right_keys: set = set()
 
-class JoinValidatorAction(BaseAction):
-    """Validate join operations."""
-    action_type = "join_validator"
-    display_name = "连接验证"
-    description = "验证连接操作"
+        for left_record in left_data:
+            key_value = self._extract_key(left_record, config.left_key)
+            right_matches = right_index.get(key_value, [])
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            left_schema = params.get("left_schema", {})
-            right_schema = params.get("right_schema", {})
-            join_key = params.get("join_key", "")
+            if right_matches:
+                for right_record in right_matches:
+                    joined = self._merge_records(left_record, right_record, config)
+                    results.append(joined)
+                    matched_right_keys.add(key_value)
+            else:
+                results.append(self._pad_right_record(left_record, config))
 
-            errors = []
-            warnings = []
+        for right_record in right_data:
+            key_value = self._extract_key(right_record, config.right_key)
+            if key_value not in matched_right_keys:
+                results.append(self._pad_left_record(right_record, config))
 
-            if not join_key:
-                errors.append("Join key is required")
+        return results
 
-            if join_key and join_key not in left_schema:
-                errors.append(f"Join key '{join_key}' not in left schema")
+    def _cross_join(
+        self,
+        left_data: List[Dict[str, Any]],
+        right_data: List[Dict[str, Any]],
+        config: JoinConfig,
+    ) -> List[Dict[str, Any]]:
+        """Perform cross join."""
+        results: List[Dict[str, Any]] = []
 
-            if join_key and join_key not in right_schema:
-                errors.append(f"Join key '{join_key}' not in right schema")
+        for left_record in left_data:
+            for right_record in right_data:
+                joined = self._merge_records(left_record, right_record, config)
+                results.append(joined)
 
-            if join_key and join_key in left_schema and join_key in right_schema:
-                if left_schema[join_key] != right_schema[join_key]:
-                    warnings.append(f"Type mismatch for key '{join_key}': {left_schema[join_key]} vs {right_schema[join_key]}")
+        return results
 
-            return ActionResult(
-                success=len(errors) == 0,
-                data={
-                    "valid": len(errors) == 0,
-                    "errors": errors,
-                    "warnings": warnings,
-                    "error_count": len(errors),
-                    "warning_count": len(warnings)
-                },
-                message=f"Join validation: {'PASSED' if len(errors) == 0 else 'FAILED'} ({len(errors)} errors, {len(warnings)} warnings)"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Join validator error: {str(e)}")
+    def _merge_records(
+        self,
+        left_record: Dict[str, Any],
+        right_record: Dict[str, Any],
+        config: JoinConfig,
+    ) -> Dict[str, Any]:
+        """Merge two records according to config."""
+        result: Dict[str, Any] = {}
 
+        if config.field_mapping:
+            for left_field, right_field in config.field_mapping.items():
+                if left_field in left_record:
+                    result[left_field] = left_record[left_field]
+                if right_field in right_record:
+                    result[right_field] = right_record[right_field]
+        else:
+            result.update(left_record)
+            for key, value in right_record.items():
+                if key not in result:
+                    result[key] = value
+                elif config.conflict_resolver:
+                    result[key] = config.conflict_resolver(result[key], value)
 
-class MultiJoinAction(BaseAction):
-    """Perform multiple joins."""
-    action_type = "multi_join"
-    display_name = "多次连接"
-    description = "执行多次连接操作"
+        return result
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            tables = params.get("tables", [])
-            join_sequence = params.get("join_sequence", [])
-            final_join_type = params.get("final_join_type", "inner")
+    def _pad_right_record(
+        self,
+        left_record: Dict[str, Any],
+        config: JoinConfig,
+    ) -> Dict[str, Any]:
+        """Pad left record with None for right side."""
+        result = dict(left_record)
+        if config.right_fields:
+            for field_name in config.right_fields:
+                if field_name not in result:
+                    result[field_name] = None
+        return result
 
-            if len(tables) < 2:
-                return ActionResult(success=False, message="At least 2 tables required")
-
-            if len(join_sequence) != len(tables) - 1:
-                errors = []
-                errors.append(f"Join sequence length ({len(join_sequence)}) must be tables count - 1 ({len(tables) - 1})")
-                return ActionResult(success=False, message="; ".join(errors))
-
-            result = tables[0]
-            for i, join_spec in enumerate(join_sequence):
-                result = self._join_tables(result, tables[i + 1], join_spec)
-
-            return ActionResult(
-                success=True,
-                data={
-                    "table_count": len(tables),
-                    "join_count": len(join_sequence),
-                    "final_join_type": final_join_type,
-                    "result_count": len(result) if isinstance(result, list) else 1
-                },
-                message=f"Multi-join completed: {len(tables)} tables joined"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Multi-join error: {str(e)}")
-
-    def _join_tables(self, left: Any, right: Any, join_spec: Dict) -> List:
-        return left if isinstance(left, list) else [left]
-
-
-class JoinOptimizerAction(BaseAction):
-    """Optimize join operations."""
-    action_type = "join_optimizer"
-    display_name = "连接优化"
-    description = "优化连接操作"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            tables = params.get("tables", [])
-            join_conditions = params.get("join_conditions", [])
-            estimated_rows = params.get("estimated_rows", [])
-
-            if len(tables) < 2:
-                return ActionResult(success=False, message="At least 2 tables required")
-
-            table_sizes = estimated_rows if estimated_rows else [100 for _ in tables]
-
-            sorted_indices = sorted(range(len(table_sizes)), key=lambda i: table_sizes[i])
-            optimal_order = [tables[i] for i in sorted_indices]
-
-            join_order = []
-            for i in range(len(tables) - 1):
-                left_idx = sorted_indices[i]
-                right_idx = sorted_indices[i + 1]
-                join_order.append({
-                    "step": i + 1,
-                    "left_table": tables[left_idx],
-                    "right_table": tables[right_idx],
-                    "estimated_result_size": table_sizes[left_idx] * table_sizes[right_idx]
-                })
-
-            return ActionResult(
-                success=True,
-                data={
-                    "original_order": tables,
-                    "optimal_order": optimal_order,
-                    "join_order": join_order,
-                    "estimated_total_joins": len(join_order),
-                    "optimization_applied": True
-                },
-                message=f"Join optimizer: optimal order = {optimal_order}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Join optimizer error: {str(e)}")
+    def _pad_left_record(
+        self,
+        right_record: Dict[str, Any],
+        config: JoinConfig,
+    ) -> Dict[str, Any]:
+        """Pad right record with None for left side."""
+        result: Dict[str, Any] = {}
+        if config.left_fields:
+            for field_name in config.left_fields:
+                result[field_name] = None
+        result.update(right_record)
+        return result

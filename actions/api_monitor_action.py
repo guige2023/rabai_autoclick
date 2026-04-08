@@ -1,221 +1,260 @@
-"""API monitor action module for RabAI AutoClick.
+"""API Monitor Action Module.
 
-Provides API monitoring operations:
-- APIMonitorTrackAction: Track API calls
-- APIMonitorAlertAction: Set up monitoring alerts
-- APIMonitorStatusAction: Get API status
-- APIMonitorMetricsAction: Get API metrics
+Provides API request/response monitoring, metrics collection,
+alerting on failures, and latency tracking.
 """
+from __future__ import annotations
 
-import threading
+import asyncio
 import time
-import urllib.request
-import urllib.parse
-import urllib.error
-from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-import json
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set
+from collections import defaultdict, deque
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+class AlertLevel(Enum):
+    """Alert level."""
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
 
 
 @dataclass
-class APICallRecord:
-    """Represents an API call record."""
-    url: str
+class RequestMetrics:
+    """Request metrics snapshot."""
+    endpoint: str
     method: str
-    status_code: Optional[int] = None
-    response_time_ms: float = 0.0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    status_code: int
+    latency_ms: float
+    timestamp: float
     error: Optional[str] = None
-    success: bool = False
+    size_bytes: int = 0
 
 
-class APIMonitor:
-    """API monitoring service."""
-    def __init__(self):
-        self._records: List[APICallRecord] = []
-        self._lock = threading.RLock()
-        self._alerts: Dict[str, Callable] = {}
-        self._max_records = 10000
+@dataclass
+class AlertRule:
+    """Alert rule configuration."""
+    name: str
+    condition: Callable[["APIMonitorAction"], bool]
+    level: AlertLevel
+    message: str
+    cooldown_seconds: float = 60.0
 
-    def track(self, record: APICallRecord) -> None:
-        with self._lock:
-            self._records.append(record)
-            if len(self._records) > self._max_records:
-                self._records = self._records[-self._max_records:]
 
-    def get_records(self, limit: int = 100, since: Optional[datetime] = None) -> List[APICallRecord]:
-        with self._lock:
-            records = self._records
-            if since:
-                records = [r for r in records if r.timestamp >= since]
-            return records[-limit:]
+class APIMonitorAction:
+    """API request monitor with metrics and alerting.
 
-    def get_stats(self, window_seconds: int = 300) -> Dict[str, Any]:
-        with self._lock:
-            cutoff = datetime.utcnow() - timedelta(seconds=window_seconds)
-            recent = [r for r in self._records if r.timestamp >= cutoff]
+    Example:
+        monitor = APIMonitorAction()
 
-            if not recent:
-                return {
-                    "total_calls": 0,
-                    "success_count": 0,
-                    "failure_count": 0,
-                    "avg_response_time_ms": 0,
-                    "success_rate": 1.0,
-                    "window_seconds": window_seconds
+        await monitor.track_request(
+            endpoint="/api/users",
+            method="GET",
+            status_code=200,
+            latency_ms=45.0
+        )
+
+        stats = monitor.get_stats()
+        alerts = monitor.check_alerts()
+    """
+
+    def __init__(
+        self,
+        retention_seconds: float = 3600.0,
+        max_requests: int = 10000,
+    ) -> None:
+        self.retention_seconds = retention_seconds
+        self.max_requests = max_requests
+
+        self._requests: deque[RequestMetrics] = deque(maxlen=max_requests)
+        self._endpoint_stats: Dict[str, Dict] = defaultdict(lambda: {
+            "count": 0,
+            "errors": 0,
+            "total_latency": 0.0,
+            "status_codes": defaultdict(int),
+        })
+        self._alert_states: Dict[str, float] = {}
+        self._alert_rules: List[AlertRule] = []
+        self._callbacks: Dict[AlertLevel, List[Callable]] = defaultdict(list)
+        self._lock = asyncio.Lock()
+
+    def register_alert_callback(
+        self,
+        level: AlertLevel,
+        callback: Callable[[str, AlertLevel], None],
+    ) -> None:
+        """Register callback for alert level."""
+        self._callbacks[level].append(callback)
+
+    def add_alert_rule(self, rule: AlertRule) -> None:
+        """Add an alert rule."""
+        self._alert_rules.append(rule)
+
+    async def track_request(
+        self,
+        endpoint: str,
+        method: str,
+        status_code: int,
+        latency_ms: float,
+        error: Optional[str] = None,
+        size_bytes: int = 0,
+    ) -> None:
+        """Track an API request.
+
+        Args:
+            endpoint: API endpoint
+            method: HTTP method
+            status_code: Response status code
+            latency_ms: Request latency in milliseconds
+            error: Optional error message
+            size_bytes: Response size in bytes
+        """
+        async with self._lock:
+            metrics = RequestMetrics(
+                endpoint=endpoint,
+                method=method,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                timestamp=time.time(),
+                error=error,
+                size_bytes=size_bytes,
+            )
+
+            self._requests.append(metrics)
+            self._update_endpoint_stats(metrics)
+            await self._cleanup_old_requests()
+
+    def _update_endpoint_stats(self, metrics: RequestMetrics) -> None:
+        """Update endpoint statistics."""
+        key = f"{metrics.method}:{metrics.endpoint}"
+        stats = self._endpoint_stats[key]
+
+        stats["count"] += 1
+        stats["total_latency"] += metrics.latency_ms
+        stats["status_codes"][metrics.status_code] += 1
+
+        if metrics.status_code >= 400 or metrics.error:
+            stats["errors"] += 1
+
+    async def _cleanup_old_requests(self) -> None:
+        """Remove requests older than retention period."""
+        cutoff = time.time() - self.retention_seconds
+        while self._requests and self._requests[0].timestamp < cutoff:
+            self._requests.popleft()
+
+    async def check_alerts(self) -> List[Dict[str, Any]]:
+        """Check all alert rules and return triggered alerts.
+
+        Returns:
+            List of triggered alerts
+        """
+        triggered: List[Dict[str, Any]] = []
+        now = time.time()
+
+        for rule in self._alert_rules:
+            if self._is_in_cooldown(rule.name, now):
+                continue
+
+            if rule.condition(self):
+                alert = {
+                    "name": rule.name,
+                    "level": rule.level,
+                    "message": rule.message,
+                    "timestamp": now,
                 }
+                triggered.append(alert)
+                self._alert_states[rule.name] = now
 
-            successes = [r for r in recent if r.success]
-            failures = [r for r in recent if not r.success]
-            response_times = [r.response_time_ms for r in recent if r.success]
+                for callback in self._callbacks.get(rule.level, []):
+                    try:
+                        callback(rule.name, rule.level)
+                    except Exception as e:
+                        logger.error(f"Alert callback failed: {e}")
 
-            return {
-                "total_calls": len(recent),
-                "success_count": len(successes),
-                "failure_count": len(failures),
-                "avg_response_time_ms": sum(response_times) / len(response_times) if response_times else 0,
-                "min_response_time_ms": min(response_times) if response_times else 0,
-                "max_response_time_ms": max(response_times) if response_times else 0,
-                "success_rate": len(successes) / len(recent) if recent else 0,
-                "window_seconds": window_seconds
-            }
+        return triggered
 
-    def get_status(self) -> str:
-        stats = self.get_stats(window_seconds=60)
-        if stats["total_calls"] == 0:
-            return "no_data"
-        if stats["success_rate"] >= 0.99:
-            return "healthy"
-        elif stats["success_rate"] >= 0.95:
-            return "degraded"
-        else:
-            return "unhealthy"
+    def _is_in_cooldown(self, rule_name: str, now: float) -> bool:
+        """Check if alert is in cooldown period."""
+        if rule_name not in self._alert_states:
+            return False
+        return now - self._alert_states[rule_name] < self._get_rule(rule_name).cooldown_seconds
 
+    def _get_rule(self, rule_name: str) -> AlertRule:
+        """Get alert rule by name."""
+        return next(r for r in self._alert_rules if r.name == rule_name)
 
-_monitor = APIMonitor()
+    def get_stats(self) -> Dict[str, Any]:
+        """Get current statistics."""
+        total_requests = len(self._requests)
+        if total_requests == 0:
+            return {"total_requests": 0}
 
+        recent_requests = [
+            r for r in self._requests
+            if time.time() - r.timestamp < 60
+        ]
 
-class APIMonitorTrackAction(BaseAction):
-    """Track API calls."""
-    action_type = "api_monitor_track"
-    display_name = "API监控"
-    description = "跟踪API调用"
+        errors = sum(1 for r in self._requests if r.status_code >= 400 or r.error)
+        avg_latency = sum(r.latency_ms for r in self._requests) / total_requests
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            url = params.get("url", "")
-            method = params.get("method", "GET")
-            headers = params.get("headers", {})
-            body = params.get("body", None)
-            timeout = params.get("timeout", 30)
-
-            if not url:
-                return ActionResult(success=False, message="url is required")
-
-            start = time.time()
-            record = APICallRecord(url=url, method=method)
-
-            try:
-                data = body.encode("utf-8") if body else None
-                req = urllib.request.Request(url, data=data, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    record.status_code = response.getcode()
-                    record.success = 200 <= response.getcode() < 300
-            except urllib.error.HTTPError as e:
-                record.status_code = e.code
-                record.success = False
-                record.error = str(e.reason)
-            except urllib.error.URLError as e:
-                record.error = str(e.reason)
-                record.success = False
-            except Exception as e:
-                record.error = str(e)
-                record.success = False
-
-            record.response_time_ms = (time.time() - start) * 1000
-            _monitor.track(record)
-
-            return ActionResult(
-                success=record.success,
-                message=f"API call: {record.status_code} in {record.response_time_ms:.2f}ms",
-                data={
-                    "success": record.success,
-                    "status_code": record.status_code,
-                    "response_time_ms": record.response_time_ms,
-                    "error": record.error
+        return {
+            "total_requests": total_requests,
+            "recent_requests_1m": len(recent_requests),
+            "error_rate": errors / total_requests if total_requests > 0 else 0,
+            "avg_latency_ms": avg_latency,
+            "endpoints": {
+                key: {
+                    "count": stats["count"],
+                    "errors": stats["errors"],
+                    "avg_latency_ms": stats["total_latency"] / stats["count"] if stats["count"] > 0 else 0,
+                    "status_codes": dict(stats["status_codes"]),
                 }
-            )
+                for key, stats in self._endpoint_stats.items()
+            },
+        }
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"API monitor track failed: {str(e)}")
+    def get_endpoint_stats(self, endpoint: str, method: str) -> Dict[str, Any]:
+        """Get statistics for specific endpoint."""
+        key = f"{method}:{endpoint}"
+        stats = self._endpoint_stats.get(key, {})
+        count = stats.get("count", 0)
+        total_latency = stats.get("total_latency", 0)
 
+        return {
+            "endpoint": endpoint,
+            "method": method,
+            "count": count,
+            "errors": stats.get("errors", 0),
+            "error_rate": stats.get("errors", 0) / count if count > 0 else 0,
+            "avg_latency_ms": total_latency / count if count > 0 else 0,
+            "status_codes": dict(stats.get("status_codes", {})),
+        }
 
-class APIMonitorAlertAction(BaseAction):
-    """Set up monitoring alerts."""
-    action_type = "api_monitor_alert"
-    display_name = "API监控告警"
-    description = "设置API监控告警"
+    def get_recent_failures(self, limit: int = 10) -> List[RequestMetrics]:
+        """Get recent failed requests."""
+        failures = [
+            r for r in self._requests
+            if r.status_code >= 400 or r.error
+        ]
+        return sorted(failures, key=lambda r: r.timestamp, reverse=True)[:limit]
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            alert_type = params.get("alert_type", "failure_rate")
-            threshold = params.get("threshold", 0.1)
-            window = params.get("window", 300)
+    def get_latency_percentiles(
+        self,
+        percentiles: List[int] = [50, 90, 95, 99],
+    ) -> Dict[int, float]:
+        """Get latency percentiles."""
+        if not self._requests:
+            return {p: 0.0 for p in percentiles}
 
-            return ActionResult(
-                success=True,
-                message=f"Alert set: {alert_type} > {threshold} in {window}s",
-                data={"alert_type": alert_type, "threshold": threshold, "window": window}
-            )
+        latencies = sorted(r.latency_ms for r in self._requests)
+        n = len(latencies)
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"API monitor alert failed: {str(e)}")
-
-
-class APIMonitorStatusAction(BaseAction):
-    """Get API status."""
-    action_type = "api_monitor_status"
-    display_name = "API状态"
-    description = "获取API状态"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            status = _monitor.get_status()
-            return ActionResult(
-                success=True,
-                message=f"API status: {status}",
-                data={"status": status}
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"API monitor status failed: {str(e)}")
-
-
-class APIMonitorMetricsAction(BaseAction):
-    """Get API metrics."""
-    action_type = "api_monitor_metrics"
-    display_name = "API指标"
-    description = "获取API指标"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            window = params.get("window", 300)
-            stats = _monitor.get_stats(window)
-
-            return ActionResult(
-                success=True,
-                message=f"API metrics (window: {window}s)",
-                data=stats
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"API monitor metrics failed: {str(e)}")
+        return {
+            p: latencies[int(n * p / 100)] if n > 0 else 0.0
+            for p in percentiles
+        }

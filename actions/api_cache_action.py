@@ -1,29 +1,27 @@
-"""
-API Cache Action Module.
+"""API Cache Action Module.
 
-Provides caching capabilities for API responses with
-TTL, invalidation, and cache warming.
+Provides multi-layer API response caching with TTL, ETag,
+conditional requests, and cache invalidation strategies.
 """
+from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
 import asyncio
 import hashlib
-import json
-import logging
 import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set
+import logging
 
 logger = logging.getLogger(__name__)
 
 
 class CacheStrategy(Enum):
-    """Cache strategies."""
-    LRU = "lru"
-    LFU = "lfu"
-    FIFO = "fifo"
+    """Cache strategy."""
     TTL = "ttl"
+    ETag = "etag"
+    LastModified = "last_modified"
+    Conditional = "conditional"
 
 
 @dataclass
@@ -31,233 +29,281 @@ class CacheEntry:
     """Cache entry."""
     key: str
     value: Any
-    created_at: datetime
-    accessed_at: datetime
-    ttl: Optional[int] = None
-    access_count: int = 0
-    size_bytes: int = 0
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if entry is expired."""
-        if self.ttl is None:
-            return False
-        age = (datetime.now() - self.created_at).total_seconds()
-        return age > self.ttl
+    created_at: float
+    ttl: float
+    etag: Optional[str] = None
+    last_modified: Optional[str] = None
 
 
-class CacheStats:
-    """Cache statistics."""
-
-    def __init__(self):
-        self.hits: int = 0
-        self.misses: int = 0
-        self.evictions: int = 0
-        self.expirations: int = 0
-
-    @property
-    def hit_rate(self) -> float:
-        """Get hit rate."""
-        total = self.hits + self.misses
-        return self.hits / total if total > 0 else 0.0
+@dataclass
+class CacheConfig:
+    """Cache configuration."""
+    strategy: CacheStrategy = CacheStrategy.TTL
+    default_ttl: float = 300.0
+    max_entries: int = 1000
+    stale_while_revalidate: bool = True
+    stale_ttl: Optional[float] = None
 
 
-class APICache:
-    """API response cache."""
+class APICacheAction:
+    """Multi-layer API response cache.
 
-    def __init__(
-        self,
-        strategy: CacheStrategy = CacheStrategy.LRU,
-        max_size: int = 1000,
-        default_ttl: Optional[int] = 300
-    ):
-        self.strategy = strategy
-        self.max_size = max_size
-        self.default_ttl = default_ttl
+    Example:
+        cache = APICacheAction(CacheConfig(default_ttl=300))
+
+        result = await cache.get_or_fetch(
+            "user_123",
+            lambda: api.get_user("123")
+        )
+
+        cache.invalidate("user_123")
+    """
+
+    def __init__(self, config: Optional[CacheConfig] = None) -> None:
+        self.config = config or CacheConfig()
         self._cache: Dict[str, CacheEntry] = {}
-        self._stats = CacheStats()
+        self._access_order: List[str] = []
         self._lock = asyncio.Lock()
+        self._pending: Dict[str, asyncio.Task] = {}
+        self._revalidation_callbacks: Dict[str, Callable] = {}
 
-    def _make_key(self, method: str, path: str, params: Optional[Dict] = None) -> str:
-        """Generate cache key."""
-        key_data = f"{method}:{path}"
-        if params:
-            key_data += f":{json.dumps(params, sort_keys=True)}"
-        return hashlib.sha256(key_data.encode()).hexdigest()
-
-    async def get(
+    def make_key(
         self,
-        method: str,
-        path: str,
-        params: Optional[Dict] = None
-    ) -> Optional[Any]:
-        """Get cached response."""
-        key = self._make_key(method, path, params)
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Generate cache key from endpoint and params.
 
+        Args:
+            endpoint: API endpoint path
+            params: Query parameters
+
+        Returns:
+            Cache key string
+        """
+        content = endpoint
+        if params:
+            sorted_params = sorted(params.items())
+            param_str = "&".join(f"{k}={v}" for k, v in sorted_params)
+            content = f"{endpoint}?{param_str}"
+
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    async def get_or_fetch(
+        self,
+        key: str,
+        fetch_fn: Callable[[], Any],
+        ttl: Optional[float] = None,
+        etag: Optional[str] = None,
+    ) -> Any:
+        """Get cached value or fetch if not present.
+
+        Args:
+            key: Cache key
+            fetch_fn: Async function to fetch data
+            ttl: Time-to-live in seconds
+            etag: Optional ETag for conditional requests
+
+        Returns:
+            Cached or fetched value
+        """
+        cached = await self.get(key)
+        if cached is not None:
+            return cached
+
+        if key in self._pending:
+            return await self._pending[key]
+
+        task = asyncio.create_task(self._fetch_and_cache(key, fetch_fn, ttl, etag))
+        self._pending[key] = task
+
+        try:
+            return await task
+        finally:
+            self._pending.pop(key, None)
+
+    async def _fetch_and_cache(
+        self,
+        key: str,
+        fetch_fn: Callable[[], Any],
+        ttl: Optional[float],
+        etag: Optional[str],
+    ) -> Any:
+        """Fetch data and cache it."""
         async with self._lock:
-            entry = self._cache.get(key)
+            if key in self._cache:
+                return self._cache[key].value
 
-            if entry is None:
-                self._stats.misses += 1
+        if asyncio.iscoroutinefunction(fetch_fn):
+            value = await fetch_fn()
+        else:
+            value = fetch_fn()
+
+        await self.set(key, value, ttl=ttl, etag=etag)
+        return value
+
+    async def get(self, key: str) -> Optional[Any]:
+        """Get value from cache.
+
+        Args:
+            key: Cache key
+
+        Returns:
+            Cached value or None
+        """
+        async with self._lock:
+            if key not in self._cache:
                 return None
 
-            if entry.is_expired:
+            entry = self._cache[key]
+            age = time.time() - entry.created_at
+
+            if age > entry.ttl:
+                if self.config.stale_while_revalidate and self.config.stale_ttl:
+                    if age < entry.ttl + self.config.stale_ttl:
+                        asyncio.create_task(self._revalidate(key))
+                        return entry.value
+
                 del self._cache[key]
-                self._stats.expirations += 1
+                self._access_order.remove(key)
                 return None
 
-            entry.accessed_at = datetime.now()
-            entry.access_count += 1
-            self._stats.hits += 1
-
+            self._touch_access(key)
             return entry.value
 
     async def set(
         self,
-        method: str,
-        path: str,
+        key: str,
         value: Any,
-        params: Optional[Dict] = None,
-        ttl: Optional[int] = None
-    ):
-        """Set cached response."""
-        key = self._make_key(method, path, params)
+        ttl: Optional[float] = None,
+        etag: Optional[str] = None,
+        last_modified: Optional[str] = None,
+    ) -> None:
+        """Set value in cache.
 
+        Args:
+            key: Cache key
+            value: Value to cache
+            ttl: Time-to-live in seconds
+            etag: Optional ETag
+            last_modified: Optional Last-Modified header
+        """
         async with self._lock:
-            if len(self._cache) >= self.max_size:
-                await self._evict()
+            if len(self._cache) >= self.config.max_entries:
+                await self._evict_oldest()
 
             entry = CacheEntry(
                 key=key,
                 value=value,
-                created_at=datetime.now(),
-                accessed_at=datetime.now(),
-                ttl=ttl or self.default_ttl,
-                size_bytes=len(json.dumps(value)) if isinstance(value, (dict, list)) else 0
+                created_at=time.time(),
+                ttl=ttl or self.config.default_ttl,
+                etag=etag,
+                last_modified=last_modified,
             )
 
             self._cache[key] = entry
+            self._touch_access(key)
 
-    async def invalidate(self, path_pattern: Optional[str] = None):
-        """Invalidate cache entries."""
+    async def invalidate(self, key: str) -> None:
+        """Invalidate cache entry.
+
+        Args:
+            key: Cache key to invalidate
+        """
         async with self._lock:
-            if path_pattern is None:
-                self._cache.clear()
-            else:
-                keys_to_delete = [
-                    k for k, v in self._cache.items()
-                    if path_pattern in k
-                ]
-                for key in keys_to_delete:
-                    del self._cache[key]
-
-    async def _evict(self):
-        """Evict entry based on strategy."""
-        if not self._cache:
-            return
-
-        if self.strategy == CacheStrategy.LRU:
-            lru_key = min(
-                self._cache.keys(),
-                key=lambda k: self._cache[k].accessed_at
-            )
-        elif self.strategy == CacheStrategy.LFU:
-            lfu_key = min(
-                self._cache.keys(),
-                key=lambda k: self._cache[k].access_count
-            )
-            lru_key = lfu_key
-        elif self.strategy == CacheStrategy.FIFO:
-            fifo_key = min(
-                self._cache.keys(),
-                key=lambda k: self._cache[k].created_at
-            )
-            lru_key = fifo_key
-        else:
-            lru_key = list(self._cache.keys())[0]
-
-        del self._cache[lru_key]
-        self._stats.evictions += 1
-
-    async def cleanup_expired(self):
-        """Remove expired entries."""
-        async with self._lock:
-            expired_keys = [
-                k for k, v in self._cache.items()
-                if v.is_expired
-            ]
-            for key in expired_keys:
+            if key in self._cache:
                 del self._cache[key]
-                self._stats.expirations += 1
+                if key in self._access_order:
+                    self._access_order.remove(key)
 
-    def get_stats(self) -> CacheStats:
-        """Get cache statistics."""
-        return self._stats
+    async def invalidate_pattern(self, pattern: str) -> int:
+        """Invalidate all keys matching pattern.
 
-    async def get_size(self) -> int:
-        """Get current cache size."""
+        Args:
+            pattern: Key pattern (simple substring match)
+
+        Returns:
+            Number of invalidated keys
+        """
         async with self._lock:
-            return len(self._cache)
+            keys_to_remove = [
+                k for k in self._cache.keys()
+                if pattern in k
+            ]
 
+            for key in keys_to_remove:
+                del self._cache[key]
+                if key in self._access_order:
+                    self._access_order.remove(key)
 
-class CacheWarmer:
-    """Warms cache with frequently accessed data."""
+            return len(keys_to_remove)
 
-    def __init__(self, cache: APICache):
-        self.cache = cache
-        self._warming = False
+    async def invalidate_prefix(self, prefix: str) -> int:
+        """Invalidate all keys with given prefix.
 
-    async def warm(
+        Args:
+            prefix: Key prefix
+
+        Returns:
+            Number of invalidated keys
+        """
+        return await self.invalidate_pattern(prefix)
+
+    async def clear(self) -> None:
+        """Clear all cache entries."""
+        async with self._lock:
+            self._cache.clear()
+            self._access_order.clear()
+
+    def register_revalidation_callback(
         self,
-        endpoints: List[Tuple[str, str, Optional[Dict]]],
-        fetcher: Callable
-    ):
-        """Warm cache with endpoint data."""
-        if self._warming:
+        key: str,
+        callback: Callable[[Any], Any],
+    ) -> None:
+        """Register callback for stale-while-revalidate.
+
+        Args:
+            key: Cache key
+            callback: Revalidation function
+        """
+        self._revalidation_callbacks[key] = callback
+
+    async def _revalidate(self, key: str) -> None:
+        """Revalidate stale cache entry."""
+        if key not in self._cache:
             return
 
-        self._warming = True
+        if key in self._revalidation_callbacks:
+            try:
+                new_value = self._revalidation_callbacks[key](self._cache[key].value)
+                if asyncio.iscoroutine(new_value):
+                    new_value = await new_value
+                await self.set(key, new_value, etag=self._cache[key].etag)
+            except Exception as e:
+                logger.error(f"Revalidation failed for {key}: {e}")
 
-        try:
-            for method, path, params in endpoints:
-                try:
-                    data = await fetcher(method, path, params)
-                    await self.cache.set(method, path, data, params)
-                except Exception as e:
-                    logger.error(f"Cache warming failed for {method} {path}: {e}")
+    def _touch_access(self, key: str) -> None:
+        """Update access order."""
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
 
-        finally:
-            self._warming = False
+    async def _evict_oldest(self) -> None:
+        """Evict least recently used entry."""
+        if self._access_order:
+            oldest = self._access_order.pop(0)
+            self._cache.pop(oldest, None)
 
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        total_entries = len(self._cache)
+        total_size = sum(
+            len(str(entry.value)) for entry in self._cache.values()
+        )
 
-class CacheInvalidator:
-    """Handles cache invalidation patterns."""
-
-    def __init__(self, cache: APICache):
-        self.cache = cache
-        self._patterns: List[str] = []
-
-    def add_pattern(self, pattern: str):
-        """Add invalidation pattern."""
-        self._patterns.append(pattern)
-
-    async def invalidate_related(self, changed_path: str):
-        """Invalidate all cache entries related to changed path."""
-        for pattern in self._patterns:
-            if pattern in changed_path:
-                await self.cache.invalidate(pattern)
-
-
-async def main():
-    """Demonstrate API cache."""
-    cache = APICache(strategy=CacheStrategy.LRU, max_size=100)
-
-    await cache.set("GET", "/api/users", {"users": ["Alice", "Bob"]})
-    result = await cache.get("GET", "/api/users")
-
-    print(f"Cache hit: {result}")
-    print(f"Stats: {cache.get_stats()}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        return {
+            "entries": total_entries,
+            "max_entries": self.config.max_entries,
+            "total_size_bytes": total_size,
+            "strategy": self.config.strategy.value,
+        }

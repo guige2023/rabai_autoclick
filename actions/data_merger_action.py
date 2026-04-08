@@ -1,103 +1,179 @@
-# Copyright (c) 2024. coded by claude
 """Data Merger Action Module.
 
-Merges multiple data sources into unified API responses with support for
-conflict resolution, field mapping, and data deduplication.
+Provides deep merging of nested dictionaries, list concatenation
+with deduplication, and conflict resolution strategies.
 """
-from typing import Optional, Dict, Any, List, Callable, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, List, Optional, Set, Union
+from copy import deepcopy
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class MergeStrategy(Enum):
-    OVERWRITE = "overwrite"
-    PRESERVE = "preserve"
-    CONFLICT_RESOLVE = "conflict_resolve"
-    UNION = "union"
+class ConflictStrategy(Enum):
+    """Conflict resolution strategy."""
+    LEFT_WINS = "left_wins"
+    RIGHT_WINS = "right_wins"
+    PREFER_NON_EMPTY = "prefer_non_empty"
+    PREFER_NON_NONE = "prefer_non_none"
+    CUSTOM = "custom"
 
 
-@dataclass
-class MergeConfig:
-    strategy: MergeStrategy = MergeStrategy.OVERWRITE
-    conflict_resolver: Optional[Callable[[Any, Any], Any]] = None
-    key_field: Optional[str] = None
-    skip_nulls: bool = False
+from enum import Enum
 
 
-@dataclass
-class MergeResult:
-    success: bool
-    merged_data: Dict[str, Any]
-    conflicts: List[Tuple[str, Any, Any]] = field(default_factory=list)
-    error: Optional[str] = None
+class DataMergerAction:
+    """Data merger with conflict resolution.
 
+    Example:
+        merger = DataMergerAction()
 
-class DataMerger:
-    def __init__(self, config: Optional[MergeConfig] = None):
-        self.config = config or MergeConfig()
+        result = merger.merge(
+            {"a": 1, "b": {"c": 2}},
+            {"b": {"d": 3}, "e": 4},
+            conflict_strategy=ConflictStrategy.RIGHT_WINS
+        )
+        # result = {"a": 1, "b": {"c": 2, "d": 3}, "e": 4}
+    """
 
-    def merge(self, *sources: Dict[str, Any]) -> MergeResult:
-        if not sources:
-            return MergeResult(success=True, merged_data={})
-        merged: Dict[str, Any] = {}
-        conflicts: List[Tuple[str, Any, Any]] = []
-        for source in sources:
-            for key, value in source.items():
-                if self.config.skip_nulls and value is None:
-                    continue
-                if key not in merged:
-                    merged[key] = value
-                else:
-                    resolved, conflict = self._resolve_conflict(key, merged[key], value)
-                    if conflict:
-                        conflicts.append((key, merged[key], value))
-                    merged[key] = resolved
-        return MergeResult(success=True, merged_data=merged, conflicts=conflicts)
+    def __init__(
+        self,
+        default_conflict_strategy: ConflictStrategy = ConflictStrategy.RIGHT_WINS,
+    ) -> None:
+        self.default_conflict_strategy = default_conflict_strategy
+        self._custom_resolvers: Dict[str, Callable] = {}
 
-    def merge_list(self, items: List[Dict[str, Any]], merge_config: Optional[MergeConfig] = None) -> List[Dict[str, Any]]:
-        config = merge_config or self.config
-        if config.strategy == MergeStrategy.UNION:
-            return self._merge_union(items, config)
-        elif config.strategy == MergeStrategy.CONFLICT_RESOLVE and config.key_field:
-            return self._merge_dedup(items, config)
-        return items
+    def register_resolver(
+        self,
+        key: str,
+        resolver: Callable[[Any, Any], Any],
+    ) -> None:
+        """Register custom conflict resolver for key."""
+        self._custom_resolvers[key] = resolver
 
-    def _resolve_conflict(self, key: str, old_value: Any, new_value: Any) -> Tuple[Any, bool]:
-        if self.config.strategy == MergeStrategy.PRESERVE:
-            return old_value, False
-        elif self.config.strategy == MergeStrategy.OVERWRITE:
-            return new_value, old_value != new_value
-        elif self.config.strategy == MergeStrategy.CONFLICT_RESOLVE:
-            if self.config.conflict_resolver:
-                return self.config.conflict_resolver(old_value, new_value), True
-            return new_value, old_value != new_value
-        return new_value, False
+    def merge(
+        self,
+        *dicts: Dict[str, Any],
+        conflict_strategy: Optional[ConflictStrategy] = None,
+    ) -> Dict[str, Any]:
+        """Merge multiple dictionaries deeply.
 
-    def _merge_union(self, items: List[Dict[str, Any]], config: MergeConfig) -> List[Dict[str, Any]]:
-        all_keys: set = set()
-        for item in items:
-            all_keys.update(item.keys())
-        result = {}
-        for key in all_keys:
-            values = [item.get(key) for item in items if key in item]
-            if values:
-                result[key] = values[0] if len(values) == 1 else values
-        return [result] if result else []
+        Args:
+            *dicts: Dictionaries to merge
+            conflict_strategy: Conflict resolution strategy
 
-    def _merge_dedup(self, items: List[Dict[str, Any]], config: MergeConfig) -> List[Dict[str, Any]]:
-        if not config.key_field:
-            return items
-        seen: Dict[str, Dict[str, Any]] = {}
-        for item in items:
-            key_value = item.get(config.key_field)
-            if key_value is None:
-                continue
-            if key_value not in seen:
-                seen[key_value] = dict(item)
+        Returns:
+            Merged dictionary
+        """
+        if not dicts:
+            return {}
+
+        result = deepcopy(dicts[0])
+        strategy = conflict_strategy or self.default_conflict_strategy
+
+        for other in dicts[1:]:
+            result = self._merge_dicts(result, other, strategy)
+
+        return result
+
+    def _merge_dicts(
+        self,
+        left: Dict,
+        right: Dict,
+        strategy: ConflictStrategy,
+    ) -> Dict:
+        """Merge two dictionaries."""
+        result = deepcopy(left)
+
+        for key, value in right.items():
+            if key in result:
+                result[key] = self._resolve_conflict(
+                    key, result[key], value, strategy
+                )
             else:
-                merge_result = self.merge(seen[key_value], item)
-                seen[key_value] = merge_result.merged_data
-        return list(seen.values())
+                result[key] = deepcopy(value)
+
+        return result
+
+    def _resolve_conflict(
+        self,
+        key: str,
+        left: Any,
+        right: Any,
+        strategy: ConflictStrategy,
+    ) -> Any:
+        """Resolve value conflict."""
+        if key in self._custom_resolvers:
+            return self._custom_resolvers[key](left, right)
+
+        if isinstance(left, dict) and isinstance(right, dict):
+            return self._merge_dicts(left, right, strategy)
+
+        if isinstance(left, list) and isinstance(right, list):
+            return self._merge_lists(left, right)
+
+        if strategy == ConflictStrategy.LEFT_WINS:
+            return left
+        elif strategy == ConflictStrategy.RIGHT_WINS:
+            return right
+        elif strategy == ConflictStrategy.PREFER_NON_EMPTY:
+            return left if left or not right else right
+        elif strategy == ConflictStrategy.PREFER_NON_NONE:
+            return left if left is not None else right
+
+        return right
+
+    def _merge_lists(
+        self,
+        left: List,
+        right: List,
+        deduplicate: bool = False,
+    ) -> List:
+        """Merge two lists."""
+        if deduplicate:
+            seen: Set = set()
+            result = []
+
+            for item in left + right:
+                key = self._make_hashable(item)
+                if key not in seen:
+                    seen.add(key)
+                    result.append(item)
+
+            return result
+
+        return deepcopy(left) + deepcopy(right)
+
+    def _make_hashable(self, item: Any) -> Any:
+        """Convert item to hashable form."""
+        if isinstance(item, dict):
+            return tuple(sorted(item.items()))
+        elif isinstance(item, list):
+            return tuple(self._make_hashable(i) for i in item)
+        return item
+
+    def merge_lists(
+        self,
+        *lists: List,
+        deduplicate: bool = False,
+    ) -> List:
+        """Merge multiple lists."""
+        if deduplicate:
+            seen: Set = set()
+            result = []
+
+            for lst in lists:
+                for item in lst:
+                    key = self._make_hashable(item)
+                    if key not in seen:
+                        seen.add(key)
+                        result.append(item)
+
+            return result
+
+        result = []
+        for lst in lists:
+            result.extend(deepcopy(lst))
+        return result

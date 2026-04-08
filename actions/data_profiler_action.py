@@ -1,12 +1,14 @@
-# Copyright (c) 2024. coded by claude
 """Data Profiler Action Module.
 
-Profiles API data structures to understand schema, types,
-nullability, and value distributions.
+Provides data profiling with statistics, type inference,
+null detection, and distribution analysis.
 """
-from typing import Optional, Dict, Any, List, Set
+from __future__ import annotations
+
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from enum import Enum
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Set, TypeVar
 import logging
 
 logger = logging.getLogger(__name__)
@@ -14,76 +16,172 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FieldProfile:
-    field_name: str
-    data_type: type
+    """Profile for a single field."""
+    name: str
+    total_count: int = 0
     null_count: int = 0
     unique_count: int = 0
-    sample_values: List[Any] = field(default_factory=list)
+    inferred_type: Optional[str] = None
     min_value: Optional[Any] = None
     max_value: Optional[Any] = None
+    avg_value: Optional[float] = None
+    top_values: List[tuple] = field(default_factory=list)
 
 
 @dataclass
-class DataProfile:
-    total_records: int
-    field_profiles: Dict[str, FieldProfile]
-    null_percentage: float
-    duplicate_count: int
+class DatasetProfile:
+    """Profile for entire dataset."""
+    field_count: int = 0
+    row_count: int = 0
+    total_cells: int = 0
+    null_cells: int = 0
+    null_percentage: float = 0.0
+    fields: Dict[str, FieldProfile] = field(default_factory=dict)
 
 
-class DataProfiler:
-    def profile(self, data: List[Dict[str, Any]]) -> DataProfile:
+class DataProfilerAction:
+    """Data profiler for datasets.
+
+    Example:
+        profiler = DataProfilerAction()
+
+        profile = profiler.profile([
+            {"name": "Alice", "age": 30},
+            {"name": "Bob", "age": 25},
+            {"name": None, "age": 35},
+        ])
+
+        print(profile.row_count)
+        print(profile.fields["name"].null_count)
+    """
+
+    def __init__(self) -> None:
+        pass
+
+    def profile(self, data: List[Dict[str, Any]]) -> DatasetProfile:
+        """Profile dataset.
+
+        Args:
+            data: List of records
+
+        Returns:
+            DatasetProfile with statistics
+        """
         if not data:
-            return DataProfile(total_records=0, field_profiles={}, null_percentage=0.0, duplicate_count=0)
+            return DatasetProfile()
+
+        row_count = len(data)
         field_names = set()
         for record in data:
             field_names.update(record.keys())
+
         field_profiles: Dict[str, FieldProfile] = {}
+        all_values: Dict[str, List] = defaultdict(list)
+
         for field_name in field_names:
-            field_profiles[field_name] = FieldProfile(field_name=field_name, data_type=type(None))
-        null_count_total = 0
-        total_cells = len(data) * len(field_names)
+            field_profiles[field_name] = FieldProfile(name=field_name)
+
         for record in data:
             for field_name in field_names:
                 value = record.get(field_name)
                 profile = field_profiles[field_name]
+                profile.total_count += 1
+
                 if value is None:
                     profile.null_count += 1
-                    null_count_total += 1
                 else:
-                    if profile.data_type == type(None):
-                        profile.data_type = type(value)
-                    if not profile.sample_values or len(profile.sample_values) < 5:
-                        if value not in profile.sample_values:
-                            profile.sample_values.append(value)
-                    if isinstance(value, (int, float)):
-                        if profile.min_value is None or value < profile.min_value:
-                            profile.min_value = value
-                        if profile.max_value is None or value > profile.max_value:
-                            profile.max_value = value
-        for profile in field_profiles.values():
-            profile.unique_count = len(set(profile.sample_values))
-        null_percentage = (null_count_total / total_cells * 100) if total_cells > 0 else 0.0
-        duplicates = len(data) - len({str(d) for d in data})
-        return DataProfile(
-            total_records=len(data),
-            field_profiles=field_profiles,
-            null_percentage=null_percentage,
-            duplicate_count=duplicates,
+                    all_values[field_name].append(value)
+
+        for field_name, values in all_values.items():
+            profile = field_profiles[field_name]
+            profile.unique_count = len(set(str(v) for v in values))
+
+            if values:
+                profile.inferred_type = self._infer_type(values)
+
+                if all(isinstance(v, (int, float)) for v in values):
+                    numeric_values = [v for v in values if v is not None]
+                    if numeric_values:
+                        profile.min_value = min(numeric_values)
+                        profile.max_value = max(numeric_values)
+                        profile.avg_value = sum(numeric_values) / len(numeric_values)
+
+                value_counts = Counter(str(v) for v in values)
+                profile.top_values = value_counts.most_common(5)
+
+        null_cells = sum(f.null_count for f in field_profiles.values())
+        total_cells = row_count * len(field_names)
+
+        return DatasetProfile(
+            field_count=len(field_names),
+            row_count=row_count,
+            total_cells=total_cells,
+            null_cells=null_cells,
+            null_percentage=(null_cells / total_cells * 100) if total_cells > 0 else 0.0,
+            fields=field_profiles,
         )
 
-    def get_summary(self, profile: DataProfile) -> Dict[str, Any]:
+    def _infer_type(self, values: List[Any]) -> str:
+        """Infer type from values."""
+        if not values:
+            return "unknown"
+
+        type_counts: Dict[str, int] = defaultdict(int)
+
+        for value in values:
+            if value is None:
+                continue
+
+            if isinstance(value, bool):
+                type_counts["boolean"] += 1
+            elif isinstance(value, int):
+                type_counts["integer"] += 1
+            elif isinstance(value, float):
+                type_counts["float"] += 1
+            elif isinstance(value, str):
+                if self._is_datetime(value):
+                    type_counts["datetime"] += 1
+                elif self._is_email(value):
+                    type_counts["email"] += 1
+                elif value.isdigit():
+                    type_counts["numeric_string"] += 1
+                else:
+                    type_counts["string"] += 1
+            elif isinstance(value, dict):
+                type_counts["object"] += 1
+            elif isinstance(value, list):
+                type_counts["array"] += 1
+
+        if not type_counts:
+            return "null"
+
+        return max(type_counts.items(), key=lambda x: x[1])[0]
+
+    def _is_datetime(self, value: str) -> bool:
+        """Check if string looks like datetime."""
+        patterns = [
+            r"\d{4}-\d{2}-\d{2}",
+            r"\d{2}/\d{2}/\d{4}",
+            r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}",
+        ]
+        return any(re.search(p, str(value)) for p in patterns)
+
+    def _is_email(self, value: str) -> bool:
+        """Check if string looks like email."""
+        return "@" in str(value) and "." in str(value)
+
+    def compare_profiles(
+        self,
+        profile1: DatasetProfile,
+        profile2: DatasetProfile,
+    ) -> Dict[str, Any]:
+        """Compare two dataset profiles.
+
+        Returns:
+            Dictionary of differences
+        """
         return {
-            "total_records": profile.total_records,
-            "total_fields": len(profile.field_profiles),
-            "null_percentage": f"{profile.null_percentage:.2f}%",
-            "duplicate_count": profile.duplicate_count,
-            "fields": {
-                name: {
-                    "type": p.data_type.__name__,
-                    "nulls": p.null_count,
-                    "samples": len(p.sample_values),
-                }
-                for name, p in profile.field_profiles.items()
-            },
+            "row_count_diff": profile2.row_count - profile1.row_count,
+            "field_count_diff": profile2.field_count - profile1.field_count,
+            "null_percentage_diff": profile2.null_percentage - profile1.null_percentage,
         }
