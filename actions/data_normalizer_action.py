@@ -1,486 +1,348 @@
-"""
-Data Normalizer Action Module.
+"""Data normalizer action module for RabAI AutoClick.
 
-Normalizes and standardizes data including min-max scaling,
-z-score normalization, log transforms, and categorical encoding.
-
-Author: RabAi Team
+Provides data normalization with schema mapping, type coercion,
+and format standardization.
 """
 
-from __future__ import annotations
-
-import math
-import re
 import sys
 import os
-import time
-from collections import Counter
-from dataclasses import dataclass, field
+import re
+from typing import Any, Dict, List, Optional, Callable, Union
+from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class NormalizationMethod(Enum):
-    """Data normalization methods."""
-    MIN_MAX = "min_max"
-    ZSCORE = "zscore"
-    LOG = "log"
-    LOG10 = "log10"
-    SQRT = "sqrt"
-    ROBUST = "robust"
-    DECIMAL = "decimal"
-    MAX = "max"
-    L1 = "l1"
-    L2 = "l2"
-    BOX_COX = "box_cox"
-
-
-class EncodingMethod(Enum):
-    """Categorical encoding methods."""
-    ONE_HOT = "one_hot"
-    LABEL = "label"
-    ORDINAL = "ordinal"
-    TARGET = "target"
-    FREQUENCY = "frequency"
+class DataType(Enum):
+    """Target data types for normalization."""
+    STRING = "string"
+    INTEGER = "integer"
+    FLOAT = "float"
+    BOOLEAN = "boolean"
+    DATETIME = "datetime"
+    LIST = "list"
+    DICT = "dict"
 
 
 @dataclass
-class NormalizerStats:
-    """Statistics for normalization."""
-    mean: Optional[float] = None
-    std: Optional[float] = None
-    min: Optional[float] = None
-    max: Optional[float] = None
-    median: Optional[float] = None
-    q1: Optional[float] = None
-    q3: Optional[float] = None
+class NormalizationRule:
+    """A normalization rule."""
+    source_field: str
+    target_field: str
+    target_type: DataType
+    default: Any = None
+    transform: Optional[Callable[[Any], Any]] = None
+    required: bool = False
+    pattern: Optional[str] = None
 
 
 class DataNormalizerAction(BaseAction):
-    """Data normalizer action.
+    """Normalize data to standard formats and types.
     
-    Normalizes and standardizes data using various methods
-    with support for batch processing and inverse transforms.
+    Supports field mapping, type coercion, format standardization,
+    and custom transformation functions.
     """
     action_type = "data_normalizer"
     display_name = "数据标准化"
-    description = "数据归一化标准化"
+    description = "数据类型转换和格式标准化"
     
-    def __init__(self):
-        super().__init__()
-        self._column_stats: Dict[str, NormalizerStats] = {}
-        self._label_mappings: Dict[str, Dict[str, int]] = {}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Normalize data.
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data normalization.
         
         Args:
-            context: The execution context.
-            params: Dictionary containing:
-                - data: Data to normalize
-                - operation: normalize/denormalize/encode/decode
-                - method: Normalization method
-                - columns: Column names to normalize
-                - feature_range: Tuple of (min, max) for min-max
-                - encoding: Categorical encoding method
-                - stats: Pre-computed statistics
-                
+            context: Execution context.
+            params: Dict with keys:
+                - data: Input data dict
+                - rules: List of NormalizationRule dicts
+                - schema: Target schema dict
+                - strict: Fail on missing required fields
+        
         Returns:
             ActionResult with normalized data.
         """
-        start_time = time.time()
+        data = params.get('data', {})
+        rules = params.get('rules', [])
+        schema = params.get('schema', {})
+        strict = params.get('strict', False)
         
-        operation = params.get("operation", "normalize")
-        data = params.get("data", [])
-        method_str = params.get("method", "min_max")
-        columns = params.get("columns", [])
-        feature_range = params.get("feature_range", (0, 1))
+        if not isinstance(data, dict):
+            return ActionResult(success=False, message="data must be a dict")
         
-        try:
-            method = NormalizationMethod(method_str)
-        except ValueError:
-            method = NormalizationMethod.MIN_MAX
+        # Convert rules
+        norm_rules = []
+        for rule in rules:
+            if isinstance(rule, dict):
+                norm_rules.append(NormalizationRule(
+                    source_field=rule.get('source', rule.get('source_field', '')),
+                    target_field=rule.get('target', rule.get('target_field', '')),
+                    target_type=DataType(rule.get('type', 'string')),
+                    default=rule.get('default'),
+                    transform=rule.get('transform'),
+                    required=rule.get('required', False),
+                    pattern=rule.get('pattern')
+                ))
         
-        try:
-            if operation == "normalize":
-                result = self._normalize(data, method, columns, feature_range, start_time)
-            elif operation == "denormalize":
-                result = self._denormalize(data, method, columns, feature_range, start_time)
-            elif operation == "encode":
-                result = self._encode_categorical(data, columns, params, start_time)
-            elif operation == "decode":
-                result = self._decode_categorical(data, columns, start_time)
-            elif operation == "stats":
-                result = self._compute_stats(data, columns, start_time)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}",
-                    duration=time.time() - start_time
-                )
+        # Apply schema-based rules if no explicit rules
+        if not norm_rules and schema:
+            for field_name, field_spec in schema.items():
+                if isinstance(field_spec, dict):
+                    norm_rules.append(NormalizationRule(
+                        source_field=field_name,
+                        target_field=field_name,
+                        target_type=DataType(field_spec.get('type', 'string')),
+                        default=field_spec.get('default'),
+                        required=field_spec.get('required', False)
+                    ))
+        
+        # Normalize
+        result = {}
+        errors = []
+        
+        for rule in norm_rules:
+            value = data.get(rule.source_field)
             
-            return result
+            # Handle missing values
+            if value is None:
+                if rule.required:
+                    errors.append(f"Required field '{rule.source_field}' is missing")
+                if rule.default is not None:
+                    value = rule.default
+                else:
+                    continue
             
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Normalization failed: {str(e)}",
-                duration=time.time() - start_time
-            )
-    
-    def _normalize(
-        self, data: List, method: NormalizationMethod,
-        columns: List[str], feature_range: Tuple[float, float], start_time: float
-    ) -> ActionResult:
-        """Normalize data."""
-        if not data:
-            return ActionResult(
-                success=True,
-                message="No data to normalize",
-                data={"data": [], "stats": {}},
-                duration=time.time() - start_time
-            )
-        
-        if not isinstance(data[0], dict):
-            return self._normalize_list(data, method, feature_range, start_time)
-        
-        if not columns:
-            columns = list(data[0].keys())
-        
-        normalized = []
-        stats = {}
-        
-        for col in columns:
-            col_values = [float(r.get(col, 0)) for r in data if isinstance(r, dict) and col in r]
-            if not col_values:
+            # Pattern validation
+            if rule.pattern and value is not None:
+                if not re.match(rule.pattern, str(value)):
+                    errors.append(
+                        f"Field '{rule.source_field}' does not match pattern"
+                    )
+                    continue
+            
+            # Apply custom transform
+            if rule.transform and callable(rule.transform):
+                try:
+                    value = rule.transform(value)
+                except Exception as e:
+                    errors.append(f"Transform failed for '{rule.source_field}': {e}")
+                    continue
+            
+            # Type coercion
+            try:
+                value = self._coerce_type(value, rule.target_type)
+            except (ValueError, TypeError) as e:
+                errors.append(f"Type coercion failed for '{rule.source_field}': {e}")
                 continue
             
-            col_stats = self._compute_column_stats(col_values)
-            stats[col] = {
-                "mean": col_stats.mean,
-                "std": col_stats.std,
-                "min": col_stats.min,
-                "max": col_stats.max,
-                "median": col_stats.median
+            result[rule.target_field] = value
+        
+        # Copy unmapped fields if not strict
+        if not strict:
+            mapped_sources = {r.source_field for r in norm_rules}
+            for key, value in data.items():
+                if key not in mapped_sources:
+                    result[key] = value
+        
+        return ActionResult(
+            success=len(errors) == 0 or not strict,
+            message=f"Normalized with {len(errors)} errors" if errors else "Normalized successfully",
+            data={
+                'result': result,
+                'errors': errors if strict else [],
+                'fields_normalized': len(result)
             }
-            
-            self._column_stats[col] = col_stats
-        
-        for record in data:
-            if not isinstance(record, dict):
-                continue
-            
-            new_record = dict(record)
-            for col in columns:
-                if col not in record:
-                    continue
-                
-                col_stats = self._column_stats.get(col)
-                if col_stats is None:
-                    continue
-                
-                value = float(record[col])
-                
-                if method == NormalizationMethod.MIN_MAX:
-                    new_val = self._min_max_scale(value, col_stats, feature_range)
-                elif method == NormalizationMethod.ZSCORE:
-                    new_val = self._zscore(value, col_stats)
-                elif method == NormalizationMethod.LOG:
-                    new_val = math.log(value + 1e-10) if value > 0 else 0
-                elif method == NormalizationMethod.LOG10:
-                    new_val = math.log10(value + 1e-10) if value > 0 else 0
-                elif method == NormalizationMethod.SQRT:
-                    new_val = math.sqrt(value) if value >= 0 else 0
-                elif method == NormalizationMethod.ROBUST:
-                    new_val = self._robust_scale(value, col_stats, feature_range)
-                elif method == NormalizationMethod.MAX:
-                    new_val = value / (col_stats.max or 1)
-                elif method == NormalizationMethod.L1:
-                    total = sum(abs(float(r.get(col, 0)) or 0) for r in data if isinstance(r, dict))
-                    new_val = abs(value) / (total or 1)
-                elif method == NormalizationMethod.L2:
-                    total = math.sqrt(sum((float(r.get(col, 0) or 0)) ** 2 for r in data if isinstance(r, dict)))
-                    new_val = value / (total or 1)
-                else:
-                    new_val = self._min_max_scale(value, col_stats, feature_range)
-                
-                new_record[col] = new_val
-            
-            normalized.append(new_record)
-        
-        return ActionResult(
-            success=True,
-            message=f"Normalized {len(normalized)} records using {method.value}",
-            data={
-                "data": normalized,
-                "stats": stats,
-                "method": method.value
-            },
-            duration=time.time() - start_time
         )
     
-    def _normalize_list(self, data: List, method: NormalizationMethod, feature_range: Tuple[float, float], start_time: float) -> ActionResult:
-        """Normalize a plain list."""
-        values = [float(v) for v in data]
-        stats = self._compute_column_stats(values)
+    def _coerce_type(self, value: Any, target_type: DataType) -> Any:
+        """Coerce value to target type."""
+        if value is None:
+            return None
         
-        normalized = []
-        for v in values:
-            if method == NormalizationMethod.MIN_MAX:
-                normalized.append(self._min_max_scale(v, stats, feature_range))
-            elif method == NormalizationMethod.ZSCORE:
-                normalized.append(self._zscore(v, stats))
-            elif method == NormalizationMethod.LOG:
-                normalized.append(math.log(v + 1e-10) if v > 0 else 0)
-            elif method == NormalizationMethod.SQRT:
-                normalized.append(math.sqrt(v) if v >= 0 else 0)
-            else:
-                normalized.append(self._min_max_scale(v, stats, feature_range))
+        if target_type == DataType.STRING:
+            if isinstance(value, bool):
+                return str(value).lower()
+            return str(value)
         
-        return ActionResult(
-            success=True,
-            message=f"Normalized {len(normalized)} values",
-            data={
-                "data": normalized,
-                "stats": {"mean": stats.mean, "std": stats.std, "min": stats.min, "max": stats.max},
-                "method": method.value
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _min_max_scale(self, value: float, stats: NormalizerStats, feature_range: Tuple[float, float]) -> float:
-        """Apply min-max scaling."""
-        min_val, max_val = stats.min or 0, stats.max or 1
-        out_min, out_max = feature_range
+        elif target_type == DataType.INTEGER:
+            if isinstance(value, str):
+                value = value.strip().replace(',', '')
+            return int(float(value))
         
-        if max_val == min_val:
-            return (out_min + out_max) / 2
+        elif target_type == DataType.FLOAT:
+            if isinstance(value, str):
+                value = value.strip().replace(',', '')
+            return float(value)
         
-        return out_min + (value - min_val) / (max_val - min_val) * (out_max - out_min)
-    
-    def _zscore(self, value: float, stats: NormalizerStats) -> float:
-        """Apply z-score normalization."""
-        if stats.std and stats.std > 0 and stats.mean is not None:
-            return (value - stats.mean) / stats.std
-        return 0.0
-    
-    def _robust_scale(self, value: float, stats: NormalizerStats, feature_range: Tuple[float, float]) -> float:
-        """Apply robust scaling using IQR."""
-        q1 = stats.q1 or stats.min or 0
-        q3 = stats.q3 or stats.max or 1
-        iqr = q3 - q1
+        elif target_type == DataType.BOOLEAN:
+            if isinstance(value, str):
+                return value.lower() in ('true', '1', 'yes', 'on')
+            return bool(value)
         
-        if iqr == 0:
-            return feature_range[0]
-        
-        out_min, out_max = feature_range
-        scaled = (value - q1) / iqr
-        
-        return out_min + scaled * (out_max - out_min)
-    
-    def _compute_column_stats(self, values: List[float]) -> NormalizerStats:
-        """Compute statistics for a column."""
-        n = len(values)
-        if n == 0:
-            return NormalizerStats()
-        
-        sorted_values = sorted(values)
-        mean = sum(values) / n
-        variance = sum((v - mean) ** 2 for v in values) / n
-        std = math.sqrt(variance) if variance > 0 else 0
-        
-        return NormalizerStats(
-            mean=mean,
-            std=std,
-            min=sorted_values[0],
-            max=sorted_values[-1],
-            median=sorted_values[n // 2],
-            q1=sorted_values[n // 4],
-            q3=sorted_values[3 * n // 4]
-        )
-    
-    def _denormalize(
-        self, data: List, method: NormalizationMethod,
-        columns: List[str], feature_range: Tuple[float, float], start_time: float
-    ) -> ActionResult:
-        """Denormalize previously normalized data."""
-        if not data:
-            return ActionResult(
-                success=True,
-                message="No data to denormalize",
-                data={"data": []},
-                duration=time.time() - start_time
-            )
-        
-        denormalized = []
-        
-        for record in data:
-            if not isinstance(record, dict):
-                continue
-            
-            new_record = dict(record)
-            for col in columns:
-                col_stats = self._column_stats.get(col)
-                if col_stats is None:
-                    continue
-                
-                value = float(record.get(col, 0))
-                in_min, in_max = feature_range
-                out_min, out_max = col_stats.min or 0, col_stats.max or 1
-                
-                if method == NormalizationMethod.MIN_MAX:
-                    normalized = (value - in_min) / (in_max - in_min) if in_max != in_min else 0
-                    denorm = out_min + normalized * (out_max - out_min)
-                    new_record[col] = denorm
-                elif method == NormalizationMethod.ZSCORE:
-                    if col_stats.std and col_stats.std > 0 and col_stats.mean is not None:
-                        new_record[col] = value * col_stats.std + col_stats.mean
-                else:
-                    new_record[col] = value
-            
-            denormalized.append(new_record)
-        
-        return ActionResult(
-            success=True,
-            message=f"Denormalized {len(denormalized)} records",
-            data={"data": denormalized, "method": method.value},
-            duration=time.time() - start_time
-        )
-    
-    def _encode_categorical(
-        self, data: List[Dict], columns: List[str], params: Dict, start_time: float
-    ) -> ActionResult:
-        """Encode categorical variables."""
-        encoding_str = params.get("encoding", "label")
-        ordinal_map = params.get("ordinal_map", {})
-        
-        try:
-            encoding = EncodingMethod(encoding_str)
-        except ValueError:
-            encoding = EncodingMethod.LABEL
-        
-        if not columns:
-            columns = [k for k, v in data[0].items() if isinstance(v, (str, bool))] if data else []
-        
-        encoded = []
-        mappings = {}
-        
-        for record in data:
-            new_record = dict(record)
-            
-            for col in columns:
-                value = record.get(col)
-                if value is None:
-                    continue
-                
-                if encoding == EncodingMethod.LABEL:
-                    if col not in self._label_mappings:
-                        self._label_mappings[col] = {}
-                    
-                    mapping = self._label_mappings[col]
-                    
-                    if value not in mapping:
-                        mapping[value] = len(mapping)
-                    
-                    new_record[f"{col}_encoded"] = mapping[value]
-                    mappings[col] = mapping
-                
-                elif encoding == EncodingMethod.ONE_HOT:
-                    one_hot = {}
-                    unique_vals = set(r.get(col) for r in data if isinstance(r, dict))
-                    for val in unique_vals:
-                        one_hot[f"{col}_{val}"] = 1 if record.get(col) == val else 0
-                    new_record.update(one_hot)
-                
-                elif encoding == EncodingMethod.ORDINAL:
-                    ordinal = ordinal_map.get(col, {})
-                    new_record[f"{col}_ordinal"] = ordinal.get(value, 0)
-                
-                elif encoding == EncodingMethod.FREQUENCY:
-                    freq = sum(1 for r in data if isinstance(r, dict) and r.get(col) == value)
-                    new_record[f"{col}_freq"] = freq
-                
-                elif encoding == EncodingMethod.TARGET:
+        elif target_type == DataType.DATETIME:
+            if isinstance(value, datetime):
+                return value.isoformat()
+            if isinstance(value, str):
+                # Try ISO format first
+                try:
+                    return datetime.fromisoformat(value.replace('Z', '+00:00')).isoformat()
+                except ValueError:
                     pass
-            
-            encoded.append(new_record)
+                # Try common formats
+                for fmt in ('%Y-%m-%d', '%Y/%m/%d', '%d-%m-%Y', '%m/%d/%Y'):
+                    try:
+                        return datetime.strptime(value, fmt).isoformat()
+                    except ValueError:
+                        continue
+            return str(value)
+        
+        elif target_type == DataType.LIST:
+            if isinstance(value, (list, tuple)):
+                return list(value)
+            if isinstance(value, str):
+                return [v.strip() for v in value.split(',')]
+            return [value]
+        
+        elif target_type == DataType.DICT:
+            if isinstance(value, dict):
+                return value
+            return {'value': value}
+        
+        return value
+
+
+class FormatStandardizerAction(BaseAction):
+    """Standardize data formats across different sources."""
+    action_type = "format_standardizer"
+    display_name = "格式标准化"
+    description = "统一不同数据源的格式"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute format standardization.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: Input data
+                - source_format: Source format identifier
+                - target_format: Target format identifier
+        
+        Returns:
+            ActionResult with standardized data.
+        """
+        data = params.get('data')
+        source_format = params.get('source_format', 'auto')
+        target_format = params.get('target_format', 'standard')
+        
+        if data is None:
+            return ActionResult(success=False, message="data is required")
+        
+        # Auto-detect source format
+        if source_format == 'auto':
+            source_format = self._detect_format(data)
+        
+        # Apply standardization
+        standardized = self._standardize(data, source_format, target_format)
         
         return ActionResult(
             success=True,
-            message=f"Encoded {len(encoded)} records",
-            data={
-                "data": encoded,
-                "mappings": mappings,
-                "encoding": encoding.value
-            },
-            duration=time.time() - start_time
+            message=f"Standardized from {source_format} to {target_format}",
+            data={'result': standardized, 'source_format': source_format}
         )
     
-    def _decode_categorical(self, data: List[Dict], columns: List[str], start_time: float) -> ActionResult:
-        """Decode previously encoded categorical variables."""
-        decoded = []
+    def _detect_format(self, data: Any) -> str:
+        """Auto-detect data format."""
+        if isinstance(data, dict):
+            if 'id' in data and 'name' in data:
+                return 'api_response'
+            return 'dict'
+        elif isinstance(data, list):
+            return 'list'
+        elif isinstance(data, str):
+            return 'string'
+        return 'unknown'
+    
+    def _standardize(
+        self,
+        data: Any,
+        source: str,
+        target: str
+    ) -> Dict:
+        """Apply standardization rules."""
+        # Placeholder for actual standardization logic
+        return {
+            'data': data,
+            'source_format': source,
+            'target_format': target
+        }
+
+
+class FieldMapperAction(BaseAction):
+    """Map fields between different schemas."""
+    action_type = "field_mapper"
+    display_name = "字段映射"
+    description = "不同schema之间的字段映射"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute field mapping.
         
-        for record in data:
-            new_record = dict(record)
-            
-            for col in columns:
-                mapping = self._label_mappings.get(col, {})
-                if not mapping:
-                    continue
-                
-                reverse_mapping = {v: k for k, v in mapping.items()}
-                
-                if f"{col}_encoded" in record:
-                    encoded_val = int(record[f"{col}_encoded"])
-                    if encoded_val in reverse_mapping:
-                        new_record[col] = reverse_mapping[encoded_val]
-                    del new_record[f"{col}_encoded"]
-            
-            decoded.append(new_record)
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - data: Input data
+                - mapping: Dict of target_field -> source_field
+                - prefix: Optional prefix for target fields
+        
+        Returns:
+            ActionResult with mapped data.
+        """
+        data = params.get('data', {})
+        mapping = params.get('mapping', {})
+        prefix = params.get('prefix', '')
+        
+        if not isinstance(data, dict):
+            return ActionResult(success=False, message="data must be a dict")
+        
+        result = {}
+        
+        for target, source in mapping.items():
+            if isinstance(source, str):
+                # Direct field mapping
+                if '.' in source:
+                    # Nested path
+                    result[f"{prefix}{target}"] = self._get_nested(data, source)
+                else:
+                    result[f"{prefix}{target}"] = data.get(source)
+            elif callable(source):
+                # Function mapping
+                result[f"{prefix}{target}"] = source(data)
         
         return ActionResult(
             success=True,
-            message=f"Decoded {len(decoded)} records",
-            data={"data": decoded},
-            duration=time.time() - start_time
+            message=f"Mapped {len(mapping)} fields",
+            data={'result': result, 'count': len(result)}
         )
     
-    def _compute_stats(self, data: List[Dict], columns: List[str], start_time: float) -> ActionResult:
-        """Compute statistics for data columns."""
-        if not columns:
-            columns = list(data[0].keys()) if data else []
-        
-        all_stats = {}
-        
-        for col in columns:
-            col_values = [float(r.get(col, 0)) for r in data if isinstance(r, dict) and col in r and r.get(col) is not None]
-            if col_values:
-                stats = self._compute_column_stats(col_values)
-                all_stats[col] = {
-                    "mean": stats.mean,
-                    "std": stats.std,
-                    "min": stats.min,
-                    "max": stats.max,
-                    "median": stats.median,
-                    "q1": stats.q1,
-                    "q3": stats.q3,
-                    "count": len(col_values)
-                }
-        
-        return ActionResult(
-            success=True,
-            message=f"Computed stats for {len(all_stats)} columns",
-            data={"stats": all_stats},
-            duration=time.time() - start_time
-        )
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate normalizer parameters."""
-        return True, ""
-    
-    def get_required_params(self) -> List[str]:
-        """Return required parameters."""
-        return []
+    def _get_nested(self, data: Dict, path: str) -> Any:
+        """Get nested value using dot notation."""
+        parts = path.split('.')
+        current = data
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+        return current
