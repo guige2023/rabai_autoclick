@@ -1,198 +1,378 @@
-"""API monitoring action module for RabAI AutoClick.
-
-Provides API monitoring operations:
-- MonitorCreateAction: Create monitor
-- MonitorTrackAction: Track API metrics
-- MonitorAlertAction: Set up alerts
-- MonitorDashboardAction: Get dashboard data
-- MonitorDowntimeAction: Track downtime
 """
+API Monitoring Action Module
 
-import time
-import uuid
-from typing import Any, Dict, List, Optional
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+Provides API monitoring, metrics collection, alerting, and observability.
+"""
+from typing import Any, Optional, Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from collections import defaultdict
+import asyncio
 
 
-class MonitorCreateAction(BaseAction):
-    """Create an API monitor."""
-    action_type = "monitor_create"
-    display_name = "创建监控"
-    description = "创建API监控"
+class AlertSeverity(Enum):
+    """Alert severity levels."""
+    CRITICAL = "critical"
+    ERROR = "error"
+    WARNING = "warning"
+    INFO = "info"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            name = params.get("name", "")
-            target_url = params.get("target_url", "")
-            interval = params.get("interval", 60)
 
-            if not name:
-                return ActionResult(success=False, message="name is required")
+@dataclass
+class MetricPoint:
+    """A single metric data point."""
+    name: str
+    value: float
+    timestamp: datetime
+    labels: dict[str, str] = field(default_factory=dict)
+    unit: str = ""
 
-            monitor_id = str(uuid.uuid4())[:8]
 
-            if not hasattr(context, "api_monitors"):
-                context.api_monitors = {}
-            context.api_monitors[monitor_id] = {
-                "monitor_id": monitor_id,
-                "name": name,
-                "target_url": target_url,
-                "interval": interval,
-                "status": "active",
-                "created_at": time.time(),
-                "checks": 0,
-                "failures": 0,
+@dataclass
+class Alert:
+    """An alert definition."""
+    alert_id: str
+    name: str
+    severity: AlertSeverity
+    condition: Callable[[dict], bool]
+    message: str
+    cooldown_seconds: float = 60.0
+    last_triggered: Optional[datetime] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AlertEvent:
+    """An alert firing event."""
+    alert: Alert
+    fired_at: datetime
+    current_value: float
+    threshold: float
+    resolved: bool = False
+    resolved_at: Optional[datetime] = None
+
+
+@dataclass
+class HealthStatus:
+    """Health check status."""
+    component: str
+    healthy: bool
+    latency_ms: float
+    message: Optional[str] = None
+    last_check: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class MonitoringSnapshot:
+    """A snapshot of monitoring data."""
+    timestamp: datetime
+    metrics: dict[str, float]
+    active_alerts: int
+    health_status: dict[str, bool]
+
+
+class MetricsCollector:
+    """Collects and stores metrics."""
+    
+    def __init__(self, retention_minutes: int = 60):
+        self.retention_minutes = retention_minutes
+        self._metrics: dict[str, list[MetricPoint]] = defaultdict(list)
+        self._counters: dict[str, int] = defaultdict(int)
+        self._gauges: dict[str, float] = {}
+        self._histograms: dict[str, list[float]] = defaultdict(list)
+    
+    def record_metric(self, metric: MetricPoint):
+        """Record a metric point."""
+        self._metrics[metric.name].append(metric)
+        self._prune_metrics(metric.name)
+    
+    def increment_counter(self, name: str, value: int = 1, labels: Optional[dict] = None):
+        """Increment a counter metric."""
+        key = self._make_key(name, labels)
+        self._counters[key] += value
+    
+    def set_gauge(self, name: str, value: float, labels: Optional[dict] = None):
+        """Set a gauge metric."""
+        key = self._make_key(name, labels)
+        self._gauges[key] = value
+    
+    def record_histogram(self, name: str, value: float, labels: Optional[dict] = None):
+        """Record a histogram value."""
+        key = self._make_key(name, labels)
+        self._histograms[key].append(value)
+        
+        # Keep only recent values
+        max_values = 1000
+        if len(self._histograms[key]) > max_values:
+            self._histograms[key] = self._histograms[key][-max_values:]
+    
+    def _make_key(self, name: str, labels: Optional[dict]) -> str:
+        """Create a unique key for metric with labels."""
+        if not labels:
+            return name
+        label_str = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+        return f"{name}{{{label_str}}}"
+    
+    def _prune_metrics(self, name: str):
+        """Remove old metric points."""
+        cutoff = datetime.now() - timedelta(minutes=self.retention_minutes)
+        self._metrics[name] = [
+            m for m in self._metrics[name]
+            if m.timestamp > cutoff
+        ]
+    
+    def get_metric_history(
+        self,
+        name: str,
+        duration: timedelta = timedelta(minutes=5)
+    ) -> list[MetricPoint]:
+        """Get metric history for a time period."""
+        cutoff = datetime.now() - duration
+        return [m for m in self._metrics.get(name, []) if m.timestamp > cutoff]
+    
+    def get_percentile(self, name: str, percentile: float) -> Optional[float]:
+        """Calculate percentile for a histogram."""
+        values = self._histograms.get(name, [])
+        if not values:
+            return None
+        
+        sorted_values = sorted(values)
+        idx = int(len(sorted_values) * percentile / 100)
+        return sorted_values[min(idx, len(sorted_values) - 1)]
+
+
+class ApiMonitoringAction:
+    """Main API monitoring action handler."""
+    
+    def __init__(self):
+        self._collector = MetricsCollector()
+        self._alerts: dict[str, Alert] = {}
+        self._alert_events: list[AlertEvent] = []
+        self._health_checks: dict[str, Callable] = {}
+        self._health_status: dict[str, HealthStatus] = {}
+        self._stats: dict[str, Any] = defaultdict(int)
+    
+    def register_alert(self, alert: Alert) -> "ApiMonitoringAction":
+        """Register an alert."""
+        self._alerts[alert.alert_id] = alert
+        return self
+    
+    def register_health_check(
+        self,
+        component: str,
+        check: Callable[[], Awaitable[HealthStatus]]
+    ) -> "ApiMonitoringAction":
+        """Register a health check."""
+        self._health_checks[component] = check
+        return self
+    
+    async def record_request(
+        self,
+        method: str,
+        path: str,
+        status_code: int,
+        latency_ms: float,
+        labels: Optional[dict] = None
+    ):
+        """Record an API request metric."""
+        labels = labels or {}
+        labels["method"] = method
+        labels["path"] = path
+        labels["status_code"] = str(status_code)
+        
+        self._collector.record_metric(MetricPoint(
+            name="api_requests_total",
+            value=1,
+            timestamp=datetime.now(),
+            labels=labels
+        ))
+        
+        self._collector.record_histogram(
+            "api_request_duration_ms",
+            latency_ms,
+            labels
+        )
+        
+        if status_code >= 500:
+            self._collector.increment_counter("api_errors_total", 1, labels)
+            self._stats["error_requests"] += 1
+        elif status_code >= 400:
+            self._collector.increment_counter("api_client_errors_total", 1, labels)
+        
+        self._stats["total_requests"] += 1
+    
+    async def record_custom_metric(
+        self,
+        name: str,
+        value: float,
+        labels: Optional[dict] = None,
+        unit: str = ""
+    ):
+        """Record a custom metric."""
+        self._collector.record_metric(MetricPoint(
+            name=name,
+            value=value,
+            timestamp=datetime.now(),
+            labels=labels or {},
+            unit=unit
+        ))
+    
+    async def increment_counter(
+        self,
+        name: str,
+        value: int = 1,
+        labels: Optional[dict] = None
+    ):
+        """Increment a counter."""
+        self._collector.increment_counter(name, value, labels)
+    
+    async def set_gauge(
+        self,
+        name: str,
+        value: float,
+        labels: Optional[dict] = None
+    ):
+        """Set a gauge value."""
+        self._collector.set_gauge(name, value, labels)
+    
+    async def check_alerts(self) -> list[AlertEvent]:
+        """Evaluate all alerts and return firing alerts."""
+        firing_alerts = []
+        now = datetime.now()
+        
+        for alert in self._alerts.values():
+            # Check cooldown
+            if alert.last_triggered:
+                cooldown = timedelta(seconds=alert.cooldown_seconds)
+                if now - alert.last_triggered < cooldown:
+                    continue
+            
+            # Evaluate alert condition
+            try:
+                context = {
+                    "metrics": dict(self._collector._gauges),
+                    "counters": dict(self._collector._counters),
+                    "timestamp": now
+                }
+                
+                should_fire = alert.condition(context)
+                
+                if should_fire:
+                    event = AlertEvent(
+                        alert=alert,
+                        fired_at=now,
+                        current_value=context["metrics"].get(alert.name, 0),
+                        threshold=0
+                    )
+                    
+                    alert.last_triggered = now
+                    firing_alerts.append(event)
+                    self._alert_events.append(event)
+                    self._stats["alerts_fired"] += 1
+                
+            except Exception as e:
+                self._stats["alert_check_errors"] += 1
+        
+        return firing_alerts
+    
+    async def check_health(self) -> dict[str, HealthStatus]:
+        """Run all health checks."""
+        results = {}
+        
+        for component, check in self._health_checks.items():
+            try:
+                status = await asyncio.wait_for(
+                    check(),
+                    timeout=5.0
+                )
+                results[component] = status
+                self._health_status[component] = status
+                
+                if not status.healthy:
+                    self._stats["unhealthy_checks"] += 1
+                
+            except asyncio.TimeoutError:
+                results[component] = HealthStatus(
+                    component=component,
+                    healthy=False,
+                    latency_ms=5000,
+                    message="Health check timed out"
+                )
+                self._stats["health_check_timeouts"] += 1
+                
+            except Exception as e:
+                results[component] = HealthStatus(
+                    component=component,
+                    healthy=False,
+                    latency_ms=0,
+                    message=str(e)
+                )
+                self._stats["health_check_errors"] += 1
+        
+        self._stats["health_checks_run"] += 1
+        return results
+    
+    async def get_snapshot(self) -> MonitoringSnapshot:
+        """Get a snapshot of current monitoring state."""
+        firing_alerts = await self.check_alerts()
+        
+        return MonitoringSnapshot(
+            timestamp=datetime.now(),
+            metrics=dict(self._collector._gauges),
+            active_alerts=len(firing_alerts),
+            health_status={
+                c: s.healthy for c, s in self._health_status.items()
             }
-
-            return ActionResult(
-                success=True,
-                data={"monitor_id": monitor_id, "name": name, "target_url": target_url},
-                message=f"Monitor {monitor_id} created: {name}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Monitor create failed: {e}")
-
-
-class MonitorTrackAction(BaseAction):
-    """Track API metrics."""
-    action_type = "monitor_track"
-    display_name = "监控追踪"
-    description = "追踪API指标"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            monitor_id = params.get("monitor_id", "")
-            latency_ms = params.get("latency_ms", 0)
-            status_code = params.get("status_code", 200)
-            timestamp = params.get("timestamp", time.time())
-
-            if not monitor_id:
-                return ActionResult(success=False, message="monitor_id is required")
-
-            monitors = getattr(context, "api_monitors", {})
-            if monitor_id not in monitors:
-                return ActionResult(success=False, message=f"Monitor {monitor_id} not found")
-
-            monitor = monitors[monitor_id]
-            monitor["checks"] += 1
-            if status_code >= 400:
-                monitor["failures"] += 1
-
-            uptime = (monitor["checks"] - monitor["failures"]) / monitor["checks"] if monitor["checks"] > 0 else 0
-
-            return ActionResult(
-                success=True,
-                data={"monitor_id": monitor_id, "latency_ms": latency_ms, "status_code": status_code, "uptime": uptime},
-                message=f"Tracked check for {monitor_id}: {status_code} in {latency_ms}ms",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Monitor track failed: {e}")
-
-
-class MonitorAlertAction(BaseAction):
-    """Set up monitoring alerts."""
-    action_type = "monitor_alert"
-    display_name = "监控告警"
-    description = "设置监控告警"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            monitor_id = params.get("monitor_id", "")
-            condition = params.get("condition", {})
-            severity = params.get("severity", "warning")
-
-            if not monitor_id:
-                return ActionResult(success=False, message="monitor_id is required")
-
-            alert_id = str(uuid.uuid4())[:8]
-
-            if not hasattr(context, "monitor_alerts"):
-                context.monitor_alerts = {}
-            context.monitor_alerts[alert_id] = {
-                "alert_id": alert_id,
-                "monitor_id": monitor_id,
-                "condition": condition,
-                "severity": severity,
-                "created_at": time.time(),
+        )
+    
+    async def get_metrics_summary(
+        self,
+        duration: timedelta = timedelta(minutes=5)
+    ) -> dict[str, Any]:
+        """Get summary of collected metrics."""
+        return {
+            "requests": {
+                "total": self._collector._counters.get("api_requests_total", 0),
+                "errors": self._collector._counters.get("api_errors_total", 0),
+                "p50_latency_ms": self._collector.get_percentile("api_request_duration_ms", 50),
+                "p95_latency_ms": self._collector.get_percentile("api_request_duration_ms", 95),
+                "p99_latency_ms": self._collector.get_percentile("api_request_duration_ms", 99)
+            },
+            "gauges": dict(self._collector._gauges),
+            "alerts": {
+                "registered": len(self._alerts),
+                "fired": self._stats["alerts_fired"]
+            },
+            "health": {
+                "checks_run": self._stats["health_checks_run"],
+                "unhealthy": self._stats["unhealthy_checks"]
             }
-
-            return ActionResult(
-                success=True,
-                data={"alert_id": alert_id, "monitor_id": monitor_id, "severity": severity},
-                message=f"Alert {alert_id} created for monitor {monitor_id}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Monitor alert failed: {e}")
-
-
-class MonitorDashboardAction(BaseAction):
-    """Get monitoring dashboard data."""
-    action_type = "monitor_dashboard"
-    display_name = "监控仪表板"
-    description = "获取监控仪表板数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            monitors = getattr(context, "api_monitors", {})
-
-            summary = []
-            for mid, m in monitors.items():
-                uptime = (m["checks"] - m["failures"]) / m["checks"] if m["checks"] > 0 else 0
-                summary.append({
-                    "monitor_id": mid,
-                    "name": m["name"],
-                    "status": m["status"],
-                    "checks": m["checks"],
-                    "failures": m["failures"],
-                    "uptime_pct": round(uptime * 100, 2),
-                })
-
-            return ActionResult(
-                success=True,
-                data={"monitors": summary, "total_monitors": len(summary)},
-                message=f"Dashboard: {len(summary)} monitors",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Monitor dashboard failed: {e}")
-
-
-class MonitorDowntimeAction(BaseAction):
-    """Track downtime events."""
-    action_type = "monitor_downtime"
-    display_name = "监控宕机"
-    description = "追踪宕机事件"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            monitor_id = params.get("monitor_id", "")
-            downtime_id = str(uuid.uuid4())[:8]
-            started_at = params.get("started_at", time.time())
-            resolved = params.get("resolved", False)
-            resolved_at = time.time() if resolved else None
-
-            if not monitor_id:
-                return ActionResult(success=False, message="monitor_id is required")
-
-            if not hasattr(context, "downtime_events"):
-                context.downtime_events = []
-            context.downtime_events.append({
-                "downtime_id": downtime_id,
-                "monitor_id": monitor_id,
-                "started_at": started_at,
-                "resolved": resolved,
-                "resolved_at": resolved_at,
-            })
-
-            return ActionResult(
-                success=True,
-                data={"downtime_id": downtime_id, "monitor_id": monitor_id, "resolved": resolved},
-                message=f"Downtime {downtime_id}: {'resolved' if resolved else 'ongoing'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Monitor downtime failed: {e}")
+        }
+    
+    def get_stats(self) -> dict[str, Any]:
+        """Get monitoring statistics."""
+        return dict(self._stats)
+    
+    def list_alerts(self, active_only: bool = False) -> list[dict[str, Any]]:
+        """List registered alerts."""
+        alerts = list(self._alerts.values())
+        
+        if active_only:
+            now = datetime.now()
+            alerts = [
+                a for a in alerts
+                if a.last_triggered and
+                (now - a.last_triggered).total_seconds() < a.cooldown_seconds
+            ]
+        
+        return [
+            {
+                "id": a.alert_id,
+                "name": a.name,
+                "severity": a.severity.value,
+                "message": a.message,
+                "last_triggered": a.last_triggered.isoformat() if a.last_triggered else None
+            }
+            for a in alerts
+        ]
