@@ -1,230 +1,400 @@
-"""API Cache action module for RabAI AutoClick.
+"""API cache action module for RabAI AutoClick.
 
-Provides API caching operations:
-- CacheGetAction: Get cached response
-- CacheSetAction: Set cache
-- CacheInvalidateAction: Invalidate cache
-- CacheStatsAction: Cache statistics
+Provides API caching:
+- APICache: Cache API responses
+- CacheStrategy: Different caching strategies
+- CacheInvalidator: Invalidate cache entries
+- CacheMonitor: Monitor cache performance
 """
 
-from __future__ import annotations
+import time
+import hashlib
+import threading
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
 
 import sys
 import os
-import time
-import hashlib
-import json
-from typing import Any, Dict, Optional
-from collections import defaultdict
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class CacheGetAction(BaseAction):
-    """Get cached response."""
-    action_type = "cache_get"
-    display_name = "缓存获取"
-    description = "获取缓存数据"
-    version = "1.0"
+class CacheStrategy(Enum):
+    """Cache strategies."""
+    LRU = "lru"
+    LFU = "lfu"
+    FIFO = "fifo"
+    TTL = "ttl"
+    TIME_BASED = "time_based"
+
+
+@dataclass
+class CacheEntry:
+    """Cache entry."""
+    key: str
+    value: Any
+    created_at: float
+    accessed_at: float
+    access_count: int = 0
+    ttl: Optional[float] = None
+    size: int = 0
+
+
+@dataclass
+class CacheStats:
+    """Cache statistics."""
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    size: int = 0
+    hit_rate: float = 0.0
+
+
+class APICache:
+    """API response cache."""
+
+    def __init__(
+        self,
+        strategy: CacheStrategy = CacheStrategy.LRU,
+        max_size: int = 1000,
+        default_ttl: Optional[float] = None,
+    ):
+        self.strategy = strategy
+        self.max_size = max_size
+        self.default_ttl = default_ttl
+        self._cache: Dict[str, CacheEntry] = {}
+        self._lock = threading.RLock()
+        self.stats = CacheStats()
+
+    def get(self, key: str) -> Tuple[Optional[Any], bool]:
+        """Get value from cache."""
+        with self._lock:
+            entry = self._cache.get(key)
+
+            if entry is None:
+                self.stats.misses += 1
+                self._update_hit_rate()
+                return None, False
+
+            if self._is_expired(entry):
+                del self._cache[key]
+                self.stats.misses += 1
+                self._update_hit_rate()
+                return None, False
+
+            entry.accessed_at = time.time()
+            entry.access_count += 1
+            self.stats.hits += 1
+            self._update_hit_rate()
+            return entry.value, True
+
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl: Optional[float] = None,
+        size: Optional[int] = None,
+    ) -> bool:
+        """Set value in cache."""
+        with self._lock:
+            if len(self._cache) >= self.max_size and key not in self._cache:
+                self._evict()
+
+            now = time.time()
+            entry = CacheEntry(
+                key=key,
+                value=value,
+                created_at=now,
+                accessed_at=now,
+                ttl=ttl or self.default_ttl,
+                size=size or len(str(value)),
+            )
+            self._cache[key] = entry
+            self.stats.size = len(self._cache)
+            return True
+
+    def delete(self, key: str) -> bool:
+        """Delete from cache."""
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                self.stats.size = len(self._cache)
+                return True
+            return False
+
+    def clear(self):
+        """Clear all cache."""
+        with self._lock:
+            self._cache.clear()
+            self.stats = CacheStats()
+
+    def invalidate(self, pattern: Optional[str] = None) -> int:
+        """Invalidate cache entries matching pattern."""
+        with self._lock:
+            if pattern is None:
+                count = len(self._cache)
+                self._cache.clear()
+                self.stats.size = 0
+                return count
+
+            to_delete = [k for k in self._cache.keys() if pattern in k]
+            for k in to_delete:
+                del self._cache[k]
+
+            self.stats.size = len(self._cache)
+            return len(to_delete)
+
+    def _is_expired(self, entry: CacheEntry) -> bool:
+        """Check if entry is expired."""
+        if entry.ttl is None:
+            return False
+        return time.time() - entry.created_at > entry.ttl
+
+    def _evict(self):
+        """Evict entry based on strategy."""
+        if not self._cache:
+            return
+
+        if self.strategy == CacheStrategy.LRU:
+            oldest = min(self._cache.items(), key=lambda x: x[1].accessed_at)
+            del self._cache[oldest[0]]
+        elif self.strategy == CacheStrategy.LFU:
+            lfu = min(self._cache.items(), key=lambda x: x[1].access_count)
+            del self._cache[lfu[0]]
+        elif self.strategy == CacheStrategy.FIFO:
+            oldest = min(self._cache.items(), key=lambda x: x[1].created_at)
+            del self._cache[oldest[0]]
+        elif self.strategy == CacheStrategy.TTL:
+            now = time.time()
+            expired = [
+                (k, v) for k, v in self._cache.items()
+                if v.ttl and now - v.created_at > v.ttl
+            ]
+            if expired:
+                oldest = min(expired, key=lambda x: x[1].created_at)
+                del self._cache[oldest[0]]
+
+        self.stats.evictions += 1
+
+    def _update_hit_rate(self):
+        """Update hit rate."""
+        total = self.stats.hits + self.stats.misses
+        if total > 0:
+            self.stats.hit_rate = self.stats.hits / total
+
+    def get_stats(self) -> Dict:
+        """Get cache statistics."""
+        return {
+            "hits": self.stats.hits,
+            "misses": self.stats.misses,
+            "evictions": self.stats.evictions,
+            "size": self.stats.size,
+            "max_size": self.max_size,
+            "hit_rate": self.stats.hit_rate,
+            "strategy": self.strategy.value,
+        }
+
+    def make_key(self, method: str, url: str, params: Optional[Dict] = None) -> str:
+        """Make cache key from request."""
+        key_parts = [method.upper(), url]
+
+        if params:
+            sorted_params = sorted(params.items())
+            param_str = "&".join(f"{k}={v}" for k, v in sorted_params)
+            key_parts.append(param_str)
+
+        key_str = "|".join(str(p) for p in key_parts)
+        return hashlib.md5(key_str.encode()).hexdigest()
+
+
+class CacheStrategySelector:
+    """Select cache strategy based on request."""
+
+    @staticmethod
+    def select(method: str, url: str, params: Optional[Dict] = None) -> CacheStrategy:
+        """Select cache strategy."""
+        if method.upper() == "GET":
+            if "/search" in url or "/query" in url:
+                return CacheStrategy.TTL
+            return CacheStrategy.LRU
+        elif method.upper() in ("POST", "PUT", "PATCH"):
+            return CacheStrategy.TIME_BASED
+        return CacheStrategy.FIFO
+
+
+class CacheInvalidator:
+    """Invalidate cache entries."""
+
+    def __init__(self, cache: APICache):
+        self.cache = cache
+
+    def invalidate_url(self, url: str) -> int:
+        """Invalidate all entries for URL."""
+        return self.cache.invalidate(pattern=url)
+
+    def invalidate_pattern(self, pattern: str) -> int:
+        """Invalidate by pattern."""
+        return self.cache.invalidate(pattern=pattern)
+
+    def invalidate_method(self, method: str) -> int:
+        """Invalidate by HTTP method."""
+        return self.cache.invalidate(pattern=method.upper())
+
+
+class CacheMonitor:
+    """Monitor cache performance."""
+
+    def __init__(self, caches: Dict[str, APICache]):
+        self.caches = caches
+
+    def get_all_stats(self) -> Dict:
+        """Get stats for all caches."""
+        result = {}
+        for name, cache in self.caches.items():
+            result[name] = cache.get_stats()
+        return result
+
+    def get_total_hits(self) -> int:
+        """Get total hits across all caches."""
+        return sum(c.stats.hits for c in self.caches.values())
+
+    def get_total_misses(self) -> int:
+        """Get total misses across all caches."""
+        return sum(c.stats.misses for c in self.caches.values())
+
+
+class APICacheAction(BaseAction):
+    """API cache action."""
+    action_type = "api_cache"
+    display_name = "API缓存"
+    description = "API响应缓存管理"
 
     def __init__(self):
         super().__init__()
-        self._cache = {}
-        self._stats = defaultdict(lambda: {'hits': 0, 'misses': 0, 'size': 0})
+        self._caches: Dict[str, APICache] = {}
+
+    def _get_or_create_cache(self, name: str, strategy_str: str = "lru") -> APICache:
+        """Get or create cache."""
+        if name not in self._caches:
+            try:
+                strategy = CacheStrategy[strategy_str.upper()]
+            except KeyError:
+                strategy = CacheStrategy.LRU
+            self._caches[name] = APICache(strategy=strategy)
+        return self._caches[name]
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache get."""
-        key = params.get('key', '')
-        namespace = params.get('namespace', 'default')
-        ttl = params.get('ttl', 3600)
-        output_var = params.get('output_var', 'cache_result')
-
-        if not key:
-            return ActionResult(success=False, message="key is required")
-
         try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_namespace = context.resolve_value(namespace) if context else namespace
+            operation = params.get("operation", "get")
 
-            cache_key = f"{resolved_namespace}:{resolved_key}"
-            entry = self._cache.get(cache_key)
-
-            if entry:
-                if entry['expires_at'] > time.time():
-                    self._stats[resolved_namespace]['hits'] += 1
-                    result = {
-                        'hit': True,
-                        'value': entry['value'],
-                        'cached_at': entry['cached_at'],
-                        'key': cache_key,
-                    }
-                    return ActionResult(
-                        success=True,
-                        data={output_var: result},
-                        message="Cache hit"
-                    )
-                else:
-                    del self._cache[cache_key]
-
-            self._stats[resolved_namespace]['misses'] += 1
-            result = {
-                'hit': False,
-                'key': cache_key,
-            }
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message="Cache miss"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache get error: {e}")
-
-
-class CacheSetAction(BaseAction):
-    """Set cache."""
-    action_type = "cache_set"
-    display_name = "缓存设置"
-    description = "设置缓存数据"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache set."""
-        key = params.get('key', '')
-        value = params.get('value', None)
-        namespace = params.get('namespace', 'default')
-        ttl = params.get('ttl', 3600)
-        output_var = params.get('output_var', 'cache_result')
-
-        if not key or value is None:
-            return ActionResult(success=False, message="key and value are required")
-
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_value = context.resolve_value(value) if context else value
-            resolved_ttl = context.resolve_value(ttl) if context else ttl
-
-            cache_key = f"{namespace}:{resolved_key}"
-
-            if hasattr(self.__class__, '_cache'):
-                self._cache[cache_key] = {
-                    'value': resolved_value,
-                    'cached_at': time.time(),
-                    'expires_at': time.time() + resolved_ttl,
-                }
-
-            result = {
-                'key': cache_key,
-                'ttl': resolved_ttl,
-                'set': True,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Cache set: {cache_key[:30]}... (TTL: {resolved_ttl}s)"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache set error: {e}")
-
-
-class CacheInvalidateAction(BaseAction):
-    """Invalidate cache."""
-    action_type = "cache_invalidate"
-    display_name = "缓存失效"
-    description = "清除缓存"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache invalidation."""
-        key = params.get('key', '')
-        namespace = params.get('namespace', 'default')
-        pattern = params.get('pattern', None)
-        output_var = params.get('output_var', 'invalidate_result')
-
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_namespace = context.resolve_value(namespace) if context else namespace
-
-            if hasattr(self.__class__, '_cache'):
-                if resolved_key:
-                    cache_key = f"{resolved_namespace}:{resolved_key}"
-                    if cache_key in self._cache:
-                        del self._cache[cache_key]
-                        count = 1
-                    else:
-                        count = 0
-                elif pattern:
-                    count = 0
-                    to_delete = [k for k in self._cache.keys() if pattern in k and k.startswith(f"{resolved_namespace}:")]
-                    for k in to_delete:
-                        del self._cache[k]
-                        count += 1
-                else:
-                    to_delete = [k for k in self._cache.keys() if k.startswith(f"{resolved_namespace}:")]
-                    for k in to_delete:
-                        del self._cache[k]
-                    count = len(to_delete)
+            if operation == "create":
+                return self._create_cache(params)
+            elif operation == "get":
+                return self._get(params)
+            elif operation == "set":
+                return self._set(params)
+            elif operation == "delete":
+                return self._delete(params)
+            elif operation == "clear":
+                return self._clear(params)
+            elif operation == "invalidate":
+                return self._invalidate(params)
+            elif operation == "stats":
+                return self._get_stats(params)
             else:
-                count = 0
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-            result = {
-                'invalidated': count,
-                'namespace': resolved_namespace,
-                'key': resolved_key,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Invalidated {count} cache entries"
-            )
         except Exception as e:
-            return ActionResult(success=False, message=f"Cache invalidate error: {e}")
+            return ActionResult(success=False, message=f"Cache error: {str(e)}")
 
-
-class CacheStatsAction(BaseAction):
-    """Cache statistics."""
-    action_type = "cache_stats"
-    display_name = "缓存统计"
-    description = "缓存统计信息"
-    version = "1.0"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache stats."""
-        namespace = params.get('namespace', 'default')
-        output_var = params.get('output_var', 'cache_stats')
+    def _create_cache(self, params: Dict) -> ActionResult:
+        """Create cache."""
+        name = params.get("name", "default")
+        strategy = params.get("strategy", "lru")
+        max_size = params.get("max_size", 1000)
+        ttl = params.get("ttl")
 
         try:
-            resolved_namespace = context.resolve_value(namespace) if context else namespace
+            strat = CacheStrategy[strategy.upper()]
+        except KeyError:
+            strat = CacheStrategy.LRU
 
-            if hasattr(self.__class__, '_stats'):
-                stats = self._stats[resolved_namespace]
-            else:
-                stats = {'hits': 0, 'misses': 0}
+        cache = APICache(strategy=strat, max_size=max_size, default_ttl=ttl)
+        self._caches[name] = cache
 
-            total = stats.get('hits', 0) + stats.get('misses', 0)
-            hit_rate = stats.get('hits', 0) / total if total > 0 else 0
+        return ActionResult(success=True, message=f"Cache '{name}' created with {strategy} strategy")
 
-            cache_size = 0
-            if hasattr(self.__class__, '_cache'):
-                cache_size = len([k for k in self._cache.keys() if k.startswith(f"{resolved_namespace}:")])
+    def _get(self, params: Dict) -> ActionResult:
+        """Get from cache."""
+        name = params.get("name", "default")
+        key = params.get("key")
 
-            result = {
-                'namespace': resolved_namespace,
-                'hits': stats.get('hits', 0),
-                'misses': stats.get('misses', 0),
-                'total_requests': total,
-                'hit_rate': hit_rate,
-                'cache_size': cache_size,
-            }
+        cache = self._get_or_create_cache(name)
+        value, hit = cache.get(key)
 
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Cache stats: {hit_rate:.1%} hit rate ({stats.get('hits', 0)} hits)"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache stats error: {e}")
+        return ActionResult(
+            success=hit,
+            message="Cache hit" if hit else "Cache miss",
+            data={"key": key, "hit": hit, "value": value},
+        )
+
+    def _set(self, params: Dict) -> ActionResult:
+        """Set in cache."""
+        name = params.get("name", "default")
+        key = params.get("key")
+        value = params.get("value")
+        ttl = params.get("ttl")
+
+        cache = self._get_or_create_cache(name)
+        cache.set(key, value, ttl)
+
+        return ActionResult(success=True, message=f"Cached key '{key}'")
+
+    def _delete(self, params: Dict) -> ActionResult:
+        """Delete from cache."""
+        name = params.get("name", "default")
+        key = params.get("key")
+
+        cache = self._caches.get(name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache '{name}' not found")
+
+        deleted = cache.delete(key)
+        return ActionResult(success=deleted, message="Deleted" if deleted else "Key not found")
+
+    def _clear(self, params: Dict) -> ActionResult:
+        """Clear cache."""
+        name = params.get("name", "default")
+
+        cache = self._caches.get(name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache '{name}' not found")
+
+        cache.clear()
+        return ActionResult(success=True, message=f"Cache '{name}' cleared")
+
+    def _invalidate(self, params: Dict) -> ActionResult:
+        """Invalidate cache entries."""
+        name = params.get("name", "default")
+        pattern = params.get("pattern")
+
+        cache = self._caches.get(name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache '{name}' not found")
+
+        count = cache.invalidate(pattern=pattern)
+        return ActionResult(success=True, message=f"Invalidated {count} entries")
+
+    def _get_stats(self, params: Dict) -> ActionResult:
+        """Get cache stats."""
+        name = params.get("name", "default")
+
+        cache = self._caches.get(name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache '{name}' not found")
+
+        stats = cache.get_stats()
+        return ActionResult(success=True, message="Stats retrieved", data=stats)
