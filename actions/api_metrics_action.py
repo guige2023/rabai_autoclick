@@ -1,22 +1,22 @@
-# Copyright (c) 2024. coded by claude
 """API Metrics Action Module.
 
-Collects and reports API metrics including request counts, response times,
-error rates, and throughput statistics.
+Provides API metrics collection with counters,
+histograms, and gauges for monitoring.
 """
-from typing import Optional, Dict, Any, List
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from __future__ import annotations
+
+import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from enum import Enum
-import threading
-import statistics
+from typing import Any, Callable, Dict, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 class MetricType(Enum):
+    """Metric type."""
     COUNTER = "counter"
     GAUGE = "gauge"
     HISTOGRAM = "histogram"
@@ -24,91 +24,217 @@ class MetricType(Enum):
 
 
 @dataclass
-class MetricPoint:
+class MetricValue:
+    """Metric value."""
+    name: str
+    metric_type: MetricType
     value: float
-    timestamp: datetime
+    timestamp: float
     labels: Dict[str, str] = field(default_factory=dict)
 
 
-class MetricsCollector:
-    def __init__(self, retention_period: timedelta = timedelta(hours=1)):
-        self.retention_period = retention_period
+class APIMetricsAction:
+    """API metrics collector.
+
+    Example:
+        metrics = APIMetricsAction()
+
+        metrics.increment("requests", labels={"method": "GET"})
+        metrics.gauge("active_connections", 10)
+
+        with metrics.timer("request_duration"):
+            await api_call()
+
+        snapshot = metrics.snapshot()
+    """
+
+    def __init__(self) -> None:
         self._counters: Dict[str, float] = defaultdict(float)
         self._gauges: Dict[str, float] = {}
         self._histograms: Dict[str, List[float]] = defaultdict(list)
-        self._timers: Dict[str, List[float]] = defaultdict(list)
-        self._lock = threading.RLock()
-        self._start_time = datetime.now()
+        self._labels: Dict[str, Dict[str, str]] = {}
+        self._timers: Dict[str, float] = {}
 
-    def increment(self, name: str, value: float = 1.0, labels: Optional[Dict[str, str]] = None) -> None:
+    def increment(
+        self,
+        name: str,
+        value: float = 1.0,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Increment counter metric.
+
+        Args:
+            name: Metric name
+            value: Value to add
+            labels: Optional labels
+        """
         key = self._make_key(name, labels)
-        with self._lock:
-            self._counters[key] += value
+        self._counters[key] += value
 
-    def set_gauge(self, name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
+        if labels:
+            self._labels[key] = labels
+
+    def decrement(
+        self,
+        name: str,
+        value: float = 1.0,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Decrement counter metric.
+
+        Args:
+            name: Metric name
+            value: Value to subtract
+            labels: Optional labels
+        """
+        self.increment(name, -value, labels)
+
+    def gauge(
+        self,
+        name: str,
+        value: float,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Set gauge metric.
+
+        Args:
+            name: Metric name
+            value: Gauge value
+            labels: Optional labels
+        """
         key = self._make_key(name, labels)
-        with self._lock:
-            self._gauges[key] = value
+        self._gauges[key] = value
 
-    def record_histogram(self, name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
+        if labels:
+            self._labels[key] = labels
+
+    def observe(
+        self,
+        name: str,
+        value: float,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Observe value for histogram.
+
+        Args:
+            name: Metric name
+            value: Observed value
+            labels: Optional labels
+        """
         key = self._make_key(name, labels)
-        with self._lock:
-            self._histograms[key].append(value)
+        self._histograms[key].append(value)
 
-    def record_timer(self, name: str, duration_ms: float, labels: Optional[Dict[str, str]] = None) -> None:
+        if labels:
+            self._labels[key] = labels
+
+    def timer(
+        self,
+        name: str,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> "TimerContext":
+        """Start timer context.
+
+        Returns:
+            TimerContext for timing
+        """
+        return TimerContext(self, name, labels)
+
+    def start_timer(self, name: str, labels: Optional[Dict[str, str]] = None) -> None:
+        """Start named timer."""
         key = self._make_key(name, labels)
-        with self._lock:
-            self._timers[key].append(duration_ms)
+        self._timers[key] = time.time()
 
-    def _make_key(self, name: str, labels: Optional[Dict[str, str]]) -> str:
+    def stop_timer(self, name: str, labels: Optional[Dict[str, str]] = None) -> float:
+        """Stop named timer and record duration.
+
+        Returns:
+            Elapsed time in seconds
+        """
+        key = self._make_key(name, labels)
+        if key not in self._timers:
+            return 0.0
+
+        elapsed = time.time() - self._timers[key]
+        self.observe(name, elapsed, labels)
+        del self._timers[key]
+
+        return elapsed
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Get metrics snapshot.
+
+        Returns:
+            All current metric values
+        """
+        return {
+            "counters": dict(self._counters),
+            "gauges": dict(self._gauges),
+            "histograms": {
+                k: self._compute_stats(v)
+                for k, v in self._histograms.items()
+            },
+            "timestamp": time.time(),
+        }
+
+    def _compute_stats(self, values: List[float]) -> Dict[str, float]:
+        """Compute histogram statistics."""
+        if not values:
+            return {}
+
+        sorted_values = sorted(values)
+        n = len(sorted_values)
+
+        return {
+            "count": n,
+            "sum": sum(values),
+            "min": min(values),
+            "max": max(values),
+            "mean": sum(values) / n,
+            "p50": sorted_values[n // 2],
+            "p95": sorted_values[int(n * 0.95)],
+            "p99": sorted_values[int(n * 0.99)],
+        }
+
+    def _make_key(
+        self,
+        name: str,
+        labels: Optional[Dict[str, str]],
+    ) -> str:
+        """Make metric key from name and labels."""
         if not labels:
             return name
+
         label_str = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
         return f"{name}{{{label_str}}}"
 
-    def get_counter(self, name: str, labels: Optional[Dict[str, str]] = None) -> float:
-        key = self._make_key(name, labels)
-        with self._lock:
-            return self._counters.get(key, 0.0)
-
-    def get_gauge(self, name: str, labels: Optional[Dict[str, str]] = None) -> Optional[float]:
-        key = self._make_key(name, labels)
-        with self._lock:
-            return self._gauges.get(key)
-
-    def get_histogram_stats(self, name: str, labels: Optional[Dict[str, str]] = None) -> Dict[str, float]:
-        key = self._make_key(name, labels)
-        with self._lock:
-            values = self._histograms.get(key, [])
-            if not values:
-                return {}
-            sorted_values = sorted(values)
-            return {
-                "count": len(values),
-                "sum": sum(values),
-                "min": min(values),
-                "max": max(values),
-                "mean": statistics.mean(values),
-                "median": statistics.median(sorted_values),
-                "p95": sorted_values[int(len(sorted_values) * 0.95)] if len(sorted_values) > 1 else sorted_values[0],
-                "p99": sorted_values[int(len(sorted_values) * 0.99)] if len(sorted_values) > 1 else sorted_values[0],
-            }
-
-    def get_all_metrics(self) -> Dict[str, Any]:
-        with self._lock:
-            uptime = (datetime.now() - self._start_time).total_seconds()
-            return {
-                "uptime_seconds": uptime,
-                "counters": dict(self._counters),
-                "gauges": dict(self._gauges),
-                "histograms": {k: self.get_histogram_stats(k) for k in self._histograms},
-                "timers": {k: self.get_histogram_stats(k) for k in self._timers},
-            }
-
     def reset(self) -> None:
-        with self._lock:
-            self._counters.clear()
-            self._gauges.clear()
-            self._histograms.clear()
-            self._timers.clear()
-            self._start_time = datetime.now()
+        """Reset all metrics."""
+        self._counters.clear()
+        self._gauges.clear()
+        self._histograms.clear()
+        self._labels.clear()
+        self._timers.clear()
+
+
+class TimerContext:
+    """Timer context manager."""
+
+    def __init__(
+        self,
+        metrics: APIMetricsAction,
+        name: str,
+        labels: Optional[Dict[str, str]],
+    ) -> None:
+        self.metrics = metrics
+        self.name = name
+        self.labels = labels
+        self.start_time: Optional[float] = None
+
+    def __enter__(self) -> "TimerContext":
+        self.start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self.start_time is not None:
+            elapsed = time.time() - self.start_time
+            self.metrics.observe(self.name, elapsed, self.labels)
