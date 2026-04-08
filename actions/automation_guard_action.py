@@ -1,225 +1,216 @@
-"""Automation Guard Action.
+"""
+Automation Guard Action Module.
 
-Pre and post condition guards for automation steps with validation,
-assertion reporting, and recovery suggestions.
+Provides pre/post condition guards for automation actions
+ with automatic rollback on failure.
 """
 
-import sys
-import os
-from typing import Any, Dict, List, Optional, Callable
+from __future__ import annotations
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-class AutomationGuardAction(BaseAction):
-    """Guard automation steps with pre/post conditions.
-    
-    Validates preconditions before step execution and verifies
-    postconditions after completion with detailed assertion reports.
+class GuardType(Enum):
+    """Type of guard."""
+    PRECONDITION = "precondition"
+    POSTCONDITION = "postcondition"
+    INVARIANT = "invariant"
+
+
+@dataclass
+class GuardResult:
+    """Result of guard evaluation."""
+    passed: bool
+    guard_name: str
+    message: str = ""
+    details: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class GuardAction:
+    """A guard condition with optional remediation."""
+    name: str
+    guard_type: GuardType
+    condition: Callable[[], bool]
+    error_message: str = "Guard condition failed"
+    remediation: Optional[Callable[[], Any]] = None
+
+
+class AutomationGuardAction:
     """
-    action_type = "automation_guard"
-    display_name = "自动化守卫"
-    description = "自动化步骤前置/后置条件守卫，支持断言验证"
+    Pre/post condition guards for automation workflows.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute guarded action with condition validation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - action: Action to guard ('check_pre', 'check_post', 'execute_guarded').
-                - preconditions: List of {var, op, value, message} dicts.
-                - postconditions: List of {var, op, value, message} dicts.
-                - target_action: Action name to execute (for execute_guarded).
-                - target_params: Action parameters (for execute_guarded).
-                - save_to_var: Variable name for results.
-                - halt_on_failure: Halt execution on precondition failure.
-        
-        Returns:
-            ActionResult with guard validation results.
-        """
+    Evaluates conditions before and after actions with
+    automatic rollback and remediation support.
+
+    Example:
+        guard = AutomationGuardAction()
+        guard.add_precondition("app_running", check_app_running)
+        guard.add_postcondition("data_saved", check_data_saved)
+        with guard.guard("my_action"):
+            perform_action()
+    """
+
+    def __init__(self) -> None:
+        self._preconditions: list[GuardAction] = []
+        self._postconditions: list[GuardAction] = []
+        self._invariants: list[GuardAction] = []
+
+    def add_precondition(
+        self,
+        name: str,
+        condition: Callable[[], bool],
+        error_message: str = "Precondition failed",
+        remediation: Optional[Callable[[], Any]] = None,
+    ) -> "AutomationGuardAction":
+        """Add a precondition guard."""
+        guard = GuardAction(
+            name=name,
+            guard_type=GuardType.PRECONDITION,
+            condition=condition,
+            error_message=error_message,
+            remediation=remediation,
+        )
+        self._preconditions.append(guard)
+        return self
+
+    def add_postcondition(
+        self,
+        name: str,
+        condition: Callable[[], bool],
+        error_message: str = "Postcondition failed",
+        remediation: Optional[Callable[[], Any]] = None,
+    ) -> "AutomationGuardAction":
+        """Add a postcondition guard."""
+        guard = GuardAction(
+            name=name,
+            guard_type=GuardType.POSTCONDITION,
+            condition=condition,
+            error_message=error_message,
+            remediation=remediation,
+        )
+        self._postconditions.append(guard)
+        return self
+
+    def add_invariant(
+        self,
+        name: str,
+        condition: Callable[[], bool],
+        error_message: str = "Invariant violated",
+    ) -> "AutomationGuardAction":
+        """Add an invariant guard."""
+        guard = GuardAction(
+            name=name,
+            guard_type=GuardType.INVARIANT,
+            condition=condition,
+            error_message=error_message,
+        )
+        self._invariants.append(guard)
+        return self
+
+    def evaluate_preconditions(self) -> list[GuardResult]:
+        """Evaluate all preconditions."""
+        return self._evaluate_guards(self._preconditions)
+
+    def evaluate_postconditions(self) -> list[GuardResult]:
+        """Evaluate all postconditions."""
+        return self._evaluate_guards(self._postconditions)
+
+    def evaluate_invariants(self) -> list[GuardResult]:
+        """Evaluate all invariants."""
+        return self._evaluate_guards(self._invariants)
+
+    def _evaluate_guards(self, guards: list[GuardAction]) -> list[GuardResult]:
+        """Evaluate a list of guards."""
+        results: list[GuardResult] = []
+
+        for guard in guards:
+            try:
+                passed = guard.condition()
+                results.append(GuardResult(
+                    passed=passed,
+                    guard_name=guard.name,
+                    message=guard.error_message if not passed else "",
+                ))
+
+                if not passed and guard.remediation:
+                    logger.info(f"Running remediation for {guard.name}")
+                    guard.remediation()
+
+            except Exception as e:
+                results.append(GuardResult(
+                    passed=False,
+                    guard_name=guard.name,
+                    message=f"Guard evaluation error: {e}",
+                ))
+
+        return results
+
+    def all_passed(self, results: list[GuardResult]) -> bool:
+        """Check if all guards passed."""
+        return all(r.passed for r in results)
+
+    def guard(
+        self,
+        action_name: str,
+        action_func: Callable,
+        rollback: Optional[Callable[[], None]] = None,
+    ) -> Any:
+        """Execute an action with guard protection."""
+        pre_results = self.evaluate_preconditions()
+        if not self.all_passed(pre_results):
+            failed = [r for r in pre_results if not r.passed]
+            logger.error(f"Preconditions failed for {action_name}: {failed}")
+            if rollback:
+                rollback()
+            raise RuntimeError(f"Preconditions failed for {action_name}")
+
         try:
-            action = params.get('action', 'execute_guarded')
-            preconditions = params.get('preconditions', [])
-            postconditions = params.get('postconditions', [])
-            target_action = params.get('target_action')
-            target_params = params.get('target_params', {})
-            save_to_var = params.get('save_to_var', 'guard_results')
-            halt_on_failure = params.get('halt_on_failure', True)
-
-            if action == 'check_pre':
-                return self._check_conditions(context, preconditions, 'pre', save_to_var)
-            elif action == 'check_post':
-                return self._check_conditions(context, postconditions, 'post', save_to_var)
-            elif action == 'execute_guarded':
-                return self._execute_with_guards(context, preconditions, postconditions, 
-                                                 target_action, target_params, save_to_var, halt_on_failure)
-            else:
-                return ActionResult(success=False, message=f"Unknown guard action: {action}")
-
+            result = action_func()
         except Exception as e:
-            return ActionResult(success=False, message=f"Guard error: {e}")
+            logger.error(f"Action {action_name} failed: {e}")
+            if rollback:
+                rollback()
+            raise
 
-    def _check_conditions(self, context: Any, conditions: List[Dict], 
-                         cond_type: str, save_to_var: str) -> ActionResult:
-        """Check conditions and return results."""
-        results = []
-        all_passed = True
+        post_results = self.evaluate_postconditions()
+        if not self.all_passed(post_results):
+            failed = [r for r in post_results if not r.passed]
+            logger.error(f"Postconditions failed for {action_name}: {failed}")
+            if rollback:
+                rollback()
+            raise RuntimeError(f"Postconditions failed for {action_name}")
 
-        for i, cond in enumerate(conditions):
-            var = cond.get('var')
-            op = cond.get('op', 'eq')
-            expected = cond.get('value')
-            message = cond.get('message', f'{cond_type}condition[{i}]')
-            
-            actual = context.get_variable(var) if var else None
-            
-            passed, details = self._evaluate_condition(actual, op, expected)
-            
-            results.append({
-                'index': i,
-                'var': var,
-                'op': op,
-                'expected': expected,
-                'actual': actual,
-                'passed': passed,
-                'message': message,
-                'details': details
-            })
-            
-            if not passed:
-                all_passed = False
+        return result
 
-        summary = {
-            'type': cond_type,
-            'total': len(results),
-            'passed': sum(1 for r in results if r['passed']),
-            'failed': sum(1 for r in results if not r['passed']),
-            'all_passed': all_passed,
-            'results': results
-        }
+    async def guard_async(
+        self,
+        action_name: str,
+        action_func: Callable,
+        rollback: Optional[Callable[[], None]] = None,
+    ) -> Any:
+        """Execute an async action with guard protection."""
+        pre_results = self.evaluate_preconditions()
+        if not self.all_passed(pre_results):
+            raise RuntimeError(f"Preconditions failed for {action_name}")
 
-        context.set_variable(save_to_var, summary)
-        return ActionResult(success=all_passed, data=summary,
-                          message=f"{cond_type}conditions: {sum(1 for r in results if r['passed'])}/{len(results)} passed")
-
-    def _execute_with_guards(self, context: Any, preconditions: List[Dict],
-                            postconditions: List[Dict], target_action: str,
-                            target_params: Dict, save_to_var: str,
-                            halt_on_failure: bool) -> ActionResult:
-        """Execute action with pre and post condition guards."""
-        # Check preconditions
-        pre_result = self._check_conditions(context, preconditions, 'pre', f'{save_to_var}_pre')
-        
-        if not pre_result.success and halt_on_failure:
-            context.set_variable(save_to_var, {
-                'success': False,
-                'phase': 'precondition',
-                'pre_result': pre_result.data
-            })
-            return ActionResult(success=False, data=pre_result.data,
-                              message="Preconditions failed, halting")
-
-        # Execute target action
-        if target_action:
-            action = self._get_action(target_action)
-            if action is None:
-                return ActionResult(success=False, message=f"Unknown action: {target_action}")
-            
-            exec_result = action.execute(context, target_params)
-            
-            if not exec_result.success:
-                context.set_variable(save_to_var, {
-                    'success': False,
-                    'phase': 'execution',
-                    'result': exec_result
-                })
-                return exec_result
-        else:
-            exec_result = ActionResult(success=True, message="No target action")
-
-        # Check postconditions
-        post_result = self._check_conditions(context, postconditions, 'post', f'{save_to_var}_post')
-        
-        summary = {
-            'success': pre_result.success and exec_result.success and post_result.success,
-            'preconditions': pre_result.data,
-            'execution': exec_result.data if exec_result else None,
-            'postconditions': post_result.data,
-            'all_passed': pre_result.success and post_result.success
-        }
-
-        context.set_variable(save_to_var, summary)
-        
-        if not post_result.success:
-            return ActionResult(success=False, data=summary,
-                              message="Postconditions failed")
-        
-        return ActionResult(success=True, data=summary, message="Guarded execution completed")
-
-    def _evaluate_condition(self, actual: Any, op: str, expected: Any) -> tuple:
-        """Evaluate a single condition."""
         try:
-            if op == 'eq' or op == '==':
-                passed = actual == expected
-                details = f"{actual} == {expected}"
-            elif op == 'ne' or op == '!=':
-                passed = actual != expected
-                details = f"{actual} != {expected}"
-            elif op == 'gt' or op == '>':
-                passed = actual > expected
-                details = f"{actual} > {expected}"
-            elif op == 'ge' or op == '>=':
-                passed = actual >= expected
-                details = f"{actual} >= {expected}"
-            elif op == 'lt' or op == '<':
-                passed = actual < expected
-                details = f"{actual} < {expected}"
-            elif op == 'le' or op == '<=':
-                passed = actual <= expected
-                details = f"{actual} <= {expected}"
-            elif op == 'contains':
-                passed = expected in actual if actual else False
-                details = f"{expected} in {actual}"
-            elif op == 'startswith':
-                passed = str(actual).startswith(str(expected))
-                details = f"{actual} starts with {expected}"
-            elif op == 'endswith':
-                passed = str(actual).endswith(str(expected))
-                details = f"{actual} ends with {expected}"
-            elif op == 'regex':
-                import re
-                passed = bool(re.match(str(expected), str(actual)))
-                details = f"regex {expected} matches {actual}"
-            elif op == 'is_none':
-                passed = actual is None
-                details = f"{actual} is None"
-            elif op == 'is_not_none':
-                passed = actual is not None
-                details = f"{actual} is not None"
-            elif op == 'in':
-                passed = actual in expected
-                details = f"{actual} in {expected}"
-            elif op == 'type_is':
-                passed = type(actual).__name__ == expected
-                details = f"type({actual}) == {expected}"
-            elif op == 'len_gt':
-                passed = len(actual) > expected
-                details = f"len({actual}) > {expected}"
-            elif op == 'len_eq':
-                passed = len(actual) == expected
-                details = f"len({actual}) == {expected}"
-            else:
-                passed = False
-                details = f"Unknown operator: {op}"
-            
-            return passed, details
+            result = await action_func()
         except Exception as e:
-            return False, f"Evaluation error: {e}"
+            logger.error(f"Action {action_name} failed: {e}")
+            if rollback:
+                rollback()
+            raise
 
-    def _get_action(self, action_name: str):
-        """Get action from registry."""
-        from core.action_registry import ActionRegistry
-        registry = ActionRegistry.get_instance()
-        return registry.get_action(action_name)
+        post_results = self.evaluate_postconditions()
+        if not self.all_passed(post_results):
+            if rollback:
+                rollback()
+            raise RuntimeError(f"Postconditions failed for {action_name}")
+
+        return result
