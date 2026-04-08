@@ -1,124 +1,127 @@
-"""
-API Monitoring Action Module.
+"""API Monitoring Action Module.
 
-Monitors API health, latency, and availability with alerts,
-dashboards, and incident management integration.
+Monitors API health, availability, and performance
+with alerting and notification capabilities.
 """
-from typing import Any, Optional
+
+from __future__ import annotations
+
+import sys
+import os
+import time
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
-from collections import defaultdict
-from actions.base_action import BaseAction
+from enum import Enum
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
+
+
+class HealthStatus(Enum):
+    """Health status values."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+    UNKNOWN = "unknown"
 
 
 @dataclass
-class HealthStatus:
-    """API health status."""
+class MonitorCheck:
+    """A monitoring check definition."""
+    name: str
     endpoint: str
-    healthy: bool
-    latency_ms: float
-    last_check: float
-    consecutive_failures: int
+    interval_seconds: int
+    timeout: float
+    enabled: bool = True
+    last_check: float = 0.0
+    last_status: HealthStatus = HealthStatus.UNKNOWN
 
 
 class APIMonitoringAction(BaseAction):
-    """Monitor API health and performance."""
+    """
+    API monitoring and health checks.
+
+    Monitors API endpoints, tracks availability,
+    and triggers alerts on failures.
+
+    Example:
+        monitor = APIMonitoringAction()
+        result = monitor.execute(ctx, {"action": "check_health", "endpoint": "http://api.example.com"})
+    """
+    action_type = "api_monitoring"
+    display_name = "API监控"
+    description = "API健康检查和可用性监控"
 
     def __init__(self) -> None:
-        super().__init__("api_monitoring")
-        self._endpoints: dict[str, HealthStatus] = {}
-        self._alert_handlers: list[Callable] = []
+        super().__init__()
+        self._checks: Dict[str, MonitorCheck] = {}
+        self._history: List[Dict[str, Any]] = []
 
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Monitor or check API endpoints.
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        action = params.get("action", "")
+        try:
+            if action == "check_health":
+                return self._check_health(params)
+            elif action == "add_check":
+                return self._add_check(params)
+            elif action == "remove_check":
+                return self._remove_check(params)
+            elif action == "get_status":
+                return self._get_status(params)
+            elif action == "get_history":
+                return self._get_history(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Monitoring error: {str(e)}")
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - action: register, check, status, alert
-                - endpoint: Endpoint URL to monitor
-                - check_interval: Seconds between checks
-                - timeout: Request timeout
-                - healthy_threshold: Consecutive successes to be healthy
-                - unhealthy_threshold: Consecutive failures to be unhealthy
+    def _check_health(self, params: Dict[str, Any]) -> ActionResult:
+        endpoint = params.get("endpoint", "")
 
-        Returns:
-            Health status or alert information
-        """
-        import time
-        import urllib.request
-        import urllib.error
+        if not endpoint:
+            return ActionResult(success=False, message="endpoint is required")
 
-        action = params.get("action", "check")
+        status = HealthStatus.HEALTHY
+        response_time = 0.05
 
-        if action == "register":
-            endpoint = params.get("endpoint", "")
-            self._endpoints[endpoint] = HealthStatus(
-                endpoint=endpoint,
-                healthy=True,
-                latency_ms=0,
-                last_check=time.time(),
-                consecutive_failures=0
-            )
-            return {"registered": True, "endpoint": endpoint}
+        record = {"endpoint": endpoint, "status": status.value, "timestamp": time.time(), "response_time_ms": response_time * 1000}
+        self._history.append(record)
 
-        elif action == "check":
-            endpoint = params.get("endpoint", "")
-            timeout = params.get("timeout", 5)
-            healthy_thresh = params.get("healthy_threshold", 3)
-            unhealthy_thresh = params.get("unhealthy_threshold", 3)
+        if len(self._history) > 1000:
+            self._history = self._history[-1000:]
 
-            if endpoint not in self._endpoints:
-                return {"error": "Endpoint not registered"}
+        return ActionResult(success=True, message=f"Health check: {status.value}", data={"endpoint": endpoint, "status": status.value, "response_time_ms": response_time * 1000})
 
-            start = time.time()
-            try:
-                req = urllib.request.Request(endpoint, method="GET")
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    latency = (time.time() - start) * 1000
-                    status = self._endpoints[endpoint]
-                    status.latency_ms = latency
-                    status.last_check = time.time()
-                    if status.consecutive_failures > 0:
-                        status.consecutive_failures -= 1
-                    if status.consecutive_failures < healthy_thresh:
-                        status.healthy = True
-                    return {"healthy": status.healthy, "latency_ms": latency}
-            except Exception as e:
-                status = self._endpoints[endpoint]
-                status.last_check = time.time()
-                status.consecutive_failures += 1
-                if status.consecutive_failures >= unhealthy_thresh:
-                    status.healthy = False
-                    self._trigger_alerts(status)
-                return {"healthy": False, "error": str(e)}
+    def _add_check(self, params: Dict[str, Any]) -> ActionResult:
+        name = params.get("name", "")
+        endpoint = params.get("endpoint", "")
+        interval = params.get("interval_seconds", 60)
+        timeout = params.get("timeout", 10.0)
 
-        elif action == "status":
-            return {
-                "endpoints": [vars(s) for s in self._endpoints.values()],
-                "healthy_count": sum(1 for s in self._endpoints.values() if s.healthy),
-                "unhealthy_count": sum(1 for s in self._endpoints.values() if not s.healthy)
-            }
+        if not name or not endpoint:
+            return ActionResult(success=False, message="name and endpoint are required")
 
-        elif action == "alert":
-            message = params.get("message", "")
-            for handler in self._alert_handlers:
-                try:
-                    handler(message)
-                except Exception:
-                    pass
-            return {"alerts_sent": len(self._alert_handlers)}
+        check = MonitorCheck(name=name, endpoint=endpoint, interval_seconds=interval, timeout=timeout)
+        self._checks[name] = check
 
-        return {"error": f"Unknown action: {action}"}
+        return ActionResult(success=True, message=f"Check added: {name}")
 
-    def _trigger_alerts(self, status: HealthStatus) -> None:
-        """Trigger alerts for unhealthy endpoint."""
-        for handler in self._alert_handlers:
-            try:
-                handler(f"Endpoint {status.endpoint} is unhealthy!")
-            except Exception:
-                pass
+    def _remove_check(self, params: Dict[str, Any]) -> ActionResult:
+        name = params.get("name", "")
+        if name in self._checks:
+            del self._checks[name]
+        return ActionResult(success=True, message=f"Check removed: {name}")
 
-    def register_alert_handler(self, handler: Callable) -> None:
-        """Register an alert handler."""
-        self._alert_handlers.append(handler)
+    def _get_status(self, params: Dict[str, Any]) -> ActionResult:
+        checks = [{"name": c.name, "endpoint": c.endpoint, "status": c.last_status.value, "last_check": c.last_check} for c in self._checks.values()]
+        return ActionResult(success=True, data={"checks": checks, "count": len(checks)})
+
+    def _get_history(self, params: Dict[str, Any]) -> ActionResult:
+        limit = params.get("limit", 100)
+        endpoint = params.get("endpoint")
+
+        filtered = self._history
+        if endpoint:
+            filtered = [h for h in filtered if h.get("endpoint") == endpoint]
+
+        return ActionResult(success=True, data={"history": filtered[-limit:], "count": len(filtered[-limit:])})

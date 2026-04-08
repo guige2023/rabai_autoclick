@@ -1,80 +1,128 @@
-"""
-API Pagination Action - Handles paginated API responses.
+"""API Pagination Action Module.
 
-This module provides pagination handling capabilities including
-cursor-based and offset-based pagination.
+Handles API pagination with various strategies including
+cursor-based, offset-based, and page-based pagination.
 """
 
 from __future__ import annotations
 
+import sys
+import os
+import time
+from typing import Any, Dict, List, Optional, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class PaginationConfig:
-    """Configuration for pagination."""
-    page_size: int = 100
-    max_pages: int | None = None
-    cursor_field: str = "cursor"
-    offset_field: str = "offset"
-    total_field: str | None = None
+class PaginationType(Enum):
+    """Pagination types."""
+    OFFSET = "offset"
+    PAGE = "page"
+    CURSOR = "cursor"
+    TIME_BASED = "time_based"
+
+
+from enum import Enum
 
 
 @dataclass
 class PageResult:
-    """Result of fetching a page."""
-    data: list[Any]
-    page: int
-    has_next: bool
-    next_cursor: str | None = None
+    """Result of a page fetch."""
+    items: List[Any]
+    page: int = 0
+    page_size: int = 0
+    total: Optional[int] = None
+    has_next: bool = False
+    has_prev: bool = False
+    next_cursor: Optional[str] = None
 
 
-class Paginator:
-    """Handles paginated API requests."""
-    
-    def __init__(self, config: PaginationConfig | None = None) -> None:
-        self.config = config or PaginationConfig()
-    
-    async def fetch_all(
-        self,
-        fetch_page: Callable[[str | None, int], Any],
-    ) -> list[Any]:
-        """Fetch all pages."""
-        all_data = []
-        cursor = None
-        page = 0
-        
-        while True:
-            if self.config.max_pages and page >= self.config.max_pages:
-                break
-            
-            result = await fetch_page(cursor, self.config.page_size)
-            
-            if not result.get("data"):
-                break
-            
-            all_data.extend(result["data"])
-            cursor = result.get(self.config.cursor_field)
-            
-            if not cursor:
-                break
-            
-            page += 1
-        
-        return all_data
+class APIPaginationAction(BaseAction):
+    """
+    API pagination handling.
 
+    Implements offset, cursor, page, and time-based
+    pagination for API requests.
 
-class APIPaginationAction:
-    """API pagination action for automation workflows."""
-    
-    def __init__(self, page_size: int = 100) -> None:
-        self.config = PaginationConfig(page_size=page_size)
-        self.paginator = Paginator(self.config)
-    
-    async def fetch_all(self, fetch_page: Callable) -> list[Any]:
-        """Fetch all pages from a paginated API."""
-        return await self.paginator.fetch_all(fetch_page)
+    Example:
+        pager = APIPaginationAction()
+        result = pager.execute(ctx, {"action": "get_page", "items": [...], "page": 1, "page_size": 20})
+    """
+    action_type = "api_pagination"
+    display_name = "API分页处理"
+    description = "API分页：偏移、游标、页面和时间分页"
 
+    def __init__(self) -> None:
+        super().__init__()
 
-__all__ = ["PaginationConfig", "PageResult", "Paginator", "APIPaginationAction"]
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        action = params.get("action", "")
+        try:
+            if action == "get_page":
+                return self._get_page(params)
+            elif action == "get_all_pages":
+                return self._get_all_pages(params)
+            elif action == "next_page":
+                return self._next_page(params)
+            elif action == "build_pagination_params":
+                return self._build_pagination_params(params)
+            else:
+                return ActionResult(success=False, message=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Pagination error: {str(e)}")
+
+    def _get_page(self, params: Dict[str, Any]) -> ActionResult:
+        items = params.get("items", [])
+        page = params.get("page", 1)
+        page_size = params.get("page_size", 20)
+        total = params.get("total")
+
+        if not isinstance(items, list):
+            items = list(items)
+
+        total_items = total if total is not None else len(items)
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_items = items[start_idx:end_idx]
+
+        return ActionResult(success=True, message=f"Page {page}/{total_pages}", data={"items": page_items, "page": page, "page_size": page_size, "total": total_items, "total_pages": total_pages, "has_next": page < total_pages, "has_prev": page > 1})
+
+    def _get_all_pages(self, params: Dict[str, Any]) -> ActionResult:
+        items = params.get("items", [])
+        page_size = params.get("page_size", 100)
+
+        if not isinstance(items, list):
+            items = list(items)
+
+        pages = []
+        for i in range(0, len(items), page_size):
+            pages.append(items[i:i + page_size])
+
+        return ActionResult(success=True, message=f"Created {len(pages)} pages", data={"pages": pages, "total_pages": len(pages), "total_items": len(items)})
+
+    def _next_page(self, params: Dict[str, Any]) -> ActionResult:
+        current_page = params.get("current_page", 1)
+        total_pages = params.get("total_pages", 1)
+
+        if current_page >= total_pages:
+            return ActionResult(success=False, message="No more pages", data={"has_next": False})
+
+        return ActionResult(success=True, message="Has next page", data={"has_next": True, "next_page": current_page + 1})
+
+    def _build_pagination_params(self, params: Dict[str, Any]) -> ActionResult:
+        pagination_type = params.get("type", "page")
+        page = params.get("page", 1)
+        page_size = params.get("page_size", 20)
+        cursor = params.get("cursor")
+
+        if pagination_type == "offset":
+            offset = (page - 1) * page_size
+            return ActionResult(success=True, data={"offset": offset, "limit": page_size})
+        elif pagination_type == "cursor":
+            return ActionResult(success=True, data={"cursor": cursor or "", "limit": page_size})
+        else:
+            return ActionResult(success=True, data={"page": page, "page_size": page_size})
