@@ -1,411 +1,271 @@
-"""
-Automation Recovery Action Module
+"""Automation recovery action module for RabAI AutoClick.
 
-Provides recovery mechanisms, checkpoints, and state restoration for automation.
+Provides recovery mechanisms for automation workflows:
+- AutomationRecoveryManager: Manage workflow failure recovery
+- CheckpointRecovery: Recover from checkpoints on failure
+- StateRecovery: Restore automation state after crashes
 """
-from typing import Any, Optional, Callable, Awaitable
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-from collections import deque
-import asyncio
+
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import time
+import threading
+import logging
 import json
+import os
+from dataclasses import dataclass, field
+from enum import Enum
+from collections import defaultdict, deque
+
+import sys
+import os
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
 class RecoveryStrategy(Enum):
     """Recovery strategies."""
-    RETRY = "retry"
     CHECKPOINT = "checkpoint"
-    FALLBACK = "fallback"
-    ROLLBACK = "rollback"
-    CIRCUIT_BREAKER = "circuit_breaker"
+    STATE = "state"
+    COMPENSATION = "compensation"
+    IDEMPOTENT_RETRY = "idempotent_retry"
+    SAGA_ROLLBACK = "saga_rollback"
 
 
 @dataclass
 class Checkpoint:
-    """A recovery checkpoint."""
+    """Workflow checkpoint."""
     checkpoint_id: str
-    operation_name: str
-    state: dict[str, Any]
-    timestamp: datetime
-    ttl_seconds: Optional[float] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    step_id: str
+    state: Dict[str, Any]
+    timestamp: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class RecoveryAction:
-    """A recovery action to execute."""
-    action_id: str
-    action_type: RecoveryStrategy
-    target_operation: str
-    executor: Callable[[], Awaitable[Any]]
-    max_attempts: int = 3
-    backoff_seconds: float = 1.0
-    fallback_value: Any = None
-
-
-@dataclass
-class RecoveryResult:
-    """Result of recovery operation."""
-    success: bool
-    recovered: bool
-    attempts: int
-    final_value: Any = None
-    error: Optional[str] = None
-    recovery_steps: list[str] = field(default_factory=list)
-    duration_ms: float = 0
-
-
-@dataclass
-class OperationContext:
-    """Context for an operation that can be checkpointed."""
-    operation_id: str
-    operation_name: str
-    state: dict[str, Any]
-    checkpoints: list[Checkpoint] = field(default_factory=list)
-    started_at: datetime = field(default_factory=datetime.now)
-    metadata: dict[str, Any] = field(default_factory=dict)
+class RecoveryConfig:
+    """Configuration for recovery."""
+    strategy: RecoveryStrategy = RecoveryStrategy.CHECKPOINT
+    checkpoint_interval: int = 5
+    max_checkpoints: int = 10
+    persistence_path: Optional[str] = None
+    auto_recover: bool = True
+    recovery_timeout: float = 300.0
 
 
 class CheckpointManager:
-    """Manages checkpoints for recovery."""
+    """Manage workflow checkpoints."""
     
-    def __init__(self, max_checkpoints: int = 100):
-        self.max_checkpoints = max_checkpoints
-        self._checkpoints: dict[str, deque[Checkpoint]] = {}
-        self._lock = asyncio.Lock()
+    def __init__(self, config: RecoveryConfig):
+        self.config = config
+        self._checkpoints: Dict[str, deque] = defaultdict(lambda: deque(maxlen=config.max_checkpoints))
+        self._current_checkpoint: Dict[str, Checkpoint] = {}
+        self._lock = threading.RLock()
     
-    async def save_checkpoint(
-        self,
-        context: OperationContext,
-        ttl_seconds: Optional[float] = None
-    ) -> Checkpoint:
-        """Save a checkpoint for the operation."""
-        async with self._lock:
-            checkpoint = Checkpoint(
-                checkpoint_id=f"{context.operation_id}:{len(context.checkpoints)}",
-                operation_name=context.operation_name,
-                state=context.state.copy(),
-                timestamp=datetime.now(),
-                ttl_seconds=ttl_seconds
-            )
-            
-            if context.operation_id not in self._checkpoints:
-                self._checkpoints[context.operation_id] = deque(maxlen=self.max_checkpoints)
-            
-            self._checkpoints[context.operation_id].append(checkpoint)
-            
-            return checkpoint
+    def create_checkpoint(self, workflow_id: str, step_id: str, state: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Checkpoint:
+        """Create a checkpoint."""
+        checkpoint_id = f"{workflow_id}_{step_id}_{int(time.time() * 1000)}"
+        checkpoint = Checkpoint(
+            checkpoint_id=checkpoint_id,
+            step_id=step_id,
+            state=dict(state),
+            metadata=metadata or {}
+        )
+        
+        with self._lock:
+            self._checkpoints[workflow_id].append(checkpoint)
+            self._current_checkpoint[f"{workflow_id}:{step_id}"] = checkpoint
+        
+        self._persist_checkpoint(workflow_id, checkpoint)
+        return checkpoint
     
-    async def get_latest_checkpoint(
-        self,
-        operation_id: str
-    ) -> Optional[Checkpoint]:
-        """Get the latest checkpoint for an operation."""
-        if operation_id not in self._checkpoints:
-            return None
-        
-        checkpoints = self._checkpoints[operation_id]
-        if not checkpoints:
-            return None
-        
-        latest = checkpoints[-1]
-        
-        # Check TTL
-        if latest.ttl_seconds:
-            age = (datetime.now() - latest.timestamp).total_seconds()
-            if age > latest.ttl_seconds:
-                return None
-        
-        return latest
-    
-    async def get_checkpoint_by_id(
-        self,
-        checkpoint_id: str
-    ) -> Optional[Checkpoint]:
-        """Get a specific checkpoint by ID."""
-        op_id = checkpoint_id.rsplit(":", 1)[0]
-        
-        if op_id not in self._checkpoints:
-            return None
-        
-        for checkpoint in self._checkpoints[op_id]:
-            if checkpoint.checkpoint_id == checkpoint_id:
-                return checkpoint
-        
+    def get_last_checkpoint(self, workflow_id: str) -> Optional[Checkpoint]:
+        """Get most recent checkpoint for workflow."""
+        with self._lock:
+            checkpoints = self._checkpoints.get(workflow_id)
+            if checkpoints:
+                return checkpoints[-1]
         return None
     
-    async def list_checkpoints(
-        self,
-        operation_id: str
-    ) -> list[Checkpoint]:
-        """List all checkpoints for an operation."""
-        if operation_id not in self._checkpoints:
-            return []
-        
-        return list(self._checkpoints[operation_id])
+    def get_checkpoint_by_id(self, workflow_id: str, checkpoint_id: str) -> Optional[Checkpoint]:
+        """Get specific checkpoint by ID."""
+        with self._lock:
+            for cp in self._checkpoints.get(workflow_id, []):
+                if cp.checkpoint_id == checkpoint_id:
+                    return cp
+        return None
     
-    async def clear_checkpoints(self, operation_id: str):
-        """Clear all checkpoints for an operation."""
-        if operation_id in self._checkpoints:
-            del self._checkpoints[operation_id]
+    def list_checkpoints(self, workflow_id: str) -> List[Checkpoint]:
+        """List all checkpoints for workflow."""
+        with self._lock:
+            return list(self._checkpoints.get(workflow_id, []))
+    
+    def clear_checkpoints(self, workflow_id: str):
+        """Clear all checkpoints for workflow."""
+        with self._lock:
+            self._checkpoints.pop(workflow_id, None)
+    
+    def _persist_checkpoint(self, workflow_id: str, checkpoint: Checkpoint):
+        """Persist checkpoint to disk."""
+        if not self.config.persistence_path:
+            return
+        try:
+            path = os.path.join(self.config.persistence_path, f"{workflow_id}_checkpoints.json")
+            checkpoints = self.list_checkpoints(workflow_id)
+            data = [{"checkpoint_id": cp.checkpoint_id, "step_id": cp.step_id, "state": cp.state, "timestamp": cp.timestamp} for cp in checkpoints]
+            with open(path, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            logging.error(f"Failed to persist checkpoint: {e}")
 
 
-class AutomationRecoveryAction:
-    """Main recovery automation action handler."""
+class AutomationRecoveryManager:
+    """Manage automation workflow recovery."""
+    
+    def __init__(self, config: Optional[RecoveryConfig] = None):
+        self.config = config or RecoveryConfig()
+        self._checkpoint_manager = CheckpointManager(self.config)
+        self._recovery_handlers: Dict[str, Callable] = {}
+        self._compensations: Dict[str, List[Callable]] = defaultdict(list)
+        self._lock = threading.RLock()
+        self._stats = {"total_recoveries": 0, "successful_recoveries": 0, "failed_recoveries": 0}
+    
+    def register_compensation(self, step_id: str, compensation: Callable):
+        """Register compensation action for step."""
+        with self._lock:
+            self._compensations[step_id].append(compensation)
+    
+    def register_recovery_handler(self, error_type: str, handler: Callable):
+        """Register recovery handler for error type."""
+        with self._lock:
+            self._recovery_handlers[error_type] = handler
+    
+    def checkpoint(self, workflow_id: str, step_id: str, state: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Checkpoint:
+        """Create checkpoint during workflow execution."""
+        return self._checkpoint_manager.create_checkpoint(workflow_id, step_id, state, metadata)
+    
+    def recover(self, workflow_id: str, error: Exception, context: Any) -> Tuple[bool, Any]:
+        """Attempt to recover from workflow failure."""
+        with self._lock:
+            self._stats["total_recoveries"] += 1
+        
+        error_type = type(error).__name__
+        
+        handler = self._recovery_handlers.get(error_type)
+        if handler:
+            try:
+                result = handler(error, context)
+                with self._lock:
+                    self._stats["successful_recoveries"] += 1
+                return True, result
+            except Exception as e:
+                logging.error(f"Recovery handler failed: {e}")
+                with self._lock:
+                    self._stats["failed_recoveries"] += 1
+                return False, e
+        
+        if self.config.strategy == RecoveryStrategy.CHECKPOINT:
+            return self._recover_from_checkpoint(workflow_id, context)
+        
+        if self.config.strategy == RecoveryStrategy.COMPENSATION:
+            return self._compensate(workflow_id, context)
+        
+        return False, error
+    
+    def _recover_from_checkpoint(self, workflow_id: str, context: Any) -> Tuple[bool, Any]:
+        """Recover from last checkpoint."""
+        checkpoint = self._checkpoint_manager.get_last_checkpoint(workflow_id)
+        if not checkpoint:
+            return False, "No checkpoint found"
+        return True, {"state": checkpoint.state, "resume_step": checkpoint.step_id}
+    
+    def _compensate(self, workflow_id: str, context: Any) -> Tuple[bool, Any]:
+        """Run compensation actions in reverse order."""
+        compensations_run = []
+        errors = []
+        
+        with self._lock:
+            step_ids = list(self._compensations.keys())
+        
+        for step_id in reversed(step_ids):
+            with self._lock:
+                comps = list(self._compensations.get(step_id, []))
+            
+            for comp in comps:
+                try:
+                    comp(context)
+                    compensations_run.append(step_id)
+                except Exception as e:
+                    errors.append(str(e))
+        
+        if errors:
+            return False, {"compensations": compensations_run, "errors": errors}
+        return True, {"compensations": compensations_run}
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get recovery statistics."""
+        with self._lock:
+            return dict(self._stats)
+
+
+class AutomationRecoveryAction(BaseAction):
+    """Automation recovery action."""
+    action_type = "automation_recovery"
+    display_name = "自动化恢复"
+    description = "自动化工作流失败恢复"
     
     def __init__(self):
-        self._checkpoint_manager = CheckpointManager()
-        self._recovery_handlers: dict[str, Callable] = {}
-        self._fallback_handlers: dict[str, Callable] = {}
-        self._circuit_breakers: dict[str, dict] = {}
-        self._stats: dict[str, Any] = defaultdict(int)
+        super().__init__()
+        self._manager: Optional[AutomationRecoveryManager] = None
+        self._lock = threading.Lock()
     
-    def register_recovery_handler(
-        self,
-        operation_name: str,
-        handler: Callable[[Exception, OperationContext], Awaitable[Any]]
-    ) -> "AutomationRecoveryAction":
-        """Register a recovery handler for an operation."""
-        self._recovery_handlers[operation_name] = handler
-        return self
-    
-    def register_fallback(
-        self,
-        operation_name: str,
-        fallback: Callable[[], Awaitable[Any]]
-    ) -> "AutomationRecoveryAction":
-        """Register a fallback handler for an operation."""
-        self._fallback_handlers[operation_name] = fallback
-        return self
-    
-    async def execute_with_recovery(
-        self,
-        context: OperationContext,
-        operation: Callable[[OperationContext], Awaitable[Any]],
-        recovery_config: Optional[dict[str, Any]] = None
-    ) -> RecoveryResult:
-        """
-        Execute an operation with recovery support.
-        
-        Args:
-            context: Operation context
-            operation: Operation to execute
-            recovery_config: Recovery configuration
-            
-        Returns:
-            RecoveryResult with outcome
-        """
-        start_time = datetime.now()
-        attempts = 0
-        recovery_steps = []
-        max_attempts = recovery_config.get("max_attempts", 3) if recovery_config else 3
-        backoff = recovery_config.get("backoff_seconds", 1.0) if recovery_config else 1.0
-        
-        config = recovery_config or {}
-        
-        while attempts < max_attempts:
-            attempts += 1
-            
-            try:
-                # Save checkpoint before execution
-                await self._checkpoint_manager.save_checkpoint(context)
-                
-                # Execute operation
-                result = await operation(context)
-                
-                self._stats["successful_operations"] += 1
-                
-                return RecoveryResult(
-                    success=True,
-                    recovered=False,
-                    attempts=attempts,
-                    final_value=result,
-                    recovery_steps=recovery_steps,
-                    duration_ms=(datetime.now() - start_time).total_seconds() * 1000
+    def _get_manager(self, params: Dict[str, Any]) -> AutomationRecoveryManager:
+        """Get or create recovery manager."""
+        with self._lock:
+            if self._manager is None:
+                config = RecoveryConfig(
+                    strategy=RecoveryStrategy[params.get("strategy", "checkpoint").upper()],
+                    checkpoint_interval=params.get("checkpoint_interval", 5),
+                    max_checkpoints=params.get("max_checkpoints", 10),
+                    auto_recover=params.get("auto_recover", True),
                 )
-                
-            except Exception as e:
-                self._stats["operation_errors"] += 1
-                last_error = e
-                
-                # Save checkpoint on failure
-                await self._checkpoint_manager.save_checkpoint(context)
-                
-                # Try to recover
-                if context.operation_name in self._recovery_handlers:
-                    try:
-                        recovered_value = await self._recovery_handlers[context.operation_name](
-                            e, context
-                        )
-                        recovery_steps.append(f"Recovery handler succeeded: {context.operation_name}")
-                        
-                        return RecoveryResult(
-                            success=True,
-                            recovered=True,
-                            attempts=attempts,
-                            final_value=recovered_value,
-                            recovery_steps=recovery_steps,
-                            duration_ms=(datetime.now() - start_time).total_seconds() * 1000
-                        )
-                    except Exception as recovery_error:
-                        recovery_steps.append(f"Recovery failed: {recovery_error}")
-                
-                # Apply backoff before retry
-                if attempts < max_attempts:
-                    await asyncio.sleep(backoff * (2 ** (attempts - 1)))
-        
-        # All retries exhausted - try fallback
-        if context.operation_name in self._fallback_handlers:
-            try:
-                fallback_value = await self._fallback_handlers[context.operation_name]()
-                recovery_steps.append("Fallback executed")
-                
-                self._stats["fallback_success"] += 1
-                
-                return RecoveryResult(
-                    success=True,
-                    recovered=True,
-                    attempts=attempts,
-                    final_value=fallback_value,
-                    recovery_steps=recovery_steps,
-                    duration_ms=(datetime.now() - start_time).total_seconds() * 1000
-                )
-            except Exception as fallback_error:
-                recovery_steps.append(f"Fallback failed: {fallback_error}")
-                self._stats["fallback_errors"] += 1
-        
-        self._stats["total_failures"] += 1
-        
-        return RecoveryResult(
-            success=False,
-            recovered=False,
-            attempts=attempts,
-            error=str(last_error),
-            recovery_steps=recovery_steps,
-            duration_ms=(datetime.now() - start_time).total_seconds() * 1000
-        )
+                self._manager = AutomationRecoveryManager(config)
+            return self._manager
     
-    async def rollback_to_checkpoint(
-        self,
-        operation_id: str,
-        checkpoint_id: Optional[str] = None
-    ) -> Optional[dict[str, Any]]:
-        """
-        Rollback operation to a checkpoint.
-        
-        Args:
-            operation_id: ID of the operation
-            checkpoint_id: Specific checkpoint ID, or None for latest
-            
-        Returns:
-            Restored state if found
-        """
-        if checkpoint_id:
-            checkpoint = await self._checkpoint_manager.get_checkpoint_by_id(checkpoint_id)
-        else:
-            checkpoint = await self._checkpoint_manager.get_latest_checkpoint(operation_id)
-        
-        if checkpoint:
-            self._stats["checkpoints_restored"] += 1
-            return checkpoint.state
-        
-        return None
-    
-    async def execute_with_circuit_breaker(
-        self,
-        operation_name: str,
-        operation: Callable[[], Awaitable[Any]],
-        threshold: int = 5,
-        timeout_seconds: float = 60.0
-    ) -> RecoveryResult:
-        """
-        Execute operation with circuit breaker pattern.
-        
-        Circuit opens after threshold consecutive failures.
-        """
-        start_time = datetime.now()
-        
-        # Get or create circuit breaker state
-        if operation_name not in self._circuit_breakers:
-            self._circuit_breakers[operation_name] = {
-                "failures": 0,
-                "successes": 0,
-                "state": "closed",  # closed, open, half_open
-                "last_failure": None,
-                "opened_at": None
-            }
-        
-        cb = self._circuit_breakers[operation_name]
-        
-        # Check if circuit is open
-        if cb["state"] == "open":
-            elapsed = (datetime.now() - cb["opened_at"]).total_seconds() if cb["opened_at"] else 0
-            
-            if elapsed > timeout_seconds:
-                cb["state"] = "half_open"
-            else:
-                self._stats["circuit_breaker_rejected"] += 1
-                return RecoveryResult(
-                    success=False,
-                    recovered=False,
-                    attempts=1,
-                    error="Circuit breaker is open",
-                    recovery_steps=["Circuit breaker rejection"]
-                )
-        
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute recovery operation."""
         try:
-            result = await operation()
+            manager = self._get_manager(params)
+            command = params.get("command", "checkpoint")
+            workflow_id = params.get("workflow_id", "default")
             
-            # Record success
-            cb["successes"] += 1
-            cb["failures"] = 0
+            if command == "checkpoint":
+                step_id = params.get("step_id", "step_0")
+                state = params.get("state", {})
+                checkpoint = manager.checkpoint(workflow_id, step_id, state)
+                return ActionResult(success=True, data={"checkpoint_id": checkpoint.checkpoint_id})
             
-            if cb["state"] == "half_open":
-                cb["state"] = "closed"
+            elif command == "recover":
+                error = params.get("error")
+                result, data = manager.recover(workflow_id, error or Exception("Unknown"), context)
+                return ActionResult(success=result, data={"recovery": data})
             
-            self._stats["circuit_breaker_success"] += 1
+            elif command == "register_compensation":
+                step_id = params.get("step_id")
+                handler = params.get("handler")
+                if step_id and handler:
+                    manager.register_compensation(step_id, handler)
+                return ActionResult(success=True)
             
-            return RecoveryResult(
-                success=True,
-                recovered=False,
-                attempts=1,
-                final_value=result,
-                duration_ms=(datetime.now() - start_time).total_seconds() * 1000
-            )
+            elif command == "stats":
+                stats = manager.get_stats()
+                return ActionResult(success=True, data={"stats": stats})
+            
+            elif command == "list_checkpoints":
+                checkpoints = manager._checkpoint_manager.list_checkpoints(workflow_id)
+                return ActionResult(success=True, data={"checkpoints": [{"id": cp.checkpoint_id, "step": cp.step_id} for cp in checkpoints]})
+            
+            return ActionResult(success=False, message=f"Unknown command: {command}")
             
         except Exception as e:
-            cb["failures"] += 1
-            cb["last_failure"] = datetime.now()
-            
-            if cb["failures"] >= threshold:
-                cb["state"] = "open"
-                cb["opened_at"] = datetime.now()
-            
-            self._stats["circuit_breaker_errors"] += 1
-            
-            return RecoveryResult(
-                success=False,
-                recovered=False,
-                attempts=1,
-                error=str(e),
-                duration_ms=(datetime.now() - start_time).total_seconds() * 1000
-            )
-    
-    def get_stats(self) -> dict[str, Any]:
-        """Get recovery statistics."""
-        return dict(self._stats)
-    
-    async def get_circuit_breaker_status(self, operation_name: str) -> Optional[dict[str, Any]]:
-        """Get circuit breaker status for an operation."""
-        if operation_name not in self._circuit_breakers:
-            return None
-        
-        cb = self._circuit_breakers[operation_name]
-        return {
-            "operation": operation_name,
-            "state": cb["state"],
-            "failures": cb["failures"],
-            "successes": cb["successes"],
-            "last_failure": cb["last_failure"].isoformat() if cb["last_failure"] else None
-        }
+            return ActionResult(success=False, message=f"AutomationRecoveryAction error: {str(e)}")
