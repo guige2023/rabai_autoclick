@@ -1,337 +1,133 @@
-"""Color Extraction Utilities.
+"""
+Color extraction utilities for UI element color analysis.
 
-Extract dominant colors, palettes, and color histograms from UI screenshots.
-Useful for visual comparison, theme detection, and color-based element identification.
+Provides color extraction from screenshots, dominant color detection,
+palette generation, and color comparison.
 """
 
 from __future__ import annotations
 
-import math
-from collections import Counter
 from dataclasses import dataclass
 from typing import Optional
 
 
 @dataclass
 class Color:
-    """Represents an RGB color with utility methods.
-
-    Attributes:
-        r: Red component (0-255).
-        g: Green component (0-255).
-        b: Blue component (0-255).
-        count: Pixel count for this color in an image.
-    """
-
+    """RGB color representation."""
     r: int
     g: int
     b: int
-    count: int = 1
-
-    def __post_init__(self) -> None:
-        """Clamp values to valid range."""
-        self.r = max(0, min(255, self.r))
-        self.g = max(0, min(255, self.g))
-        self.b = max(0, min(255, self.b))
 
     @property
     def rgb(self) -> tuple[int, int, int]:
-        """Return as RGB tuple."""
         return (self.r, self.g, self.b)
 
     @property
     def hex(self) -> str:
-        """Return as hex string."""
         return f"#{self.r:02x}{self.g:02x}{self.b:02x}"
 
     @property
     def luminance(self) -> float:
-        """Calculate perceived luminance (0.0 to 1.0)."""
-        return 0.299 * self.r + 0.587 * self.g + 0.114 * self.b
+        """Compute relative luminance."""
+        def to_linear(c: int) -> float:
+            v = c / 255.0
+            return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+        return 0.2126 * to_linear(self.r) + 0.7152 * to_linear(self.g) + 0.0722 * to_linear(self.b)
 
-    @property
-    def is_dark(self) -> bool:
-        """Check if color is considered dark."""
-        return self.luminance < 128
-
-    @property
     def is_light(self) -> bool:
-        """Check if color is considered light."""
-        return self.luminance >= 128
+        return self.luminance > 0.5
 
-    def distance_to(self, other: "Color") -> float:
-        """Calculate Euclidean distance to another color.
+    def contrast_with(self, other: Color) -> float:
+        """Compute contrast ratio with another color."""
+        l1 = self.luminance
+        l2 = other.luminance
+        lighter = max(l1, l2)
+        darker = min(l1, l2)
+        return (lighter + 0.05) / (darker + 0.05)
 
-        Args:
-            other: Color to measure distance to.
-
-        Returns:
-            Distance value (0.0 to ~441.67 for max distance).
-        """
-        dr = self.r - other.r
-        dg = self.g - other.g
-        db = self.b - other.b
-        return math.sqrt(dr * dr + dg * dg + db * db)
-
-    def is_similar_to(self, other: "Color", threshold: float = 30.0) -> bool:
-        """Check if another color is within threshold distance.
-
-        Args:
-            other: Color to compare.
-            threshold: Maximum distance to consider similar.
-
-        Returns:
-            True if colors are similar.
-        """
-        return self.distance_to(other) <= threshold
-
-    def to_hsv(self) -> tuple[float, float, float]:
-        """Convert to HSV representation.
-
-        Returns:
-            Tuple of (hue 0-360, saturation 0-1, value 0-1).
-        """
-        r, g, b = self.r / 255.0, self.g / 255.0, self.b / 255.0
-        max_c = max(r, g, b)
-        min_c = min(r, g, b)
-        diff = max_c - min_c
-
-        if diff == 0:
-            hue = 0.0
-        elif max_c == r:
-            hue = 60 * (((g - b) / diff) % 6)
-        elif max_c == g:
-            hue = 60 * (((b - r) / diff) + 2)
-        else:
-            hue = 60 * (((r - g) / diff) + 4)
-
-        saturation = 0.0 if max_c == 0 else diff / max_c
-        value = max_c
-        return (hue, saturation, value)
+    def distance_to(self, other: Color) -> float:
+        """Compute Euclidean distance to another color."""
+        return ((self.r - other.r) ** 2 + (self.g - other.g) ** 2 + (self.b - other.b) ** 2) ** 0.5
 
 
-@dataclass
-class ColorPalette:
-    """Collection of colors forming a palette.
+class ColorExtractor:
+    """Extracts colors from image data."""
 
-    Attributes:
-        dominant: The most dominant color.
-        colors: All colors in the palette.
-    """
-
-    dominant: Color
-    colors: list[Color]
-
-    def find_similar(self, color: Color, threshold: float = 30.0) -> Optional[Color]:
-        """Find a color in the palette similar to the given color.
-
-        Args:
-            color: Color to match.
-            threshold: Maximum distance for similarity.
-
-        Returns:
-            Matching Color or None.
-        """
-        for c in self.colors:
-            if c.is_similar_to(color, threshold):
-                return c
-        return None
-
-
-class DominantColorExtractor:
-    """Extracts dominant colors from image data.
-
-    Uses k-means-style clustering for color quantization.
-
-    Example:
-        extractor = DominantColorExtractor()
-        pixels = load_image_pixels("screenshot.png")
-        palette = extractor.extract(pixels, num_colors=5)
-    """
-
-    def __init__(self):
-        """Initialize the extractor."""
-        pass
-
-    def extract(
+    def extract_dominant(
         self,
         pixels: list[tuple[int, int, int]],
-        num_colors: int = 5,
-        min_threshold: float = 0.01,
-    ) -> ColorPalette:
-        """Extract dominant colors from pixel data.
-
-        Args:
-            pixels: List of (r, g, b) tuples.
-            num_colors: Target number of dominant colors.
-            min_threshold: Minimum population ratio for a color to be included.
-
-        Returns:
-            ColorPalette with extracted colors.
-        """
-        if not pixels:
-            return ColorPalette(
-                dominant=Color(0, 0, 0),
-                colors=[Color(0, 0, 0)],
-            )
-
-        # Count color frequencies
-        color_counts: dict[tuple[int, int, int], int] = Counter(pixels)
-
-        # Quantize colors to reduce palette
-        quantized = self._quantize_colors(color_counts, num_colors * 2)
-
-        # Cluster similar colors
-        clusters = self._cluster_colors(quantized, num_colors)
-
-        # Sort by population
-        sorted_colors = sorted(clusters, key=lambda c: c.count, reverse=True)
-
-        total_pixels = len(pixels)
-        filtered = [c for c in sorted_colors if c.count / total_pixels >= min_threshold]
-
-        if not filtered:
-            filtered = sorted_colors[:num_colors]
-
-        dominant = filtered[0] if filtered else Color(0, 0, 0)
-        return ColorPalette(dominant=dominant, colors=filtered)
-
-    def _quantize_colors(
-        self,
-        color_counts: dict[tuple[int, int, int], int],
-        levels: int = 8,
-    ) -> dict[tuple[int, int, int], int]:
-        """Reduce color precision for clustering.
-
-        Args:
-            color_counts: Color frequency map.
-            levels: Number of quantization levels per channel.
-
-        Returns:
-            Quantized color counts.
-        """
-        step = 256 // levels
-        quantized: dict[tuple[int, int, int], int] = {}
-
-        for (r, g, b), count in color_counts.items():
-            qr = (r // step) * step + step // 2
-            qg = (g // step) * step + step // 2
-            qb = (b // step) * step + step // 2
-            qcolor = (max(0, min(255, qr)), max(0, min(255, qg)), max(0, min(255, qb)))
-            quantized[qcolor] = quantized.get(qcolor, 0) + count
-
-        return quantized
-
-    def _cluster_colors(
-        self,
-        color_counts: dict[tuple[int, int, int], int],
-        target_count: int,
+        k: int = 5,
     ) -> list[Color]:
-        """Cluster similar colors together.
+        """Extract k dominant colors from pixel list using simple clustering."""
+        if not pixels:
+            return []
 
-        Args:
-            color_counts: Quantized color counts.
-            target_count: Target number of clusters.
+        # Simple k-means-like approach
+        colors = [Color(p[0], p[1], p[2]) for p in pixels[:1000]]  # Sample
 
-        Returns:
-            List of Color objects representing clusters.
-        """
-        if len(color_counts) <= target_count:
-            return [Color(r, g, b, c) for (r, g, b), c in color_counts.items()]
+        # Quantize to reduce color space
+        quantized = {}
+        for c in colors:
+            qr, qg, qb = c.r // 32 * 32, c.g // 32 * 32, c.b // 32 * 32
+            key = (qr, qg, qb)
+            quantized[key] = quantized.get(key, 0) + 1
 
-        # Simple greedy clustering
-        sorted_colors = sorted(
-            color_counts.keys(), key=lambda c: color_counts[c], reverse=True
-        )
-        centroids = sorted_colors[:target_count]
-
-        clusters: dict[int, list[tuple[int, int, int]]] = {i: [] for i in range(len(centroids))}
-
-        for color in color_counts.keys():
-            min_dist = float("inf")
-            closest = 0
-            for i, centroid in enumerate(centroids):
-                dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(color, centroid)))
-                if dist < min_dist:
-                    min_dist = dist
-                    closest = i
-            clusters[closest].append(color)
-
+        # Sort by frequency
+        sorted_colors = sorted(quantized.items(), key=lambda x: x[1], reverse=True)
         result = []
-        for i, centroid in enumerate(centroids):
-            cluster_colors = clusters[i]
-            if cluster_colors:
-                total_count = sum(color_counts[c] for c in cluster_colors)
-                avg_r = sum(c[0] * color_counts[c] for c in cluster_colors) // total_count
-                avg_g = sum(c[1] * color_counts[c] for c in cluster_colors) // total_count
-                avg_b = sum(c[2] * color_counts[c] for c in cluster_colors) // total_count
-                result.append(Color(avg_r, avg_g, avg_b, total_count))
-            else:
-                result.append(Color(*centroid, color_counts[centroid]))
-
+        for (r, g, b), count in sorted_colors[:k]:
+            result.append(Color(r, g, b))
         return result
 
-
-class ColorHistogram:
-    """Computes color histograms for images."""
-
-    def __init__(self, bins_per_channel: int = 16):
-        """Initialize histogram builder.
-
-        Args:
-            bins_per_channel: Number of bins per color channel.
-        """
-        self.bins_per_channel = bins_per_channel
-
-    def compute(self, pixels: list[tuple[int, int, int]]) -> dict[str, list[int]]:
-        """Compute color histogram from pixel data.
-
-        Args:
-            pixels: List of (r, g, b) tuples.
-
-        Returns:
-            Dictionary with 'r', 'g', 'b' keys containing bin counts.
-        """
-        bin_size = 256 // self.bins_per_channel
-        hist_r = [0] * self.bins_per_channel
-        hist_g = [0] * self.bins_per_channel
-        hist_b = [0] * self.bins_per_channel
-
-        for r, g, b in pixels:
-            hist_r[min(r // bin_size, self.bins_per_channel - 1)] += 1
-            hist_g[min(g // bin_size, self.bins_per_channel - 1)] += 1
-            hist_b[min(b // bin_size, self.bins_per_channel - 1)] += 1
-
-        return {"r": hist_r, "g": hist_g, "b": hist_b}
-
-    def compare(
+    def extract_from_region(
         self,
-        hist1: dict[str, list[int]],
-        hist2: dict[str, list[int]],
-    ) -> float:
-        """Compare two histograms using correlation.
+        pixels: list[tuple[int, int, int]],
+    ) -> Color:
+        """Extract average color from a region."""
+        if not pixels:
+            return Color(0, 0, 0)
 
-        Args:
-            hist1: First histogram dict.
-            hist2: Second histogram dict.
+        total_r = sum(p[0] for p in pixels)
+        total_g = sum(p[1] for p in pixels)
+        total_b = sum(p[2] for p in pixels)
+        count = len(pixels)
 
-        Returns:
-            Correlation coefficient (-1 to 1).
-        """
-        def correlate(a: list[int], b: list[int]) -> float:
-            n = len(a)
-            if n == 0:
-                return 0.0
-            mean_a = sum(a) / n
-            mean_b = sum(b) / n
-            numerator = sum((x - mean_a) * (y - mean_b) for x, y in zip(a, b))
-            denom_a = math.sqrt(sum((x - mean_a) ** 2 for x in a))
-            denom_b = math.sqrt(sum((y - mean_b) ** 2 for y in b))
-            if denom_a == 0 or denom_b == 0:
-                return 0.0
-            return numerator / (denom_a * denom_b)
+        return Color(total_r // count, total_g // count, total_b // count)
 
-        r_corr = correlate(hist1["r"], hist2["r"])
-        g_corr = correlate(hist1["g"], hist2["g"])
-        b_corr = correlate(hist1["b"], hist2["b"])
-        return (r_corr + g_corr + b_corr) / 3.0
+    def extract_palette(
+        self,
+        pixels: list[tuple[int, int, int]],
+        palette_size: int = 8,
+    ) -> list[Color]:
+        """Extract a color palette from pixels."""
+        return self.extract_dominant(pixels, k=palette_size)
+
+
+def hex_to_color(hex_str: str) -> Color:
+    """Parse hex color string to Color object."""
+    hex_str = hex_str.lstrip("#")
+    if len(hex_str) == 6:
+        return Color(
+            r=int(hex_str[0:2], 16),
+            g=int(hex_str[2:4], 16),
+            b=int(hex_str[4:6], 16),
+        )
+    return Color(0, 0, 0)
+
+
+def color_from_rgb(r: int, g: int, b: int) -> Color:
+    return Color(r, g, b)
+
+
+def color_distance(c1: Color, c2: Color) -> float:
+    return c1.distance_to(c2)
+
+
+def best_text_color(bg_color: Color) -> Color:
+    """Determine best text color (black or white) for given background."""
+    if bg_color.is_light():
+        return Color(0, 0, 0)
+    return Color(255, 255, 255)
+
+
+__all__ = ["Color", "ColorExtractor", "hex_to_color", "color_from_rgb", "color_distance", "best_text_color"]
