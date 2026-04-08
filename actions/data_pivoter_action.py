@@ -1,357 +1,183 @@
 """Data pivoter action module for RabAI AutoClick.
 
-Provides pivot table operations to transform data from rows to
-columns (pivot) and from columns to rows (unpivot Melt).
+Provides data pivoting and unpivoting capabilities for
+reshaping data between wide and long formats.
 """
 
-import time
 import sys
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class PivotAction(BaseAction):
-    """Pivot data from rows to columns.
+class DataPivoterAction(BaseAction):
+    """Data pivoter action for reshaping data.
     
-    Transforms data so that unique values in a column
-    become new columns with aggregated values.
+    Supports pivot (long to wide) and unpivot (wide to long)
+    transformations with aggregation.
     """
-    action_type = "pivot"
-    display_name = "透视表"
-    description = "将行数据透视为列"
-
+    action_type = "data_pivoter"
+    display_name = "数据透视"
+    description = "数据透视表变换"
+    
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Pivot data.
+        """Execute pivot operation.
         
         Args:
             context: Execution context.
-            params: Dict with keys: data, index (field to group by),
-                   columns (field whose values become columns),
-                   values (field to aggregate), aggfunc (sum|count|avg|first).
+            params: Dict with keys:
+                operation: pivot|unpivot
+                data: Input data
+                index: Column(s) to group by (for pivot)
+                columns: Column to pivot (for pivot)
+                values: Column to aggregate (for pivot)
+                aggfunc: Aggregation function (default: sum)
+                id_vars: Columns to keep as variables (for unpivot)
+                value_vars: Columns to unpivot (for unpivot).
         
         Returns:
-            ActionResult with pivoted data.
+            ActionResult with pivoted/unpivoted data.
         """
+        operation = params.get('operation', 'pivot')
+        
+        if operation == 'pivot':
+            return self._pivot(params)
+        elif operation == 'unpivot':
+            return self._unpivot(params)
+        else:
+            return ActionResult(success=False, message=f"Unknown operation: {operation}")
+    
+    def _pivot(self, params: Dict[str, Any]) -> ActionResult:
+        """Pivot data from long to wide format."""
         data = params.get('data', [])
-        index = params.get('index', '')
-        columns = params.get('columns', '')
-        values = params.get('values', '')
-        aggfunc = params.get('aggfunc', 'first')
-        start_time = time.time()
-
-        if not isinstance(data, list):
-            data = [data]
-
-        if not all([index, columns, values]):
-            return ActionResult(
-                success=False,
-                message="index, columns, and values fields are all required"
-            )
-
-        pivot = {}
-        col_values = set()
-
-        for row in data:
-            idx_val = self._get_field(row, index)
-            col_val = self._get_field(row, columns)
-            val = self._get_field(row, values)
-            col_values.add(col_val)
-
-            key = idx_val
-            if key not in pivot:
-                pivot[key] = {}
-            pivot[key][col_val] = val
-
+        index = params.get('index')
+        columns = params.get('columns')
+        values = params.get('values')
+        aggfunc = params.get('aggfunc', 'sum')
+        
+        if not data:
+            return ActionResult(success=False, message="No data provided")
+        
+        if not index or not columns or not values:
+            return ActionResult(success=False, message="index, columns, and values are required")
+        
+        if not isinstance(data[0], dict):
+            return ActionResult(success=False, message="Pivot requires list of dicts")
+        
+        index_fields = index.split(',') if isinstance(index, str) else index
+        columns_field = columns
+        
+        pivot_data: Dict[tuple, Dict[Any, List]] = defaultdict(lambda: defaultdict(list))
+        
+        for item in data:
+            index_values = tuple(item.get(f) for f in index_fields)
+            col_value = item.get(columns_field)
+            val_value = item.get(values)
+            
+            if val_value is not None:
+                pivot_data[index_values][col_value].append(val_value)
+        
         results = []
-        for idx_val, col_data in pivot.items():
-            result_row = {index: idx_val}
-            for cv in col_values:
-                result_row[cv] = col_data.get(cv)
-            results.append(result_row)
-
+        all_columns = set()
+        
+        for index_values, col_data in pivot_data.items():
+            all_columns.update(col_data.keys())
+            result = dict(zip(index_fields, index_values))
+            result.update({
+                col: self._aggregate(col_data[col], aggfunc)
+                for col in col_data.keys()
+            })
+            results.append(result)
+        
         return ActionResult(
             success=True,
-            message=f"Pivoted {len(data)} rows into {len(results)} pivot rows with {len(col_values)} columns",
+            message=f"Pivoted to {len(results)} rows x {len(all_columns)} columns",
             data={
-                'pivoted': results,
-                'columns': list(col_values),
-                'count': len(results)
-            },
-            duration=time.time() - start_time
+                'results': results,
+                'columns': list(all_columns),
+                'index_columns': index_fields,
+                'pivot_column': columns_field,
+                'value_column': values
+            }
         )
-
-    def _get_field(self, row: Any, field: str) -> Any:
-        if not field:
-            return row
-        keys = field.split('.')
-        value = row
-        for k in keys:
-            if isinstance(value, dict):
-                value = value.get(k)
-            elif hasattr(value, k):
-                value = getattr(value, k)
-            else:
-                return None
-        return value
-
-
-class UnpivotAction(BaseAction):
-    """Unpivot/Melt data from columns to rows.
     
-    Transforms wide format data (columns as variables)
-    into long format (variable-value pairs).
-    """
-    action_type = "unpivot"
-    display_name = "逆透视"
-    description = "将列数据逆透视为行"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Unpivot wide data to long format.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: data, id_vars (list of fields
-                   to keep as identifiers), value_vars (list of
-                   fields to unpivot), var_name, value_name.
-        
-        Returns:
-            ActionResult with unpivoted data.
-        """
+    def _unpivot(self, params: Dict[str, Any]) -> ActionResult:
+        """Unpivot data from wide to long format."""
         data = params.get('data', [])
         id_vars = params.get('id_vars', [])
-        value_vars = params.get('value_vars', [])
-        var_name = params.get('var_name', 'variable')
-        value_name = params.get('value_name', 'value')
-        start_time = time.time()
-
-        if not isinstance(data, list):
-            data = [data]
-
-        if not value_vars:
-            if id_vars and data:
-                first_row = data[0]
-                all_fields = set()
-                for row in data:
-                    if isinstance(row, dict):
-                        all_fields.update(row.keys())
-                value_vars = [f for f in all_fields if f not in id_vars]
-
-        results = []
-        for row in data:
-            base = {k: self._get_field(row, k) for k in id_vars if self._get_field(row, k) is not None}
-            for var in value_vars:
-                val = self._get_field(row, var)
-                new_row = dict(base)
-                new_row[var_name] = var
-                new_row[value_name] = val
-                results.append(new_row)
-
-        return ActionResult(
-            success=True,
-            message=f"Unpivoted {len(data)} rows into {len(results)} rows",
-            data={
-                'unpivoted': results,
-                'count': len(results),
-                'var_name': var_name,
-                'value_name': value_name
-            },
-            duration=time.time() - start_time
-        )
-
-    def _get_field(self, row: Any, field: str) -> Any:
-        if not field:
-            return row
-        keys = field.split('.')
-        value = row
-        for k in keys:
-            if isinstance(value, dict):
-                value = value.get(k)
-            elif hasattr(value, k):
-                value = getattr(value, k)
-            else:
-                return None
-        return value
-
-
-class TransposeAction(BaseAction):
-    """Transpose rows and columns.
-    
-    Swaps rows and columns in data, turning
-    row observations into columns.
-    """
-    action_type = "transpose"
-    display_name = "转置"
-    description = "转置数据行列"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Transpose data.
+        value_vars = params.get('value_vars')
         
-        Args:
-            context: Execution context.
-            params: Dict with keys: data, header_field (field
-                   to use as column headers), value_field.
-        
-        Returns:
-            ActionResult with transposed data.
-        """
-        data = params.get('data', [])
-        header_field = params.get('header_field', '')
-        value_field = params.get('value_field', '')
-        start_time = time.time()
-
-        if not isinstance(data, list):
-            data = [data]
-
         if not data:
-            return ActionResult(success=True, message="No data to transpose", data={'transposed': [], 'count': 0})
-
-        if header_field:
-            headers = [self._get_field(row, header_field) for row in data]
-            if value_field:
-                values = [[self._get_field(row, value_field)] for row in data]
-            else:
-                values = [[self._get_field(row, f) for f in headers] for row in data]
-        else:
-            headers = [f"col_{i}" for i in range(len(data[0]) if isinstance(data[0], dict) else len(data))]
-            values = [[self._get_field(row, h) for h in headers] for row in data]
-
-        transposed = []
-        for col_idx in range(len(headers)):
-            row_data = {'column': headers[col_idx]}
-            for row_idx, row in enumerate(data):
-                row_data[f"row_{row_idx}"] = values[row_idx][col_idx] if row_idx < len(values) and col_idx < len(values[row_idx]) else None
-            transposed.append(row_data)
-
-        return ActionResult(
-            success=True,
-            message=f"Transposed to {len(transposed)} columns from {len(data)} rows",
-            data={
-                'transposed': transposed,
-                'count': len(transposed)
-            },
-            duration=time.time() - start_time
-        )
-
-    def _get_field(self, row: Any, field: str) -> Any:
-        if not field:
-            return row
-        keys = field.split('.')
-        value = row
-        for k in keys:
-            if isinstance(value, dict):
-                value = value.get(k)
-            elif hasattr(value, k):
-                value = getattr(value, k)
-            else:
-                return None
-        return value
-
-
-class CrossTabAction(BaseAction):
-    """Create cross-tabulation (contingency table).
-    
-    Computes frequency counts or aggregations for
-    combinations of two categorical variables.
-    """
-    action_type = "cross_tab"
-    display_name = "交叉表"
-    description = "创建两个分类变量的交叉表"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Create cross-tabulation.
+            return ActionResult(success=False, message="No data provided")
         
-        Args:
-            context: Execution context.
-            params: Dict with keys: data, rows (field for row variable),
-                   cols (field for column variable), values (optional
-                   field to aggregate), aggfunc.
+        if not isinstance(data[0], dict):
+            return ActionResult(success=False, message="Unpivot requires list of dicts")
         
-        Returns:
-            ActionResult with cross-tabulation result.
-        """
-        data = params.get('data', [])
-        rows = params.get('rows', '')
-        cols = params.get('cols', '')
-        values = params.get('values')
-        aggfunc = params.get('aggfunc', 'count')
-        start_time = time.time()
-
-        if not isinstance(data, list):
-            data = [data]
-
-        table = {}
-        row_vals = set()
-        col_vals = set()
-
-        for row in data:
-            rv = self._get_field(row, rows)
-            cv = self._get_field(row, cols)
-            vv = self._get_field(row, values) if values else 1
-            row_vals.add(rv)
-            col_vals.add(cv)
-
-            if rv not in table:
-                table[rv] = {}
-            if cv not in table[rv]:
-                table[rv][cv] = []
-            table[rv][cv].append(vv)
-
+        if isinstance(id_vars, str):
+            id_vars = [id_vars]
+        
+        if value_vars is None:
+            if id_vars:
+                value_vars = [k for k in data[0].keys() if k not in id_vars]
+            else:
+                value_vars = list(data[0].keys())
+        
+        if isinstance(value_vars, str):
+            value_vars = [value_vars]
+        
         results = []
-        for rv in sorted(row_vals):
-            result_row = {rows: rv}
-            for cv in sorted(col_vals):
-                vals = table.get(rv, {}).get(cv, [])
-                if aggfunc == 'count':
-                    result_row[cv] = len(vals)
-                elif aggfunc == 'sum':
-                    result_row[cv] = sum(vals)
-                elif aggfunc == 'avg':
-                    result_row[cv] = sum(vals) / len(vals) if vals else 0
-                elif aggfunc == 'first':
-                    result_row[cv] = vals[0] if vals else None
-            results.append(result_row)
-
+        
+        for item in data:
+            base = {k: item.get(k) for k in id_vars if k in item}
+            
+            for var in value_vars:
+                result = dict(base)
+                result['variable'] = var
+                result['value'] = item.get(var)
+                results.append(result)
+        
         return ActionResult(
             success=True,
-            message=f"Cross-tab: {len(results)} rows x {len(col_vals)} columns",
+            message=f"Unpivoted to {len(results)} rows",
             data={
-                'cross_tab': results,
-                'row_values': sorted(row_vals),
-                'column_values': sorted(col_vals),
-                'count': len(results)
-            },
-            duration=time.time() - start_time
+                'results': results,
+                'id_vars': id_vars,
+                'value_vars': value_vars,
+                'original_rows': len(data)
+            }
         )
-
-    def _get_field(self, row: Any, field: str) -> Any:
-        if not field:
-            return row
-        keys = field.split('.')
-        value = row
-        for k in keys:
-            if isinstance(value, dict):
-                value = value.get(k)
-            elif hasattr(value, k):
-                value = getattr(value, k)
-            else:
-                return None
-        return value
+    
+    def _aggregate(self, values: List[Any], aggfunc: str) -> Any:
+        """Aggregate values."""
+        if not values:
+            return None
+        
+        numeric_values = [v for v in values if isinstance(v, (int, float))]
+        
+        if aggfunc == 'sum':
+            return sum(numeric_values) if numeric_values else sum(values)
+        elif aggfunc == 'avg' or aggfunc == 'mean':
+            return sum(numeric_values) / len(numeric_values) if numeric_values else None
+        elif aggfunc == 'count':
+            return len(values)
+        elif aggfunc == 'min':
+            return min(values) if values else None
+        elif aggfunc == 'max':
+            return max(values) if values else None
+        elif aggfunc == 'first':
+            return values[0] if values else None
+        elif aggfunc == 'last':
+            return values[-1] if values else None
+        elif aggfunc == 'median':
+            sorted_vals = sorted(values)
+            n = len(sorted_vals)
+            return sorted_vals[n // 2] if n > 0 else None
+        
+        return values[0] if values else None
