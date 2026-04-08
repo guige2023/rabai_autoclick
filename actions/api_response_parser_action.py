@@ -1,476 +1,289 @@
-"""
-API Response Parser Action Module.
+"""API response parser action module for RabAI AutoClick.
 
-Parses, transforms, and validates API responses with support
-for JSONPath, XML, CSV, and custom transformation pipelines.
-
-Author: RabAi Team
+Provides API response parsing with support for JSONPath,
+field extraction, transformation, and validation.
 """
 
-from __future__ import annotations
-
-import json
-import re
 import sys
 import os
-import csv
-import io
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import json
+import re
+from typing import Any, Dict, List, Optional, Union, Callable
+from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class ResponseFormat(Enum):
-    """Supported response formats."""
-    JSON = "json"
-    XML = "xml"
-    CSV = "csv"
-    TEXT = "text"
-    HTML = "html"
-    BINARY = "binary"
-
-
-class ParseMode(Enum):
-    """Parsing modes."""
-    AUTO = "auto"
-    STRICT = "strict"
-    LENIENT = "lenient"
-    SILENT = "silent"
-
-
 @dataclass
-class TransformRule:
-    """A single transformation rule."""
-    field_path: str
-    transform_type: str
-    params: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ValidationRule:
-    """A single validation rule."""
-    field_path: str
-    rule_type: str
-    params: Dict[str, Any] = field(default_factory=dict)
-    error_message: Optional[str] = None
-
-
-@dataclass
-class ParseResult:
-    """Result of parsing an API response."""
-    success: bool
-    parsed_data: Any
-    format_detected: ResponseFormat
-    transformations_applied: List[str]
-    validation_errors: List[Dict[str, Any]]
-    metadata: Dict[str, Any]
-
-
-class JsonPathParser:
-    """Simple JSONPath-like parser for extracting data from JSON."""
-    
-    @staticmethod
-    def get(data: Any, path: str, default: Any = None) -> Any:
-        """Get value from data using dot-notation path."""
-        if not path or path == "$":
-            return data
-        
-        parts = path.replace("[", ".").replace("]", "").split(".")
-        current = data
-        
-        for part in parts:
-            if part.isdigit():
-                idx = int(part)
-                if isinstance(current, list) and 0 <= idx < len(current):
-                    current = current[idx]
-                else:
-                    return default
-            elif isinstance(current, dict):
-                current = current.get(part, default)
-            else:
-                return default
-        
-        return current
-    
-    @staticmethod
-    def set(data: Any, path: str, value: Any) -> Any:
-        """Set value in data using dot-notation path."""
-        if isinstance(data, dict) and "." in path:
-            first, rest = path.split(".", 1)
-            if first not in data:
-                data[first] = {}
-            data[first] = JsonPathParser.set(data[first], rest, value)
-            return data
-        elif isinstance(data, dict):
-            data[path] = value
-            return data
-        elif isinstance(data, list) and path.isdigit():
-            idx = int(path)
-            if 0 <= idx < len(data):
-                data[idx] = value
-        return data
-
-
-class XmlParser:
-    """XML parser and extractor."""
-    
-    @staticmethod
-    def to_dict(element: ET.Element) -> Dict[str, Any]:
-        """Convert XML element to dictionary."""
-        result: Dict[str, Any] = {}
-        
-        if element.attrib:
-            result["@attributes"] = element.attrib
-        
-        if element.text and element.text.strip():
-            if len(element) == 0:
-                return element.text.strip()
-            result["_text"] = element.text.strip()
-        
-        for child in element:
-            child_data = XmlParser.to_dict(child)
-            
-            if child.tag in result:
-                if not isinstance(result[child.tag], list):
-                    result[child.tag] = [result[child.tag]]
-                result[child.tag].append(child_data)
-            else:
-                result[child.tag] = child_data
-        
-        return result
-    
-    @staticmethod
-    def extract(xml_string: str, xpath: str) -> List[str]:
-        """Extract values using XPath."""
-        try:
-            root = ET.fromstring(xml_string)
-            namespaces = {
-                "re": "http://exslt.org/regular-expressions"
-            }
-            elements = root.findall(xpath)
-            return [el.text for el in elements if el.text]
-        except Exception:
-            return []
+class FieldMapping:
+    """Field mapping definition."""
+    source: str
+    target: str
+    transform: Optional[str] = None
+    default: Any = None
 
 
 class ApiResponseParserAction(BaseAction):
-    """API response parser action.
+    """API response parser action for extracting and transforming responses.
     
-    Parses and transforms API responses with extraction,
-    validation, and data transformation capabilities.
+    Supports JSONPath extraction, field mapping, response
+    validation, and data transformation.
     """
     action_type = "api_response_parser"
-    display_name = "API响应解析"
-    description = "解析和转换API响应数据"
+    display_name = "API响应解析器"
+    description = "API响应解析与字段映射"
     
-    def __init__(self):
-        super().__init__()
-        self._transform_functions: Dict[str, Callable] = {
-            "uppercase": lambda x, **kw: str(x).upper() if x else "",
-            "lowercase": lambda x, **kw: str(x).lower() if x else "",
-            "trim": lambda x, **kw: str(x).strip() if x else "",
-            "strip_tags": lambda x, **kw: re.sub(r"<[^>]+>", "", str(x)) if x else "",
-            "to_int": lambda x, **kw: int(float(x)) if x else 0,
-            "to_float": lambda x, **kw: float(x) if x else 0.0,
-            "to_string": lambda x, **kw: str(x) if x is not None else "",
-            "to_bool": lambda x, **kw: str(x).lower() in ("true", "1", "yes", "on") if x else False,
-            "to_json": lambda x, **kw: json.dumps(x) if isinstance(x, (dict, list)) else x,
-            "from_json": lambda x, **kw: json.loads(x) if isinstance(x, str) else x,
-            "hash": lambda x, **kw: str(hash(str(x))) if x else "",
-            "slice": lambda x, start=0, end=None, **kw: str(x)[start:end] if x else "",
-            "replace": lambda x, pattern="", replacement="", **kw: re.sub(pattern, replacement, str(x)) if x else "",
-            "default": lambda x, default="", **kw: x if x else default,
-            "coalesce": lambda x, *args, **kw: x if x else (args[0] if args else ""),
-        }
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Parse and transform an API response.
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute parsing operation.
         
         Args:
-            context: The execution context.
-            params: Dictionary containing:
-                - response: The API response (dict, string, or raw)
-                - format: Response format hint (json/xml/csv/auto)
-                - extract: JSONPath to extract specific data
-                - transforms: List of transform rules
-                - validations: List of validation rules
-                - flatten: Whether to flatten nested structures
-                - mode: Parse mode (auto/strict/lenient/silent)
-                
+            context: Execution context.
+            params: Dict with keys:
+                data: Response data to parse
+                extraction: Extraction rules
+                mappings: Field mappings
+                validation: Validation rules
+                transform: Transformation rules.
+        
         Returns:
-            ActionResult with parsed and transformed data.
+            ActionResult with parsed data.
         """
-        import time
-        start_time = time.time()
+        data = params.get('data')
+        extraction = params.get('extraction')
+        mappings = params.get('mappings', [])
+        validation = params.get('validation')
+        transform = params.get('transform')
         
-        response = params.get("response")
-        format_hint = params.get("format", "auto")
-        extract_path = params.get("extract")
-        transform_rules = params.get("transforms", [])
-        validation_rules = params.get("validations", [])
-        flatten = params.get("flatten", False)
-        mode = ParseMode(params.get("mode", "auto"))
+        if data is None:
+            return ActionResult(success=False, message="No data provided")
         
-        if response is None:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: response",
-                duration=time.time() - start_time
-            )
+        parsed = data
         
-        try:
-            detected_format = self._detect_format(response, format_hint)
-            
-            parsed = self._parse_response(response, detected_format, mode)
-            
-            if extract_path:
-                parsed = JsonPathParser.get(parsed, extract_path, [])
-                if parsed is None:
-                    parsed = []
-                elif not isinstance(parsed, list):
-                    parsed = [parsed]
-            
-            transformations_applied = []
-            
-            for rule in transform_rules:
-                parsed = self._apply_transform(parsed, rule)
-                transformations_applied.append(f"{rule['field_path']}:{rule['transform_type']}")
-            
-            validation_errors = []
-            for rule in validation_rules:
-                errors = self._validate(parsed, rule)
-                validation_errors.extend(errors)
-            
-            if flatten:
-                parsed = self._flatten(parsed)
-            
-            return ActionResult(
-                success=len(validation_errors) == 0,
-                message=f"Parsed {detected_format.value} with {len(transformations_applied)} transforms",
-                data={
-                    "data": parsed,
-                    "format": detected_format.value,
-                    "transformations_applied": transformations_applied,
-                    "validation_errors": validation_errors,
-                    "metadata": {
-                        "total_items": len(parsed) if isinstance(parsed, list) else 1,
-                        "flattened": flatten
-                    }
-                },
-                duration=time.time() - start_time
-            )
-            
-        except Exception as e:
-            if mode == ParseMode.SILENT:
-                return ActionResult(
-                    success=True,
-                    message=f"Parse failed silently: {str(e)}",
-                    data={"data": response, "format": "raw"},
-                    duration=time.time() - start_time
-                )
-            return ActionResult(
-                success=False,
-                message=f"Parse failed: {str(e)}",
-                duration=time.time() - start_time
-            )
-    
-    def _detect_format(self, response: Any, hint: str) -> ResponseFormat:
-        """Detect response format."""
-        if hint != "auto":
-            return ResponseFormat(hint)
-        
-        if isinstance(response, (dict, list)):
-            return ResponseFormat.JSON
-        elif isinstance(response, str):
-            stripped = response.strip()
-            if stripped.startswith("{") or stripped.startswith("["):
-                return ResponseFormat.JSON
-            elif stripped.startswith("<"):
-                return ResponseFormat.XML
-            elif "," in stripped and "\n" in stripped:
-                return ResponseFormat.CSV
-            elif "<html" in stripped.lower() or "</html>" in stripped.lower():
-                return ResponseFormat.HTML
-            else:
-                return ResponseFormat.TEXT
-        elif isinstance(response, bytes):
-            return ResponseFormat.BINARY
-        
-        return ResponseFormat.JSON
-    
-    def _parse_response(self, response: Any, format: ResponseFormat, mode: ParseMode) -> Any:
-        """Parse response based on format."""
-        if format == ResponseFormat.JSON:
-            if isinstance(response, (dict, list)):
-                return response
-            elif isinstance(response, str):
-                try:
-                    return json.loads(response)
-                except json.JSONDecodeError as e:
-                    if mode == ParseMode.STRICT:
-                        raise
-                    return response
-            return response
-        
-        elif format == ResponseFormat.XML:
-            if isinstance(response, str):
-                try:
-                    root = ET.fromstring(response)
-                    return XmlParser.to_dict(root)
-                except ET.ParseError as e:
-                    if mode == ParseMode.STRICT:
-                        raise
-                    return {"raw": response}
-            return response
-        
-        elif format == ResponseFormat.CSV:
-            if isinstance(response, str):
-                try:
-                    reader = csv.DictReader(io.StringIO(response))
-                    return list(reader)
-                except Exception:
-                    return []
-            elif isinstance(response, list):
-                return response
-            return []
-        
-        else:
-            return response
-    
-    def _apply_transform(self, data: Any, rule: Dict[str, Any]) -> Any:
-        """Apply a single transformation rule."""
-        field_path = rule.get("field_path", "$")
-        transform_type = rule.get("transform_type", "default")
-        transform_params = rule.get("params", {})
-        
-        if isinstance(data, list):
-            return [
-                self._apply_transform_to_item(item, field_path, transform_type, transform_params)
-                for item in data
-            ]
-        else:
-            return self._apply_transform_to_item(data, field_path, transform_type, transform_params)
-    
-    def _apply_transform_to_item(
-        self, item: Any, field_path: str, transform_type: str, params: Dict[str, Any]
-    ) -> Any:
-        """Apply transform to a single item."""
-        if field_path != "$":
-            value = JsonPathParser.get(item, field_path)
-        else:
-            value = item
-        
-        transform_fn = self._transform_functions.get(transform_type)
-        if transform_fn:
+        if isinstance(data, str):
             try:
-                new_value = transform_fn(value, **params)
-            except Exception:
-                new_value = value
-        else:
-            new_value = value
+                parsed = json.loads(data)
+            except json.JSONDecodeError:
+                return ActionResult(
+                    success=False,
+                    message="Failed to parse JSON",
+                    data={'raw': data}
+                )
         
-        if field_path != "$" and isinstance(item, dict):
-            JsonPathParser.set(item, field_path, new_value)
-            return item
+        result = {'_original': parsed}
         
-        return new_value
+        if extraction:
+            extracted = self._extract_fields(parsed, extraction)
+            result.update(extracted)
+        
+        if mappings:
+            result = self._apply_mappings(result, mappings)
+        
+        if validation:
+            validation_result = self._validate(result, validation)
+            result['_validation'] = validation_result
+        
+        if transform:
+            result = self._apply_transforms(result, transform)
+        
+        return ActionResult(
+            success=True,
+            message="Response parsed",
+            data=result
+        )
     
-    def _validate(self, data: Any, rule: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Validate data against a rule."""
-        field_path = rule.get("field_path", "$")
-        rule_type = rule.get("rule_type", "required")
-        error_msg = rule.get("error_message", f"Validation failed for {field_path}")
-        params = rule.get("params", {})
+    def _extract_fields(
+        self,
+        data: Any,
+        extraction: Union[Dict, List, str]
+    ) -> Dict[str, Any]:
+        """Extract fields from data using JSONPath-like syntax."""
+        result = {}
         
+        if isinstance(extraction, str):
+            value = self._jsonpath(data, extraction)
+            return {'result': value}
+        
+        if isinstance(extraction, list):
+            for field_path in extraction:
+                if isinstance(field_path, str):
+                    result[field_path] = self._jsonpath(data, field_path)
+            return result
+        
+        if isinstance(extraction, dict):
+            for target_name, source_path in extraction.items():
+                if isinstance(source_path, str):
+                    result[target_name] = self._jsonpath(data, source_path)
+            return result
+        
+        return result
+    
+    def _jsonpath(self, data: Any, path: str) -> Any:
+        """Extract value using JSONPath-like notation."""
+        if path.startswith('$.'):
+            path = path[2:]
+        
+        parts = path.split('.')
+        current = data
+        
+        for part in parts:
+            if part == '*':
+                if isinstance(current, list):
+                    return [self._jsonpath(item, '.'.join(parts[parts.index(part) + 1:])) for item in current]
+                return current
+            
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif isinstance(current, list):
+                try:
+                    idx = int(part)
+                    current = current[idx]
+                except (ValueError, IndexError):
+                    return None
+            else:
+                return None
+        
+        return current
+    
+    def _apply_mappings(
+        self,
+        data: Dict,
+        mappings: List[Dict]
+    ) -> Dict:
+        """Apply field mappings to data."""
+        result = dict(data)
+        
+        for mapping in mappings:
+            source = mapping.get('source')
+            target = mapping.get('target', source)
+            transform = mapping.get('transform')
+            default = mapping.get('default')
+            
+            value = self._get_nested(data, source) if '.' in source else data.get(source)
+            
+            if value is None:
+                value = default
+            
+            if transform and value is not None:
+                value = self._apply_transform(value, transform)
+            
+            self._set_nested(result, target, value)
+        
+        return result
+    
+    def _apply_transform(self, value: Any, transform: str) -> Any:
+        """Apply single transform to value."""
+        if transform == 'upper':
+            return str(value).upper() if value else value
+        elif transform == 'lower':
+            return str(value).lower() if value else value
+        elif transform == 'strip':
+            return str(value).strip() if value else value
+        elif transform == 'int':
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                return value
+        elif transform == 'float':
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                return value
+        elif transform == 'str':
+            return str(value) if value is not None else value
+        elif transform == 'bool':
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ('true', '1', 'yes', 'on')
+            return bool(value)
+        elif transform == 'len':
+            return len(value) if value is not None else 0
+        elif transform == 'json':
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except json.JSONDecodeError:
+                    return value
+            return value
+        
+        return value
+    
+    def _apply_transforms(
+        self,
+        data: Dict,
+        transforms: List[Dict]
+    ) -> Dict:
+        """Apply multiple transforms to data."""
+        result = dict(data)
+        
+        for transform_def in transforms:
+            field = transform_def.get('field')
+            operation = transform_def.get('operation')
+            
+            if not field or not operation:
+                continue
+            
+            value = result.get(field)
+            result[field] = self._apply_transform(value, operation)
+        
+        return result
+    
+    def _validate(
+        self,
+        data: Dict,
+        validation: Dict
+    ) -> Dict:
+        """Validate parsed data."""
         errors = []
+        warnings = []
         
-        if isinstance(data, list):
-            for i, item in enumerate(data):
-                item_errors = self._validate_item(item, field_path, rule_type, params, error_msg, i)
-                errors.extend(item_errors)
-        else:
-            errors = self._validate_item(data, field_path, rule_type, params, error_msg)
+        for rule in validation.get('required', []):
+            field = rule.get('field')
+            if field not in data or data[field] is None:
+                errors.append(f"Required field '{field}' is missing")
         
-        return errors
+        for rule in validation.get('types', []):
+            field = rule.get('field')
+            expected = rule.get('expected')
+            value = data.get(field)
+            
+            if value is not None:
+                actual_type = type(value).__name__
+                if actual_type != expected:
+                    errors.append(f"Field '{field}' should be {expected}, got {actual_type}")
+        
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors,
+            'warnings': warnings
+        }
     
-    def _validate_item(
-        self, item: Any, field_path: str, rule_type: str, params: Dict[str, Any], error_msg: str, index: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """Validate a single item against a rule."""
-        errors = []
-        value = JsonPathParser.get(item, field_path) if field_path != "$" else item
+    def _get_nested(self, data: Dict, path: str) -> Any:
+        """Get nested value using dot notation."""
+        parts = path.split('.')
+        current = data
         
-        if rule_type == "required":
-            if value is None or value == "":
-                prefix = f"[{index}] " if index is not None else ""
-                errors.append({"field": field_path, "rule": rule_type, "message": f"{prefix}{error_msg}"})
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
         
-        elif rule_type == "type":
-            expected_type = params.get("expected_type", "string")
-            type_map = {"string": str, "int": int, "float": float, "bool": bool, "list": list, "dict": dict}
-            expected = type_map.get(expected_type)
-            if expected and not isinstance(value, expected):
-                prefix = f"[{index}] " if index is not None else ""
-                errors.append({"field": field_path, "rule": rule_type, "message": f"{prefix}Expected {expected_type}"})
-        
-        elif rule_type == "min":
-            min_val = params.get("min")
-            if min_val is not None and value is not None and float(value) < float(min_val):
-                errors.append({"field": field_path, "rule": rule_type, "message": f"{error_msg}: min={min_val}"})
-        
-        elif rule_type == "max":
-            max_val = params.get("max")
-            if max_val is not None and value is not None and float(value) > float(max_val):
-                errors.append({"field": field_path, "rule": rule_type, "message": f"{error_msg}: max={max_val}"})
-        
-        elif rule_type == "pattern":
-            pattern = params.get("pattern")
-            if pattern and value and not re.match(pattern, str(value)):
-                errors.append({"field": field_path, "rule": rule_type, "message": error_msg})
-        
-        elif rule_type == "enum":
-            allowed = params.get("values", [])
-            if value and value not in allowed:
-                errors.append({"field": field_path, "rule": rule_type, "message": error_msg})
-        
-        return errors
+        return current
     
-    def _flatten(self, data: Any, parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
-        """Flatten nested dictionaries."""
-        items: List[Tuple[str, Any]] = []
+    def _set_nested(self, data: Dict, path: str, value: Any) -> None:
+        """Set nested value using dot notation."""
+        parts = path.split('.')
+        current = data
         
-        if isinstance(data, dict):
-            for k, v in data.items():
-                new_key = f"{parent_key}{sep}{k}" if parent_key else k
-                if isinstance(v, dict):
-                    items.extend(self._flatten(v, new_key, sep).items())
-                elif isinstance(v, list):
-                    for i, item in enumerate(v):
-                        if isinstance(item, dict):
-                            items.extend(self._flatten(item, f"{new_key}[{i}]", sep).items())
-                        else:
-                            items.append((f"{new_key}[{i}]", item))
-                else:
-                    items.append((new_key, v))
-        elif isinstance(data, list):
-            for i, item in enumerate(data):
-                items.extend(self._flatten(item, f"{parent_key}[{i}]", sep).items())
-        else:
-            items.append((parent_key, data))
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
         
-        return dict(items)
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate parser parameters."""
-        if "response" not in params:
-            return False, "Missing required parameter: response"
-        return True, ""
-    
-    def get_required_params(self) -> List[str]:
-        """Return required parameters."""
-        return ["response"]
+        current[parts[-1]] = value
