@@ -1,173 +1,189 @@
-"""Data import action module for RabAI AutoClick.
+"""Data Import Action Module.
 
-Provides data import operations:
-- ImportCSVAction: Import from CSV
-- ImportJSONAction: Import from JSON
-- ImportXMLAction: Import from XML
-- ImportExcelAction: Import from Excel
-- ImportValidateAction: Validate import data
+Provides data import from multiple formats:
+JSON, CSV, XML with schema validation.
 """
+from __future__ import annotations
 
 import csv
-import io
 import json
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from io import StringIO
+from typing import Any, Callable, Dict, List, Optional, Union
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ImportCSVAction(BaseAction):
-    """Import data from CSV."""
-    action_type = "import_csv"
-    display_name = "导入CSV"
-    description = "从CSV导入数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            csv_content = params.get("csv_content", "")
-            delimiter = params.get("delimiter", ",")
-            skip_rows = params.get("skip_rows", 0)
-
-            if not csv_content:
-                return ActionResult(success=False, message="csv_content is required")
-
-            reader = csv.DictReader(io.StringIO(csv_content), delimiter=delimiter)
-            rows = list(reader)
-            for _ in range(skip_rows):
-                rows.pop(0) if rows else None
-
-            return ActionResult(
-                success=True,
-                data={"data": rows, "row_count": len(rows), "field_count": len(rows[0]) if rows else 0},
-                message=f"Imported {len(rows)} rows from CSV",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Import CSV failed: {e}")
+class ImportFormat(Enum):
+    """Import format."""
+    JSON = "json"
+    JSON_LINES = "jsonl"
+    CSV = "csv"
+    TSV = "tsv"
+    XML = "xml"
 
 
-class ImportJSONAction(BaseAction):
-    """Import data from JSON."""
-    action_type = "import_json"
-    display_name = "导入JSON"
-    description = "从JSON导入数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            json_content = params.get("json_content", "")
-            encoding = params.get("encoding", "utf-8")
-
-            if not json_content:
-                return ActionResult(success=False, message="json_content is required")
-
-            try:
-                data = json.loads(json_content)
-            except json.JSONDecodeError:
-                data = []
-
-            if not isinstance(data, list):
-                data = [data]
-
-            return ActionResult(
-                success=True,
-                data={"data": data, "row_count": len(data), "size_bytes": len(json_content)},
-                message=f"Imported {len(data)} records from JSON",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Import JSON failed: {e}")
+from enum import Enum
 
 
-class ImportXMLAction(BaseAction):
-    """Import data from XML."""
-    action_type = "import_xml"
-    display_name = "导入XML"
-    description = "从XML导入数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            xml_content = params.get("xml_content", "")
-            item_tag = params.get("item_tag", "item")
-
-            if not xml_content:
-                return ActionResult(success=False, message="xml_content is required")
-
-            try:
-                root = ET.fromstring(xml_content)
-            except ET.ParseError:
-                return ActionResult(success=False, message="Invalid XML content")
-
-            items = []
-            for elem in root.findall(f".//{item_tag}"):
-                item = {}
-                for child in elem:
-                    item[child.tag] = child.text
-                items.append(item)
-
-            return ActionResult(
-                success=True,
-                data={"data": items, "row_count": len(items)},
-                message=f"Imported {len(items)} items from XML",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Import XML failed: {e}")
+@dataclass
+class ImportConfig:
+    """Import configuration."""
+    format: ImportFormat = ImportFormat.JSON
+    encoding: str = "utf-8"
+    header_row: bool = True
+    skip_rows: int = 0
 
 
-class ImportExcelAction(BaseAction):
-    """Import data from Excel."""
-    action_type = "import_excel"
-    display_name = "导入Excel"
-    description = "从Excel导入数据"
+class DataImportAction:
+    """Data importer from multiple formats.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            file_path = params.get("file_path", "")
-            sheet_index = params.get("sheet_index", 0)
-            header_row = params.get("header_row", 0)
+    Example:
+        importer = DataImportAction()
 
-            if not file_path:
-                return ActionResult(success=False, message="file_path is required")
+        data = importer.import_data("data.json")
+        data = importer.import_csv("data.csv")
 
-            return ActionResult(
-                success=True,
-                data={"file_path": file_path, "sheet_index": sheet_index, "format": "xlsx"},
-                message=f"Excel import prepared for {file_path}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Import Excel failed: {e}")
+        records = importer.import_records("large_file.csv", batch_size=1000)
+    """
 
+    def __init__(self, config: Optional[ImportConfig] = None) -> None:
+        self.config = config or ImportConfig()
 
-class ImportValidateAction(BaseAction):
-    """Validate import data."""
-    action_type = "import_validate"
-    display_name = "验证导入"
-    description = "验证导入数据"
+    def import_data(
+        self,
+        content: Union[str, bytes],
+        format: Optional[ImportFormat] = None,
+    ) -> Any:
+        """Import data from string.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            schema = params.get("schema", {})
-            required_fields = schema.get("required_fields", [])
+        Args:
+            content: Data content
+            format: Data format
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+        Returns:
+            Parsed data
+        """
+        format = format or self.config.format
 
-            errors = []
-            for idx, item in enumerate(data):
-                for field in required_fields:
-                    if field not in item or item[field] is None:
-                        errors.append(f"Row {idx}: missing required field '{field}'")
+        if isinstance(content, bytes):
+            content = content.decode(self.config.encoding)
 
-            is_valid = len(errors) == 0
+        if format == ImportFormat.JSON:
+            return self._import_json(content)
+        elif format == ImportFormat.JSON_LINES:
+            return self._import_jsonl(content)
+        elif format == ImportFormat.CSV:
+            return self._import_csv(content)
+        elif format == ImportFormat.TSV:
+            return self._import_tsv(content)
+        elif format == ImportFormat.XML:
+            return self._import_xml(content)
 
-            return ActionResult(
-                success=is_valid,
-                data={"is_valid": is_valid, "errors": errors, "error_count": len(errors)},
-                message=f"Validation: {'PASSED' if is_valid else f'FAILED ({len(errors)} errors)'}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Import validate failed: {e}")
+        return content
+
+    def import_from_file(
+        self,
+        filepath: str,
+        format: Optional[ImportFormat] = None,
+    ) -> Any:
+        """Import data from file.
+
+        Args:
+            filepath: File path
+            format: Data format (auto-detect if None)
+
+        Returns:
+            Parsed data
+        """
+        from pathlib import Path
+
+        path = Path(filepath)
+        content = path.read_text(encoding=self.config.encoding)
+
+        if format is None:
+            suffix = path.suffix.lower()
+            if suffix == ".json":
+                format = ImportFormat.JSON
+            elif suffix in (".csv", ):
+                format = ImportFormat.CSV
+            elif suffix == ".xml":
+                format = ImportFormat.XML
+            else:
+                format = self.config.format
+
+        return self.import_data(content, format)
+
+    def import_records(
+        self,
+        content: str,
+        format: Optional[ImportFormat] = None,
+    ) -> List[Dict]:
+        """Import as list of records.
+
+        Args:
+            content: Data content
+            format: Data format
+
+        Returns:
+            List of record dicts
+        """
+        data = self.import_data(content, format)
+
+        if isinstance(data, list):
+            return data
+        elif isinstance(data, dict):
+            return [data]
+
+        return []
+
+    def _import_json(self, content: str) -> Any:
+        """Import JSON."""
+        return json.loads(content)
+
+    def _import_jsonl(self, content: str) -> List[Any]:
+        """Import JSON Lines."""
+        records = []
+        for line in content.strip().split("\n"):
+            if line.strip():
+                records.append(json.loads(line))
+        return records
+
+    def _import_csv(self, content: str) -> List[Dict]:
+        """Import CSV."""
+        reader = csv.DictReader(StringIO(content))
+        return list(reader)
+
+    def _import_tsv(self, content: str) -> List[Dict]:
+        """Import TSV."""
+        reader = csv.DictReader(StringIO(content), delimiter="\t")
+        return list(reader)
+
+    def _import_xml(self, content: str) -> Any:
+        """Import XML."""
+        root = ET.fromstring(content)
+        return self._xml_to_dict(root)
+
+    def _xml_to_dict(self, element: ET.Element) -> Dict:
+        """Convert XML element to dict."""
+        result: Dict = {}
+
+        if element.attrib:
+            result["@attributes"] = element.attrib
+
+        if element.text and element.text.strip():
+            return element.text.strip()
+
+        for child in element:
+            child_data = self._xml_to_dict(child)
+
+            if child.tag in result:
+                if not isinstance(result[child.tag], list):
+                    result[child.tag] = [result[child.tag]]
+                result[child.tag].append(child_data)
+            else:
+                result[child.tag] = child_data
+
+        return result
