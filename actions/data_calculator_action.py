@@ -1,17 +1,14 @@
 """Data calculator action module for RabAI AutoClick.
 
 Provides data calculation operations:
-- DataCalculatorAction: Perform data calculations
-- AggregateCalculatorAction: Calculate aggregations
-- StatisticalCalculatorAction: Statistical calculations
-- FormulaEvaluatorAction: Evaluate formulas
-- MetricCalculatorAction: Calculate metrics
+- CalculateFieldAction: Calculate new field
+- CalculateExpressionAction: Evaluate expression
+- CalculateAggregateAction: Aggregate calculations
+- CalculateRollingAction: Rolling calculations
+- CalculateCumulativeAction: Cumulative calculations
 """
 
-import math
-import statistics
-from typing import Any, Dict, List, Optional, Union
-from datetime import datetime
+from typing import Any, Dict, List
 
 import sys
 import os
@@ -21,299 +18,211 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class DataCalculatorAction(BaseAction):
-    """Perform data calculations."""
-    action_type = "data_calculator"
-    display_name = "数据计算"
-    description = "执行数据计算"
+class CalculateFieldAction(BaseAction):
+    """Calculate a new field."""
+    action_type = "calculate_field"
+    display_name = "计算字段"
+    description = "计算新字段"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
+            data = params.get("data", [])
+            output_field = params.get("output_field", "result")
             operation = params.get("operation", "add")
-            values = params.get("values", [])
-            operand = params.get("operand", None)
+            fields = params.get("fields", [])
 
-            if not values and operand is None:
-                return ActionResult(success=False, message="values or operand is required")
+            if not data:
+                return ActionResult(success=False, message="data is required")
 
-            supported_ops = ["add", "subtract", "multiply", "divide", "power", "mod", "avg", "min", "max", "sum"]
-
-            if operation not in supported_ops:
-                return ActionResult(success=False, message=f"Unsupported operation: {operation}")
-
-            if operation == "sum" or operation == "add":
-                result = sum(values) if values else 0
-            elif operation == "subtract":
-                result = values[0] - sum(values[1:]) if values else 0
-            elif operation == "multiply":
-                result = math.prod(values) if values else 0
-            elif operation == "divide":
-                if operand == 0:
-                    return ActionResult(success=False, message="Division by zero")
-                result = values[0] / operand if values else 0
-            elif operation == "power":
-                result = math.pow(values[0], values[1]) if len(values) >= 2 else 0
-            elif operation == "mod":
-                result = values[0] % operand if values else 0
-            elif operation == "avg":
-                result = sum(values) / len(values) if values else 0
-            elif operation == "min":
-                result = min(values) if values else None
-            elif operation == "max":
-                result = max(values) if values else None
-            else:
-                result = 0
+            results = []
+            for item in data:
+                new_item = item.copy()
+                if operation == "add" and len(fields) == 2:
+                    new_item[output_field] = item.get(fields[0], 0) + item.get(fields[1], 0)
+                elif operation == "subtract" and len(fields) == 2:
+                    new_item[output_field] = item.get(fields[0], 0) - item.get(fields[1], 0)
+                elif operation == "multiply" and len(fields) == 2:
+                    new_item[output_field] = item.get(fields[0], 0) * item.get(fields[1], 0)
+                elif operation == "divide" and len(fields) == 2:
+                    divisor = item.get(fields[1], 0)
+                    new_item[output_field] = item.get(fields[0], 0) / divisor if divisor != 0 else None
+                elif operation == "square":
+                    new_item[output_field] = item.get(fields[0], 0) ** 2
+                elif operation == "sqrt":
+                    import math
+                    val = item.get(fields[0], 0)
+                    new_item[output_field] = math.sqrt(val) if val >= 0 else None
+                elif operation == "abs":
+                    new_item[output_field] = abs(item.get(fields[0], 0))
+                else:
+                    new_item[output_field] = None
+                results.append(new_item)
 
             return ActionResult(
                 success=True,
-                data={
-                    "operation": operation,
-                    "result": result,
-                    "input_count": len(values),
-                    "operand": operand
-                },
-                message=f"Calculation result: {result}"
+                data={"results": results, "output_field": output_field, "operation": operation, "count": len(results)},
+                message=f"Calculated {output_field} using {operation} on {len(results)} rows",
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Data calculator error: {str(e)}")
+            return ActionResult(success=False, message=f"Calculate field failed: {e}")
 
 
-class AggregateCalculatorAction(BaseAction):
-    """Calculate aggregations on data."""
-    action_type = "aggregate_calculator"
+class CalculateExpressionAction(BaseAction):
+    """Evaluate expression."""
+    action_type = "calculate_expression"
+    display_name = "计算表达式"
+    description = "计算表达式"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            data = params.get("data", [])
+            expression = params.get("expression", "")
+            output_field = params.get("output_field", "expression_result")
+
+            if not data:
+                return ActionResult(success=False, message="data is required")
+            if not expression:
+                return ActionResult(success=False, message="expression is required")
+
+            results = []
+            for item in data:
+                try:
+                    local_vars = {k: v for k, v in item.items() if isinstance(v, (int, float))}
+                    result = eval(expression, {"__builtins__": {}}, local_vars)
+                    new_item = item.copy()
+                    new_item[output_field] = result
+                    results.append(new_item)
+                except Exception:
+                    new_item = item.copy()
+                    new_item[output_field] = None
+                    results.append(new_item)
+
+            return ActionResult(
+                success=True,
+                data={"results": results, "output_field": output_field, "expression": expression, "count": len(results)},
+                message=f"Evaluated expression on {len(results)} rows",
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Calculate expression failed: {e}")
+
+
+class CalculateAggregateAction(BaseAction):
+    """Aggregate calculations."""
+    action_type = "calculate_aggregate"
     display_name = "聚合计算"
-    description = "计算数据聚合"
+    description = "聚合计算"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
             data = params.get("data", [])
-            aggregation_type = params.get("aggregation_type", "sum")
-            group_by = params.get("group_by", None)
-            having = params.get("having", None)
+            field = params.get("field", "value")
+            functions = params.get("functions", ["sum", "avg", "min", "max", "count"])
 
             if not data:
                 return ActionResult(success=False, message="data is required")
 
-            numeric_data = [x for x in data if isinstance(x, (int, float))]
-
-            if aggregation_type == "sum":
-                result = sum(numeric_data) if numeric_data else 0
-            elif aggregation_type == "count":
-                result = len(data)
-            elif aggregation_type == "avg":
-                result = statistics.mean(numeric_data) if numeric_data else 0
-            elif aggregation_type == "min":
-                result = min(numeric_data) if numeric_data else None
-            elif aggregation_type == "max":
-                result = max(numeric_data) if numeric_data else None
-            elif aggregation_type == "median":
-                result = statistics.median(numeric_data) if numeric_data else None
-            elif aggregation_type == "stddev":
-                result = statistics.stdev(numeric_data) if len(numeric_data) > 1 else 0
-            else:
-                return ActionResult(success=False, message=f"Unknown aggregation: {aggregation_type}")
-
-            return ActionResult(
-                success=True,
-                data={
-                    "aggregation_type": aggregation_type,
-                    "result": result,
-                    "record_count": len(data),
-                    "numeric_count": len(numeric_data),
-                    "group_by": group_by,
-                    "having": having
-                },
-                message=f"Aggregation '{aggregation_type}' = {result}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Aggregate calculator error: {str(e)}")
-
-
-class StatisticalCalculatorAction(BaseAction):
-    """Statistical calculations."""
-    action_type = "statistical_calculator"
-    display_name = "统计计算"
-    description = "执行统计计算"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            stats = params.get("stats", ["mean", "median", "stdev", "variance"])
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            numeric_data = [x for x in data if isinstance(x, (int, float))]
-            if not numeric_data:
-                return ActionResult(success=False, message="No numeric data found")
-
+            values = [d.get(field, 0) for d in data]
             result = {}
-
-            if "mean" in stats:
-                result["mean"] = statistics.mean(numeric_data)
-            if "median" in stats:
-                result["median"] = statistics.median(numeric_data)
-            if "stdev" in stats:
-                result["stdev"] = statistics.stdev(numeric_data) if len(numeric_data) > 1 else 0
-            if "variance" in stats:
-                result["variance"] = statistics.variance(numeric_data) if len(numeric_data) > 1 else 0
-            if "min" in stats:
-                result["min"] = min(numeric_data)
-            if "max" in stats:
-                result["max"] = max(numeric_data)
-            if "range" in stats:
-                result["range"] = max(numeric_data) - min(numeric_data)
-            if "sum" in stats:
-                result["sum"] = sum(numeric_data)
-            if "count" in stats:
-                result["count"] = len(numeric_data)
-            if "q1" in stats:
-                sorted_data = sorted(numeric_data)
-                q1_idx = len(sorted_data) // 4
-                result["q1"] = sorted_data[q1_idx]
-            if "q3" in stats:
-                sorted_data = sorted(numeric_data)
-                q3_idx = 3 * len(sorted_data) // 4
-                result["q3"] = sorted_data[q3_idx]
-            if "iqr" in stats:
-                sorted_data = sorted(numeric_data)
-                q1_idx = len(sorted_data) // 4
-                q3_idx = 3 * len(sorted_data) // 4
-                result["iqr"] = sorted_data[q3_idx] - sorted_data[q1_idx]
+            if "sum" in functions:
+                result["sum"] = sum(values)
+            if "avg" in functions:
+                result["avg"] = sum(values) / len(values) if values else 0
+            if "min" in functions:
+                result["min"] = min(values) if values else None
+            if "max" in functions:
+                result["max"] = max(values) if values else None
+            if "count" in functions:
+                result["count"] = len(values)
 
             return ActionResult(
                 success=True,
-                data={
-                    "stats": result,
-                    "data_points": len(numeric_data),
-                    "stats_calculated": list(result.keys())
-                },
-                message=f"Statistics calculated: {', '.join(result.keys())}"
+                data={"aggregates": result, "field": field, "functions": functions},
+                message=f"Aggregate {field}: " + ", ".join(f"{k}={v}" for k, v in result.items()),
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Statistical calculator error: {str(e)}")
+            return ActionResult(success=False, message=f"Calculate aggregate failed: {e}")
 
 
-class FormulaEvaluatorAction(BaseAction):
-    """Evaluate mathematical formulas."""
-    action_type = "formula_evaluator"
-    display_name = "公式计算"
-    description = "计算数学公式"
+class CalculateRollingAction(BaseAction):
+    """Rolling calculations."""
+    action_type = "calculate_rolling"
+    display_name = "滚动计算"
+    description = "滚动窗口计算"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            formula = params.get("formula", "")
-            variables = params.get("variables", {})
+            data = params.get("data", [])
+            field = params.get("field", "value")
+            window = params.get("window", 3)
+            function = params.get("function", "avg")
 
-            if not formula:
-                return ActionResult(success=False, message="formula is required")
+            if not data:
+                return ActionResult(success=False, message="data is required")
 
-            try:
-                local_vars = {**variables}
-                result = eval(formula, {"__builtins__": {}, "math": math}, local_vars)
-            except Exception as e:
-                return ActionResult(success=False, message=f"Formula evaluation error: {str(e)}")
+            values = [d.get(field, 0) for d in data]
+            results = []
+            for i in range(len(values)):
+                window_vals = values[max(0, i - window + 1) : i + 1]
+                if function == "avg":
+                    val = sum(window_vals) / len(window_vals)
+                elif function == "sum":
+                    val = sum(window_vals)
+                elif function == "min":
+                    val = min(window_vals)
+                elif function == "max":
+                    val = max(window_vals)
+                else:
+                    val = window_vals[-1]
+                new_item = data[i].copy()
+                new_item[f"{field}_rolling_{function}"] = val
+                results.append(new_item)
 
             return ActionResult(
                 success=True,
-                data={
-                    "formula": formula,
-                    "result": result,
-                    "variables": variables,
-                    "evaluated_at": datetime.now().isoformat()
-                },
-                message=f"Formula evaluated: {result}"
+                data={"results": results, "window": window, "function": function, "count": len(results)},
+                message=f"Rolling {function} with window={window} on {len(results)} rows",
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Formula evaluator error: {str(e)}")
+            return ActionResult(success=False, message=f"Calculate rolling failed: {e}")
 
 
-class MetricCalculatorAction(BaseAction):
-    """Calculate metrics."""
-    action_type = "metric_calculator"
-    display_name = "指标计算"
-    description = "计算各种指标"
+class CalculateCumulativeAction(BaseAction):
+    """Cumulative calculations."""
+    action_type = "calculate_cumulative"
+    display_name = "累计计算"
+    description = "累计计算"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            metric_type = params.get("metric_type", "ratio")
-            value = params.get("value", 0)
-            baseline = params.get("baseline", 1)
-            unit = params.get("unit", "")
+            data = params.get("data", [])
+            field = params.get("field", "value")
+            function = params.get("function", "sum")
 
-            if metric_type == "ratio":
-                result = value / baseline if baseline != 0 else 0
-                display = f"{result:.2f}"
-            elif metric_type == "percentage":
-                result = (value / baseline * 100) if baseline != 0 else 0
-                display = f"{result:.1f}%"
-            elif metric_type == "change":
-                result = value - baseline
-                display = f"+{result:.2f}" if result > 0 else f"{result:.2f}"
-            elif metric_type == "percent_change":
-                result = ((value - baseline) / baseline * 100) if baseline != 0 else 0
-                display = f"{result:+.1f}%"
-            elif metric_type == "rate":
-                result = value / baseline if baseline != 0 else 0
-                display = f"{result:.2f}/{unit}"
-            else:
-                result = value
-                display = str(value)
+            if not data:
+                return ActionResult(success=False, message="data is required")
+
+            values = [d.get(field, 0) for d in data]
+            cumulative = []
+            running = 0
+            for v in values:
+                if function == "sum":
+                    running += v
+                elif function == "min":
+                    running = min(running, v) if cumulative else v
+                elif function == "max":
+                    running = max(running, v) if cumulative else v
+                cumulative.append(running)
+
+            results = []
+            for i, d in enumerate(data):
+                new_item = d.copy()
+                new_item[f"{field}_cumulative_{function}"] = cumulative[i]
+                results.append(new_item)
 
             return ActionResult(
                 success=True,
-                data={
-                    "metric_type": metric_type,
-                    "value": value,
-                    "baseline": baseline,
-                    "result": result,
-                    "display": display,
-                    "unit": unit
-                },
-                message=f"Metric '{metric_type}': {display}"
+                data={"results": results, "function": function, "count": len(results)},
+                message=f"Cumulative {function} on {len(results)} rows",
             )
         except Exception as e:
-            return ActionResult(success=False, message=f"Metric calculator error: {str(e)}")
-
-
-class PercentageCalculatorAction(BaseAction):
-    """Calculate percentages."""
-    action_type = "percentage_calculator"
-    display_name = "百分比计算"
-    description = "计算百分比"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "calculate")
-            part = params.get("part", 0)
-            whole = params.get("whole", 1)
-            percentage = params.get("percentage", 0)
-
-            if operation == "calculate":
-                if whole == 0:
-                    return ActionResult(success=False, message="whole cannot be zero")
-                result = (part / whole) * 100
-                return ActionResult(
-                    success=True,
-                    data={"part": part, "whole": whole, "percentage": result},
-                    message=f"{part}/{whole} = {result:.2f}%"
-                )
-            elif operation == "of":
-                result = (percentage / 100) * whole
-                return ActionResult(
-                    success=True,
-                    data={"percentage": percentage, "whole": whole, "part": result},
-                    message=f"{percentage}% of {whole} = {result}"
-                )
-            elif operation == "from":
-                result = (part / (percentage / 100)) if percentage != 0 else 0
-                return ActionResult(
-                    success=True,
-                    data={"part": part, "percentage": percentage, "whole": result},
-                    message=f"{part} is {percentage}% of {result:.2f}"
-                )
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Percentage calculator error: {str(e)}")
+            return ActionResult(success=False, message=f"Calculate cumulative failed: {e}")
