@@ -1,360 +1,309 @@
-"""Batch processor action module for RabAI AutoClick.
-
-Provides batch processing operations:
-- BatchProcessor: Process items in batches
-- ParallelBatchProcessor: Parallel batch processing
-- PriorityBatch: Priority-based batch processing
-- BatchScheduler: Schedule batch jobs
-- BatchMonitor: Monitor batch progress
 """
+Batch processing and ETL module for large-scale data operations.
 
+Supports chunking, parallel processing, checkpointing,
+error handling, and data transformation pipelines.
+"""
+from __future__ import annotations
+
+import json
 import time
-import threading
-import queue
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import uuid
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Iterator, Optional
 
-import sys
-import os
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+class ProcessingMode(Enum):
+    """Batch processing mode."""
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"
+    DISTRIBUTED = "distributed"
+
+
+class ProcessingStatus(Enum):
+    """Processing job status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    PAUSED = "paused"
 
 
 @dataclass
-class BatchItem:
-    """Batch item."""
+class BatchConfig:
+    """Configuration for batch processing."""
+    chunk_size: int = 1000
+    max_parallelism: int = 4
+    mode: ProcessingMode = ProcessingMode.SEQUENTIAL
+    retry_count: int = 3
+    retry_delay_seconds: float = 1.0
+    checkpoint_enabled: bool = True
+    checkpoint_interval: int = 10
+    timeout_seconds: int = 3600
+
+
+@dataclass
+class Chunk:
+    """A chunk of data for processing."""
     id: str
-    data: Any
-    priority: int = 0
-    metadata: Dict = field(default_factory=dict)
+    index: int
+    data: list
+    start_offset: int
+    end_offset: int
+    status: ProcessingStatus = ProcessingStatus.PENDING
+    attempts: int = 0
+    error: Optional[str] = None
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+
+    def duration_ms(self) -> float:
+        if self.start_time and self.end_time:
+            return (self.end_time - self.start_time) * 1000
+        return 0.0
+
+
+@dataclass
+class Transform:
+    """A data transformation step."""
+    name: str
+    func: Callable
+    input_field: Optional[str] = None
+    output_field: Optional[str] = None
+    condition: Optional[Callable] = None
+
+
+@dataclass
+class BatchJob:
+    """A batch processing job."""
+    id: str
+    name: str
+    config: BatchConfig
+    total_records: int
+    chunks: list[Chunk] = field(default_factory=list)
+    status: ProcessingStatus = ProcessingStatus.PENDING
+    progress: float = 0.0
+    processed_count: int = 0
+    failed_count: int = 0
+    start_time: float = field(default_factory=time.time)
+    end_time: Optional[float] = None
+    checkpoint_data: dict = field(default_factory=dict)
 
 
 @dataclass
 class BatchResult:
-    """Batch processing result."""
-    batch_id: str
-    total: int
-    successful: int
-    failed: int
-    duration: float
-    results: List[Any]
-    errors: List[Dict]
-
-
-@dataclass
-class BatchProgress:
-    """Batch progress tracking."""
-    batch_id: str
-    total_items: int
-    processed_items: int
-    successful_items: int
-    failed_items: int
-    start_time: float
-    current_item: Optional[str] = None
-    status: str = "running"
+    """Result of batch processing."""
+    job_id: str
+    status: ProcessingStatus
+    total_records: int
+    processed_records: int
+    failed_records: int
+    duration_ms: float
+    chunks_processed: int
+    chunks_failed: int
+    errors: list[str] = field(default_factory=list)
 
 
 class BatchProcessor:
-    """Batch processor."""
+    """
+    Batch processing and ETL service.
 
-    def __init__(self, batch_size: int = 100):
-        self.batch_size = batch_size
-
-    def process(
-        self,
-        items: List[Any],
-        processor: Callable[[Any], Any],
-        on_item_complete: Optional[Callable[[Any, Any], None]] = None,
-        on_error: Optional[Callable[[Exception, Any], None]] = None,
-    ) -> BatchResult:
-        """Process items in batches."""
-        batch_id = f"batch_{int(time.time() * 1000)}"
-        start_time = time.time()
-        results = []
-        errors = []
-        successful = 0
-        failed = 0
-
-        for i in range(0, len(items), self.batch_size):
-            batch = items[i:i+self.batch_size]
-
-            for item in batch:
-                try:
-                    result = processor(item)
-                    results.append(result)
-                    successful += 1
-                    if on_item_complete:
-                        on_item_complete(item, result)
-                except Exception as e:
-                    failed += 1
-                    errors.append({"item": str(item)[:50], "error": str(e)})
-                    if on_error:
-                        on_error(e, item)
-
-        duration = time.time() - start_time
-        return BatchResult(
-            batch_id=batch_id,
-            total=len(items),
-            successful=successful,
-            failed=failed,
-            duration=duration,
-            results=results,
-            errors=errors,
-        )
-
-
-class ParallelBatchProcessor:
-    """Parallel batch processor."""
-
-    def __init__(self, max_workers: int = 4, batch_size: int = 50):
-        self.max_workers = max_workers
-        self.batch_size = batch_size
-
-    def process(
-        self,
-        items: List[Any],
-        processor: Callable[[Any], Any],
-        on_error: Optional[Callable[[Exception, Any], None]] = None,
-    ) -> BatchResult:
-        """Process items in parallel."""
-        batch_id = f"batch_{int(time.time() * 1000)}"
-        start_time = time.time()
-        results = []
-        errors = []
-        successful = 0
-        failed = 0
-
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_item = {executor.submit(processor, item): item for item in items}
-
-            for future in as_completed(future_to_item):
-                item = future_to_item[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                    successful += 1
-                except Exception as e:
-                    failed += 1
-                    errors.append({"item": str(item)[:50], "error": str(e)})
-                    if on_error:
-                        on_error(e, item)
-
-        duration = time.time() - start_time
-        return BatchResult(
-            batch_id=batch_id,
-            total=len(items),
-            successful=successful,
-            failed=failed,
-            duration=duration,
-            results=results,
-            errors=errors,
-        )
-
-
-class PriorityBatch:
-    """Priority-based batch processor."""
+    Provides chunking, parallel processing, checkpointing,
+    and transformation pipelines for large-scale data operations.
+    """
 
     def __init__(self):
-        self._queue = queue.PriorityQueue()
-        self._lock = threading.Lock()
+        self._jobs: dict[str, BatchJob] = {}
+        self._checkpoints: dict[str, dict] = {}
 
-    def add(self, item: Any, priority: int = 0):
-        """Add item to priority batch."""
-        self._queue.put((priority, time.time(), item))
-
-    def add_batch(self, items: List[Any], default_priority: int = 0):
-        """Add multiple items."""
-        for item in items:
-            self.add(item, default_priority)
-
-    def get_batch(self, batch_size: int) -> List[Any]:
-        """Get batch of items."""
-        items = []
-        for _ in range(batch_size):
-            try:
-                _, _, item = self._queue.get_nowait()
-                items.append(item)
-            except queue.Empty:
-                break
-        return items
-
-    def size(self) -> int:
-        """Get queue size."""
-        return self._queue.qsize()
-
-
-class BatchScheduler:
-    """Schedule batch jobs."""
-
-    def __init__(self):
-        self._scheduled: List[Dict] = []
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._lock = threading.RLock()
-
-    def schedule(
+    def create_job(
         self,
         name: str,
-        items: List[Any],
+        data: list,
+        config: Optional[BatchConfig] = None,
+    ) -> BatchJob:
+        """Create a new batch processing job."""
+        config = config or BatchConfig()
+        job_id = str(uuid.uuid4())[:12]
+
+        chunks = self._create_chunks(data, config.chunk_size)
+
+        job = BatchJob(
+            id=job_id,
+            name=name,
+            config=config,
+            total_records=len(data),
+            chunks=chunks,
+        )
+
+        self._jobs[job_id] = job
+        return job
+
+    def _create_chunks(self, data: list, chunk_size: int) -> list[Chunk]:
+        """Split data into chunks."""
+        chunks = []
+        for i in range(0, len(data), chunk_size):
+            chunk = Chunk(
+                id=str(uuid.uuid4())[:8],
+                index=i // chunk_size,
+                data=data[i:i + chunk_size],
+                start_offset=i,
+                end_offset=min(i + chunk_size, len(data)),
+            )
+            chunks.append(chunk)
+        return chunks
+
+    def execute_job(
+        self,
+        job_id: str,
         processor: Callable,
-        interval: float,
-        batch_size: int = 100,
-    ) -> str:
-        """Schedule recurring batch job."""
-        job_id = f"job_{int(time.time() * 1000)}"
-        with self._lock:
-            self._scheduled.append({
-                "id": job_id,
-                "name": name,
-                "items": items,
-                "processor": processor,
-                "interval": interval,
-                "batch_size": batch_size,
-                "last_run": None,
-                "next_run": time.time(),
-            })
-        return job_id
+        transforms: Optional[list[Transform]] = None,
+    ) -> BatchResult:
+        """Execute a batch processing job."""
+        job = self._jobs.get(job_id)
+        if not job:
+            raise ValueError(f"Job not found: {job_id}")
 
-    def cancel(self, job_id: str) -> bool:
-        """Cancel scheduled job."""
-        with self._lock:
-            for job in self._scheduled:
-                if job["id"] == job_id:
-                    self._scheduled.remove(job)
-                    return True
-        return False
+        job.status = ProcessingStatus.RUNNING
 
-    def start(self):
-        """Start scheduler."""
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        """Stop scheduler."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
-
-    def _run_loop(self):
-        """Scheduler loop."""
-        while self._running:
-            now = time.time()
-            with self._lock:
-                for job in self._scheduled:
-                    if job["next_run"] <= now:
-                        try:
-                            processor = BatchProcessor(batch_size=job["batch_size"])
-                            processor.process(job["items"], job["processor"])
-                        except Exception:
-                            pass
-                        job["last_run"] = now
-                        job["next_run"] = now + job["interval"]
-            time.sleep(1.0)
-
-
-class BatchProcessorAction(BaseAction):
-    """Batch processor action."""
-    action_type = "batch_processor"
-    display_name = "批处理器"
-    description = "批量数据并行处理"
-
-    def __init__(self):
-        super().__init__()
-        self._scheduler = BatchScheduler()
-        self._scheduler.start()
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            operation = params.get("operation", "process")
+            for i, chunk in enumerate(job.chunks):
+                if job.status == ProcessingStatus.CANCELLED:
+                    break
 
-            if operation == "process":
-                return self._process(params)
-            elif operation == "process_parallel":
-                return self._process_parallel(params)
-            elif operation == "schedule":
-                return self._schedule(params)
-            elif operation == "cancel":
-                return self._cancel(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+                self._process_chunk(chunk, processor, transforms)
+
+                job.processed_count += chunk.end_offset - chunk.start_offset
+                if chunk.status == ProcessingStatus.FAILED:
+                    job.failed_count += len(chunk.data)
+
+                if job.config.checkpoint_enabled and (i + 1) % job.config.checkpoint_interval == 0:
+                    self._save_checkpoint(job)
+
+                job.progress = (i + 1) / len(job.chunks) * 100
+
+            failed_chunks = [c for c in job.chunks if c.status == ProcessingStatus.FAILED]
+            job.status = ProcessingStatus.COMPLETED if not failed_chunks else ProcessingStatus.FAILED
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Batch error: {str(e)}")
+            job.status = ProcessingStatus.FAILED
 
-    def _process(self, params: Dict) -> ActionResult:
-        """Process items in batches."""
-        items = params.get("items", [])
-        processor = params.get("processor")
-        batch_size = params.get("batch_size", 100)
+        job.end_time = time.time()
 
-        if not processor:
-            return ActionResult(success=False, message="processor is required")
-
-        proc = BatchProcessor(batch_size=batch_size)
-        result = proc.process(items, processor)
-
-        return ActionResult(
-            success=result.failed == 0,
-            message=f"Processed {result.successful}/{result.total} items in {result.duration:.2f}s",
-            data={
-                "batch_id": result.batch_id,
-                "total": result.total,
-                "successful": result.successful,
-                "failed": result.failed,
-                "duration": result.duration,
-            },
+        return BatchResult(
+            job_id=job_id,
+            status=job.status,
+            total_records=job.total_records,
+            processed_records=job.processed_count,
+            failed_records=job.failed_count,
+            duration_ms=(job.end_time - job.start_time) * 1000,
+            chunks_processed=sum(1 for c in job.chunks if c.status == ProcessingStatus.COMPLETED),
+            chunks_failed=sum(1 for c in job.chunks if c.status == ProcessingStatus.FAILED),
         )
 
-    def _process_parallel(self, params: Dict) -> ActionResult:
-        """Process items in parallel."""
-        items = params.get("items", [])
-        processor = params.get("processor")
-        max_workers = params.get("max_workers", 4)
-        batch_size = params.get("batch_size", 50)
+    def _process_chunk(
+        self,
+        chunk: Chunk,
+        processor: Callable,
+        transforms: Optional[list[Transform]],
+    ) -> None:
+        """Process a single chunk."""
+        chunk.status = ProcessingStatus.RUNNING
+        chunk.start_time = time.time()
+        chunk.attempts += 1
 
-        if not processor:
-            return ActionResult(success=False, message="processor is required")
+        try:
+            data = chunk.data
 
-        proc = ParallelBatchProcessor(max_workers=max_workers, batch_size=batch_size)
-        result = proc.process(items, processor)
+            if transforms:
+                for transform in transforms:
+                    if transform.condition and not transform.condition(data):
+                        continue
+                    data = self._apply_transform(data, transform)
 
-        return ActionResult(
-            success=result.failed == 0,
-            message=f"Processed {result.successful}/{result.total} items in {result.duration:.2f}s",
-            data={
-                "batch_id": result.batch_id,
-                "total": result.total,
-                "successful": result.successful,
-                "failed": result.failed,
-                "duration": result.duration,
-            },
-        )
+            result = processor(data)
 
-    def _schedule(self, params: Dict) -> ActionResult:
-        """Schedule batch job."""
-        name = params.get("name", "batch_job")
-        items = params.get("items", [])
-        processor = params.get("processor")
-        interval = params.get("interval", 60.0)
-        batch_size = params.get("batch_size", 100)
+            chunk.status = ProcessingStatus.COMPLETED
+            chunk.end_time = time.time()
 
-        if not processor:
-            return ActionResult(success=False, message="processor is required")
+        except Exception as e:
+            chunk.error = str(e)
+            chunk.status = ProcessingStatus.FAILED
+            chunk.end_time = time.time()
 
-        job_id = self._scheduler.schedule(name, items, processor, interval, batch_size)
-        return ActionResult(success=True, message=f"Job '{name}' scheduled with ID '{job_id}'")
+    def _apply_transform(self, data: list, transform: Transform) -> list:
+        """Apply a transformation to data."""
+        if transform.input_field and transform.output_field:
+            return [
+                {**item, transform.output_field: transform.func(item.get(transform.input_field))}
+                for item in data
+            ]
+        return [transform.func(item) for item in data]
 
-    def _cancel(self, params: Dict) -> ActionResult:
-        """Cancel scheduled job."""
-        job_id = params.get("job_id")
-        if not job_id:
-            return ActionResult(success=False, message="job_id is required")
+    def _save_checkpoint(self, job: BatchJob) -> None:
+        """Save a processing checkpoint."""
+        self._checkpoints[job.id] = {
+            "processed_count": job.processed_count,
+            "failed_count": job.failed_count,
+            "progress": job.progress,
+            "chunk_index": job.chunks.index(next(
+                c for c in job.chunks if c.status == ProcessingStatus.PENDING
+            )) if any(c.status == ProcessingStatus.PENDING for c in job.chunks) else len(job.chunks),
+            "timestamp": time.time(),
+        }
 
-        success = self._scheduler.cancel(job_id)
-        return ActionResult(success=success, message="Job cancelled" if success else "Job not found")
+    def resume_job(
+        self,
+        job_id: str,
+        processor: Callable,
+        transforms: Optional[list[Transform]] = None,
+    ) -> BatchResult:
+        """Resume a failed or paused job from checkpoint."""
+        job = self._jobs.get(job_id)
+        if not job:
+            raise ValueError(f"Job not found: {job_id}")
+
+        checkpoint = self._checkpoints.get(job_id)
+        if checkpoint:
+            pending_chunks = [
+                c for c in job.chunks
+                if c.index >= checkpoint.get("chunk_index", 0)
+                and c.status in (ProcessingStatus.PENDING, ProcessingStatus.FAILED)
+            ]
+        else:
+            pending_chunks = [c for c in job.chunks if c.status == ProcessingStatus.PENDING]
+
+        job.chunks = pending_chunks
+        job.status = ProcessingStatus.RUNNING
+
+        return self.execute_job(job_id, processor, transforms)
+
+    def cancel_job(self, job_id: str) -> bool:
+        """Cancel a running job."""
+        job = self._jobs.get(job_id)
+        if not job:
+            return False
+
+        job.status = ProcessingStatus.CANCELLED
+        return True
+
+    def get_job_status(self, job_id: str) -> Optional[BatchJob]:
+        """Get the status of a job."""
+        return self._jobs.get(job_id)
+
+    def list_jobs(self, status: Optional[ProcessingStatus] = None) -> list[BatchJob]:
+        """List all jobs with optional status filter."""
+        jobs = list(self._jobs.values())
+        if status:
+            jobs = [j for j in jobs if j.status == status]
+        return sorted(jobs, key=lambda j: j.start_time, reverse=True)
+
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a job and its checkpoint."""
+        if job_id in self._jobs:
+            del self._jobs[job_id]
+        if job_id in self._checkpoints:
+            del self._checkpoints[job_id]
+        return True
