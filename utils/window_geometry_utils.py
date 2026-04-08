@@ -1,61 +1,109 @@
-"""Window geometry calculation utilities.
+"""Window Geometry and Bounds Utilities.
 
-This module provides utilities for calculating window positions,
-overlaps, visibility regions, and geometric relationships.
+Geometry calculations for window positioning and arrangement.
+Supports multi-monitor setups, alignment, and spatial queries.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import math
 from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Optional
+
+
+class Anchor(Enum):
+    """Anchor points for positioning."""
+
+    TOP_LEFT = auto()
+    TOP_CENTER = auto()
+    TOP_RIGHT = auto()
+    MIDDLE_LEFT = auto()
+    CENTER = auto()
+    MIDDLE_RIGHT = auto()
+    BOTTOM_LEFT = auto()
+    BOTTOM_CENTER = auto()
+    BOTTOM_RIGHT = auto()
+
+
+class Alignment(Enum):
+    """Alignment options."""
+
+    LEFT = auto()
+    CENTER_H = auto()
+    RIGHT = auto()
+    TOP = auto()
+    CENTER_V = auto()
+    BOTTOM = auto()
 
 
 @dataclass
-class Rect:
-    """A rectangle defined by top-left and bottom-right corners."""
-    x: int
-    y: int
-    width: int
-    height: int
+class Rectangle:
+    """2D rectangle for bounds representation.
+
+    Attributes:
+        x: Left edge X coordinate.
+        y: Top edge Y coordinate.
+        width: Rectangle width.
+        height: Rectangle height.
+    """
+
+    x: float
+    y: float
+    width: float
+    height: float
 
     @property
-    def left(self) -> int:
+    def left(self) -> float:
+        """Left edge X coordinate."""
         return self.x
 
     @property
-    def top(self) -> int:
-        return self.y
-
-    @property
-    def right(self) -> int:
+    def right(self) -> float:
+        """Right edge X coordinate."""
         return self.x + self.width
 
     @property
-    def bottom(self) -> int:
+    def top(self) -> float:
+        """Top edge Y coordinate."""
+        return self.y
+
+    @property
+    def bottom(self) -> float:
+        """Bottom edge Y coordinate."""
         return self.y + self.height
 
     @property
-    def center_x(self) -> int:
-        return self.x + self.width // 2
+    def center_x(self) -> float:
+        """Center X coordinate."""
+        return self.x + self.width / 2
 
     @property
-    def center_y(self) -> int:
-        return self.y + self.height // 2
+    def center_y(self) -> float:
+        """Center Y coordinate."""
+        return self.y + self.height / 2
 
     @property
-    def center(self) -> Tuple[int, int]:
+    def center(self) -> tuple[float, float]:
+        """Center coordinates."""
         return (self.center_x, self.center_y)
 
     @property
-    def area(self) -> int:
+    def area(self) -> float:
+        """Rectangle area."""
         return self.width * self.height
 
-    def contains_point(self, x: int, y: int) -> bool:
-        """Check if a point is inside the rectangle."""
-        return self.left <= x < self.right and self.top <= y < self.bottom
+    @property
+    def perimeter(self) -> float:
+        """Rectangle perimeter."""
+        return 2 * (self.width + self.height)
 
-    def contains_rect(self, other: "Rect") -> bool:
-        """Check if another rect is fully contained."""
+    def contains_point(self, px: float, py: float) -> bool:
+        """Check if point is inside rectangle."""
+        return self.left <= px <= self.right and self.top <= py <= self.bottom
+
+    def contains_rect(self, other: "Rectangle") -> bool:
+        """Check if another rectangle is inside this one."""
         return (
             self.left <= other.left
             and self.right >= other.right
@@ -63,156 +111,382 @@ class Rect:
             and self.bottom >= other.bottom
         )
 
-    def intersects(self, other: "Rect") -> bool:
-        """Check if this rect intersects another."""
+    def intersects(self, other: "Rectangle") -> bool:
+        """Check if rectangles intersect."""
         return not (
-            self.right <= other.left
-            or self.left >= other.right
-            or self.bottom <= other.top
-            or self.top >= other.bottom
+            self.right < other.left
+            or self.left > other.right
+            or self.bottom < other.top
+            or self.top > other.bottom
         )
 
-    def intersection(self, other: "Rect") -> Optional["Rect"]:
-        """Get the intersection with another rect."""
+    def intersection(self, other: "Rectangle") -> Optional["Rectangle"]:
+        """Get intersection rectangle."""
         if not self.intersects(other):
             return None
+
         left = max(self.left, other.left)
         top = max(self.top, other.top)
         right = min(self.right, other.right)
         bottom = min(self.bottom, other.bottom)
-        return Rect(left, top, right - left, bottom - top)
 
-    def union(self, other: "Rect") -> "Rect":
-        """Get the bounding rect that contains both."""
-        left = min(self.left, other.left)
-        top = min(self.top, other.top)
-        right = max(self.right, other.right)
-        bottom = max(self.bottom, other.bottom)
-        return Rect(left, top, right - left, bottom - top)
+        return Rectangle(
+            x=left,
+            y=top,
+            width=right - left,
+            height=bottom - top,
+        )
 
-    def distance_to(self, other: "Rect") -> float:
-        """Minimum distance between this rect and another."""
+    def distance_to(self, other: "Rectangle") -> float:
+        """Calculate minimum distance to another rectangle."""
+        if self.intersects(other):
+            return 0.0
+
         dx = max(0, max(other.left - self.right, self.left - other.right))
         dy = max(0, max(other.top - self.bottom, self.top - other.bottom))
-        return (dx * dx + dy * dy) ** 0.5
+        return math.sqrt(dx * dx + dy * dy)
 
 
 @dataclass
-class WindowInfo:
-    """Window information with geometry and metadata."""
-    rect: Rect
-    title: str
-    app_name: str
-    is_visible: bool
-    is_focused: bool
-    window_id: Optional[int] = None
+class MonitorInfo:
+    """Information about a display monitor.
 
-
-def arrange_grid(windows: List[Rect], columns: int) -> List[Rect]:
-    """Arrange windows in a grid layout.
-
-    Args:
-        windows: List of window rects to arrange.
-        columns: Number of columns in the grid.
-
-    Returns:
-        List of repositioned rects.
+    Attributes:
+        index: Monitor index.
+        bounds: Monitor bounds.
+        work_area: Usable area (excluding taskbar, etc.).
+        is_primary: Whether this is the primary monitor.
+        scale_factor: DPI scale factor.
     """
-    if not windows:
-        return []
-    rows = (len(windows) + columns - 1) // columns
-    total_width = max(w.width for w in windows)
-    total_height = max(w.height for w in windows)
 
-    arranged = []
-    for i, win in enumerate(windows):
-        col = i % columns
-        row = i // columns
-        x = col * total_width
-        y = row * total_height
-        arranged.append(Rect(x, y, win.width, win.height))
-    return arranged
+    index: int
+    bounds: Rectangle
+    work_area: Rectangle
+    is_primary: bool = False
+    scale_factor: float = 1.0
 
 
-def tile_horizontal(windows: List[Rect], screen_width: int, screen_height: int) -> List[Rect]:
-    """Tile windows horizontally."""
-    if not windows:
-        return []
-    tile_width = screen_width // len(windows)
-    return [
-        Rect(i * tile_width, 0, tile_width, screen_height)
-        for i, _ in enumerate(windows)
-    ]
+class GeometryCalculator:
+    """Calculates geometry for window operations.
+
+    Example:
+        calc = GeometryCalculator()
+        centered = calc.center_in_region(window_bounds, screen_bounds)
+    """
+
+    @staticmethod
+    def center_in_region(
+        inner: Rectangle,
+        outer: Rectangle,
+    ) -> Rectangle:
+        """Center a rectangle within another.
+
+        Args:
+            inner: Rectangle to center.
+            outer: Container rectangle.
+
+        Returns:
+            Centered rectangle.
+        """
+        x = outer.center_x - inner.width / 2
+        y = outer.center_y - inner.height / 2
+        return Rectangle(x=x, y=y, width=inner.width, height=inner.height)
+
+    @staticmethod
+    def align_to_anchor(
+        inner: Rectangle,
+        outer: Rectangle,
+        anchor: Anchor,
+    ) -> Rectangle:
+        """Align a rectangle to an anchor point.
+
+        Args:
+            inner: Rectangle to align.
+            outer: Container rectangle.
+            anchor: Anchor point to align to.
+
+        Returns:
+            Aligned rectangle.
+        """
+        if anchor == Anchor.TOP_LEFT:
+            return Rectangle(x=outer.left, y=outer.top, width=inner.width, height=inner.height)
+        elif anchor == Anchor.TOP_CENTER:
+            return Rectangle(x=outer.center_x - inner.width / 2, y=outer.top, width=inner.width, height=inner.height)
+        elif anchor == Anchor.TOP_RIGHT:
+            return Rectangle(x=outer.right - inner.width, y=outer.top, width=inner.width, height=inner.height)
+        elif anchor == Anchor.MIDDLE_LEFT:
+            return Rectangle(x=outer.left, y=outer.center_y - inner.height / 2, width=inner.width, height=inner.height)
+        elif anchor == Anchor.CENTER:
+            return Rectangle(x=outer.center_x - inner.width / 2, y=outer.center_y - inner.height / 2, width=inner.width, height=inner.height)
+        elif anchor == Anchor.MIDDLE_RIGHT:
+            return Rectangle(x=outer.right - inner.width, y=outer.center_y - inner.height / 2, width=inner.width, height=inner.height)
+        elif anchor == Anchor.BOTTOM_LEFT:
+            return Rectangle(x=outer.left, y=outer.bottom - inner.height, width=inner.width, height=inner.height)
+        elif anchor == Anchor.BOTTOM_CENTER:
+            return Rectangle(x=outer.center_x - inner.width / 2, y=outer.bottom - inner.height, width=inner.width, height=inner.height)
+        elif anchor == Anchor.BOTTOM_RIGHT:
+            return Rectangle(x=outer.right - inner.width, y=outer.bottom - inner.height, width=inner.width, height=inner.height)
+        return inner
+
+    @staticmethod
+    def align_windows(
+        windows: list[Rectangle],
+        alignment: Alignment,
+        gap: float = 0,
+    ) -> list[Rectangle]:
+        """Align multiple windows.
+
+        Args:
+            windows: List of window rectangles.
+            alignment: Alignment direction.
+            gap: Gap between windows.
+
+        Returns:
+            List of aligned rectangles.
+        """
+        if not windows:
+            return []
+
+        if alignment == Alignment.LEFT:
+            min_x = min(w.x for w in windows)
+            return [Rectangle(x=min_x, y=w.y, width=w.width, height=w.height) for w in windows]
+        elif alignment == Alignment.RIGHT:
+            max_x = max(w.right for w in windows) - windows[0].width
+            return [Rectangle(x=max_x, y=w.y, width=w.width, height=w.height) for w in windows]
+        elif alignment == Alignment.CENTER_H:
+            avg_center_y = sum(w.center_y for w in windows) / len(windows)
+            return [Rectangle(x=w.x, y=avg_center_y - w.height / 2, width=w.width, height=w.height) for w in windows]
+        elif alignment == Alignment.TOP:
+            min_y = min(w.y for w in windows)
+            return [Rectangle(x=w.x, y=min_y, width=w.width, height=w.height) for w in windows]
+        elif alignment == Alignment.BOTTOM:
+            max_y = max(w.bottom for w in windows) - windows[0].height
+            return [Rectangle(x=w.x, y=max_y, width=w.width, height=w.height) for w in windows]
+        elif alignment == Alignment.CENTER_V:
+            avg_center_x = sum(w.center_x for w in windows) / len(windows)
+            return [Rectangle(x=avg_center_x - w.width / 2, y=w.y, width=w.width, height=w.height) for w in windows]
+
+        return windows
+
+    @staticmethod
+    def tile_horizontal(
+        windows: list[Rectangle],
+        container: Rectangle,
+        gap: float = 0,
+    ) -> list[Rectangle]:
+        """Tile windows horizontally.
+
+        Args:
+            windows: List of window rectangles.
+            container: Container rectangle.
+            gap: Gap between windows.
+
+        Returns:
+            List of tiled rectangles.
+        """
+        if not windows:
+            return []
+
+        total_width = container.width - gap * (len(windows) - 1)
+        window_width = total_width / len(windows)
+
+        results = []
+        x = container.left
+        for w in windows:
+            results.append(Rectangle(
+                x=x,
+                y=container.top,
+                width=window_width,
+                height=container.height,
+            ))
+            x += window_width + gap
+
+        return results
+
+    @staticmethod
+    def tile_vertical(
+        windows: list[Rectangle],
+        container: Rectangle,
+        gap: float = 0,
+    ) -> list[Rectangle]:
+        """Tile windows vertically.
+
+        Args:
+            windows: List of window rectangles.
+            container: Container rectangle.
+            gap: Gap between windows.
+
+        Returns:
+            List of tiled rectangles.
+        """
+        if not windows:
+            return []
+
+        total_height = container.height - gap * (len(windows) - 1)
+        window_height = total_height / len(windows)
+
+        results = []
+        y = container.top
+        for w in windows:
+            results.append(Rectangle(
+                x=container.left,
+                y=y,
+                width=container.width,
+                height=window_height,
+            ))
+            y += window_height + gap
+
+        return results
+
+    @staticmethod
+    def snap_to_grid(
+        rect: Rectangle,
+        grid_width: float,
+        grid_height: float,
+    ) -> Rectangle:
+        """Snap rectangle to a grid.
+
+        Args:
+            rect: Rectangle to snap.
+            grid_width: Grid cell width.
+            grid_height: Grid cell height.
+
+        Returns:
+            Snapped rectangle.
+        """
+        return Rectangle(
+            x=round(rect.x / grid_width) * grid_width,
+            y=round(rect.y / grid_height) * grid_height,
+            width=rect.width,
+            height=rect.height,
+        )
+
+    @staticmethod
+    def resize_to_aspect(
+        rect: Rectangle,
+        aspect_ratio: float,
+        anchor: Anchor = Anchor.CENTER,
+    ) -> Rectangle:
+        """Resize rectangle to a specific aspect ratio.
+
+        Args:
+            rect: Rectangle to resize.
+            aspect_ratio: Target width/height ratio.
+            anchor: Anchor point for resizing.
+
+        Returns:
+            Resized rectangle.
+        """
+        new_width = rect.height * aspect_ratio
+        new_height = rect.width / aspect_ratio
+
+        if abs(new_width - rect.width) < abs(new_height - rect.height):
+            new_height = rect.height
+        else:
+            new_width = rect.width
+
+        x, y = rect.x, rect.y
+
+        if anchor in (Anchor.MIDDLE_LEFT, Anchor.CENTER, Anchor.MIDDLE_RIGHT):
+            y = rect.center_y - new_height / 2
+        elif anchor in (Anchor.BOTTOM_LEFT, Anchor.BOTTOM_CENTER, Anchor.BOTTOM_RIGHT):
+            y = rect.bottom - new_height
+
+        if anchor in (Anchor.TOP_CENTER, Anchor.CENTER, Anchor.BOTTOM_CENTER):
+            x = rect.center_x - new_width / 2
+        elif anchor in (Anchor.TOP_RIGHT, Anchor.MIDDLE_RIGHT, Anchor.BOTTOM_RIGHT):
+            x = rect.right - new_width
+
+        return Rectangle(x=x, y=y, width=new_width, height=new_height)
 
 
-def tile_vertical(windows: List[Rect], screen_width: int, screen_height: int) -> List[Rect]:
-    """Tile windows vertically."""
-    if not windows:
-        return []
-    tile_height = screen_height // len(windows)
-    return [
-        Rect(0, i * tile_height, screen_width, tile_height)
-        for i, _ in enumerate(windows)
-    ]
+class MultiMonitorManager:
+    """Manages multi-monitor configurations.
 
+    Example:
+        mgr = MultiMonitorManager()
+        monitors = mgr.get_all_monitors()
+        primary = mgr.get_primary_monitor()
+    """
 
-def cascade_windows(windows: List[Rect], offset_x: int = 30, offset_y: int = 30) -> List[Rect]:
-    """Cascade windows with offset."""
-    return [
-        Rect(i * offset_x, i * offset_y, w.width, w.height)
-        for i, w in enumerate(windows)
-    ]
+    def __init__(self):
+        """Initialize the monitor manager."""
+        self._monitors: list[MonitorInfo] = []
 
+    def add_monitor(self, monitor: MonitorInfo) -> None:
+        """Add a monitor.
 
-def fit_to_screen(rect: Rect, screen: Rect) -> Rect:
-    """Fit a window rect inside a screen rect."""
-    width = min(rect.width, screen.width)
-    height = min(rect.height, screen.height)
-    x = max(screen.left, min(rect.x, screen.right - width))
-    y = max(screen.top, min(rect.y, screen.bottom - height))
-    return Rect(x, y, width, height)
+        Args:
+            monitor: MonitorInfo to add.
+        """
+        self._monitors.append(monitor)
 
+    def get_monitor_count(self) -> int:
+        """Get number of monitors."""
+        return len(self._monitors)
 
-def visible_region(window: Rect, occluders: List[Rect]) -> Rect:
-    """Calculate the visible region of a window given occluders."""
-    result = window
-    for occ in occluders:
-        intersection = result.intersection(occ)
-        if intersection:
-            parts = subtract_rect(result, intersection)
-            result = parts[0] if parts else Rect(0, 0, 0, 0)
-    return result
+    def get_monitor(self, index: int) -> Optional[MonitorInfo]:
+        """Get monitor by index.
 
+        Args:
+            index: Monitor index.
 
-def subtract_rect(rect: Rect, sub: Rect) -> List[Rect]:
-    """Subtract one rect from another, returning up to 4 rects."""
-    if not rect.intersects(sub):
-        return [rect]
+        Returns:
+            MonitorInfo or None.
+        """
+        return self._monitors[index] if index < len(self._monitors) else None
 
-    results: List[Rect] = []
-    # Top
-    if sub.top > rect.top:
-        results.append(Rect(rect.left, rect.top, rect.width, sub.top - rect.top))
-    # Bottom
-    if sub.bottom < rect.bottom:
-        results.append(Rect(rect.left, sub.bottom, rect.width, rect.bottom - sub.bottom))
-    # Left
-    if sub.left > rect.left:
-        results.append(Rect(rect.left, max(rect.top, sub.top), sub.left - rect.left, min(rect.bottom, sub.bottom) - max(rect.top, sub.top)))
-    # Right
-    if sub.right < rect.right:
-        results.append(Rect(sub.right, max(rect.top, sub.top), rect.right - sub.right, min(rect.bottom, sub.bottom) - max(rect.top, sub.top)))
-    return results
+    def get_primary_monitor(self) -> Optional[MonitorInfo]:
+        """Get the primary monitor.
 
+        Returns:
+            Primary MonitorInfo or None.
+        """
+        for m in self._monitors:
+            if m.is_primary:
+                return m
+        return self._monitors[0] if self._monitors else None
 
-__all__ = [
-    "Rect",
-    "WindowInfo",
-    "arrange_grid",
-    "tile_horizontal",
-    "tile_vertical",
-    "cascade_windows",
-    "fit_to_screen",
-    "visible_region",
-    "subtract_rect",
-]
+    def get_monitor_at_point(self, x: float, y: float) -> Optional[MonitorInfo]:
+        """Get monitor containing a point.
+
+        Args:
+            x: X coordinate.
+            y: Y coordinate.
+
+        Returns:
+            MonitorInfo or None.
+        """
+        for m in self._monitors:
+            if m.bounds.contains_point(x, y):
+                return m
+        return None
+
+    def get_all_monitors(self) -> list[MonitorInfo]:
+        """Get all monitors.
+
+        Returns:
+            List of MonitorInfo.
+        """
+        return list(self._monitors)
+
+    def get_workspace_bounds(self) -> Rectangle:
+        """Get bounds covering all monitors.
+
+        Returns:
+            Rectangle covering all monitors.
+        """
+        if not self._monitors:
+            return Rectangle(x=0, y=0, width=1920, height=1080)
+
+        min_x = min(m.bounds.left for m in self._monitors)
+        min_y = min(m.bounds.top for m in self._monitors)
+        max_x = max(m.bounds.right for m in self._monitors)
+        max_y = max(m.bounds.bottom for m in self._monitors)
+
+        return Rectangle(
+            x=min_x,
+            y=min_y,
+            width=max_x - min_x,
+            height=max_y - min_y,
+        )
