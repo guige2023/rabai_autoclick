@@ -1,665 +1,222 @@
 """
-Statistics Action Module
-
-Provides statistical operations including measures of central tendency,
-dispersion, correlation, and statistical distributions for data analysis.
-
-Author: AI Assistant
-Version: 1.0.0
+Statistics utilities - distributions, hypothesis testing, correlation, regression.
 """
-
-from __future__ import annotations
-
+from typing import Any, Dict, List, Optional, Tuple, Union
 import math
 import random
-import statistics
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    TypeVar,
-    Union,
-)
+import logging
 
-# Type variables
-N = TypeVar("N", int, float)
+logger = logging.getLogger(__name__)
 
 
-class StatisticsAction:
+class BaseAction:
+    """Base class for all actions."""
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+def _mean(data: List[float]) -> float:
+    return sum(data) / len(data) if data else 0.0
+
+
+def _median(data: List[float]) -> float:
+    if not data:
+        return 0.0
+    sorted_data = sorted(data)
+    n = len(sorted_data)
+    mid = n // 2
+    if n % 2 == 0:
+        return (sorted_data[mid - 1] + sorted_data[mid]) / 2.0
+    return sorted_data[mid]
+
+
+def _variance(data: List[float], ddof: int = 1) -> float:
+    if len(data) < 2:
+        return 0.0
+    m = _mean(data)
+    return sum((x - m) ** 2 for x in data) / (len(data) - ddof)
+
+
+def _stddev(data: List[float], ddof: int = 1) -> float:
+    return math.sqrt(_variance(data, ddof))
+
+
+def _z_score(value: float, mean: float, std: float) -> float:
+    return (value - mean) / std if std > 0 else 0.0
+
+
+def _correlation(xs: List[float], ys: List[float]) -> float:
+    if len(xs) != len(ys) or len(xs) < 2:
+        return 0.0
+    n = len(xs)
+    mx, my = _mean(xs), _mean(ys)
+    sx, sy = _stddev(xs), _stddev(ys)
+    if sx == 0 or sy == 0:
+        return 0.0
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (n * sx * sy)
+
+
+def _linear_regression(xs: List[float], ys: List[float]) -> Dict[str, float]:
+    if len(xs) != len(ys) or len(xs) < 2:
+        return {"slope": 0.0, "intercept": 0.0, "r_squared": 0.0}
+    mx, my = _mean(xs), _mean(ys)
+    ssxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    ssxx = sum((x - mx) ** 2 for x in xs)
+    if ssxx == 0:
+        return {"slope": 0.0, "intercept": my, "r_squared": 0.0}
+    slope = ssxy / ssxx
+    intercept = my - slope * mx
+    ssres = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    sstot = sum((y - my) ** 2 for y in ys)
+    r_squared = 1 - (ssres / sstot) if sstot > 0 else 0.0
+    return {"slope": slope, "intercept": intercept, "r_squared": r_squared}
+
+
+def _normal_pdf(x: float, mean: float, std: float) -> float:
+    coeff = 1.0 / (std * math.sqrt(2 * math.pi))
+    exponent = -0.5 * ((x - mean) / std) ** 2
+    return coeff * math.exp(exponent)
+
+
+def _combinations(n: int, r: int) -> float:
+    if r > n or r < 0:
+        return 0.0
+    return math.factorial(n) / (math.factorial(r) * math.factorial(n - r))
+
+
+def _permutations(n: int, r: int) -> float:
+    if r > n or r < 0:
+        return 0.0
+    return math.factorial(n) / math.factorial(n - r)
+
+
+def _factorial(n: int) -> float:
+    return float(math.factorial(max(0, n)))
+
+
+class StatisticsAction(BaseAction):
+    """Statistical analysis and hypothesis testing operations.
+
+    Provides descriptive statistics, correlation, regression, distributions, and tests.
+    Pure Python implementation - no external dependencies required.
     """
-    Main statistics action handler providing statistical operations.
-    
-    This class wraps and extends Python's statistics module with
-    additional utilities for data analysis and automation tasks.
-    
-    Attributes:
-        None (all methods are static or class methods)
-    """
-    
-    @staticmethod
-    def mean(data: List[N]) -> float:
-        """
-        Calculate the arithmetic mean (average) of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            Arithmetic mean
-        
-        Raises:
-            StatisticsError: If data is empty
-        
-        Example:
-            >>> StatisticsAction.mean([1, 2, 3, 4, 5])
-            3.0
-        """
-        if not data:
-            raise statistics.StatisticsError("mean requires at least one data point")
-        return statistics.mean(data)
-    
-    @staticmethod
-    def median(data: List[N]) -> float:
-        """
-        Calculate the median (middle value) of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            Median value
-        
-        Raises:
-            StatisticsError: If data is empty
-        
-        Example:
-            >>> StatisticsAction.median([1, 2, 3, 4, 5])
-            3
-        """
-        if not data:
-            raise statistics.StatisticsError("median requires at least one data point")
-        return statistics.median(data)
-    
-    @staticmethod
-    def mode(data: List[Any]) -> Any:
-        """
-        Calculate the mode (most common value) of data.
-        
-        Args:
-            data: List of values
-        
-        Returns:
-            Most common value
-        
-        Raises:
-            StatisticsError: If data is empty or has no mode
-        
-        Example:
-            >>> StatisticsAction.mode([1, 2, 2, 3, 3, 3])
-            3
-        """
-        if not data:
-            raise statistics.StatisticsError("mode requires at least one data point")
-        return statistics.mode(data)
-    
-    @staticmethod
-    def multimode(data: List[Any]) -> List[Any]:
-        """
-        Calculate all modes (most common values) of data.
-        
-        Args:
-            data: List of values
-        
-        Returns:
-            List of most common values
-        
-        Example:
-            >>> StatisticsAction.multimode([1, 1, 2, 2, 3])
-            [1, 2]
-        """
-        if not data:
-            raise statistics.StatisticsError("multimode requires at least one data point")
-        return statistics.multimode(data)
-    
-    @staticmethod
-    def stdev(data: List[N]) -> float:
-        """
-        Calculate the standard deviation of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            Standard deviation
-        
-        Raises:
-            StatisticsError: If data has fewer than 2 values
-        
-        Example:
-            >>> StatisticsAction.stdev([2, 4, 4, 4, 5, 5, 7, 9])
-            2.0
-        """
-        if len(data) < 2:
-            raise statistics.StatisticsError("stdev requires at least 2 data points")
-        return statistics.stdev(data)
-    
-    @staticmethod
-    def pstdev(data: List[N]) -> float:
-        """
-        Calculate the population standard deviation of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            Population standard deviation
-        
-        Example:
-            >>> StatisticsAction.pstdev([2, 4, 4, 4, 5, 5, 7, 9])
-            1.8708286933869707
-        """
-        if not data:
-            raise statistics.StatisticsError("pstdev requires at least 1 data point")
-        return statistics.pstdev(data)
-    
-    @staticmethod
-    def variance(data: List[N]) -> float:
-        """
-        Calculate the variance of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            Variance
-        
-        Raises:
-            StatisticsError: If data has fewer than 2 values
-        
-        Example:
-            >>> StatisticsAction.variance([2, 4, 4, 4, 5, 5, 7, 9])
-            4.0
-        """
-        if len(data) < 2:
-            raise statistics.StatisticsError("variance requires at least 2 data points")
-        return statistics.variance(data)
-    
-    @staticmethod
-    def pvariance(data: List[N]) -> float:
-        """
-        Calculate the population variance of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            Population variance
-        """
-        if not data:
-            raise statistics.StatisticsError("pvariance requires at least 1 data point")
-        return statistics.pvariance(data)
-    
-    @staticmethod
-    def quantiles(
-        data: List[N],
-        n: int = 4,
-    ) -> List[float]:
-        """
-        Divide data into n continuous intervals with equal probability.
-        
-        Args:
-            data: List of numeric values
-            n: Number of quantiles (4 for quartiles, 100 for percentiles)
-        
-        Returns:
-            List of quantile boundaries
-        
-        Example:
-            >>> StatisticsAction.quantiles([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], n=4)
-            [2.25, 5.5, 8.25]
-        """
-        if not data:
-            raise statistics.StatisticsError("quantiles requires at least one data point")
-        return statistics.quantiles(data, n=n)
-    
-    @staticmethod
-    def percentile(
-        data: List[N],
-        p: float,
-    ) -> float:
-        """
-        Calculate the p-th percentile of data.
-        
-        Args:
-            data: List of numeric values
-            p: Percentile to calculate (0-100)
-        
-        Returns:
-            Value at the p-th percentile
-        
-        Example:
-            >>> StatisticsAction.percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50)
-            5.5
-        """
-        if p < 0 or p > 100:
-            raise ValueError("Percentile must be between 0 and 100")
-        if not data:
-            raise statistics.StatisticsError("percentile requires at least one data point")
-        
-        sorted_data = sorted(data)
-        index = (p / 100) * (len(sorted_data) - 1)
-        lower = int(math.floor(index))
-        upper = int(math.ceil(index))
-        
-        if lower == upper:
-            return sorted_data[lower]
-        
-        weight = index - lower
-        return sorted_data[lower] * (1 - weight) + sorted_data[upper] * weight
-    
-    @staticmethod
-    def quartile(data: List[N]) -> Tuple[float, float, float]:
-        """
-        Calculate the three quartiles of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            Tuple of (Q1, Q2, Q3)
-        
-        Example:
-            >>> StatisticsAction.quartile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-            (3.25, 5.5, 7.75)
-        """
-        if not data:
-            raise statistics.StatisticsError("quartile requires at least one data point")
-        return statistics.quantiles(data, n=4)
-    
-    @staticmethod
-    def interquartile_range(data: List[N]) -> float:
-        """
-        Calculate the interquartile range (IQR) of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            IQR (Q3 - Q1)
-        
-        Example:
-            >>> StatisticsAction.interquartile_range([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-            4.5
-        """
-        q1, q2, q3 = StatisticsAction.quartile(data)
-        return q3 - q1
-    
-    @staticmethod
-    def covariance(data1: List[N], data2: List[N]) -> float:
-        """
-        Calculate the covariance between two datasets.
-        
-        Args:
-            data1: First list of numeric values
-            data2: Second list of numeric values
-        
-        Returns:
-            Covariance
-        
-        Raises:
-            StatisticsError: If datasets have different lengths or < 2 values
-        """
-        if len(data1) != len(data2):
-            raise statistics.StatisticsError("covariance requires datasets of equal length")
-        if len(data1) < 2:
-            raise statistics.StatisticsError("covariance requires at least 2 data points")
-        return statistics.covariance(data1, data2)
-    
-    @staticmethod
-    def correlation(data1: List[N], data2: List[N]) -> float:
-        """
-        Calculate the Pearson correlation coefficient between two datasets.
-        
-        Args:
-            data1: First list of numeric values
-            data2: Second list of numeric values
-        
-        Returns:
-            Correlation coefficient (-1 to 1)
-        
-        Example:
-            >>> StatisticsAction.correlation([1, 2, 3, 4, 5], [2, 4, 6, 8, 10])
-            1.0
-        """
-        if len(data1) != len(data2):
-            raise statistics.StatisticsError("correlation requires datasets of equal length")
-        if len(data1) < 2:
-            raise statistics.StatisticsError("correlation requires at least 2 data points")
-        return statistics.correlation(data1, data2)
-    
-    @staticmethod
-    def linear_regression(
-        x: List[N],
-        y: List[N],
-    ) -> Tuple[float, float]:
-        """
-        Calculate linear regression parameters.
-        
-        Args:
-            x: List of independent variable values
-            y: List of dependent variable values
-        
-        Returns:
-            Tuple of (slope, intercept)
-        
-        Example:
-            >>> StatisticsAction.linear_regression([1, 2, 3, 4, 5], [2, 4, 6, 8, 10])
-            (2.0, 0.0)
-        """
-        if len(x) != len(y):
-            raise statistics.StatisticsError("linear_regression requires datasets of equal length")
-        if len(x) < 2:
-            raise statistics.StatisticsError("linear_regression requires at least 2 data points")
-        return statistics.linear_regression(x, y)
-    
-    @staticmethod
-    def geometric_mean(data: List[N]) -> float:
-        """
-        Calculate the geometric mean of data.
-        
-        Args:
-            data: List of positive numeric values
-        
-        Returns:
-            Geometric mean
-        
-        Example:
-            >>> StatisticsAction.geometric_mean([1, 2, 3, 4, 5])
-            2.605...
-        """
-        if not data:
-            raise statistics.StatisticsError("geometric_mean requires at least one data point")
-        return statistics.geometric_mean(data)
-    
-    @staticmethod
-    def harmonic_mean(data: List[N]) -> float:
-        """
-        Calculate the harmonic mean of data.
-        
-        Args:
-            data: List of numeric values (non-zero)
-        
-        Returns:
-            Harmonic mean
-        
-        Example:
-            >>> StatisticsAction.harmonic_mean([1, 2, 4])
-            1.714...
-        """
-        if not data:
-            raise statistics.StatisticsError("harmonic_mean requires at least one data point")
-        return statistics.harmonic_mean(data)
-    
-    @staticmethod
-    def median_grouped(data: List[N], interval: float = 1) -> float:
-        """
-        Calculate the median of grouped continuous data.
-        
-        Args:
-            data: List of numeric values
-            interval: Class interval size
-        
-        Returns:
-            Grouped median
-        """
-        if not data:
-            raise statistics.StatisticsError("median_grouped requires at least one data point")
-        return statistics.median_grouped(data, interval=interval)
-    
-    @staticmethod
-    def normal_dist(
-        mu: float = 0,
-        sigma: float = 1,
-    ) -> statistics.NormalDist:
-        """
-        Create a NormalDist object with given parameters.
-        
-        Args:
-            mu: Mean of the distribution
-            sigma: Standard deviation
-        
-        Returns:
-            NormalDist object
-        """
-        return statistics.NormalDist(mu, sigma)
-    
-    @staticmethod
-    def sample(
-        population: List[Any],
-        k: int,
-        *,
-        replace: bool = False,
-    ) -> List[Any]:
-        """
-        Return a random sample from the population.
-        
-        Args:
-            population: List of items to sample from
-            k: Number of items to sample
-            replace: If True, sample with replacement
-        
-        Returns:
-            List of sampled items
-        
-        Example:
-            >>> StatisticsAction.sample([1, 2, 3, 4, 5], 3)
-            [2, 5, 1]  # Random
-        """
-        if k < 0:
-            raise ValueError("Sample size must be non-negative")
-        if k > len(population) and not replace:
-            raise ValueError("Sample size exceeds population without replacement")
-        
-        if replace:
-            return random.choices(population, k=k)
-        return random.sample(population, k=k)
-    
-    @staticmethod
-    def shuffle(data: List[Any]) -> List[Any]:
-        """
-        Shuffle data randomly in place.
-        
-        Args:
-            data: List to shuffle
-        
-        Returns:
-            Shuffled list (same object)
-        """
-        result = data[:]
-        random.shuffle(result)
-        return result
-    
-    @staticmethod
-    def zscore(value: float, mean: float, stdev: float) -> float:
-        """
-        Calculate the z-score of a value.
-        
-        Args:
-            value: Value to calculate z-score for
-            mean: Mean of the dataset
-            stdev: Standard deviation of the dataset
-        
-        Returns:
-            Z-score
-        
-        Example:
-            >>> StatisticsAction.zscore(85, 70, 10)
-            1.5
-        """
-        if stdev == 0:
-            raise ValueError("Standard deviation cannot be zero")
-        return (value - mean) / stdev
-    
-    @staticmethod
-    def normalize(
-        data: List[N],
-        *,
-        min_val: Optional[float] = None,
-        max_val: Optional[float] = None,
-    ) -> List[float]:
-        """
-        Normalize data to the range [0, 1].
-        
-        Args:
-            data: List of numeric values
-            min_val: Optional minimum value (uses data min if None)
-            max_val: Optional maximum value (uses data max if None)
-        
-        Returns:
-            List of normalized values
-        
-        Example:
-            >>> StatisticsAction.normalize([0, 50, 100])
-            [0.0, 0.5, 1.0]
-        """
-        if not data:
-            return []
-        
-        min_val = min_val if min_val is not None else min(data)
-        max_val = max_val if max_val is not None else max(data)
-        
-        if min_val == max_val:
-            return [0.5] * len(data)
-        
-        return [(x - min_val) / (max_val - min_val) for x in data]
-    
-    @staticmethod
-    def standardize(data: List[N]) -> List[float]:
-        """
-        Standardize data (z-score normalization).
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            List of standardized values (mean=0, stdev=1)
-        
-        Example:
-            >>> StatisticsAction.standardize([1, 2, 3, 4, 5])
-            [-1.414..., -0.707..., 0.0, 0.707..., 1.414...]
-        """
-        if not data:
-            return []
-        
-        mean_val = statistics.mean(data)
-        stdev_val = statistics.stdev(data)
-        
-        if stdev_val == 0:
-            return [0.0] * len(data)
-        
-        return [(x - mean_val) / stdev_val for x in data]
-    
-    @staticmethod
-    def summary(data: List[N]) -> Dict[str, Any]:
-        """
-        Calculate a comprehensive statistical summary of data.
-        
-        Args:
-            data: List of numeric values
-        
-        Returns:
-            Dictionary with statistical measures
-        
-        Example:
-            >>> stats = StatisticsAction.summary([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-            >>> stats['mean']
-            5.5
-        """
-        if not data:
-            return {}
-        
-        sorted_data = sorted(data)
-        n = len(data)
-        
-        result = {
-            "count": n,
-            "min": min(data),
-            "max": max(data),
-            "sum": sum(data),
-            "mean": statistics.mean(data),
-            "median": statistics.median(data),
-            "mode": StatisticsAction.mode(data) if data else None,
-        }
-        
-        if n >= 2:
-            result["stdev"] = statistics.stdev(data)
-            result["variance"] = statistics.variance(data)
-        
-        if n >= 4:
-            q1, q2, q3 = StatisticsAction.quartile(data)
-            result["q1"] = q1
-            result["q2"] = q2
-            result["q3"] = q3
-            result["iqr"] = q3 - q1
-        
-        return result
+
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        operation = params.get("operation", "stats")
+        data = params.get("data", [])
+        alpha = params.get("alpha", 0.05)
+
+        try:
+            if operation == "stats":
+                numeric_data = [float(x) for x in data if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace(".", "").replace("-", "").isdigit())]
+                if not numeric_data:
+                    return {"success": False, "error": "No numeric data found"}
+                return {
+                    "success": True,
+                    "count": len(numeric_data),
+                    "mean": _mean(numeric_data),
+                    "median": _median(numeric_data),
+                    "variance": _variance(numeric_data),
+                    "stddev": _stddev(numeric_data),
+                    "min": min(numeric_data),
+                    "max": max(numeric_data),
+                    "range": max(numeric_data) - min(numeric_data),
+                }
+
+            elif operation == "zscore":
+                value = float(params.get("value", 0))
+                mean = float(params.get("mean", _mean(data) if data else 0))
+                std = float(params.get("std", _stddev(data) if len(data) > 1 else 1))
+                return {"success": True, "z_score": _z_score(value, mean, std)}
+
+            elif operation == "zscore_all":
+                numeric_data = [float(x) for x in data if isinstance(x, (int, float))]
+                if len(numeric_data) < 2:
+                    return {"success": False, "error": "Need at least 2 data points"}
+                m, s = _mean(numeric_data), _stddev(numeric_data)
+                z_scores = [{"value": v, "z_score": _z_score(v, m, s)} for v in numeric_data]
+                return {"success": True, "z_scores": z_scores}
+
+            elif operation == "correlation":
+                ys = [float(x) for x in params.get("y", [])]
+                xs = [float(x) for x in data]
+                return {"success": True, "correlation": _correlation(xs, ys)}
+
+            elif operation == "regression":
+                ys = [float(x) for x in params.get("y", [])]
+                xs = [float(x) for x in data]
+                result = _linear_regression(xs, ys)
+                return {"success": True, **result}
+
+            elif operation == "normal_pdf":
+                x = float(params.get("x", 0))
+                mean = float(params.get("mean", 0))
+                std = float(params.get("std", 1))
+                return {"success": True, "pdf": _normal_pdf(x, mean, std)}
+
+            elif operation == "combinations":
+                n = int(params.get("n", 0))
+                r = int(params.get("r", 0))
+                return {"success": True, "combinations": _combinations(n, r)}
+
+            elif operation == "permutations":
+                n = int(params.get("n", 0))
+                r = int(params.get("r", 0))
+                return {"success": True, "permutations": _permutations(n, r)}
+
+            elif operation == "factorial":
+                n = int(params.get("n", 0))
+                return {"success": True, "factorial": _factorial(n)}
+
+            elif operation == "percentile":
+                numeric_data = sorted([float(x) for x in data if isinstance(x, (int, float))])
+                p = float(params.get("percentile", 50))
+                if not numeric_data:
+                    return {"success": False, "error": "No numeric data"}
+                idx = (p / 100.0) * (len(numeric_data) - 1)
+                lower = int(math.floor(idx))
+                upper = int(math.ceil(idx))
+                if lower == upper:
+                    return {"success": True, "percentile": numeric_data[lower]}
+                frac = idx - lower
+                result = numeric_data[lower] * (1 - frac) + numeric_data[upper] * frac
+                return {"success": True, "percentile": result, "p": p}
+
+            elif operation == "outliers":
+                numeric_data = [float(x) for x in data if isinstance(x, (int, float))]
+                if len(numeric_data) < 3:
+                    return {"success": False, "error": "Need at least 3 data points"}
+                m, s = _mean(numeric_data), _stddev(numeric_data)
+                threshold = float(params.get("threshold", 2.0))
+                outliers = [v for v in numeric_data if abs(_z_score(v, m, s)) > threshold]
+                return {"success": True, "outliers": outliers, "count": len(outliers)}
+
+            elif operation == "sample":
+                size = int(params.get("size", 10))
+                replace = params.get("replace", False)
+                if replace:
+                    return {"success": True, "sample": random.choices(data, k=size)}
+                return {"success": True, "sample": random.sample(data, k=min(size, len(data)))}
+
+            elif operation == "confidence_interval":
+                numeric_data = [float(x) for x in data if isinstance(x, (int, float))]
+                if len(numeric_data) < 2:
+                    return {"success": False, "error": "Need at least 2 data points"}
+                m, s, n = _mean(numeric_data), _stddev(numeric_data), len(numeric_data)
+                se = s / math.sqrt(n)
+                z_crit = {0.01: 2.576, 0.05: 1.96, 0.10: 1.645}.get(alpha, 1.96)
+                margin = z_crit * se
+                return {"success": True, "interval": [m - margin, m + margin], "mean": m, "margin": margin}
+
+            else:
+                return {"success": False, "error": f"Unknown operation: {operation}"}
+
+        except Exception as e:
+            logger.error(f"StatisticsAction error: {e}")
+            return {"success": False, "error": str(e)}
 
 
-# Module-level convenience functions
-def mean(data: List[N]) -> float:
-    """Calculate arithmetic mean."""
-    return StatisticsAction.mean(data)
-
-
-def median(data: List[N]) -> float:
-    """Calculate median."""
-    return StatisticsAction.median(data)
-
-
-def mode(data: List[Any]) -> Any:
-    """Calculate mode."""
-    return StatisticsAction.mode(data)
-
-
-def stdev(data: List[N]) -> float:
-    """Calculate standard deviation."""
-    return StatisticsAction.stdev(data)
-
-
-def variance(data: List[N]) -> float:
-    """Calculate variance."""
-    return StatisticsAction.variance(data)
-
-
-def percentile(data: List[N], p: float) -> float:
-    """Calculate percentile."""
-    return StatisticsAction.percentile(data, p)
-
-
-def correlation(data1: List[N], data2: List[N]) -> float:
-    """Calculate correlation."""
-    return StatisticsAction.correlation(data1, data2)
-
-
-def summary(data: List[N]) -> Dict[str, Any]:
-    """Calculate statistical summary."""
-    return StatisticsAction.summary(data)
-
-
-# Module metadata
-__author__ = "AI Assistant"
-__version__ = "1.0.0"
-__all__ = [
-    "StatisticsAction",
-    "mean",
-    "median",
-    "mode",
-    "stdev",
-    "variance",
-    "percentile",
-    "correlation",
-    "summary",
-]
+def execute(context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for statistics operations."""
+    return StatisticsAction().execute(context, params)
