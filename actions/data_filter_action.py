@@ -1,15 +1,21 @@
-"""Data filter action module for RabAI AutoClick.
+"""
+Data Filter Action Module.
 
-Provides data filtering with complex condition support,
-including comparison operators, pattern matching, and
-compound conditions.
+Filters data based on conditions, expressions, ranges,
+and pattern matching with support for complex logic.
+
+Author: RabAi Team
 """
 
+from __future__ import annotations
+
+import re
 import sys
 import os
-import re
-from typing import Any, Dict, List, Optional, Union, Callable
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
@@ -20,203 +26,469 @@ class FilterOperator(Enum):
     EQ = "eq"
     NE = "ne"
     GT = "gt"
-    GE = "ge"
+    GTE = "gte"
     LT = "lt"
-    LE = "le"
+    LTE = "lte"
     IN = "in"
     NOT_IN = "not_in"
     CONTAINS = "contains"
+    NOT_CONTAINS = "not_contains"
     STARTS_WITH = "starts_with"
     ENDS_WITH = "ends_with"
     REGEX = "regex"
     IS_NULL = "is_null"
     IS_NOT_NULL = "is_not_null"
+    BETWEEN = "between"
+    CUSTOM = "custom"
 
 
-from enum import Enum
+class FilterLogic(Enum):
+    """Logic combinators for multiple conditions."""
+    AND = "and"
+    OR = "or"
+    NAND = "nand"
+    NOR = "nor"
 
 
 @dataclass
 class FilterCondition:
-    """A filter condition."""
+    """A single filter condition."""
     field: str
     operator: FilterOperator
     value: Any = None
+    value2: Any = None
 
 
 class DataFilterAction(BaseAction):
-    """Data filter action for filtering data with conditions.
+    """Data filter action.
     
-    Supports various operators including comparison, pattern
-    matching, and compound conditions.
+    Filters data based on conditions, expressions, and
+    pattern matching with complex logical combinations.
     """
     action_type = "data_filter"
-    display_name = "数据过滤器"
+    display_name = "数据过滤"
     description = "数据条件过滤"
     
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute filter operation.
+    def __init__(self):
+        super().__init__()
+        self._custom_filters: Dict[str, Callable] = {}
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Filter data.
         
         Args:
-            context: Execution context.
-            params: Dict with keys:
-                data: Data to filter
-                conditions: List of filter conditions
-                condition: Single condition (alternative)
-                logic: 'and' or 'or' for combining conditions
-                exclude: If True, exclude matching records.
-        
+            context: The execution context.
+            params: Dictionary containing:
+                - data: Data to filter
+                - operation: filter/partition/exclude/sample
+                - conditions: List of filter conditions
+                - logic: AND/OR/NAND/NOR for combining conditions
+                - field: Field name for single-condition filtering
+                - operator: Filter operator
+                - value: Filter value
+                - expression: Filter expression string
+                - limit: Max records to return
+                - offset: Records to skip
+                
         Returns:
             ActionResult with filtered data.
         """
-        data = params.get('data', [])
-        conditions = params.get('conditions', [])
-        condition = params.get('condition')
-        logic = params.get('logic', 'and')
-        exclude = params.get('exclude', False)
+        start_time = time.time()
         
-        if not data:
-            return ActionResult(success=False, message="No data provided")
-        
-        if condition:
-            conditions = [condition]
-        
-        parsed_conditions = [self._parse_condition(c) for c in conditions]
-        
-        filtered = []
-        excluded_count = 0
-        
-        for item in data:
-            matches = self._evaluate_conditions(item, parsed_conditions, logic)
-            
-            if exclude:
-                if not matches:
-                    filtered.append(item)
-                else:
-                    excluded_count += 1
-            else:
-                if matches:
-                    filtered.append(item)
-        
-        return ActionResult(
-            success=True,
-            message=f"Filtered {len(data)} items to {len(filtered)}",
-            data={
-                'items': filtered,
-                'count': len(filtered),
-                'original_count': len(data),
-                'excluded_count': excluded_count if exclude else len(data) - len(filtered)
-            }
-        )
-    
-    def _parse_condition(self, cond: Union[Dict, str]) -> FilterCondition:
-        """Parse condition definition."""
-        if isinstance(cond, str):
-            parts = cond.split(':', 1)
-            return FilterCondition(
-                field=parts[0],
-                operator=FilterOperator.EQ,
-                value=parts[1] if len(parts) > 1 else None
-            )
-        
-        field = cond.get('field', '')
-        op = cond.get('operator', 'eq')
-        value = cond.get('value')
+        operation = params.get("operation", "filter")
+        data = params.get("data", [])
+        conditions = params.get("conditions", [])
+        logic = params.get("logic", "and")
+        field = params.get("field")
+        operator_str = params.get("operator", "eq")
+        value = params.get("value")
+        expression = params.get("expression")
+        limit = params.get("limit")
+        offset = params.get("offset", 0)
         
         try:
-            operator = FilterOperator(op)
+            logic_type = FilterLogic(logic)
         except ValueError:
-            operator = FilterOperator.EQ
+            logic_type = FilterLogic.AND
         
-        return FilterCondition(field=field, operator=operator, value=value)
+        try:
+            if not conditions and field:
+                operator = FilterOperator(operator_str)
+                conditions = [FilterCondition(field=field, operator=operator, value=value)]
+        except ValueError:
+            return ActionResult(
+                success=False,
+                message=f"Unknown operator: {operator_str}",
+                duration=time.time() - start_time
+            )
+        
+        try:
+            if operation == "filter":
+                result = self._filter_data(data, conditions, logic_type, expression, limit, offset, start_time)
+            elif operation == "partition":
+                result = self._partition_data(data, conditions, logic_type, start_time)
+            elif operation == "exclude":
+                result = self._exclude_data(data, conditions, logic_type, expression, start_time)
+            elif operation == "sample":
+                result = self._sample_data(data, value, start_time)
+            else:
+                return ActionResult(
+                    success=False,
+                    message=f"Unknown operation: {operation}",
+                    duration=time.time() - start_time
+                )
+            
+            return result
+            
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"Filter failed: {str(e)}",
+                duration=time.time() - start_time
+            )
     
-    def _evaluate_conditions(
-        self,
-        item: Any,
-        conditions: List[FilterCondition],
-        logic: str
+    def _evaluate_condition(self, record: Any, condition: FilterCondition) -> bool:
+        """Evaluate a single filter condition."""
+        field_value = self._get_field_value(record, condition.field)
+        
+        op = condition.operator
+        
+        if op == FilterOperator.IS_NULL:
+            return field_value is None
+        
+        if op == FilterOperator.IS_NOT_NULL:
+            return field_value is not None
+        
+        if op == FilterOperator.EQ:
+            return self._compare_eq(field_value, condition.value)
+        
+        if op == FilterOperator.NE:
+            return not self._compare_eq(field_value, condition.value)
+        
+        if op == FilterOperator.GT:
+            return self._compare_gt(field_value, condition.value)
+        
+        if op == FilterOperator.GTE:
+            return self._compare_gte(field_value, condition.value)
+        
+        if op == FilterOperator.LT:
+            return self._compare_lt(field_value, condition.value)
+        
+        if op == FilterOperator.LTE:
+            return self._compare_lte(field_value, condition.value)
+        
+        if op == FilterOperator.IN:
+            return field_value in (condition.value if isinstance(condition.value, (list, tuple, set)) else [condition.value])
+        
+        if op == FilterOperator.NOT_IN:
+            return field_value not in (condition.value if isinstance(condition.value, (list, tuple, set)) else [condition.value])
+        
+        if op == FilterOperator.CONTAINS:
+            return self._contains(field_value, condition.value)
+        
+        if op == FilterOperator.NOT_CONTAINS:
+            return not self._contains(field_value, condition.value)
+        
+        if op == FilterOperator.STARTS_WITH:
+            return self._starts_with(field_value, condition.value)
+        
+        if op == FilterOperator.ENDS_WITH:
+            return self._ends_with(field_value, condition.value)
+        
+        if op == FilterOperator.REGEX:
+            return self._regex_match(field_value, condition.value)
+        
+        if op == FilterOperator.BETWEEN:
+            return self._between(field_value, condition.value, condition.value2)
+        
+        if op == FilterOperator.CUSTOM:
+            return self._custom_filter(condition.value, record)
+        
+        return True
+    
+    def _get_field_value(self, record: Any, field: str) -> Any:
+        """Get value from record by field path."""
+        if field is None or field == "":
+            return record
+        
+        if isinstance(record, dict):
+            parts = field.split(".")
+            value = record
+            for part in parts:
+                if isinstance(value, dict):
+                    value = value.get(part)
+                else:
+                    return None
+            return value
+        elif isinstance(record, (list, tuple)) and field.isdigit():
+            idx = int(field)
+            return record[idx] if 0 <= idx < len(record) else None
+        else:
+            return getattr(record, field, None) if hasattr(record, field) else None
+    
+    def _compare_eq(self, a: Any, b: Any) -> bool:
+        """Compare equality."""
+        if a is None or b is None:
+            return a is b
+        try:
+            return float(a) == float(b) if isinstance(a, (int, float)) and isinstance(b, (int, float)) else str(a) == str(b)
+        except (ValueError, TypeError):
+            return str(a) == str(b)
+    
+    def _compare_gt(self, a: Any, b: Any) -> bool:
+        """Compare greater than."""
+        try:
+            return float(a) > float(b)
+        except (ValueError, TypeError):
+            return str(a) > str(b)
+    
+    def _compare_gte(self, a: Any, b: Any) -> bool:
+        """Compare greater than or equal."""
+        try:
+            return float(a) >= float(b)
+        except (ValueError, TypeError):
+            return str(a) >= str(b)
+    
+    def _compare_lt(self, a: Any, b: Any) -> bool:
+        """Compare less than."""
+        try:
+            return float(a) < float(b)
+        except (ValueError, TypeError):
+            return str(a) < str(b)
+    
+    def _compare_lte(self, a: Any, b: Any) -> bool:
+        """Compare less than or equal."""
+        try:
+            return float(a) <= float(b)
+        except (ValueError, TypeError):
+            return str(a) <= str(b)
+    
+    def _contains(self, a: Any, b: Any) -> bool:
+        """Check if a contains b."""
+        if a is None:
+            return False
+        return str(b) in str(a)
+    
+    def _starts_with(self, a: Any, b: Any) -> bool:
+        """Check if a starts with b."""
+        if a is None:
+            return False
+        return str(a).startswith(str(b))
+    
+    def _ends_with(self, a: Any, b: Any) -> bool:
+        """Check if a ends with b."""
+        if a is None:
+            return False
+        return str(a).endswith(str(b))
+    
+    def _regex_match(self, a: Any, pattern: str) -> bool:
+        """Check regex match."""
+        if a is None:
+            return False
+        try:
+            return bool(re.search(pattern, str(a)))
+        except re.error:
+            return False
+    
+    def _between(self, a: Any, low: Any, high: Any) -> bool:
+        """Check if a is between low and high."""
+        try:
+            a_f, low_f, high_f = float(a), float(low), float(high)
+            return low_f <= a_f <= high_f
+        except (ValueError, TypeError):
+            return str(a) >= str(low) and str(a) <= str(high)
+    
+    def _custom_filter(self, filter_name: str, record: Any) -> bool:
+        """Apply custom filter function."""
+        if filter_name not in self._custom_filters:
+            return False
+        try:
+            return bool(self._custom_filters[filter_name](record))
+        except Exception:
+            return False
+    
+    def _evaluate_logical_combination(
+        self, record: Any, conditions: List[FilterCondition], logic: FilterLogic
     ) -> bool:
-        """Evaluate all conditions against an item."""
+        """Evaluate combination of conditions."""
         if not conditions:
             return True
         
-        results = []
+        results = [self._evaluate_condition(record, cond) for cond in conditions]
         
-        for cond in conditions:
-            result = self._evaluate_condition(item, cond)
-            results.append(result)
-        
-        if logic == 'and':
+        if logic == FilterLogic.AND:
             return all(results)
-        else:
+        elif logic == FilterLogic.OR:
             return any(results)
+        elif logic == FilterLogic.NAND:
+            return not all(results)
+        elif logic == FilterLogic.NOR:
+            return not any(results)
+        
+        return all(results)
     
-    def _evaluate_condition(self, item: Any, cond: FilterCondition) -> bool:
-        """Evaluate single condition."""
-        if not isinstance(item, dict):
-            return False
+    def _evaluate_expression(self, record: Any, expression: str) -> bool:
+        """Evaluate a filter expression."""
+        import math
         
-        value = self._get_value(item, cond.field)
-        
-        if cond.operator == FilterOperator.EQ:
-            return value == cond.value
-        elif cond.operator == FilterOperator.NE:
-            return value != cond.value
-        elif cond.operator == FilterOperator.GT:
+        def safe_eval(expr: str, context: Dict) -> Any:
+            context_safe = {k: v for k, v in context.items() if not k.startswith("_")}
+            context_safe["math"] = math
+            context_safe["str"] = str
+            context_safe["int"] = int
+            context_safe["float"] = float
+            context_safe["bool"] = bool
+            context_safe["len"] = len
+            context_safe["abs"] = abs
+            context_safe["min"] = min
+            context_safe["max"] = max
+            context_safe["sum"] = sum
+            context_safe["any"] = any
+            context_safe["all"] = all
+            context_safe["re"] = re
+            
             try:
-                return float(value) > float(cond.value)
-            except (TypeError, ValueError):
-                return str(value) > str(cond.value)
-        elif cond.operator == FilterOperator.GE:
-            try:
-                return float(value) >= float(cond.value)
-            except (TypeError, ValueError):
-                return str(value) >= str(cond.value)
-        elif cond.operator == FilterOperator.LT:
-            try:
-                return float(value) < float(cond.value)
-            except (TypeError, ValueError):
-                return str(value) < str(cond.value)
-        elif cond.operator == FilterOperator.LE:
-            try:
-                return float(value) <= float(cond.value)
-            except (TypeError, ValueError):
-                return str(value) <= str(cond.value)
-        elif cond.operator == FilterOperator.IN:
-            return value in cond.value if isinstance(cond.value, (list, tuple, set)) else False
-        elif cond.operator == FilterOperator.NOT_IN:
-            return value not in cond.value if isinstance(cond.value, (list, tuple, set)) else True
-        elif cond.operator == FilterOperator.CONTAINS:
-            return str(cond.value) in str(value) if value is not None else False
-        elif cond.operator == FilterOperator.STARTS_WITH:
-            return str(value).startswith(str(cond.value)) if value is not None else False
-        elif cond.operator == FilterOperator.ENDS_WITH:
-            return str(value).endswith(str(cond.value)) if value is not None else False
-        elif cond.operator == FilterOperator.REGEX:
-            try:
-                return bool(re.search(str(cond.value), str(value) if value is not None else ''))
-            except re.error:
+                return eval(expr, {"__builtins__": {}}, context_safe)
+            except Exception:
                 return False
-        elif cond.operator == FilterOperator.IS_NULL:
-            return value is None or value == ''
-        elif cond.operator == FilterOperator.IS_NOT_NULL:
-            return value is not None and value != ''
         
-        return False
+        if isinstance(record, dict):
+            context = dict(record)
+        else:
+            context = {"record": record}
+        
+        return bool(safe_eval(expression, context))
     
-    def _get_value(self, data: Dict, field: str) -> Any:
-        """Get value from dict using dot notation."""
-        parts = field.split('.')
-        current = data
+    def _filter_data(
+        self, data: List, conditions: List[FilterCondition], logic: FilterLogic,
+        expression: Optional[str], limit: Optional[int], offset: int, start_time: float
+    ) -> ActionResult:
+        """Filter data based on conditions."""
+        filtered = []
+        matched_count = 0
+        skipped_count = 0
         
-        for part in parts:
-            if isinstance(current, dict):
-                current = current.get(part)
+        for record in data:
+            if offset > 0 and skipped_count < offset:
+                skipped_count += 1
+                continue
+            
+            matched = False
+            
+            if expression:
+                matched = self._evaluate_expression(record, expression)
+            elif conditions:
+                matched = self._evaluate_logical_combination(record, conditions, logic)
             else:
-                return None
+                matched = True
+            
+            if matched:
+                filtered.append(record)
+                matched_count += 1
+            
+            if limit and len(filtered) >= limit:
+                break
         
-        return current
+        return ActionResult(
+            success=True,
+            message=f"Filtered {matched_count} records",
+            data={
+                "filtered": filtered,
+                "count": len(filtered),
+                "matched": matched_count,
+                "skipped": skipped_count
+            },
+            duration=time.time() - start_time
+        )
+    
+    def _partition_data(
+        self, data: List, conditions: List[FilterCondition], logic: FilterLogic, start_time: float
+    ) -> ActionResult:
+        """Partition data into matching and non-matching."""
+        matched = []
+        not_matched = []
+        
+        for record in data:
+            if self._evaluate_logical_combination(record, conditions, logic):
+                matched.append(record)
+            else:
+                not_matched.append(record)
+        
+        return ActionResult(
+            success=True,
+            message=f"Partitioned: {len(matched)} matched, {len(not_matched)} not matched",
+            data={
+                "matched": matched,
+                "not_matched": not_matched,
+                "matched_count": len(matched),
+                "not_matched_count": len(not_matched)
+            },
+            duration=time.time() - start_time
+        )
+    
+    def _exclude_data(
+        self, data: List, conditions: List[FilterCondition], logic: FilterLogic,
+        expression: Optional[str], start_time: float
+    ) -> ActionResult:
+        """Exclude records matching conditions."""
+        excluded = []
+        remaining = []
+        
+        for record in data:
+            if expression:
+                matched = self._evaluate_expression(record, expression)
+            else:
+                matched = self._evaluate_logical_combination(record, conditions, logic)
+            
+            if matched:
+                excluded.append(record)
+            else:
+                remaining.append(record)
+        
+        return ActionResult(
+            success=True,
+            message=f"Excluded {len(excluded)} records",
+            data={
+                "remaining": remaining,
+                "excluded": excluded,
+                "remaining_count": len(remaining),
+                "excluded_count": len(excluded)
+            },
+            duration=time.time() - start_time
+        )
+    
+    def _sample_data(self, data: List, sample_size: Any, start_time: float) -> ActionResult:
+        """Randomly sample records from data."""
+        import random
+        
+        if isinstance(sample_size, float) and 0 < sample_size <= 1:
+            n = int(len(data) * sample_size)
+        elif isinstance(sample_size, int):
+            n = min(sample_size, len(data))
+        else:
+            n = max(1, len(data) // 10)
+        
+        sampled = random.sample(data, n) if n <= len(data) else data
+        
+        return ActionResult(
+            success=True,
+            message=f"Sampled {len(sampled)} records",
+            data={
+                "sampled": sampled,
+                "count": len(sampled),
+                "original_count": len(data)
+            },
+            duration=time.time() - start_time
+        )
+    
+    def register_filter(self, name: str, filter_fn: Callable) -> None:
+        """Register a custom filter function."""
+        self._custom_filters[name] = filter_fn
+    
+    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
+        """Validate filter parameters."""
+        return True, ""
+    
+    def get_required_params(self) -> List[str]:
+        """Return required parameters."""
+        return []
