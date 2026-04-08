@@ -1,37 +1,32 @@
 """
-Automation Audit Action Module.
+Automation Audit Action Module
 
-Provides audit logging for automation workflows
-with tracking, compliance, and reporting.
+Provides audit logging, compliance tracking, and activity recording.
 """
-
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from collections import defaultdict
 import asyncio
-import logging
-import uuid
-
-logger = logging.getLogger(__name__)
 
 
 class AuditEventType(Enum):
     """Audit event types."""
-    ACTION_START = "action_start"
-    ACTION_COMPLETE = "action_complete"
-    ACTION_FAIL = "action_fail"
-    WORKFLOW_START = "workflow_start"
-    WORKFLOW_COMPLETE = "workflow_complete"
-    WORKFLOW_FAIL = "workflow_fail"
-    CONDITION_EVAL = "condition_eval"
-    VARIABLE_CHANGE = "variable_change"
-    USER_ACTION = "user_action"
+    CREATE = "create"
+    READ = "read"
+    UPDATE = "update"
+    DELETE = "delete"
+    LOGIN = "login"
+    LOGOUT = "logout"
+    ACCESS_DENIED = "access_denied"
+    CONFIG_CHANGE = "config_change"
     SYSTEM_EVENT = "system_event"
+    CUSTOM = "custom"
 
 
 class AuditSeverity(Enum):
-    """Audit severity levels."""
+    """Audit event severity."""
     DEBUG = "debug"
     INFO = "info"
     WARNING = "warning"
@@ -41,237 +36,375 @@ class AuditSeverity(Enum):
 
 @dataclass
 class AuditEvent:
-    """Single audit event."""
+    """An audit event."""
     event_id: str
     event_type: AuditEventType
     timestamp: datetime
-    workflow_id: Optional[str] = None
-    action_id: Optional[str] = None
-    user_id: Optional[str] = None
+    actor: dict[str, Any]  # Who performed the action
+    resource: str  # What was affected
+    action: str  # What action was taken
+    result: str  # success, failure, partial
+    metadata: dict[str, Any] = field(default_factory=dict)
     severity: AuditSeverity = AuditSeverity.INFO
-    message: str = ""
-    details: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    session_id: Optional[str] = None
+    request_id: Optional[str] = None
+    correlation_id: Optional[str] = None
 
 
 @dataclass
-class AuditLog:
-    """Audit log containing events."""
-    log_id: str
-    workflow_id: Optional[str] = None
-    events: List[AuditEvent] = field(default_factory=list)
-    started_at: datetime = field(default_factory=datetime.now)
-    completed_at: Optional[datetime] = None
+class AuditQuery:
+    """Query parameters for audit log search."""
+    event_types: Optional[list[AuditEventType]] = None
+    actor_ids: Optional[list[str]] = None
+    resource_pattern: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    severity: Optional[AuditSeverity] = None
+    result: Optional[str] = None
+    limit: int = 100
+    offset: int = 0
+
+
+@dataclass
+class AuditSummary:
+    """Summary of audit events."""
+    total_events: int
+    by_event_type: dict[str, int]
+    by_severity: dict[str, int]
+    by_result: dict[str, int]
+    top_actors: list[tuple[str, int]]
+    top_resources: list[tuple[str, int]]
 
 
 class AuditLogger:
-    """Logs audit events."""
+    """Logger for audit events with configurable storage."""
+    
+    def __init__(self, storage: Callable[[AuditEvent], Awaitable] = None):
+        self._storage = storage
+        self._events: list[AuditEvent] = []
+        self._max_memory_events = 10000
+    
+    async def log(self, event: AuditEvent):
+        """Log an audit event."""
+        self._events.append(event)
+        
+        # Trim memory if needed
+        if len(self._events) > self._max_memory_events:
+            self._events = self._events[-self._max_memory_events:]
+        
+        if self._storage:
+            await self._storage(event)
+    
+    def get_events(self, limit: int = 100) -> list[AuditEvent]:
+        """Get recent events from memory."""
+        return self._events[-limit:]
+    
+    def get_by_time_range(
+        self,
+        start: datetime,
+        end: datetime
+    ) -> list[AuditEvent]:
+        """Get events within time range."""
+        return [
+            e for e in self._events
+            if start <= e.timestamp <= end
+        ]
 
-    def __init__(self, workflow_id: Optional[str] = None):
-        self.workflow_id = workflow_id
-        self.events: List[AuditEvent] = []
-        self._handlers: List[Callable] = []
 
-    def log(
+class AutomationAuditAction:
+    """Main audit action handler."""
+    
+    def __init__(self):
+        self._logger = AuditLogger()
+        self._retention_days = 90
+        self._compliance_rules: dict[str, Callable] = {}
+        self._alert_handlers: list[Callable] = []
+        self._stats: dict[str, Any] = defaultdict(int)
+    
+    async def log_event(
         self,
         event_type: AuditEventType,
-        message: str,
-        action_id: Optional[str] = None,
-        user_id: Optional[str] = None,
+        actor: dict[str, Any],
+        resource: str,
+        action: str,
+        result: str,
         severity: AuditSeverity = AuditSeverity.INFO,
-        details: Optional[Dict[str, Any]] = None
+        metadata: Optional[dict[str, Any]] = None,
+        **kwargs
     ) -> AuditEvent:
-        """Log an audit event."""
+        """
+        Log an audit event.
+        
+        Args:
+            event_type: Type of event
+            actor: Who performed the action
+            resource: What was affected
+            action: What action was taken
+            result: Outcome (success, failure, partial)
+            severity: Event severity
+            metadata: Additional event data
+            **kwargs: Additional fields (ip_address, user_agent, etc.)
+            
+        Returns:
+            The created AuditEvent
+        """
+        import uuid
+        
         event = AuditEvent(
             event_id=str(uuid.uuid4()),
             event_type=event_type,
             timestamp=datetime.now(),
-            workflow_id=self.workflow_id,
-            action_id=action_id,
-            user_id=user_id,
+            actor=actor,
+            resource=resource,
+            action=action,
+            result=result,
             severity=severity,
-            message=message,
-            details=details or {}
+            metadata=metadata or {},
+            **kwargs
         )
-
-        self.events.append(event)
-        self._notify_handlers(event)
-
+        
+        await self._logger.log(event)
+        self._stats["events_logged"] += 1
+        
+        # Check compliance rules
+        await self._check_compliance(event)
+        
+        # Trigger alerts if needed
+        if severity in [AuditSeverity.ERROR, AuditSeverity.CRITICAL]:
+            await self._trigger_alerts(event)
+        
         return event
-
-    def log_action_start(self, action_id: str, details: Optional[Dict] = None):
-        """Log action start."""
-        return self.log(
-            AuditEventType.ACTION_START,
-            f"Action started: {action_id}",
-            action_id=action_id,
-            details=details
-        )
-
-    def log_action_complete(self, action_id: str, details: Optional[Dict] = None):
-        """Log action completion."""
-        return self.log(
-            AuditEventType.ACTION_COMPLETE,
-            f"Action completed: {action_id}",
-            action_id=action_id,
-            details=details
-        )
-
-    def log_action_fail(self, action_id: str, error: str):
-        """Log action failure."""
-        return self.log(
-            AuditEventType.ACTION_FAIL,
-            f"Action failed: {action_id}",
-            action_id=action_id,
-            severity=AuditSeverity.ERROR,
-            details={"error": error}
-        )
-
-    def register_handler(self, handler: Callable):
-        """Register event handler."""
-        self._handlers.append(handler)
-
-    def _notify_handlers(self, event: AuditEvent):
-        """Notify handlers of new event."""
-        for handler in self._handlers:
-            try:
-                handler(event)
-            except Exception as e:
-                logger.error(f"Audit handler error: {e}")
-
-
-class AuditRepository:
-    """Stores and queries audit logs."""
-
-    def __init__(self):
-        self.logs: Dict[str, AuditLog] = {}
-        self.events: List[AuditEvent] = []
-
-    def add_log(self, audit_log: AuditLog):
-        """Add an audit log."""
-        self.logs[audit_log.log_id] = audit_log
-        self.events.extend(audit_log.events)
-
-    def query(
+    
+    async def log_create(
         self,
-        workflow_id: Optional[str] = None,
-        action_id: Optional[str] = None,
-        event_type: Optional[AuditEventType] = None,
-        severity: Optional[AuditSeverity] = None,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-        limit: int = 100
-    ) -> List[AuditEvent]:
-        """Query audit events."""
-        results = self.events
-
-        if workflow_id:
-            results = [e for e in results if e.workflow_id == workflow_id]
-
-        if action_id:
-            results = [e for e in results if e.action_id == action_id]
-
-        if event_type:
-            results = [e for e in results if e.event_type == event_type]
-
-        if severity:
-            results = [e for e in results if e.severity == severity]
-
-        if start_time:
-            results = [e for e in results if e.timestamp >= start_time]
-
-        if end_time:
-            results = [e for e in results if e.timestamp <= end_time]
-
-        return results[-limit:]
-
-    def get_workflow_timeline(self, workflow_id: str) -> List[AuditEvent]:
-        """Get workflow timeline."""
-        return sorted(
-            [e for e in self.events if e.workflow_id == workflow_id],
-            key=lambda e: e.timestamp
+        actor: dict[str, Any],
+        resource: str,
+        resource_id: str,
+        metadata: Optional[dict] = None
+    ) -> AuditEvent:
+        """Log a create event."""
+        return await self.log_event(
+            AuditEventType.CREATE,
+            actor,
+            f"{resource}/{resource_id}",
+            f"create_{resource}",
+            "success",
+            metadata={"resource_id": resource_id, **(metadata or {})}
         )
-
-
-class AuditReporter:
-    """Generates audit reports."""
-
-    def __init__(self, repository: AuditRepository):
-        self.repository = repository
-
-    def generate_summary(
+    
+    async def log_update(
+        self,
+        actor: dict[str, Any],
+        resource: str,
+        resource_id: str,
+        changes: dict[str, Any],
+        metadata: Optional[dict] = None
+    ) -> AuditEvent:
+        """Log an update event."""
+        return await self.log_event(
+            AuditEventType.UPDATE,
+            actor,
+            f"{resource}/{resource_id}",
+            f"update_{resource}",
+            "success",
+            metadata={"changes": changes, **(metadata or {})}
+        )
+    
+    async def log_delete(
+        self,
+        actor: dict[str, Any],
+        resource: str,
+        resource_id: str,
+        metadata: Optional[dict] = None
+    ) -> AuditEvent:
+        """Log a delete event."""
+        return await self.log_event(
+            AuditEventType.DELETE,
+            actor,
+            f"{resource}/{resource_id}",
+            f"delete_{resource}",
+            "success",
+            metadata={"resource_id": resource_id, **(metadata or {})}
+        )
+    
+    async def log_access_denied(
+        self,
+        actor: dict[str, Any],
+        resource: str,
+        reason: str,
+        **kwargs
+    ) -> AuditEvent:
+        """Log an access denied event."""
+        return await self.log_event(
+            AuditEventType.ACCESS_DENIED,
+            actor,
+            resource,
+            "access",
+            "denied",
+            severity=AuditSeverity.WARNING,
+            metadata={"reason": reason},
+            **kwargs
+        )
+    
+    async def query_events(
+        self,
+        query: AuditQuery
+    ) -> list[AuditEvent]:
+        """Query audit events."""
+        events = self._logger.get_events(limit=10000)
+        
+        # Apply filters
+        if query.event_types:
+            events = [e for e in events if e.event_type in query.event_types]
+        
+        if query.actor_ids:
+            events = [
+                e for e in events
+                if e.actor.get("id") in query.actor_ids
+            ]
+        
+        if query.resource_pattern:
+            import fnmatch
+            events = [
+                e for e in events
+                if fnmatch.fnmatch(e.resource, query.resource_pattern)
+            ]
+        
+        if query.start_time:
+            events = [e for e in events if e.timestamp >= query.start_time]
+        
+        if query.end_time:
+            events = [e for e in events if e.timestamp <= query.end_time]
+        
+        if query.severity:
+            events = [e for e in events if e.severity == query.severity]
+        
+        if query.result:
+            events = [e for e in events if e.result == query.result]
+        
+        # Apply pagination
+        return events[query.offset:query.offset + query.limit]
+    
+    async def get_summary(
         self,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None
-    ) -> Dict[str, Any]:
-        """Generate audit summary."""
-        events = self.repository.query(
-            start_time=start_time,
-            end_time=end_time,
-            limit=10000
-        )
-
-        event_counts: Dict[AuditEventType, int] = {}
-        severity_counts: Dict[AuditSeverity, int] = {}
-        workflow_counts: Dict[str, int] = {}
-
+    ) -> AuditSummary:
+        """Get summary statistics of audit events."""
+        events = self._logger.get_events(limit=10000)
+        
+        if start_time:
+            events = [e for e in events if e.timestamp >= start_time]
+        if end_time:
+            events = [e for e in events if e.timestamp <= end_time]
+        
+        # Count by type
+        by_type = defaultdict(int)
         for event in events:
-            event_counts[event.event_type] = event_counts.get(event.event_type, 0) + 1
-            severity_counts[event.severity] = severity_counts.get(event.severity, 0) + 1
-            if event.workflow_id:
-                workflow_counts[event.workflow_id] = workflow_counts.get(event.workflow_id, 0) + 1
-
+            by_type[event.event_type.value] += 1
+        
+        # Count by severity
+        by_severity = defaultdict(int)
+        for event in events:
+            by_severity[event.severity.value] += 1
+        
+        # Count by result
+        by_result = defaultdict(int)
+        for event in events:
+            by_result[event.result] += 1
+        
+        # Top actors
+        actor_counts = defaultdict(int)
+        for event in events:
+            actor_id = event.actor.get("id", "unknown")
+            actor_counts[actor_id] += 1
+        top_actors = sorted(actor_counts.items(), key=lambda x: -x[1])[:10]
+        
+        # Top resources
+        resource_counts = defaultdict(int)
+        for event in events:
+            resource_counts[event.resource] += 1
+        top_resources = sorted(resource_counts.items(), key=lambda x: -x[1])[:10]
+        
+        return AuditSummary(
+            total_events=len(events),
+            by_event_type=dict(by_type),
+            by_severity=dict(by_severity),
+            by_result=dict(by_result),
+            top_actors=top_actors,
+            top_resources=top_resources
+        )
+    
+    async def _check_compliance(self, event: AuditEvent):
+        """Check event against compliance rules."""
+        for rule_name, rule_fn in self._compliance_rules.items():
+            try:
+                await rule_fn(event)
+            except Exception as e:
+                self._stats["compliance_check_errors"] += 1
+    
+    async def _trigger_alerts(self, event: AuditEvent):
+        """Trigger alerts for critical events."""
+        for handler in self._alert_handlers:
+            try:
+                await handler(event)
+            except Exception:
+                self._stats["alert_errors"] += 1
+    
+    def register_compliance_rule(
+        self,
+        rule_name: str,
+        rule_fn: Callable[[AuditEvent], Awaitable]
+    ) -> "AutomationAuditAction":
+        """Register a compliance checking rule."""
+        self._compliance_rules[rule_name] = rule_fn
+        return self
+    
+    def register_alert_handler(
+        self,
+        handler: Callable[[AuditEvent], Awaitable]
+    ) -> "AutomationAuditAction":
+        """Register an alert handler for critical events."""
+        self._alert_handlers.append(handler)
+        return self
+    
+    async def get_user_activity(
+        self,
+        user_id: str,
+        days: int = 30
+    ) -> list[AuditEvent]:
+        """Get all activity for a specific user."""
+        start_time = datetime.now() - timedelta(days=days)
+        
+        events = self._logger.get_by_time_range(start_time, datetime.now())
+        
+        return [
+            e for e in events
+            if e.actor.get("id") == user_id
+        ]
+    
+    async def get_resource_history(
+        self,
+        resource: str,
+        days: int = 30
+    ) -> list[AuditEvent]:
+        """Get all changes to a specific resource."""
+        start_time = datetime.now() - timedelta(days=days)
+        
+        events = self._logger.get_by_time_range(start_time, datetime.now())
+        
+        return [
+            e for e in events
+            if e.resource.startswith(resource)
+        ]
+    
+    def get_stats(self) -> dict[str, Any]:
+        """Get audit statistics."""
         return {
-            "total_events": len(events),
-            "event_counts": {k.value: v for k, v in event_counts.items()},
-            "severity_counts": {k.value: v for k, v in severity_counts.items()},
-            "unique_workflows": len(workflow_counts),
-            "time_range": {
-                "start": min(e.timestamp for e in events).isoformat() if events else None,
-                "end": max(e.timestamp for e in events).isoformat() if events else None
-            }
+            **dict(self._stats),
+            "events_in_memory": len(self._logger._events),
+            "compliance_rules": len(self._compliance_rules),
+            "alert_handlers": len(self._alert_handlers)
         }
-
-    def generate_workflow_report(self, workflow_id: str) -> Dict[str, Any]:
-        """Generate report for specific workflow."""
-        timeline = self.repository.get_workflow_timeline(workflow_id)
-
-        if not timeline:
-            return {"error": "Workflow not found"}
-
-        start_event = timeline[0]
-        end_event = timeline[-1] if len(timeline) > 1 else None
-
-        duration = None
-        if end_event:
-            duration = (end_event.timestamp - start_event.timestamp).total_seconds()
-
-        errors = [e for e in timeline if e.severity == AuditSeverity.ERROR]
-
-        return {
-            "workflow_id": workflow_id,
-            "start_time": start_event.timestamp.isoformat(),
-            "end_time": end_event.timestamp.isoformat() if end_event else None,
-            "duration_seconds": duration,
-            "total_events": len(timeline),
-            "error_count": len(errors),
-            "status": "completed" if end_event and end_event.event_type == AuditEventType.WORKFLOW_COMPLETE else "failed"
-        }
-
-
-def main():
-    """Demonstrate audit logging."""
-    logger = AuditLogger(workflow_id="wf-123")
-
-    logger.log_action_start("action-1")
-    logger.log_action_complete("action-1", {"result": "success"})
-    logger.log_action_start("action-2")
-    logger.log_action_fail("action-2", "Timeout error")
-
-    print(f"Logged {len(logger.events)} events")
-    for event in logger.events:
-        print(f"  - {event.event_type.value}: {event.message}")
-
-
-if __name__ == "__main__":
-    main()
