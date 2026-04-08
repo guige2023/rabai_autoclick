@@ -1,122 +1,307 @@
 """
 Data Profiler Action Module.
 
-Profiles datasets: computes statistics, detects types, finds patterns,
-identifies missing values, and generates data quality reports.
+Profiles datasets to understand schema, distributions, quality,
+ and statistical characteristics of data fields.
 """
-from typing import Any, Optional
+
+from __future__ import annotations
+
+from typing import Any, Callable, Optional, Union
 from dataclasses import dataclass, field
-from actions.base_action import BaseAction
+from collections import Counter
+from enum import Enum
+import statistics
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class FieldType(Enum):
+    """Inferred type of a data field."""
+    STRING = "string"
+    INTEGER = "integer"
+    FLOAT = "float"
+    BOOLEAN = "boolean"
+    DATETIME = "datetime"
+    LIST = "list"
+    DICT = "dict"
+    NULL = "null"
+    MIXED = "mixed"
 
 
 @dataclass
-class DataProfile:
-    """Data profile report."""
-    row_count: int
-    column_count: int
-    columns: dict[str, dict[str, Any]]
-    missing_values: dict[str, int]
-    duplicate_rows: int
-    memory_bytes: int
+class FieldProfile:
+    """Statistical profile of a single field."""
+    name: str
+    field_type: FieldType
+    total_count: int = 0
+    null_count: int = 0
+    unique_count: int = 0
+    empty_count: int = 0
+    min_value: Any = None
+    max_value: Any = None
+    mean_value: Optional[float] = None
+    median_value: Any = None
+    std_dev: Optional[float] = None
+    top_values: list[tuple[Any, int]] = field(default_factory=list)
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
+    avg_length: Optional[float] = None
+    patterns: list[str] = field(default_factory=list)
 
 
-class DataProfilerAction(BaseAction):
-    """Profile a dataset and generate statistics."""
+@dataclass
+class DatasetProfile:
+    """Complete profile of a dataset."""
+    record_count: int = 0
+    field_count: int = 0
+    total_cells: int = 0
+    null_cells: int = 0
+    completeness: float = 0.0
+    field_profiles: dict[str, FieldProfile] = field(default_factory=dict)
+    quality_score: float = 0.0
+    issues: list[str] = field(default_factory=list)
 
-    def __init__(self) -> None:
-        super().__init__("data_profiler")
 
-    def execute(self, context: dict, params: dict) -> DataProfile:
-        """
-        Profile data records.
+class DataProfilerAction:
+    """
+    Dataset profiling and quality analysis.
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - records: List of dict records to profile
-                - sample_size: Max records to profile (default: all)
+    Analyzes datasets to generate comprehensive statistical profiles
+    including type inference, distributions, and quality metrics.
 
-        Returns:
-            DataProfile with statistics for each column
-        """
-        import sys
+    Example:
+        profiler = DataProfilerAction()
+        profile = profiler.profile_dataset(data)
+        print(f"Quality score: {profile.quality_score}")
+        for field_name, fp in profile.field_profiles.items():
+            print(f"{field_name}: {fp.field_type.value}, {fp.unique_count} unique")
+    """
 
-        records = params.get("records", [])
-        sample_size = params.get("sample_size", len(records))
+    def __init__(
+        self,
+        sample_size: Optional[int] = None,
+        top_values_limit: int = 10,
+    ) -> None:
+        self.sample_size = sample_size
+        self.top_values_limit = top_values_limit
 
-        if not records:
-            return DataProfile(
-                row_count=0,
-                column_count=0,
-                columns={},
-                missing_values={},
-                duplicate_rows=0,
-                memory_bytes=0
-            )
+    def profile_dataset(
+        self,
+        data: list[dict[str, Any]],
+    ) -> DatasetProfile:
+        """Profile an entire dataset."""
+        if not data:
+            return DatasetProfile()
 
-        sample = records[:sample_size]
-        columns: dict[str, dict[str, Any]] = {}
-        missing_values: dict[str, int] = {}
-        seen_rows = set()
-        duplicate_rows = 0
+        sample = data[:self.sample_size] if self.sample_size else data
 
-        all_keys: set[str] = set()
-        for r in sample:
-            if isinstance(r, dict):
-                all_keys.update(r.keys())
+        field_names: set[str] = set()
+        for record in sample:
+            field_names.update(record.keys())
 
-        for key in all_keys:
-            values = []
-            for r in sample:
-                if isinstance(r, dict):
-                    values.append(r.get(key))
-                else:
-                    values.append(None)
+        field_profiles: dict[str, FieldProfile] = {}
+        total_cells = 0
+        null_cells = 0
 
-            non_null = [v for v in values if v is not None]
-            missing_count = len(values) - len(non_null)
-            missing_values[key] = missing_count
+        for field_name in field_names:
+            values = [record.get(field_name) for record in sample]
+            profile = self._profile_field(field_name, values)
+            field_profiles[field_name] = profile
+            total_cells += len(values)
+            null_cells += profile.null_count
 
-            col_type = self._infer_type(non_null)
-            stats: dict[str, Any] = {"type": col_type, "null_count": missing_count}
+        completeness = 1.0 - (null_cells / total_cells) if total_cells > 0 else 0.0
 
-            if col_type == "numeric" and non_null:
-                numeric_vals = [v for v in non_null if isinstance(v, (int, float))]
-                if numeric_vals:
-                    stats["min"] = min(numeric_vals)
-                    stats["max"] = max(numeric_vals)
-                    stats["mean"] = sum(numeric_vals) / len(numeric_vals)
-                    stats["sum"] = sum(numeric_vals)
-            elif col_type == "string" and non_null:
-                str_vals = [str(v) for v in non_null]
-                stats["min_length"] = min(len(s) for s in str_vals)
-                stats["max_length"] = max(len(s) for s in str_vals)
-                stats["unique_count"] = len(set(str_vals))
+        issues = self._detect_issues(field_profiles, completeness)
+        quality_score = self._calculate_quality_score(completeness, issues)
 
-            columns[key] = stats
-
-        row_bytes = sys.getsizeof(str(sample))
-        return DataProfile(
-            row_count=len(records),
-            column_count=len(columns),
-            columns=columns,
-            missing_values=missing_values,
-            duplicate_rows=duplicate_rows,
-            memory_bytes=row_bytes
+        return DatasetProfile(
+            record_count=len(data),
+            field_count=len(field_names),
+            total_cells=total_cells,
+            null_cells=null_cells,
+            completeness=completeness,
+            field_profiles=field_profiles,
+            quality_score=quality_score,
+            issues=issues,
         )
 
-    def _infer_type(self, values: list) -> str:
-        """Infer the type of a list of non-null values."""
+    def _profile_field(
+        self,
+        field_name: str,
+        values: list[Any],
+    ) -> FieldProfile:
+        """Profile a single field."""
+        non_null = [v for v in values if v is not None]
+        empty = [v for v in non_null if self._is_empty(v)]
+
+        field_type = self._infer_type(non_null)
+
+        unique_values = set(v for v in non_null if not self._is_empty(v))
+
+        top_values: list[tuple[Any, int]] = []
+        if len(unique_values) <= self.top_values_limit * 2:
+            counter = Counter(non_null)
+            top_values = counter.most_common(self.top_values_limit)
+
+        numeric_values = [v for v in non_null if isinstance(v, (int, float)) and not isinstance(v, bool)]
+
+        profile = FieldProfile(
+            name=field_name,
+            field_type=field_type,
+            total_count=len(values),
+            null_count=len(values) - len(non_null),
+            unique_count=len(unique_values),
+            empty_count=len(empty),
+        )
+
+        if numeric_values:
+            profile.min_value = min(numeric_values)
+            profile.max_value = max(numeric_values)
+            profile.mean_value = statistics.mean(numeric_values)
+            profile.median_value = statistics.median(numeric_values)
+            if len(numeric_values) > 1:
+                profile.std_dev = statistics.stdev(numeric_values)
+
+        if field_type == FieldType.STRING:
+            string_values = [v for v in non_null if isinstance(v, str)]
+            if string_values:
+                profile.min_length = min(len(v) for v in string_values)
+                profile.max_length = max(len(v) for v in string_values)
+                profile.avg_length = statistics.mean(len(v) for v in string_values)
+                profile.patterns = self._detect_patterns(string_values[:100])
+
+        profile.top_values = top_values
+        return profile
+
+    def _infer_type(self, values: list[Any]) -> FieldType:
+        """Infer the type of a field."""
         if not values:
-            return "unknown"
-        sample = values[:100]
-        numeric_count = sum(1 for v in sample if isinstance(v, (int, float)))
-        if numeric_count / len(sample) > 0.8:
-            return "numeric"
-        string_count = sum(1 for v in sample if isinstance(v, str))
-        if string_count / len(sample) > 0.8:
-            return "string"
-        bool_count = sum(1 for v in sample if isinstance(v, bool))
-        if bool_count / len(sample) > 0.8:
-            return "boolean"
-        return "mixed"
+            return FieldType.NULL
+
+        types_present: set[str] = set()
+        for v in values:
+            if v is None:
+                continue
+            elif isinstance(v, bool):
+                types_present.add("boolean")
+            elif isinstance(v, int):
+                types_present.add("integer")
+            elif isinstance(v, float):
+                types_present.add("float")
+            elif isinstance(v, str):
+                if self._looks_like_datetime(v):
+                    types_present.add("datetime")
+                else:
+                    types_present.add("string")
+            elif isinstance(v, list):
+                types_present.add("list")
+            elif isinstance(v, dict):
+                types_present.add("dict")
+            else:
+                types_present.add("mixed")
+
+        if len(types_present) == 0:
+            return FieldType.NULL
+        if len(types_present) == 1:
+            t = types_present.pop()
+            if t == "boolean":
+                return FieldType.BOOLEAN
+            elif t == "integer":
+                return FieldType.INTEGER
+            elif t == "float":
+                return FieldType.FLOAT
+            elif t == "datetime":
+                return FieldType.DATETIME
+            elif t == "string":
+                return FieldType.STRING
+            elif t == "list":
+                return FieldType.LIST
+            elif t == "dict":
+                return FieldType.DICT
+
+        return FieldType.MIXED
+
+    def _is_empty(self, value: Any) -> bool:
+        """Check if a value is empty."""
+        if value is None:
+            return True
+        if isinstance(value, str) and value.strip() == "":
+            return True
+        if isinstance(value, (list, dict)) and len(value) == 0:
+            return True
+        return False
+
+    def _looks_like_datetime(self, value: str) -> bool:
+        """Check if a string looks like a datetime."""
+        import re
+        patterns = [
+            r'\d{4}-\d{2}-\d{2}',
+            r'\d{2}/\d{2}/\d{4}',
+            r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',
+        ]
+        return any(re.match(p, str(value)) for p in patterns)
+
+    def _detect_patterns(self, values: list[str]) -> list[str]:
+        """Detect common patterns in string values."""
+        import re
+        patterns_found: dict[str, int] = {}
+
+        for value in values[:50]:
+            if re.match(r'^[A-Z]{2,}$', value):
+                patterns_found["ALL_CAPS"] = patterns_found.get("ALL_CAPS", 0) + 1
+            elif re.match(r'^[a-z]+$', value):
+                patterns_found["lowercase"] = patterns_found.get("lowercase", 0) + 1
+            elif re.match(r'^[A-Za-z\s]+$', value):
+                patterns_found["Title Case"] = patterns_found.get("Title Case", 0) + 1
+            elif re.match(r'^\d+$', value):
+                patterns_found["numeric"] = patterns_found.get("numeric", 0) + 1
+            elif re.match(r'^\S+@\S+\.\S+$', value):
+                patterns_found["email"] = patterns_found.get("email", 0) + 1
+            elif re.match(r'^https?://', value):
+                patterns_found["url"] = patterns_found.get("url", 0) + 1
+
+        return [p for p, c in sorted(patterns_found.items(), key=lambda x: -x[1]) if c > len(values) * 0.1]
+
+    def _detect_issues(
+        self,
+        field_profiles: dict[str, FieldProfile],
+        completeness: float,
+    ) -> list[str]:
+        """Detect data quality issues."""
+        issues: list[str] = []
+
+        if completeness < 0.5:
+            issues.append(f"Low completeness: {completeness:.1%}")
+
+        for name, profile in field_profiles.items():
+            if profile.null_count > profile.total_count * 0.5:
+                issues.append(f"Field '{name}' has >50% null values")
+
+            if profile.unique_count == 1 and profile.total_count > 10:
+                issues.append(f"Field '{name}' has only one unique value")
+
+            if profile.field_type == FieldType.MIXED:
+                issues.append(f"Field '{name}' has mixed types")
+
+        return issues
+
+    def _calculate_quality_score(
+        self,
+        completeness: float,
+        issues: list[str],
+    ) -> float:
+        """Calculate overall data quality score."""
+        score = completeness
+
+        for issue in issues:
+            if "Low completeness" in issue:
+                score -= 0.2
+            elif ">50% null" in issue:
+                score -= 0.1
+            elif "mixed types" in issue:
+                score -= 0.05
+
+        return max(0.0, min(1.0, score))
