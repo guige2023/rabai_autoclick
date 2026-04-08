@@ -1,244 +1,158 @@
-"""
-Animation recording utilities for GUI automation.
+"""Animation recording utilities.
 
-Provides recording and playback of UI animations
-for automation testing and documentation.
+This module provides utilities for recording UI animations,
+capturing frame sequences, and analyzing animation properties.
 """
 
 from __future__ import annotations
 
 import time
-import json
-from typing import Optional, List, Dict, Any, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, auto
 
 
-class AnimationEventType(Enum):
-    """Animation event types."""
-    FRAME = "frame"
-    CLICK = "click"
-    DRAG = "drag"
-    SCROLL = "scroll"
-    KEY_FRAME = "key_frame"
+class AnimationType(Enum):
+    """Types of UI animations."""
+    TRANSITION = auto()
+    TRANSFORM = auto()
+    OPACITY = auto()
+    COLOR = auto()
+    LAYOUT = auto()
+    CUSTOM = auto()
 
 
 @dataclass
-class AnimationEvent:
-    """Single animation event."""
-    event_type: AnimationEventType
+class KeyFrame:
+    """A keyframe in an animation."""
     timestamp: float
-    x: Optional[int] = None
-    y: Optional[int] = None
-    end_x: Optional[int] = None
-    end_y: Optional[int] = None
-    frame_data: Optional[str] = None
+    x: float = 0.0
+    y: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
+    opacity: float = 1.0
+    rotation: float = 0.0
+    scale: float = 1.0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class AnimationRecording:
-    """Animation recording session."""
-    id: str
+class AnimationClip:
+    """A recorded animation clip."""
     name: str
-    fps: int
-    events: List[AnimationEvent] = field(default_factory=list)
-    start_time: Optional[float] = None
-    end_time: Optional[float] = None
-    frame_count: int = 0
+    animation_type: AnimationType
+    keyframes: List[KeyFrame] = field(default_factory=list)
+    duration_ms: float = 0.0
+    loop_count: int = 1
+    easing: str = "linear"
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def add_keyframe(self, keyframe: KeyFrame) -> None:
+        self.keyframes.append(keyframe)
+        self._recompute_duration()
+
+    def _recompute_duration(self) -> None:
+        if self.keyframes:
+            self.duration_ms = (self.keyframes[-1].timestamp - self.keyframes[0].timestamp) * 1000
+
+    def get_frame_at(self, timestamp: float) -> Optional[KeyFrame]:
+        if not self.keyframes:
+            return None
+        if timestamp <= self.keyframes[0].timestamp:
+            return self.keyframes[0]
+        if timestamp >= self.keyframes[-1].timestamp:
+            return self.keyframes[-1]
+        for i in range(len(self.keyframes) - 1):
+            kf1 = self.keyframes[i]
+            kf2 = self.keyframes[i + 1]
+            if kf1.timestamp <= timestamp <= kf2.timestamp:
+                t = (timestamp - kf1.timestamp) / (kf2.timestamp - kf1.timestamp)
+                return self._interpolate(kf1, kf2, t)
+        return None
+
+    def _interpolate(self, kf1: KeyFrame, kf2: KeyFrame, t: float) -> KeyFrame:
+        return KeyFrame(
+            timestamp=kf1.timestamp + (kf2.timestamp - kf1.timestamp) * t,
+            x=kf1.x + (kf2.x - kf1.x) * t,
+            y=kf1.y + (kf2.y - kf1.y) * t,
+            width=kf1.width + (kf2.width - kf1.width) * t,
+            height=kf1.height + (kf2.height - kf1.height) * t,
+            opacity=kf1.opacity + (kf2.opacity - kf1.opacity) * t,
+            rotation=kf1.rotation + (kf2.rotation - kf1.rotation) * t,
+            scale=kf1.scale + (kf2.scale - kf1.scale) * t,
+        )
 
 
 class AnimationRecorder:
-    """Records UI animations."""
-    
-    def __init__(self, name: str = "animation", fps: int = 30):
-        """
-        Initialize animation recorder.
-        
-        Args:
-            name: Recording name.
-            fps: Frames per second.
-        """
-        self.recording = AnimationRecording(
-            id=str(time.time()),
+    """Records UI animations as clips."""
+
+    def __init__(self) -> None:
+        self._clips: Dict[str, AnimationClip] = {}
+        self._recording: Optional[AnimationClip] = None
+        self._recording_start: Optional[float] = None
+
+    def start_recording(
+        self,
+        name: str,
+        animation_type: AnimationType,
+    ) -> None:
+        self._recording = AnimationClip(
             name=name,
-            fps=fps
+            animation_type=animation_type,
         )
-        self._is_recording = False
-        self._frame_interval = 1.0 / fps
-        self._last_frame_time = 0.0
-        self._frame_callbacks: List[Callable] = []
-    
-    def start(self) -> None:
-        """Start recording."""
-        self._is_recording = True
-        self.recording.start_time = time.time()
-        self._last_frame_time = time.time()
-    
-    def stop(self) -> AnimationRecording:
-        """
-        Stop recording.
-        
-        Returns:
-            AnimationRecording with captured events.
-        """
-        self._is_recording = False
-        self.recording.end_time = time.time()
-        return self.recording
-    
-    def record_frame(self, frame_data: Optional[str] = None,
-                    metadata: Optional[Dict] = None) -> None:
-        """
-        Record a frame.
-        
-        Args:
-            frame_data: Optional frame data.
-            metadata: Optional metadata.
-        """
-        if not self._is_recording:
-            return
-        
-        now = time.time()
-        if now - self._last_frame_time < self._frame_interval:
-            return
-        
-        event = AnimationEvent(
-            event_type=AnimationEventType.FRAME,
-            timestamp=now,
-            frame_data=frame_data,
-            metadata=metadata or {}
-        )
-        
-        self.recording.events.append(event)
-        self.recording.frame_count += 1
-        self._last_frame_time = now
-        
-        for callback in self._frame_callbacks:
-            try:
-                callback(event)
-            except Exception:
-                pass
-    
-    def record_click(self, x: int, y: int) -> None:
-        """Record click event."""
-        if not self._is_recording:
-            return
-        
-        self.recording.events.append(AnimationEvent(
-            event_type=AnimationEventType.CLICK,
-            timestamp=time.time(),
-            x=x, y=y
-        ))
-    
-    def record_drag(self, x1: int, y1: int, x2: int, y2: int) -> None:
-        """Record drag event."""
-        if not self._is_recording:
-            return
-        
-        self.recording.events.append(AnimationEvent(
-            event_type=AnimationEventType.DRAG,
-            timestamp=time.time(),
-            x=x1, y=y1, end_x=x2, end_y=y2
-        ))
-    
-    def add_frame_callback(self, callback: Callable) -> None:
-        """Add frame capture callback."""
-        self._frame_callbacks.append(callback)
-    
-    def is_recording(self) -> bool:
-        """Check if recording."""
-        return self._is_recording
-    
-    def get_duration(self) -> float:
-        """Get recording duration."""
-        if self.recording.start_time is None:
-            return 0.0
-        end = self.recording.end_time or time.time()
-        return end - self.recording.start_time
+        self._recording_start = time.time()
 
+    def add_keyframe(
+        self,
+        x: float = 0.0,
+        y: float = 0.0,
+        width: float = 0.0,
+        height: float = 0.0,
+        opacity: float = 1.0,
+        rotation: float = 0.0,
+        scale: float = 1.0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self._recording and self._recording_start is not None:
+            timestamp = time.time() - self._recording_start
+            kf = KeyFrame(
+                timestamp=timestamp,
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+                opacity=opacity,
+                rotation=rotation,
+                scale=scale,
+                metadata=metadata or {},
+            )
+            self._recording.add_keyframe(kf)
 
-def export_animation(recording: AnimationRecording, path: str) -> bool:
-    """
-    Export animation recording to JSON.
-    
-    Args:
-        recording: AnimationRecording to export.
-        path: Output file path.
-        
-    Returns:
-        True if successful.
-    """
-    try:
-        data = {
-            'id': recording.id,
-            'name': recording.name,
-            'fps': recording.fps,
-            'frame_count': recording.frame_count,
-            'start_time': recording.start_time,
-            'end_time': recording.end_time,
-            'metadata': recording.metadata,
-            'events': [
-                {
-                    'type': e.event_type.value,
-                    'timestamp': e.timestamp,
-                    'x': e.x,
-                    'y': e.y,
-                    'end_x': e.end_x,
-                    'end_y': e.end_y,
-                    'frame_data': e.frame_data,
-                    'metadata': e.metadata,
-                }
-                for e in recording.events
-            ]
-        }
-        
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
-        return True
-    except Exception:
+    def stop_recording(self) -> Optional[AnimationClip]:
+        clip = self._recording
+        if clip:
+            self._clips[clip.name] = clip
+        self._recording = None
+        self._recording_start = None
+        return clip
+
+    @property
+    def clips(self) -> Dict[str, AnimationClip]:
+        return self._clips.copy()
+
+    def get_clip(self, name: str) -> Optional[AnimationClip]:
+        return self._clips.get(name)
+
+    def remove_clip(self, name: str) -> bool:
+        if name in self._clips:
+            del self._clips[name]
+            return True
         return False
 
 
-def import_animation(path: str) -> Optional[AnimationRecording]:
-    """
-    Import animation recording from JSON.
-    
-    Args:
-        path: Input file path.
-        
-    Returns:
-        AnimationRecording or None.
-    """
-    try:
-        with open(path, 'r') as f:
-            data = json.load(f)
-        
-        events = [
-            AnimationEvent(
-                event_type=AnimationEventType(e['type']),
-                timestamp=e['timestamp'],
-                x=e.get('x'),
-                y=e.get('y'),
-                end_x=e.get('end_x'),
-                end_y=e.get('end_y'),
-                frame_data=e.get('frame_data'),
-                metadata=e.get('metadata', {}),
-            )
-            for e in data.get('events', [])
-        ]
-        
-        recording = AnimationRecording(
-            id=data['id'],
-            name=data['name'],
-            fps=data.get('fps', 30),
-            frame_count=data.get('frame_count', 0),
-            start_time=data.get('start_time'),
-            end_time=data.get('end_time'),
-            metadata=data.get('metadata', {}),
-            events=events
-        )
-        
-        return recording
-    except Exception:
-        return None
+__all__ = [
+    "AnimationType",
+    "KeyFrame",
+    "AnimationClip",
+    "AnimationRecorder",
+]
