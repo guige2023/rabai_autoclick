@@ -1,99 +1,133 @@
 """
 Data Transform Pipeline Action Module.
 
-Builds and executes data transformation pipelines with
-chained operations, conditional branching, and error handling.
+Pipeline for chained data transformations,
+supports mapping, filtering, aggregation, and custom transforms.
 """
-from typing import Any, Optional, Callable
+
+from __future__ import annotations
+
+from typing import Any, Callable, Optional, Union
 from dataclasses import dataclass, field
-from actions.base_action import BaseAction
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TransformStep:
-    """A transformation step."""
+class TransformStage:
+    """Single transformation stage."""
     name: str
-    transform_func: Callable
-    input_field: Optional[str] = None
-    output_field: Optional[str] = None
-    on_error: str = "skip"  # skip, stop, log
+    func: Callable[[Any], Any]
+    skip_on_error: bool = False
 
 
-@dataclass
-class TransformPipelineResult:
-    """Result of pipeline execution."""
-    success: bool
-    records_out: list[dict[str, Any]]
-    steps_completed: int
-    errors: list[str]
+class DataTransformPipelineAction:
+    """
+    Data transformation pipeline with composable stages.
 
+    Chains together map, filter, reduce, and custom
+    transformations for batch data processing.
 
-class DataTransformPipelineAction(BaseAction):
-    """Execute chained data transformations."""
+    Example:
+        pipeline = DataTransformPipelineAction()
+        pipeline.map(normalize_fields)
+        pipeline.filter(drop_nulls)
+        pipeline.aggregate(compute_stats)
+        result = pipeline.run(raw_data)
+    """
 
-    def __init__(self) -> None:
-        super().__init__("data_transform_pipeline")
+    def __init__(self, name: str = "transform") -> None:
+        self.name = name
+        self._stages: list[TransformStage] = []
 
-    def execute(self, context: dict, params: dict) -> dict:
-        """
-        Execute transformation pipeline.
+    def map(
+        self,
+        func: Callable[[dict], dict],
+        name: Optional[str] = None,
+        skip_on_error: bool = False,
+    ) -> "DataTransformPipelineAction":
+        """Add a map transformation stage."""
+        stage_name = name or f"map_{len(self._stages)}"
+        self._stages.append(TransformStage(
+            name=stage_name,
+            func=func,
+            skip_on_error=skip_on_error,
+        ))
+        return self
 
-        Args:
-            context: Execution context
-            params: Parameters:
-                - records: Input records
-                - steps: List of transform step configs
-                    - name: Step name
-                    - func: Transform function
-                    - input_field: Field to transform
-                    - output_field: Output field name
-                    - on_error: skip, stop, log
-                - stop_on_error: Stop pipeline on first error
+    def filter(
+        self,
+        predicate: Callable[[dict], bool],
+        name: Optional[str] = None,
+    ) -> "DataTransformPipelineAction":
+        """Add a filter stage."""
+        def filter_func(data: list) -> list:
+            return [item for item in data if predicate(item)]
 
-        Returns:
-            TransformPipelineResult
-        """
-        records = params.get("records", [])
-        step_configs = params.get("steps", [])
-        stop_on_error = params.get("stop_on_error", False)
+        stage_name = name or f"filter_{len(self._stages)}"
+        self._stages.append(TransformStage(
+            name=stage_name,
+            func=filter_func,
+        ))
+        return self
 
-        steps = []
-        for cfg in step_configs:
-            steps.append(TransformStep(
-                name=cfg.get("name", "unnamed"),
-                transform_func=cfg.get("func"),
-                input_field=cfg.get("input_field"),
-                output_field=cfg.get("output_field", cfg.get("input_field")),
-                on_error=cfg.get("on_error", "skip")
-            ))
+    def aggregate(
+        self,
+        func: Callable[[list], Any],
+        name: Optional[str] = None,
+    ) -> "DataTransformPipelineAction":
+        """Add an aggregation stage."""
+        stage_name = name or f"aggregate_{len(self._stages)}"
+        self._stages.append(TransformStage(
+            name=stage_name,
+            func=func,
+        ))
+        return self
 
-        records_out = list(records)
-        errors = []
-        steps_completed = 0
+    def run(
+        self,
+        data: Any,
+        stop_on_error: bool = True,
+    ) -> Any:
+        """Execute the pipeline on data."""
+        current = data
 
-        for step in steps:
-            new_records = []
-            for r in records_out:
-                try:
-                    if step.transform_func:
-                        result = step.transform_func(r)
-                        if step.output_field and result is not None:
-                            r[step.output_field] = result
-                        new_records.append(r)
-                    else:
-                        new_records.append(r)
-                    steps_completed += 1
-                except Exception as e:
-                    errors.append(f"Step {step.name}: {str(e)}")
-                    if step.on_error == "stop" or stop_on_error:
-                        return TransformPipelineResult(False, records_out, steps_completed, errors).__dict__
-                    elif step.on_error == "skip":
-                        new_records.append(r)
-            records_out = new_records
+        for stage in self._stages:
+            try:
+                current = stage.func(current)
+            except Exception as e:
+                if stop_on_error and not stage.skip_on_error:
+                    logger.error("Pipeline stage '%s' failed: %s", stage.name, e)
+                    raise
+                else:
+                    logger.warning("Pipeline stage '%s' failed, skipping: %s", stage.name, e)
 
-        return TransformPipelineResult(
-            success=len(errors) == 0,
-            records_out=records_out,
-            steps_completed=steps_completed,
-            errors=errors
-        ).__dict__
+        return current
+
+    def run_batch(
+        self,
+        items: list,
+        stop_on_error: bool = True,
+    ) -> list:
+        """Run pipeline on each item in a batch."""
+        results = []
+
+        for item in items:
+            try:
+                result = self.run(item, stop_on_error=stop_on_error)
+                results.append(result)
+            except Exception as e:
+                if stop_on_error:
+                    raise
+                logger.warning("Batch item failed: %s", e)
+
+        return results
+
+    def clear(self) -> None:
+        """Remove all stages."""
+        self._stages.clear()
+
+    def get_stage_names(self) -> list[str]:
+        """Get names of all stages in order."""
+        return [s.name for s in self._stages]

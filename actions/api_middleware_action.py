@@ -1,157 +1,185 @@
 """
-API Middleware Action - Middleware for API request/response processing.
+API Middleware Action Module.
 
-This module provides middleware capabilities including
-authentication, transformation, and request/response interception.
+Middleware chain for API request/response processing,
+supports authentication, logging, rate limiting, and transformation.
 """
 
 from __future__ import annotations
 
-import time
+from typing import Any, Callable, Optional, Union
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from enum import Enum
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
+
+class MiddlewarePhase(Enum):
+    """Middleware execution phases."""
+    BEFORE_REQUEST = "before_request"
+    AFTER_REQUEST = "after_request"
+    ON_ERROR = "on_error"
+
+
+@dataclass
+class MiddlewareContext:
+    """Context passed through middleware chain."""
+    request: dict[str, Any]
+    response: Optional[dict[str, Any]] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass
 class MiddlewareConfig:
-    """Configuration for middleware."""
+    """Middleware configuration."""
+    name: str
+    phase: MiddlewarePhase
     enabled: bool = True
     order: int = 0
 
 
-@dataclass
-class RequestContext:
-    """Context for request processing."""
-    method: str
-    url: str
-    headers: dict[str, str]
-    params: dict[str, Any]
-    body: Any | None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ResponseContext:
-    """Context for response processing."""
-    status_code: int
-    headers: dict[str, str]
-    body: Any
-    duration_ms: float
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class Middleware:
-    """Base middleware class."""
-    
-    def __init__(self, config: MiddlewareConfig | None = None) -> None:
-        self.config = config or MiddlewareConfig()
-    
-    async def process_request(self, ctx: RequestContext) -> RequestContext:
-        """Process request."""
-        return ctx
-    
-    async def process_response(self, ctx: ResponseContext) -> ResponseContext:
-        """Process response."""
-        return ctx
-
-
-class AuthMiddleware(Middleware):
-    """Authentication middleware."""
-    
-    def __init__(self, token: str, header: str = "Authorization") -> None:
-        super().__init__()
-        self.token = token
-        self.header = header
-    
-    async def process_request(self, ctx: RequestContext) -> RequestContext:
-        """Add auth header to request."""
-        ctx.headers[self.header] = f"Bearer {self.token}"
-        return ctx
-
-
-class HeaderMiddleware(Middleware):
-    """Header transformation middleware."""
-    
-    def __init__(self, add_headers: dict[str, str] | None = None) -> None:
-        super().__init__()
-        self.add_headers = add_headers or {}
-    
-    async def process_request(self, ctx: RequestContext) -> RequestContext:
-        """Add headers to request."""
-        ctx.headers.update(self.add_headers)
-        return ctx
-    
-    async def process_response(self, ctx: ResponseContext) -> ResponseContext:
-        """Remove headers from response."""
-        return ctx
-
-
-class TimingMiddleware(Middleware):
-    """Request timing middleware."""
-    
-    async def process_request(self, ctx: RequestContext) -> RequestContext:
-        """Record request start time."""
-        ctx.metadata["_start_time"] = time.time()
-        return ctx
-    
-    async def process_response(self, ctx: ResponseContext) -> ResponseContext:
-        """Calculate request duration."""
-        start_time = ctx.metadata.get("_start_time", ctx.metadata.get("_start_time", time.time()))
-        ctx.duration_ms = (time.time() - start_time) * 1000
-        return ctx
-
-
-class APIMiddlewareChain:
-    """Chains multiple middleware together."""
-    
-    def __init__(self) -> None:
-        self._middleware: list[Middleware] = []
-    
-    def add(self, middleware: Middleware) -> None:
-        """Add middleware to chain."""
-        self._middleware.append(middleware)
-        self._middleware.sort(key=lambda m: m.config.order)
-    
-    async def process_request(self, ctx: RequestContext) -> RequestContext:
-        """Process request through middleware chain."""
-        for m in self._middleware:
-            if m.config.enabled:
-                ctx = await m.process_request(ctx)
-        return ctx
-    
-    async def process_response(self, ctx: ResponseContext) -> ResponseContext:
-        """Process response through middleware chain."""
-        for m in reversed(self._middleware):
-            if m.config.enabled:
-                ctx = await m.process_response(ctx)
-        return ctx
+MiddlewareFunc = Callable[[MiddlewareContext], MiddlewareContext]
 
 
 class APIMiddlewareAction:
-    """API middleware action for automation workflows."""
-    
+    """
+    Middleware chain for API request/response processing.
+
+    Supports composable middleware for auth, logging,
+    transformation, and more.
+
+    Example:
+        mw = APIMiddlewareAction()
+        mw.use(auth_middleware, phase=MiddlewarePhase.BEFORE_REQUEST)
+        mw.use(logging_middleware)
+        ctx = mw.process(request_data)
+    """
+
     def __init__(self) -> None:
-        self.chain = APIMiddlewareChain()
-    
-    def add_auth(self, token: str, header: str = "Authorization") -> None:
-        """Add authentication middleware."""
-        self.chain.add(AuthMiddleware(token, header))
-    
-    def add_headers(self, headers: dict[str, str]) -> None:
-        """Add header middleware."""
-        self.chain.add(HeaderMiddleware(headers))
-    
-    def add_timing(self) -> None:
-        """Add timing middleware."""
-        self.chain.add(TimingMiddleware())
-    
-    async def process_request(self, ctx: RequestContext) -> RequestContext:
-        """Process request through middleware."""
-        return await self.chain.process_request(ctx)
-    
-    async def process_response(self, ctx: ResponseContext) -> ResponseContext:
-        """Process response through middleware."""
-        return await self.chain.process_response(ctx)
+        self._middleware: list[tuple[MiddlewareConfig, MiddlewareFunc]] = []
+
+    def add(
+        self,
+        name: str,
+        func: MiddlewareFunc,
+        phase: MiddlewarePhase = MiddlewarePhase.BEFORE_REQUEST,
+        order: int = 0,
+        enabled: bool = True,
+    ) -> "APIMiddlewareAction":
+        """Register a middleware function."""
+        config = MiddlewareConfig(
+            name=name,
+            phase=phase,
+            order=order,
+            enabled=enabled,
+        )
+        self._middleware.append((config, func))
+        self._middleware.sort(key=lambda x: (x[0].phase.value, x[0].order))
+        return self
+
+    def use(
+        self,
+        func: MiddlewareFunc,
+        phase: MiddlewarePhase = MiddlewarePhase.BEFORE_REQUEST,
+        order: int = 0,
+    ) -> "APIMiddlewareAction":
+        """Alias for add()."""
+        return self.add(func.__name__, func, phase, order)
+
+    def process(
+        self,
+        request: dict[str, Any],
+        response: Optional[dict[str, Any]] = None,
+    ) -> MiddlewareContext:
+        """Process request through middleware chain."""
+        ctx = MiddlewareContext(
+            request=request,
+            response=response,
+        )
+
+        before = [m for m in self._middleware
+                  if m[0].phase == MiddlewarePhase.BEFORE_REQUEST and m[0].enabled]
+
+        for config, func in before:
+            try:
+                ctx = func(ctx)
+            except Exception as e:
+                logger.error("Middleware '%s' error: %s", config.name, e)
+                ctx.errors.append(f"{config.name}: {str(e)}")
+
+        return ctx
+
+    def process_response(
+        self,
+        ctx: MiddlewareContext,
+        response: dict[str, Any],
+    ) -> MiddlewareContext:
+        """Process response through middleware chain."""
+        ctx.response = response
+
+        after = [m for m in self._middleware
+                 if m[0].phase == MiddlewarePhase.AFTER_REQUEST and m[0].enabled]
+
+        for config, func in after:
+            try:
+                ctx = func(ctx)
+            except Exception as e:
+                logger.error("Middleware '%s' error: %s", config.name, e)
+                ctx.errors.append(f"{config.name}: {str(e)}")
+
+        return ctx
+
+    def remove(self, name: str) -> bool:
+        """Remove middleware by name."""
+        for i, (config, _) in enumerate(self._middleware):
+            if config.name == name:
+                del self._middleware[i]
+                return True
+        return False
+
+    def disable(self, name: str) -> bool:
+        """Disable middleware by name."""
+        for config, _ in self._middleware:
+            if config.name == name:
+                config.enabled = False
+                return True
+        return False
+
+    def enable(self, name: str) -> bool:
+        """Enable middleware by name."""
+        for config, _ in self._middleware:
+            if config.name == name:
+                config.enabled = True
+                return True
+        return False
+
+    def clear(self) -> None:
+        """Remove all middleware."""
+        self._middleware.clear()
+
+    def list_middleware(self) -> list[str]:
+        """List all registered middleware names."""
+        return [config.name for config, _ in self._middleware]
 
 
-__all__ = ["MiddlewareConfig", "RequestContext", "ResponseContext", "Middleware", "AuthMiddleware", "HeaderMiddleware", "TimingMiddleware", "APIMiddlewareChain", "APIMiddlewareAction"]
+def auth_middleware(token_field: str = "Authorization") -> MiddlewareFunc:
+    """Create authentication middleware."""
+    def middleware(ctx: MiddlewareContext) -> MiddlewareContext:
+        headers = ctx.request.get("headers", {})
+        if token_field in headers:
+            ctx.metadata["authenticated"] = True
+        return ctx
+    return middleware
+
+
+def logging_middleware() -> MiddlewareFunc:
+    """Create request logging middleware."""
+    def middleware(ctx: MiddlewareContext) -> MiddlewareContext:
+        start = time.time()
+        ctx.metadata["request_start"] = start
+        logger.debug("Processing request to %s", ctx.request.get("url", "unknown"))
+        return ctx
+    return middleware
