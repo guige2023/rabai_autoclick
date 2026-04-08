@@ -1,330 +1,337 @@
 """Rate limit action module for RabAI AutoClick.
 
-Provides rate limiting and throttling for API calls,
-task execution, and resource access control.
+Provides rate limiting with token bucket, sliding window,
+leaky bucket, and fixed window algorithms.
 """
 
 import sys
 import os
 import time
 import threading
-from typing import Any, Dict, List, Optional
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
 from collections import deque
-from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
+class RateLimitAlgorithm(Enum):
+    """Rate limiting algorithm types."""
+    TOKEN_BUCKET = "token_bucket"
+    SLIDING_WINDOW = "sliding_window"
+    LEAKY_BUCKET = "leaky_bucket"
+    FIXED_WINDOW = "fixed_window"
+
+
 @dataclass
-class TokenBucket:
-    """Token bucket for rate limiting."""
-    capacity: int
-    refill_rate: float  # tokens per second
-    tokens: float
-    last_refill: float
-    lock: threading.Lock
-
-    def consume(self, tokens: int = 1) -> bool:
-        """Try to consume tokens. Returns True if allowed."""
-        with self.lock:
-            self._refill()
-            if self.tokens >= tokens:
-                self.tokens -= tokens
-                return True
-            return False
-
-    def _refill(self):
-        """Refill tokens based on elapsed time."""
-        now = time.time()
-        elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-        self.last_refill = now
-
-    def wait_time(self, tokens: int = 1) -> float:
-        """Get wait time in seconds until tokens available."""
-        with self.lock:
-            self._refill()
-            if self.tokens >= tokens:
-                return 0
-            needed = tokens - self.tokens
-            return needed / self.refill_rate
+class RateLimitConfig:
+    """Configuration for a rate limiter."""
+    capacity: int = 10
+    refill_rate: float = 1.0
+    refill_period: float = 1.0
+    timeout: float = 0.0
 
 
 class RateLimitAction(BaseAction):
-    """Rate limit task execution or API calls.
+    """Rate limiting for actions and API calls.
     
-    Token bucket implementation with configurable
-    capacity and refill rate.
+    Supports token bucket, sliding window, leaky bucket,
+    and fixed window rate limiting algorithms.
     """
     action_type = "rate_limit"
-    display_name = "限流"
-    description = "使用令牌桶算法限制执行速率"
+    display_name = "限流控制"
+    description = "限流控制：令牌桶/滑动窗口/漏桶/固定窗口"
 
-    _buckets: Dict[str, TokenBucket] = {}
-    _lock = threading.Lock()
+    _limiters: Dict[str, Any] = {}
+    _locks: Dict[str, threading.Lock] = {}
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Apply rate limit.
+        """Check or consume rate limit tokens.
         
         Args:
             context: Execution context.
             params: Dict with keys:
-                - bucket_id: str (identifier for this bucket)
-                - capacity: int (max tokens, default 10)
-                - refill_rate: float (tokens per second)
-                - tokens_requested: int (tokens to consume)
-                - wait: bool (block until available)
-                - max_wait: float (max seconds to wait)
+                - operation: str (check/consume/reset/get_status)
+                - limiter_name: str, name of the rate limiter
+                - algorithm: str (token_bucket/sliding_window/leaky_bucket/fixed_window)
+                - capacity: int, max tokens/requests
+                - refill_rate: float, tokens/requests per refill_period
+                - refill_period: float, refill period in seconds
+                - tokens: int, tokens to consume (default 1)
+                - timeout: float, max time to wait for token (0 = no wait)
                 - save_to_var: str
         
         Returns:
-            ActionResult with rate limit result.
+            ActionResult with rate limit check result.
         """
-        bucket_id = params.get('bucket_id', 'default')
+        operation = params.get('operation', 'check')
+        limiter_name = params.get('limiter_name', 'default')
+        algorithm = params.get('algorithm', 'token_bucket')
         capacity = params.get('capacity', 10)
         refill_rate = params.get('refill_rate', 1.0)
-        tokens_requested = params.get('tokens_requested', 1)
-        wait = params.get('wait', False)
-        max_wait = params.get('max_wait', 30.0)
-        save_to_var = params.get('save_to_var', 'rate_limit')
+        refill_period = params.get('refill_period', 1.0)
+        tokens = params.get('tokens', 1)
+        timeout = params.get('timeout', 0.0)
+        save_to_var = params.get('save_to_var', None)
 
-        with self._lock:
-            if bucket_id not in self._buckets:
-                self._buckets[bucket_id] = TokenBucket(
-                    capacity=capacity,
-                    refill_rate=refill_rate,
-                    tokens=float(capacity),
-                    last_refill=time.time(),
-                    lock=threading.Lock(),
-                )
-            bucket = self._buckets[bucket_id]
+        self._ensure_limiter(limiter_name, algorithm, capacity, refill_rate, refill_period)
 
-        if wait:
-            # Block until tokens available
-            wait_time = bucket.wait_time(tokens_requested)
-            if wait_time > max_wait:
+        if operation == 'check':
+            return self._check_limit(limiter_name, tokens, timeout, save_to_var)
+        elif operation == 'consume':
+            return self._consume(limiter_name, tokens, timeout, save_to_var)
+        elif operation == 'reset':
+            return self._reset_limiter(limiter_name, save_to_var)
+        elif operation == 'get_status':
+            return self._get_status(limiter_name, save_to_var)
+        else:
+            return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+    def _ensure_limiter(
+        self, name: str, algorithm: str, capacity: int,
+        refill_rate: float, refill_period: float
+    ) -> None:
+        """Ensure limiter exists."""
+        if name not in self._limiters:
+            with threading.Lock():
+                if name not in self._limiters:
+                    self._limiters[name] = {
+                        'algorithm': algorithm,
+                        'capacity': capacity,
+                        'refill_rate': refill_rate,
+                        'refill_period': refill_period,
+                        'state': self._create_state(algorithm, capacity),
+                        'created_at': time.time(),
+                    }
+                    self._locks[name] = threading.Lock()
+
+    def _create_state(self, algorithm: str, capacity: int) -> Dict:
+        """Create initial state for algorithm."""
+        if algorithm == 'token_bucket':
+            return {'tokens': float(capacity), 'last_refill': time.time()}
+        elif algorithm == 'sliding_window':
+            return {'requests': deque(), 'window_size': 60}
+        elif algorithm == 'leaky_bucket':
+            return {'level': 0.0, 'last_update': time.time(), 'leak_rate': 1.0}
+        elif algorithm == 'fixed_window':
+            return {'count': 0, 'window_start': time.time(), 'window_size': 60}
+        return {}
+
+    def _check_limit(
+        self, name: str, tokens: int, timeout: float, save_to_var: Optional[str]
+    ) -> ActionResult:
+        """Check if request would be allowed."""
+        limiter = self._limiters.get(name)
+        if not limiter:
+            return ActionResult(success=False, message=f"Limiter '{name}' not found")
+
+        deadline = time.time() + timeout if timeout > 0 else None
+
+        while True:
+            allowed, reason = self._is_allowed(limiter, tokens)
+            if allowed:
+                break
+            if timeout <= 0 or (deadline and time.time() >= deadline):
                 return ActionResult(
                     success=False,
-                    data={'wait_time': wait_time, 'allowed': False},
-                    message=f"Rate limit: would need to wait {wait_time:.1f}s (max {max_wait}s)"
+                    message=f"Rate limited: {reason}",
+                    data={'allowed': False, 'reason': reason}
                 )
-            if wait_time > 0:
-                time.sleep(wait_time)
+            time.sleep(0.05)
 
-        allowed = bucket.consume(tokens_requested)
-
-        result = {
-            'bucket_id': bucket_id,
-            'allowed': allowed,
-            'tokens_remaining': bucket.tokens,
-            'capacity': bucket.capacity,
-            'refill_rate': bucket.refill_rate,
-        }
-
-        if context and save_to_var:
-            context.variables[save_to_var] = result
-
-        return ActionResult(
-            success=allowed,
-            data=result,
-            message=f"Rate limit {'allowed' if allowed else 'denied'}: {bucket.tokens:.1f}/{bucket.capacity} tokens"
-        )
-
-
-class SlidingWindowRateAction(BaseAction):
-    """Sliding window rate limiter.
-    
-    Count actions in a sliding time window and
-    enforce maximum per window.
-    """
-    action_type = "sliding_window_rate"
-    display_name = "滑动窗口限流"
-    description = "滑动窗口速率限制器"
-
-    _windows: Dict[str, deque] = {}
-    _lock = threading.Lock()
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Apply sliding window rate limit.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - window_id: str
-                - window_size: float (seconds)
-                - max_calls: int (max calls per window)
-                - save_to_var: str
-        
-        Returns:
-            ActionResult with rate limit result.
-        """
-        window_id = params.get('window_id', 'default')
-        window_size = params.get('window_size', 60.0)
-        max_calls = params.get('max_calls', 60)
-        save_to_var = params.get('save_to_var', 'sliding_rate')
-
-        with self._lock:
-            if window_id not in self._windows:
-                self._windows[window_id] = deque()
-            window = self._windows[window_id]
-
-        now = time.time()
-        cutoff = now - window_size
-
-        # Remove expired entries
-        while window and window[0] < cutoff:
-            window.popleft()
-
-        current_count = len(window)
-        allowed = current_count < max_calls
-
-        if allowed:
-            window.append(now)
-
-        result = {
-            'window_id': window_id,
-            'allowed': allowed,
-            'current_count': current_count,
-            'max_calls': max_calls,
-            'window_size': window_size,
-            'remaining': max(0, max_calls - current_count - (1 if allowed else 0)),
-        }
-
-        if context and save_to_var:
-            context.variables[save_to_var] = result
-
-        return ActionResult(
-            success=allowed,
-            data=result,
-            message=f"Sliding rate: {current_count}/{max_calls} in last {window_size}s {'allowed' if allowed else 'denied'}"
-        )
-
-
-class ThrottleAction(BaseAction):
-    """Throttle repeated actions - only execute if enough
-    time has passed since last execution.
-    
-    Debounce-style throttling for repeated events.
-    """
-    action_type = "throttle"
-    display_name = "节流"
-    description = "节流：限制重复执行频率"
-
-    _last_exec: Dict[str, float] = {}
-    _lock = threading.Lock()
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Apply throttle.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - throttle_id: str
-                - min_interval: float (seconds between executions)
-                - save_to_var: str
-        
-        Returns:
-            ActionResult with throttle result.
-        """
-        throttle_id = params.get('throttle_id', 'default')
-        min_interval = params.get('min_interval', 1.0)
-        save_to_var = params.get('save_to_var', 'throttle')
-
-        with self._lock:
-            last = self._last_exec.get(throttle_id, 0)
-
-        now = time.time()
-        elapsed = now - last
-        can_execute = elapsed >= min_interval
-
-        if can_execute:
-            self._last_exec[throttle_id] = now
-
-        result = {
-            'throttle_id': throttle_id,
-            'can_execute': can_execute,
-            'elapsed_since_last': elapsed,
-            'min_interval': min_interval,
-            'next_allowed_in': max(0, min_interval - elapsed) if not can_execute else 0,
-        }
-
-        if context and save_to_var:
-            context.variables[save_to_var] = result
+        status = self._get_limiter_status(limiter)
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = status
 
         return ActionResult(
             success=True,
-            data=result,
-            message=f"Throttle {'EXECUTED' if can_execute else f'wait {min_interval - elapsed:.2f}s'}"
+            message="Rate limit check passed",
+            data={'allowed': True, **status}
         )
 
+    def _consume(
+        self, name: str, tokens: int, timeout: float, save_to_var: Optional[str]
+    ) -> ActionResult:
+        """Consume tokens from the limiter."""
+        limiter = self._limiters.get(name)
+        if not limiter:
+            return ActionResult(success=False, message=f"Limiter '{name}' not found")
 
-class BurstLimitAction(BaseAction):
-    """Burst rate limiter - allow sudden spikes up to
-    a maximum, then limit sustained rate.
-    
-    Implements a simple burst-aware limiter.
-    """
-    action_type = "burst_limit"
-    display_name = "突发限流"
-    description = "突发限流：允许短时突发但限制持续速率"
+        deadline = time.time() + timeout if timeout > 0 else None
 
-    _bursts: Dict[str, deque] = {}
-    _lock = threading.Lock()
+        while True:
+            allowed, reason = self._try_consume(limiter, tokens)
+            if allowed:
+                break
+            if timeout <= 0 or (deadline and time.time() >= deadline):
+                return ActionResult(
+                    success=False,
+                    message=f"Rate limited: {reason}",
+                    data={'allowed': False, 'reason': reason}
+                )
+            time.sleep(0.05)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Apply burst rate limit.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - burst_id: str
-                - burst_size: int (max burst size)
-                - sustain_rate: float (max per second sustained)
-                - time_window: float (sustain window in seconds)
-                - save_to_var: str
-        
-        Returns:
-            ActionResult with burst limit result.
-        """
-        burst_id = params.get('burst_id', 'default')
-        burst_size = params.get('burst_size', 10)
-        sustain_rate = params.get('sustain_rate', 1.0)
-        time_window = params.get('time_window', 60.0)
-        save_to_var = params.get('save_to_var', 'burst_limit')
-
-        with self._lock:
-            if burst_id not in self._bursts:
-                self._bursts[burst_id] = deque()
-            timestamps = self._bursts[burst_id]
-
-        now = time.time()
-        cutoff = now - time_window
-
-        # Clean old entries
-        while timestamps and timestamps[0] < cutoff:
-            timestamps.popleft()
-
-        current_count = len(timestamps)
-        allowed = current_count < burst_size
-
-        if allowed:
-            timestamps.append(now)
-
-        result = {
-            'burst_id': burst_id,
-            'allowed': allowed,
-            'current_burst': current_count,
-            'burst_size': burst_size,
-            'sustain_rate': sustain_rate,
-            'remaining_burst': max(0, burst_size - current_count - (1 if allowed else 0)),
-        }
-
-        if context and save_to_var:
-            context.variables[save_to_var] = result
+        status = self._get_limiter_status(limiter)
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = status
 
         return ActionResult(
-            success=allowed,
-            data=result,
-            message=f"Burst limit: {current_count}/{burst_size} burst {'allowed' if allowed else 'denied'}"
+            success=True,
+            message=f"Consumed {tokens} token(s)",
+            data={'allowed': True, **status}
         )
+
+    def _is_allowed(self, limiter: Dict, tokens: int) -> Tuple[bool, str]:
+        """Check if tokens would be allowed."""
+        algorithm = limiter['algorithm']
+        state = limiter['state']
+
+        if algorithm == 'token_bucket':
+            self._refill_token_bucket(limiter)
+            available = state['tokens']
+            return available >= tokens, f"Only {available:.1f} tokens available"
+
+        elif algorithm == 'sliding_window':
+            now = time.time()
+            window_size = state['window_size']
+            cutoff = now - window_size
+            while state['requests'] and state['requests'][0] <= cutoff:
+                state['requests'].popleft()
+            count = len(state['requests'])
+            capacity = limiter['capacity']
+            return count + tokens <= capacity, f"Window has {count}/{capacity} requests"
+
+        elif algorithm == 'leaky_bucket':
+            self._leak_leaky_bucket(limiter)
+            level = state['level']
+            capacity = limiter['capacity']
+            return level + tokens <= capacity, f"Leaky bucket level {level:.1f}/{capacity}"
+
+        elif algorithm == 'fixed_window':
+            now = time.time()
+            window_size = limiter['refill_period']
+            if now - state['window_start'] >= window_size:
+                state['count'] = 0
+                state['window_start'] = now
+            count = state['count']
+            capacity = limiter['capacity']
+            return count + tokens <= capacity, f"Window has {count}/{capacity} requests"
+
+        return True, "ok"
+
+    def _try_consume(self, limiter: Dict, tokens: int) -> Tuple[bool, str]:
+        """Try to consume tokens."""
+        allowed, reason = self._is_allowed(limiter, tokens)
+        if not allowed:
+            return False, reason
+
+        state = limiter['state']
+        algorithm = limiter['algorithm']
+
+        if algorithm == 'token_bucket':
+            state['tokens'] -= tokens
+        elif algorithm == 'sliding_window':
+            for _ in range(tokens):
+                state['requests'].append(time.time())
+        elif algorithm == 'leaky_bucket':
+            state['level'] += tokens
+        elif algorithm == 'fixed_window':
+            state['count'] += tokens
+
+        return True, "ok"
+
+    def _refill_token_bucket(self, limiter: Dict) -> None:
+        """Refill token bucket based on elapsed time."""
+        state = limiter['state']
+        now = time.time()
+        elapsed = now - state['last_refill']
+        refill_amount = elapsed * limiter['refill_rate']
+        state['tokens'] = min(limiter['capacity'], state['tokens'] + refill_amount)
+        state['last_refill'] = now
+
+    def _leak_leaky_bucket(self, limiter: Dict) -> None:
+        """Leak from leaky bucket based on elapsed time."""
+        state = limiter['state']
+        now = time.time()
+        elapsed = now - state['last_update']
+        leak_amount = elapsed * state['leak_rate']
+        state['level'] = max(0.0, state['level'] - leak_amount)
+        state['last_update'] = now
+
+    def _get_limiter_status(self, limiter: Dict) -> Dict[str, Any]:
+        """Get current limiter status."""
+        algorithm = limiter['algorithm']
+        state = limiter['state']
+
+        if algorithm == 'token_bucket':
+            self._refill_token_bucket(limiter)
+            return {
+                'tokens': round(state['tokens'], 2),
+                'capacity': limiter['capacity'],
+                'algorithm': algorithm
+            }
+        elif algorithm == 'sliding_window':
+            cutoff = time.time() - state['window_size']
+            while state['requests'] and state['requests'][0] <= cutoff:
+                state['requests'].popleft()
+            return {
+                'requests_in_window': len(state['requests']),
+                'capacity': limiter['capacity'],
+                'algorithm': algorithm
+            }
+        elif algorithm == 'leaky_bucket':
+            self._leak_leaky_bucket(limiter)
+            return {
+                'level': round(state['level'], 2),
+                'capacity': limiter['capacity'],
+                'algorithm': algorithm
+            }
+        elif algorithm == 'fixed_window':
+            return {
+                'count': state['count'],
+                'capacity': limiter['capacity'],
+                'window_start': state['window_start'],
+                'algorithm': algorithm
+            }
+        return {}
+
+    def _reset_limiter(self, name: str, save_to_var: Optional[str]) -> ActionResult:
+        """Reset a limiter to initial state."""
+        if name not in self._limiters:
+            return ActionResult(success=False, message=f"Limiter '{name}' not found")
+
+        limiter = self._limiters[name]
+        limiter['state'] = self._create_state(limiter['algorithm'], limiter['capacity'])
+
+        return ActionResult(success=True, message=f"Reset limiter '{name}'")
+
+    def _get_status(self, name: str, save_to_var: Optional[str]) -> ActionResult:
+        """Get full status of a limiter."""
+        limiter = self._limiters.get(name)
+        if not limiter:
+            return ActionResult(success=False, message=f"Limiter '{name}' not found")
+
+        status = self._get_limiter_status(limiter)
+        status['name'] = name
+        status['created_at'] = limiter['created_at']
+
+        if save_to_var and hasattr(context, 'vars'):
+            context.vars[save_to_var] = status
+
+        return ActionResult(success=True, message=f"Status for '{name}'", data=status)
+
+    def get_required_params(self) -> List[str]:
+        return ['operation', 'limiter_name']
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            'algorithm': 'token_bucket',
+            'capacity': 10,
+            'refill_rate': 1.0,
+            'refill_period': 1.0,
+            'tokens': 1,
+            'timeout': 0.0,
+            'save_to_var': None,
+        }
