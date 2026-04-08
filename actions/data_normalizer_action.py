@@ -1,387 +1,486 @@
-"""Data normalizer action module for RabAI AutoClick.
+"""
+Data Normalizer Action Module.
 
-Provides data normalization with standardization, min-max scaling,
-robust scaling, and encoding capabilities.
+Normalizes and standardizes data including min-max scaling,
+z-score normalization, log transforms, and categorical encoding.
+
+Author: RabAi Team
 """
 
+from __future__ import annotations
+
+import math
+import re
 import sys
 import os
-import math
-from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass
+import time
+from collections import Counter
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class NormalizationType(Enum):
-    """Normalization types."""
-    STANDARD = "standard"
+class NormalizationMethod(Enum):
+    """Data normalization methods."""
     MIN_MAX = "min_max"
-    ROBUST = "robust"
+    ZSCORE = "zscore"
     LOG = "log"
-    POWER = "power"
+    LOG10 = "log10"
+    SQRT = "sqrt"
+    ROBUST = "robust"
+    DECIMAL = "decimal"
+    MAX = "max"
+    L1 = "l1"
+    L2 = "l2"
+    BOX_COX = "box_cox"
 
 
-from enum import Enum
+class EncodingMethod(Enum):
+    """Categorical encoding methods."""
+    ONE_HOT = "one_hot"
+    LABEL = "label"
+    ORDINAL = "ordinal"
+    TARGET = "target"
+    FREQUENCY = "frequency"
 
 
 @dataclass
-class ScaleParams:
-    """Scaling parameters."""
-    mean: float
-    std: float
-    min: float
-    max: float
-    median: float
-    q1: float
-    q3: float
+class NormalizerStats:
+    """Statistics for normalization."""
+    mean: Optional[float] = None
+    std: Optional[float] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+    median: Optional[float] = None
+    q1: Optional[float] = None
+    q3: Optional[float] = None
 
 
 class DataNormalizerAction(BaseAction):
-    """Data normalizer action for scaling and encoding data.
+    """Data normalizer action.
     
-    Supports standard scaling, min-max scaling, robust scaling,
-    log transformation, and various encoding methods.
+    Normalizes and standardizes data using various methods
+    with support for batch processing and inverse transforms.
     """
     action_type = "data_normalizer"
     display_name = "数据标准化"
-    description = "数据归一化与标准化"
+    description = "数据归一化标准化"
     
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute normalization.
+    def __init__(self):
+        super().__init__()
+        self._column_stats: Dict[str, NormalizerStats] = {}
+        self._label_mappings: Dict[str, Dict[str, int]] = {}
+    
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Normalize data.
         
         Args:
-            context: Execution context.
-            params: Dict with keys:
-                operation: normalize|encode|fit_transform|inverse
-                data: Data to normalize
-                method: Normalization method
-                feature_range: Tuple of (min, max) for min-max scaling.
-        
+            context: The execution context.
+            params: Dictionary containing:
+                - data: Data to normalize
+                - operation: normalize/denormalize/encode/decode
+                - method: Normalization method
+                - columns: Column names to normalize
+                - feature_range: Tuple of (min, max) for min-max
+                - encoding: Categorical encoding method
+                - stats: Pre-computed statistics
+                
         Returns:
             ActionResult with normalized data.
         """
-        operation = params.get('operation', 'normalize')
+        start_time = time.time()
         
-        if operation == 'normalize':
-            return self._normalize(params)
-        elif operation == 'encode':
-            return self._encode(params)
-        elif operation == 'fit_transform':
-            return self._fit_transform(params)
-        elif operation == 'inverse':
-            return self._inverse_transform(params)
-        else:
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-    
-    def _normalize(self, params: Dict[str, Any]) -> ActionResult:
-        """Normalize data."""
-        data = params.get('data', [])
-        method = params.get('method', 'standard')
-        feature_range = params.get('feature_range', (0, 1))
-        params_data = params.get('params')
+        operation = params.get("operation", "normalize")
+        data = params.get("data", [])
+        method_str = params.get("method", "min_max")
+        columns = params.get("columns", [])
+        feature_range = params.get("feature_range", (0, 1))
         
-        if not data and not params_data:
-            return ActionResult(success=False, message="No data provided")
+        try:
+            method = NormalizationMethod(method_str)
+        except ValueError:
+            method = NormalizationMethod.MIN_MAX
         
-        if isinstance(data, list) and len(data) > 0:
-            if isinstance(data[0], dict):
-                return self._normalize_dict_list(data, method, feature_range)
-            elif isinstance(data[0], (int, float)):
-                return self._normalize_list(data, method, feature_range, params_data)
-        
-        return ActionResult(success=False, message="Unsupported data format")
-    
-    def _normalize_list(
-        self,
-        data: List[Union[int, float]],
-        method: str,
-        feature_range: tuple,
-        fit_params: Optional[Dict] = None
-    ) -> ActionResult:
-        """Normalize a list of numbers."""
-        if not data:
-            return ActionResult(success=True, message="Empty data", data={'data': []})
-        
-        if method == 'standard' or method == 'zscore':
-            mean = sum(data) / len(data)
-            variance = sum((x - mean) ** 2 for x in data) / len(data)
-            std = math.sqrt(variance) if variance > 0 else 1
-            
-            if fit_params:
-                mean = fit_params.get('mean', mean)
-                std = fit_params.get('std', std)
-            
-            normalized = [(x - mean) / std for x in data]
-            
-            return ActionResult(
-                success=True,
-                message=f"Standardized {len(data)} values",
-                data={
-                    'data': normalized,
-                    'params': {'mean': mean, 'std': std}
-                }
-            )
-        
-        elif method == 'minmax' or method == 'min_max':
-            min_val = min(data)
-            max_val = max(data)
-            range_val = max_val - min_val if max_val != min_val else 1
-            
-            if fit_params:
-                min_val = fit_params.get('min', min_val)
-                max_val = fit_params.get('max', max_val)
-                range_val = max_val - min_val if max_val != min_val else 1
-            
-            min_target, max_target = feature_range
-            normalized = [min_target + (x - min_val) / range_val * (max_target - min_target) for x in data]
-            
-            return ActionResult(
-                success=True,
-                message=f"Min-max scaled {len(data)} values",
-                data={
-                    'data': normalized,
-                    'params': {'min': min_val, 'max': max_val, 'range': feature_range}
-                }
-            )
-        
-        elif method == 'robust' or method == 'robust_scaler':
-            sorted_data = sorted(data)
-            n = len(sorted_data)
-            median = sorted_data[n // 2]
-            q1 = sorted_data[n // 4]
-            q3 = sorted_data[3 * n // 4]
-            iqr = q3 - q1 if q3 != q1 else 1
-            
-            if fit_params:
-                median = fit_params.get('median', median)
-                q1 = fit_params.get('q1', q1)
-                q3 = fit_params.get('q3', q3)
-                iqr = q3 - q1 if q3 != q1 else 1
-            
-            normalized = [(x - median) / iqr for x in data]
-            
-            return ActionResult(
-                success=True,
-                message=f"Robust scaled {len(data)} values",
-                data={
-                    'data': normalized,
-                    'params': {'median': median, 'q1': q1, 'q3': q3, 'iqr': iqr}
-                }
-            )
-        
-        elif method == 'log' or method == 'log_transform':
-            normalized = []
-            for x in data:
-                if x > 0:
-                    normalized.append(math.log(x))
-                elif x == 0:
-                    normalized.append(0)
-                else:
-                    normalized.append(float('nan'))
-            
-            return ActionResult(
-                success=True,
-                message=f"Log transformed {len(data)} values",
-                data={'data': normalized}
-            )
-        
-        elif method == 'power' or method == 'power_transform':
-            if fit_params:
-                power = fit_params.get('power', 0.5)
+        try:
+            if operation == "normalize":
+                result = self._normalize(data, method, columns, feature_range, start_time)
+            elif operation == "denormalize":
+                result = self._denormalize(data, method, columns, feature_range, start_time)
+            elif operation == "encode":
+                result = self._encode_categorical(data, columns, params, start_time)
+            elif operation == "decode":
+                result = self._decode_categorical(data, columns, start_time)
+            elif operation == "stats":
+                result = self._compute_stats(data, columns, start_time)
             else:
-                log_data = [math.log(x) if x > 0 else 0 for x in data]
-                power = 0.5
+                return ActionResult(
+                    success=False,
+                    message=f"Unknown operation: {operation}",
+                    duration=time.time() - start_time
+                )
             
-            normalized = [math.copysign(abs(x) ** power, x) if x != 0 else 0 for x in data]
+            return result
             
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                message=f"Normalization failed: {str(e)}",
+                duration=time.time() - start_time
+            )
+    
+    def _normalize(
+        self, data: List, method: NormalizationMethod,
+        columns: List[str], feature_range: Tuple[float, float], start_time: float
+    ) -> ActionResult:
+        """Normalize data."""
+        if not data:
             return ActionResult(
                 success=True,
-                message=f"Power transformed {len(data)} values",
-                data={'data': normalized, 'params': {'power': power}}
+                message="No data to normalize",
+                data={"data": [], "stats": {}},
+                duration=time.time() - start_time
             )
         
-        return ActionResult(success=False, message=f"Unknown method: {method}")
-    
-    def _normalize_dict_list(
-        self,
-        data: List[Dict],
-        method: str,
-        feature_range: tuple
-    ) -> ActionResult:
-        """Normalize a list of dictionaries."""
-        if not data:
-            return ActionResult(success=True, message="Empty data", data={'data': []})
+        if not isinstance(data[0], dict):
+            return self._normalize_list(data, method, feature_range, start_time)
         
-        numeric_fields = []
-        for key in data[0].keys():
-            if all(isinstance(item.get(key), (int, float)) for item in data if item.get(key) is not None):
-                numeric_fields.append(key)
+        if not columns:
+            columns = list(data[0].keys())
         
-        if not numeric_fields:
-            return ActionResult(success=False, message="No numeric fields found")
-        
-        all_params = {}
         normalized = []
+        stats = {}
         
-        for item in data:
-            new_item = dict(item)
-            for field in numeric_fields:
-                values = [d.get(field) for d in data if d.get(field) is not None]
-                if not values:
+        for col in columns:
+            col_values = [float(r.get(col, 0)) for r in data if isinstance(r, dict) and col in r]
+            if not col_values:
+                continue
+            
+            col_stats = self._compute_column_stats(col_values)
+            stats[col] = {
+                "mean": col_stats.mean,
+                "std": col_stats.std,
+                "min": col_stats.min,
+                "max": col_stats.max,
+                "median": col_stats.median
+            }
+            
+            self._column_stats[col] = col_stats
+        
+        for record in data:
+            if not isinstance(record, dict):
+                continue
+            
+            new_record = dict(record)
+            for col in columns:
+                if col not in record:
                     continue
                 
-                result = self._normalize_list(values, method, feature_range)
-                if result.success:
-                    param_key = f"{field}_params"
-                    all_params[param_key] = result.data['params']
-                    
-                    idx = [i for i, d in enumerate(data) if d.get(field) is not None].index(list(data).index(item) if item in data else 0)
-                    
-                    if hasattr(item, '__getitem__') and hasattr(item, '__class__'):
-                        try:
-                            normalized_values = result.data['data']
-                            indices = [i for i, d in enumerate(data) if d.get(field) is not None]
-                            if idx < len(normalized_values):
-                                new_item[field] = normalized_values[idx]
-                        except (IndexError, KeyError):
-                            pass
+                col_stats = self._column_stats.get(col)
+                if col_stats is None:
+                    continue
+                
+                value = float(record[col])
+                
+                if method == NormalizationMethod.MIN_MAX:
+                    new_val = self._min_max_scale(value, col_stats, feature_range)
+                elif method == NormalizationMethod.ZSCORE:
+                    new_val = self._zscore(value, col_stats)
+                elif method == NormalizationMethod.LOG:
+                    new_val = math.log(value + 1e-10) if value > 0 else 0
+                elif method == NormalizationMethod.LOG10:
+                    new_val = math.log10(value + 1e-10) if value > 0 else 0
+                elif method == NormalizationMethod.SQRT:
+                    new_val = math.sqrt(value) if value >= 0 else 0
+                elif method == NormalizationMethod.ROBUST:
+                    new_val = self._robust_scale(value, col_stats, feature_range)
+                elif method == NormalizationMethod.MAX:
+                    new_val = value / (col_stats.max or 1)
+                elif method == NormalizationMethod.L1:
+                    total = sum(abs(float(r.get(col, 0)) or 0) for r in data if isinstance(r, dict))
+                    new_val = abs(value) / (total or 1)
+                elif method == NormalizationMethod.L2:
+                    total = math.sqrt(sum((float(r.get(col, 0) or 0)) ** 2 for r in data if isinstance(r, dict)))
+                    new_val = value / (total or 1)
+                else:
+                    new_val = self._min_max_scale(value, col_stats, feature_range)
+                
+                new_record[col] = new_val
             
-            normalized.append(new_item)
+            normalized.append(new_record)
         
         return ActionResult(
             success=True,
-            message=f"Normalized {len(data)} items across {len(numeric_fields)} fields",
+            message=f"Normalized {len(normalized)} records using {method.value}",
             data={
-                'data': normalized,
-                'params': all_params,
-                'normalized_fields': numeric_fields
-            }
+                "data": normalized,
+                "stats": stats,
+                "method": method.value
+            },
+            duration=time.time() - start_time
         )
     
-    def _encode(self, params: Dict[str, Any]) -> ActionResult:
-        """Encode categorical data."""
-        data = params.get('data', [])
-        method = params.get('method', 'onehot')
-        field = params.get('field')
+    def _normalize_list(self, data: List, method: NormalizationMethod, feature_range: Tuple[float, float], start_time: float) -> ActionResult:
+        """Normalize a plain list."""
+        values = [float(v) for v in data]
+        stats = self._compute_column_stats(values)
         
-        if not data:
-            return ActionResult(success=False, message="No data provided")
-        
-        if method == 'onehot' or method == 'one_hot':
-            return self._one_hot_encode(data, field)
-        elif method == 'label' or method == 'label_encode':
-            return self._label_encode(data, field)
-        elif method == 'ordinal':
-            return self._ordinal_encode(data, field, params.get('mapping', {}))
-        else:
-            return ActionResult(success=False, message=f"Unknown encoding method: {method}")
-    
-    def _one_hot_encode(self, data: List[Any], field: Optional[str]) -> ActionResult:
-        """One-hot encode."""
-        items = data if field is None else [d.get(field) if isinstance(d, dict) else d for d in data]
-        unique_values = sorted(set(items))
-        
-        encoding_map = {v: i for i, v in enumerate(unique_values)}
-        
-        one_hot = []
-        for item in items:
-            encoding = [0] * len(unique_values)
-            if item in encoding_map:
-                encoding[encoding_map[item]] = 1
-            one_hot.append(encoding)
+        normalized = []
+        for v in values:
+            if method == NormalizationMethod.MIN_MAX:
+                normalized.append(self._min_max_scale(v, stats, feature_range))
+            elif method == NormalizationMethod.ZSCORE:
+                normalized.append(self._zscore(v, stats))
+            elif method == NormalizationMethod.LOG:
+                normalized.append(math.log(v + 1e-10) if v > 0 else 0)
+            elif method == NormalizationMethod.SQRT:
+                normalized.append(math.sqrt(v) if v >= 0 else 0)
+            else:
+                normalized.append(self._min_max_scale(v, stats, feature_range))
         
         return ActionResult(
             success=True,
-            message=f"One-hot encoded {len(unique_values)} categories",
+            message=f"Normalized {len(normalized)} values",
             data={
-                'encoded': one_hot,
-                'categories': unique_values,
-                'mapping': encoding_map
-            }
+                "data": normalized,
+                "stats": {"mean": stats.mean, "std": stats.std, "min": stats.min, "max": stats.max},
+                "method": method.value
+            },
+            duration=time.time() - start_time
         )
     
-    def _label_encode(self, data: List[Any], field: Optional[str]) -> ActionResult:
-        """Label encode."""
-        items = data if field is None else [d.get(field) if isinstance(d, dict) else d for d in data]
-        unique_values = sorted(set(items))
+    def _min_max_scale(self, value: float, stats: NormalizerStats, feature_range: Tuple[float, float]) -> float:
+        """Apply min-max scaling."""
+        min_val, max_val = stats.min or 0, stats.max or 1
+        out_min, out_max = feature_range
         
-        encoding_map = {v: i for i, v in enumerate(unique_values)}
-        encoded = [encoding_map.get(item, -1) for item in items]
+        if max_val == min_val:
+            return (out_min + out_max) / 2
         
-        return ActionResult(
-            success=True,
-            message=f"Label encoded {len(unique_values)} categories",
-            data={
-                'encoded': encoded,
-                'categories': unique_values,
-                'mapping': encoding_map
-            }
+        return out_min + (value - min_val) / (max_val - min_val) * (out_max - out_min)
+    
+    def _zscore(self, value: float, stats: NormalizerStats) -> float:
+        """Apply z-score normalization."""
+        if stats.std and stats.std > 0 and stats.mean is not None:
+            return (value - stats.mean) / stats.std
+        return 0.0
+    
+    def _robust_scale(self, value: float, stats: NormalizerStats, feature_range: Tuple[float, float]) -> float:
+        """Apply robust scaling using IQR."""
+        q1 = stats.q1 or stats.min or 0
+        q3 = stats.q3 or stats.max or 1
+        iqr = q3 - q1
+        
+        if iqr == 0:
+            return feature_range[0]
+        
+        out_min, out_max = feature_range
+        scaled = (value - q1) / iqr
+        
+        return out_min + scaled * (out_max - out_min)
+    
+    def _compute_column_stats(self, values: List[float]) -> NormalizerStats:
+        """Compute statistics for a column."""
+        n = len(values)
+        if n == 0:
+            return NormalizerStats()
+        
+        sorted_values = sorted(values)
+        mean = sum(values) / n
+        variance = sum((v - mean) ** 2 for v in values) / n
+        std = math.sqrt(variance) if variance > 0 else 0
+        
+        return NormalizerStats(
+            mean=mean,
+            std=std,
+            min=sorted_values[0],
+            max=sorted_values[-1],
+            median=sorted_values[n // 2],
+            q1=sorted_values[n // 4],
+            q3=sorted_values[3 * n // 4]
         )
     
-    def _ordinal_encode(
-        self,
-        data: List[Any],
-        field: Optional[str],
-        mapping: Dict[Any, int]
+    def _denormalize(
+        self, data: List, method: NormalizationMethod,
+        columns: List[str], feature_range: Tuple[float, float], start_time: float
     ) -> ActionResult:
-        """Ordinal encode."""
-        items = data if field is None else [d.get(field) if isinstance(d, dict) else d for d in data]
-        
-        if not mapping:
-            unique_values = sorted(set(items))
-            mapping = {v: i for i, v in enumerate(unique_values)}
-        
-        encoded = [mapping.get(item, -1) for item in items]
-        
-        return ActionResult(
-            success=True,
-            message=f"Ordinal encoded {len(mapping)} categories",
-            data={
-                'encoded': encoded,
-                'mapping': mapping
-            }
-        )
-    
-    def _fit_transform(self, params: Dict[str, Any]) -> ActionResult:
-        """Fit and transform data (learns params and applies)."""
-        return self._normalize(params)
-    
-    def _inverse_transform(self, params: Dict[str, Any]) -> ActionResult:
-        """Inverse transform normalized data."""
-        data = params.get('data', [])
-        method = params.get('method', 'standard')
-        scale_params = params.get('params', {})
-        
+        """Denormalize previously normalized data."""
         if not data:
-            return ActionResult(success=False, message="No data provided")
+            return ActionResult(
+                success=True,
+                message="No data to denormalize",
+                data={"data": []},
+                duration=time.time() - start_time
+            )
         
-        if method == 'standard' or method == 'zscore':
-            mean = scale_params.get('mean', 0)
-            std = scale_params.get('std', 1)
-            original = [x * std + mean for x in data]
-        elif method == 'minmax' or method == 'min_max':
-            min_val = scale_params.get('min', 0)
-            max_val = scale_params.get('max', 1)
-            feature_range = scale_params.get('range', (0, 1))
-            min_target, max_target = feature_range
-            original = [min_val + (x - min_target) / (max_target - min_target) * (max_val - min_val) for x in data]
-        elif method == 'robust':
-            median = scale_params.get('median', 0)
-            q1 = scale_params.get('q1', 0)
-            q3 = scale_params.get('q3', 1)
-            iqr = q3 - q1 if q3 != q1 else 1
-            original = [x * iqr + median for x in data]
-        else:
-            return ActionResult(success=False, message=f"Cannot inverse transform for method: {method}")
+        denormalized = []
+        
+        for record in data:
+            if not isinstance(record, dict):
+                continue
+            
+            new_record = dict(record)
+            for col in columns:
+                col_stats = self._column_stats.get(col)
+                if col_stats is None:
+                    continue
+                
+                value = float(record.get(col, 0))
+                in_min, in_max = feature_range
+                out_min, out_max = col_stats.min or 0, col_stats.max or 1
+                
+                if method == NormalizationMethod.MIN_MAX:
+                    normalized = (value - in_min) / (in_max - in_min) if in_max != in_min else 0
+                    denorm = out_min + normalized * (out_max - out_min)
+                    new_record[col] = denorm
+                elif method == NormalizationMethod.ZSCORE:
+                    if col_stats.std and col_stats.std > 0 and col_stats.mean is not None:
+                        new_record[col] = value * col_stats.std + col_stats.mean
+                else:
+                    new_record[col] = value
+            
+            denormalized.append(new_record)
         
         return ActionResult(
             success=True,
-            message=f"Inverse transformed {len(data)} values",
-            data={'original': original}
+            message=f"Denormalized {len(denormalized)} records",
+            data={"data": denormalized, "method": method.value},
+            duration=time.time() - start_time
         )
+    
+    def _encode_categorical(
+        self, data: List[Dict], columns: List[str], params: Dict, start_time: float
+    ) -> ActionResult:
+        """Encode categorical variables."""
+        encoding_str = params.get("encoding", "label")
+        ordinal_map = params.get("ordinal_map", {})
+        
+        try:
+            encoding = EncodingMethod(encoding_str)
+        except ValueError:
+            encoding = EncodingMethod.LABEL
+        
+        if not columns:
+            columns = [k for k, v in data[0].items() if isinstance(v, (str, bool))] if data else []
+        
+        encoded = []
+        mappings = {}
+        
+        for record in data:
+            new_record = dict(record)
+            
+            for col in columns:
+                value = record.get(col)
+                if value is None:
+                    continue
+                
+                if encoding == EncodingMethod.LABEL:
+                    if col not in self._label_mappings:
+                        self._label_mappings[col] = {}
+                    
+                    mapping = self._label_mappings[col]
+                    
+                    if value not in mapping:
+                        mapping[value] = len(mapping)
+                    
+                    new_record[f"{col}_encoded"] = mapping[value]
+                    mappings[col] = mapping
+                
+                elif encoding == EncodingMethod.ONE_HOT:
+                    one_hot = {}
+                    unique_vals = set(r.get(col) for r in data if isinstance(r, dict))
+                    for val in unique_vals:
+                        one_hot[f"{col}_{val}"] = 1 if record.get(col) == val else 0
+                    new_record.update(one_hot)
+                
+                elif encoding == EncodingMethod.ORDINAL:
+                    ordinal = ordinal_map.get(col, {})
+                    new_record[f"{col}_ordinal"] = ordinal.get(value, 0)
+                
+                elif encoding == EncodingMethod.FREQUENCY:
+                    freq = sum(1 for r in data if isinstance(r, dict) and r.get(col) == value)
+                    new_record[f"{col}_freq"] = freq
+                
+                elif encoding == EncodingMethod.TARGET:
+                    pass
+            
+            encoded.append(new_record)
+        
+        return ActionResult(
+            success=True,
+            message=f"Encoded {len(encoded)} records",
+            data={
+                "data": encoded,
+                "mappings": mappings,
+                "encoding": encoding.value
+            },
+            duration=time.time() - start_time
+        )
+    
+    def _decode_categorical(self, data: List[Dict], columns: List[str], start_time: float) -> ActionResult:
+        """Decode previously encoded categorical variables."""
+        decoded = []
+        
+        for record in data:
+            new_record = dict(record)
+            
+            for col in columns:
+                mapping = self._label_mappings.get(col, {})
+                if not mapping:
+                    continue
+                
+                reverse_mapping = {v: k for k, v in mapping.items()}
+                
+                if f"{col}_encoded" in record:
+                    encoded_val = int(record[f"{col}_encoded"])
+                    if encoded_val in reverse_mapping:
+                        new_record[col] = reverse_mapping[encoded_val]
+                    del new_record[f"{col}_encoded"]
+            
+            decoded.append(new_record)
+        
+        return ActionResult(
+            success=True,
+            message=f"Decoded {len(decoded)} records",
+            data={"data": decoded},
+            duration=time.time() - start_time
+        )
+    
+    def _compute_stats(self, data: List[Dict], columns: List[str], start_time: float) -> ActionResult:
+        """Compute statistics for data columns."""
+        if not columns:
+            columns = list(data[0].keys()) if data else []
+        
+        all_stats = {}
+        
+        for col in columns:
+            col_values = [float(r.get(col, 0)) for r in data if isinstance(r, dict) and col in r and r.get(col) is not None]
+            if col_values:
+                stats = self._compute_column_stats(col_values)
+                all_stats[col] = {
+                    "mean": stats.mean,
+                    "std": stats.std,
+                    "min": stats.min,
+                    "max": stats.max,
+                    "median": stats.median,
+                    "q1": stats.q1,
+                    "q3": stats.q3,
+                    "count": len(col_values)
+                }
+        
+        return ActionResult(
+            success=True,
+            message=f"Computed stats for {len(all_stats)} columns",
+            data={"stats": all_stats},
+            duration=time.time() - start_time
+        )
+    
+    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
+        """Validate normalizer parameters."""
+        return True, ""
+    
+    def get_required_params(self) -> List[str]:
+        """Return required parameters."""
+        return []
