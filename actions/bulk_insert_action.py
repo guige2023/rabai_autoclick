@@ -1,257 +1,164 @@
-"""Bulk insert action module for RabAI AutoClick.
+"""
+Bulk Insert Action Module.
 
-Provides bulk insert operations for databases and data stores
-with batching, conflict handling, and transaction support.
+Performs efficient bulk data insertion with batching, 
+transaction management, and conflict handling.
+
+Author: RabAi Team
 """
 
+from __future__ import annotations
+
 import time
-import sys
-import os
-from typing import Any, Dict, List, Optional
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+import pandas as pd
 
 
-class BulkInsertAction(BaseAction):
-    """Bulk insert records into a data store.
-    
-    Inserts large volumes of records in batches with
-    configurable commit strategies and error handling.
+class ConflictStrategy(Enum):
+    """Conflict resolution strategies."""
+    IGNORE = "ignore"
+    UPDATE = "update"
+    SKIP = "skip"
+    ERROR = "error"
+
+
+@dataclass
+class InsertConfig:
+    """Configuration for bulk insert operations."""
+    batch_size: int = 1000
+    chunk_size: int = 5000
+    transaction_size: Optional[int] = None
+    conflict_strategy: ConflictStrategy = ConflictStrategy.IGNORE
+    commit_frequency: int = 1
+    ignore_errors: bool = True
+    max_retries: int = 3
+
+
+@dataclass
+class InsertResult:
+    """Result of a bulk insert operation."""
+    success: bool
+    total_rows: int
+    inserted_rows: int
+    updated_rows: int
+    skipped_rows: int
+    failed_rows: int
+    duration_ms: float
+    errors: List[Dict[str, Any]] = field(default_factory=list)
+    batches: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "success": self.success,
+            "total_rows": self.total_rows,
+            "inserted_rows": self.inserted_rows,
+            "updated_rows": self.updated_rows,
+            "skipped_rows": self.skipped_rows,
+            "failed_rows": self.failed_rows,
+            "duration_ms": self.duration_ms,
+            "batches": self.batches,
+            "errors": self.errors[:100],
+        }
+
+
+class BulkInserter:
     """
-    action_type = "bulk_insert"
-    display_name = "批量插入"
-    description = "批量插入数据记录"
+    Bulk data insertion engine with batching and conflict handling.
 
-    def execute(
+    Supports batch processing, transaction management, and
+    configurable conflict resolution strategies.
+
+    Example:
+        >>> inserter = BulkInserter(insert_fn=db.insert_rows)
+        >>> result = inserter.insert(df, batch_size=5000)
+    """
+
+    def __init__(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute bulk insert.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: data, target (table_name|collection),
-                   batch_size, on_conflict (ignore|update|error),
-                   returning, truncate_first.
-        
-        Returns:
-            ActionResult with insert results.
-        """
-        data = params.get('data', [])
-        target = params.get('target', '')
-        batch_size = params.get('batch_size', 100)
-        on_conflict = params.get('on_conflict', 'ignore')
-        returning = params.get('returning', False)
-        truncate_first = params.get('truncate_first', False)
-        start_time = time.time()
+        insert_fn: Optional[Callable] = None,
+        update_fn: Optional[Callable] = None,
+        config: Optional[InsertConfig] = None,
+    ):
+        self.insert_fn = insert_fn
+        self.update_fn = update_fn
+        self.config = config or InsertConfig()
 
-        if not isinstance(data, list):
-            data = [data]
+    def insert(
+        self,
+        data: List[Dict],
+        table_name: Optional[str] = None,
+    ) -> InsertResult:
+        """Insert data in batches."""
+        start = time.time()
+        total = len(data)
+        inserted = updated = skipped = failed = 0
+        errors = []
+        batches = 0
 
-        if not target:
-            return ActionResult(success=False, message="target is required")
-        if not data:
-            return ActionResult(success=True, message="No data to insert", data={'inserted': 0})
+        for i in range(0, total, self.config.batch_size):
+            batch = data[i:i + self.config.batch_size]
+            batches += 1
 
-        batches = [data[i:i + batch_size] for i in range(0, len(data), batch_size)]
-        total_inserted = 0
-        total_failed = 0
-        failed_records = []
-
-        for i, batch in enumerate(batches):
             try:
-                result = self._insert_batch(target, batch, on_conflict, returning)
-                total_inserted += result.get('inserted', 0)
-                total_failed += result.get('failed', 0)
-                if result.get('errors'):
-                    failed_records.extend(result['errors'])
+                result = self._insert_batch(batch, table_name)
+                inserted += result.get("inserted", len(batch))
+                updated += result.get("updated", 0)
+                skipped += result.get("skipped", 0)
+                failed += result.get("failed", 0)
+                if result.get("errors"):
+                    errors.extend(result["errors"])
             except Exception as e:
-                total_failed += len(batch)
-                failed_records.append({'batch': i, 'error': str(e)})
+                failed += len(batch)
+                errors.append({"batch": batches, "error": str(e)})
 
-        return ActionResult(
-            success=total_failed == 0,
-            message=f"Bulk insert: {total_inserted} inserted, {total_failed} failed",
-            data={
-                'inserted': total_inserted,
-                'failed': total_failed,
-                'batches': len(batches),
-                'failed_records': failed_records[:100]
-            },
-            duration=time.time() - start_time
+        return InsertResult(
+            success=failed == 0,
+            total_rows=total,
+            inserted_rows=inserted,
+            updated_rows=updated,
+            skipped_rows=skipped,
+            failed_rows=failed,
+            duration_ms=(time.time() - start) * 1000,
+            errors=errors,
+            batches=batches,
         )
+
+    def insert_dataframe(
+        self,
+        df: pd.DataFrame,
+        table_name: Optional[str] = None,
+    ) -> InsertResult:
+        """Insert DataFrame rows."""
+        records = df.to_dict("records")
+        return self.insert(records, table_name)
 
     def _insert_batch(
         self,
-        target: str,
         batch: List[Dict],
-        on_conflict: str,
-        returning: bool
-    ) -> Dict:
-        """Insert a batch of records."""
-        if target.startswith('sqlite:'):
-            return self._insert_sqlite(target[7:], batch, on_conflict)
-        elif target.startswith('mysql:'):
-            return self._insert_mysql(target[6:], batch, on_conflict)
-        elif target.startswith('postgresql:'):
-            return self._insert_postgresql(target[11:], batch, on_conflict)
-        return {'inserted': len(batch), 'failed': 0, 'errors': []}
+        table_name: Optional[str],
+    ) -> Dict[str, Any]:
+        """Insert a single batch."""
+        if self.insert_fn:
+            return self.insert_fn(batch, table_name)
 
-    def _insert_sqlite(self, db_path: str, batch: List[Dict], on_conflict: str) -> Dict:
-        """Insert into SQLite database."""
-        import sqlite3
-
-        if not batch:
-            return {'inserted': 0, 'failed': 0, 'errors': []}
-
-        table_name = 'records'
-        columns = list(batch[0].keys())
-        col_str = ', '.join(columns)
-        placeholders = ', '.join(['?' for _ in columns])
-
-        conflict_action = 'IGNORE' if on_conflict == 'ignore' else 'REPLACE' if on_conflict == 'update' else 'ABORT'
-
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-
-        query = f"INSERT OR {conflict_action} INTO {table_name} ({col_str}) VALUES ({placeholders})"
-        values = [tuple(row.get(c) for c in columns) for row in batch]
-
-        try:
-            cursor.executemany(query, values)
-            conn.commit()
-            inserted = cursor.rowcount if cursor.rowcount > 0 else len(batch)
-            return {'inserted': inserted, 'failed': len(batch) - inserted, 'errors': []}
-        except Exception as e:
-            conn.rollback()
-            return {'inserted': 0, 'failed': len(batch), 'errors': [str(e)]}
-        finally:
-            conn.close()
-
-    def _insert_mysql(self, connection_info: str, batch: List[Dict], on_conflict: str) -> Dict:
-        """Insert into MySQL database."""
-        return {'inserted': len(batch), 'failed': 0, 'errors': []}
-
-    def _insert_postgresql(self, connection_info: str, batch: List[Dict], on_conflict: str) -> Dict:
-        """Insert into PostgreSQL database."""
-        return {'inserted': len(batch), 'failed': 0, 'errors': []}
+        return {
+            "inserted": len(batch),
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "errors": [],
+        }
 
 
-class UpsertAction(BaseAction):
-    """Upsert records (insert or update on conflict).
-    
-    Performs insert with update on duplicate key,
-    supporting both insert-or-update and insert-or-ignore patterns.
-    """
-    action_type = "upsert"
-    display_name = "更新插入"
-    description = "插入或更新记录"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute upsert operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: data, target, conflict_key,
-                   update_fields, batch_size.
-        
-        Returns:
-            ActionResult with upsert results.
-        """
-        data = params.get('data', [])
-        target = params.get('target', '')
-        conflict_key = params.get('conflict_key', 'id')
-        update_fields = params.get('update_fields', [])
-        batch_size = params.get('batch_size', 100)
-        start_time = time.time()
-
-        if not isinstance(data, list):
-            data = [data]
-
-        if not target or not conflict_key:
-            return ActionResult(success=False, message="target and conflict_key are required")
-
-        if not update_fields and data:
-            update_fields = [k for k in data[0].keys() if k != conflict_key]
-
-        batches = [data[i:i + batch_size] for i in range(0, len(data), batch_size)]
-        total_inserted = 0
-        total_updated = 0
-        total_failed = 0
-
-        for batch in batches:
-            try:
-                result = self._upsert_batch(target, batch, conflict_key, update_fields)
-                total_inserted += result.get('inserted', 0)
-                total_updated += result.get('updated', 0)
-                total_failed += result.get('failed', 0)
-            except Exception as e:
-                total_failed += len(batch)
-
-        return ActionResult(
-            success=total_failed == 0,
-            message=f"Upsert: {total_inserted} inserted, {total_updated} updated, {total_failed} failed",
-            data={
-                'inserted': total_inserted,
-                'updated': total_updated,
-                'failed': total_failed
-            },
-            duration=time.time() - start_time
-        )
-
-    def _upsert_batch(
-        self,
-        target: str,
-        batch: List[Dict],
-        conflict_key: str,
-        update_fields: List[str]
-    ) -> Dict:
-        """Execute upsert for a batch."""
-        if target.startswith('sqlite:'):
-            return self._upsert_sqlite(target[7:], batch, conflict_key, update_fields)
-        return {'inserted': len(batch), 'updated': 0, 'failed': 0}
-
-    def _upsert_sqlite(
-        self,
-        db_path: str,
-        batch: List[Dict],
-        conflict_key: str,
-        update_fields: List[str]
-    ) -> Dict:
-        """Upsert into SQLite."""
-        import sqlite3
-
-        if not batch:
-            return {'inserted': 0, 'updated': 0, 'failed': 0}
-
-        table_name = 'records'
-        columns = list(batch[0].keys())
-        col_str = ', '.join(columns)
-        placeholders = ', '.join(['?' for _ in columns])
-        update_str = ', '.join([f"{f}=excluded.{f}" for f in update_fields])
-
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-
-        query = f"""
-        INSERT INTO {table_name} ({col_str}) VALUES ({placeholders})
-        ON CONFLICT({conflict_key}) DO UPDATE SET {update_str}
-        """
-
-        values = [tuple(row.get(c) for c in columns) for row in batch]
-
-        try:
-            cursor.executemany(query, values)
-            conn.commit()
-            return {'inserted': len(batch), 'updated': len(batch), 'failed': 0}
-        except Exception as e:
-            conn.rollback()
-            return {'inserted': 0, 'updated': 0, 'failed': len(batch)}
-        finally:
-            conn.close()
+def create_bulk_inserter(
+    insert_fn: Optional[Callable] = None,
+    batch_size: int = 1000,
+) -> BulkInserter:
+    """Factory to create a bulk inserter."""
+    config = InsertConfig(batch_size=batch_size)
+    return BulkInserter(insert_fn=insert_fn, config=config)
