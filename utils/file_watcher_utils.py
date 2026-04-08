@@ -1,216 +1,106 @@
-"""File watcher utilities for monitoring file system changes.
-
-Provides directory and file monitoring for triggering
-automation actions when files are created, modified,
-or deleted, supporting watch-for-change workflows.
-
-Example:
-    >>> from utils.file_watcher_utils import FileWatcher, watch
-    >>> watcher = FileWatcher('/tmp')
-    >>> watcher.on_change('*.py', lambda e: print(f'Changed: {e.path}'))
-    >>> watcher.start()
 """
+File Watcher Utilities
 
+Provides utilities for watching file changes
+in automation workflows.
+
+Author: Agent3
+"""
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Optional
-
-__all__ = [
-    "FileWatcher",
-    "FileEvent",
-    "FileEventType",
-    "watch",
-]
+from typing import Any, Callable
+from enum import Enum, auto
+import os
+import time
 
 
-class FileEventType:
-    """File event type constants."""
-
-    CREATED = "created"
-    MODIFIED = "modified"
-    DELETED = "deleted"
-    MOVED = "moved"
-    ANY = "any"
+class FileChangeType(Enum):
+    """Types of file changes."""
+    CREATED = auto()
+    MODIFIED = auto()
+    DELETED = auto()
+    RENAMED = auto()
 
 
 @dataclass
-class FileEvent:
-    """A file system event.
-
-    Attributes:
-        event_type: Type of event.
-        path: Path to the affected file.
-        timestamp: When the event occurred.
-        old_path: Previous path (for moved events).
-    """
-
-    event_type: str
-    path: Path
+class FileChange:
+    """Represents a file change event."""
+    change_type: FileChangeType
+    path: str
     timestamp: float
-    old_path: Optional[Path] = None
+    old_path: str | None = None
 
 
 class FileWatcher:
-    """Monitors a directory tree for file system changes.
-
-    Example:
-        >>> watcher = FileWatcher('/tmp/myapp')
-        >>> @watcher.on('*.py')
-        ... def on_python_change(event):
-        ...     print(f"Python file changed: {event.path}")
-        >>> watcher.start()
+    """
+    Watches files for changes.
+    
+    Monitors file system for modifications
+    and notifies registered handlers.
     """
 
-    def __init__(
-        self,
-        path: str | Path,
-        recursive: bool = True,
-        poll_interval: float = 1.0,
-    ):
-        self.watch_path = Path(path)
-        self.recursive = recursive
-        self.poll_interval = poll_interval
+    def __init__(self, poll_interval: float = 1.0) -> None:
+        self._watch_paths: dict[str, float] = {}
+        self._handlers: list[Callable[[FileChange], None]] = []
+        self._poll_interval = poll_interval
         self._running = False
-        self._handlers: dict[str, list[Callable]] = {}
-        self._file_mtimes: dict[Path, float] = {}
-        self._known_files: set[Path] = set()
-        self._lock = __import__("threading").Lock()
 
-    def on(self, pattern: str) -> Callable:
-        """Decorator to register a handler for a file pattern.
-
-        Args:
-            pattern: Glob pattern (e.g., '*.py', 'config/*.json').
-        """
-        def decorator(fn: Callable) -> Callable:
-            self._handlers.setdefault(pattern, []).append(fn)
-            return fn
-        return decorator
-
-    def start(self, blocking: bool = True) -> None:
-        """Start watching for file changes.
-
-        Args:
-            blocking: If True, runs in the current thread.
-        """
-        self._running = True
-        self._scan_initial()
-
-        if blocking:
-            self._watch_loop()
+    def watch(self, path: str) -> None:
+        """Start watching a file or directory."""
+        if os.path.exists(path):
+            self._watch_paths[path] = os.path.getmtime(path)
         else:
-            import threading
-            t = threading.Thread(target=self._watch_loop, daemon=True)
-            t.start()
+            self._watch_paths[path] = 0.0
 
-    def stop(self) -> None:
-        """Stop the file watcher."""
-        self._running = False
+    def unwatch(self, path: str) -> None:
+        """Stop watching a path."""
+        self._watch_paths.pop(path, None)
 
-    def _scan_initial(self) -> None:
-        """Perform initial scan to populate known files."""
-        if not self.watch_path.exists():
-            return
+    def add_handler(self, handler: Callable[[FileChange], None]) -> None:
+        """Add a change handler."""
+        self._handlers.append(handler)
 
-        for p in self._iter_files():
-            self._known_files.add(p)
-            try:
-                self._file_mtimes[p] = p.stat().st_mtime
-            except OSError:
-                pass
+    def check_changes(self) -> list[FileChange]:
+        """
+        Check for file changes since last check.
+        
+        Returns:
+            List of detected changes.
+        """
+        changes = []
+        current_time = time.time()
+        paths_to_remove = []
 
-    def _iter_files(self):
-        if self.recursive:
-            return self.watch_path.rglob("*")
-        return self.watch_path.glob("*")
-
-    def _watch_loop(self) -> None:
-        """Main watching loop."""
-        import os
-
-        while self._running:
-            current_files: set[Path] = set()
-
-            for p in self._iter_files():
-                if not p.is_file():
-                    continue
-                current_files.add(p)
-
-                try:
-                    mtime = p.stat().st_mtime
-                except OSError:
-                    continue
-
-                if p not in self._known_files:
-                    # New file
-                    self._dispatch(FileEvent(
-                        event_type=FileEventType.CREATED,
-                        path=p,
-                        timestamp=time.time(),
+        for path, last_mtime in self._watch_paths.items():
+            if not os.path.exists(path):
+                changes.append(FileChange(
+                    change_type=FileChangeType.DELETED,
+                    path=path,
+                    timestamp=current_time,
+                ))
+                paths_to_remove.append(path)
+            else:
+                current_mtime = os.path.getmtime(path)
+                if current_mtime > last_mtime:
+                    changes.append(FileChange(
+                        change_type=FileChangeType.MODIFIED,
+                        path=path,
+                        timestamp=current_time,
                     ))
-                    self._known_files.add(p)
-                elif p in self._file_mtimes and self._file_mtimes[p] != mtime:
-                    # Modified file
-                    self._dispatch(FileEvent(
-                        event_type=FileEventType.MODIFIED,
-                        path=p,
-                        timestamp=time.time(),
-                    ))
+                    self._watch_paths[path] = current_mtime
 
-                self._file_mtimes[p] = mtime
+        for path in paths_to_remove:
+            self._watch_paths.pop(path, None)
 
-            # Check for deleted files
-            for p in list(self._known_files):
-                if p not in current_files:
-                    self._dispatch(FileEvent(
-                        event_type=FileEventType.DELETED,
-                        path=p,
-                        timestamp=time.time(),
-                    ))
-                    self._known_files.discard(p)
-                    self._file_mtimes.pop(p, None)
+        return changes
 
-            time.sleep(self.poll_interval)
+    def notify_handlers(self, changes: list[FileChange]) -> None:
+        """Notify all handlers of changes."""
+        for change in changes:
+            for handler in self._handlers:
+                handler(change)
 
-    def _dispatch(self, event: FileEvent) -> None:
-        """Dispatch an event to matching handlers."""
-        with self._lock:
-            for pattern, handlers in self._handlers.items():
-                if self._matches(event.path, pattern):
-                    for handler in handlers:
-                        try:
-                            handler(event)
-                        except Exception:
-                            pass
-
-    def _matches(self, path: Path, pattern: str) -> bool:
-        """Check if a path matches a glob pattern."""
-        import fnmatch
-
-        return fnmatch.fnmatch(path.name, pattern)
-
-
-def watch(
-    path: str | Path,
-    handler: Callable[[FileEvent], None],
-    pattern: str = "*",
-    recursive: bool = True,
-) -> FileWatcher:
-    """Convenience function to create and start a file watcher.
-
-    Args:
-        path: Directory to watch.
-        handler: Callback function.
-        pattern: File pattern to match.
-        recursive: Watch subdirectories.
-
-    Returns:
-        The FileWatcher instance (already started).
-    """
-    watcher = FileWatcher(path, recursive=recursive)
-    watcher.on(pattern)(handler)
-    watcher.start(blocking=False)
-    return watcher
+    def get_watched_paths(self) -> list[str]:
+        """Get list of watched paths."""
+        return list(self._watch_paths.keys())
