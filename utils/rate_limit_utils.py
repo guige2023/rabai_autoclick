@@ -1,77 +1,45 @@
-"""Rate limiting utilities for controlling action frequency.
+"""Rate limit utilities for RabAI AutoClick.
 
-Provides token bucket and sliding window rate limiters,
- decorators for rate-limiting function calls, and
-integration helpers for API call throttling.
-
-Example:
-    >>> from utils.rate_limit_utils import rate_limit, TokenBucket
-    >>> @rate_limit(calls=10, period=1.0)
-    ... def api_call():
-    ...     return do_api_request()
-    >>> bucket = TokenBucket(capacity=5, refill_rate=1.0)
-    >>> if bucket.consume():
-    ...     do_action()
+Provides:
+- Token bucket rate limiter
+- Sliding window rate limiter
+- Rate-limited decorator
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Optional
-
-__all__ = [
-    "rate_limit",
-    "TokenBucket",
-    "SlidingWindowRateLimiter",
-    "RateLimiter",
-]
+from typing import (
+    Any,
+    Callable,
+    Optional,
+    TypeVar,
+)
 
 
-def rate_limit(calls: int = 10, period: float = 1.0) -> Callable:
-    """Decorator to rate-limit a function.
-
-    Args:
-        calls: Maximum number of calls allowed.
-        period: Time window in seconds.
-
-    Returns:
-        Decorated function.
-
-    Example:
-        >>> @rate_limit(calls=5, period=1.0)
-        ... def throttled_func():
-        ...     ...
-    """
-    limiter = TokenBucket(capacity=calls, refill_rate=float(calls) / period)
-
-    def decorator(fn: Callable) -> Callable:
-        def wrapper(*args, **kwargs):
-            if limiter.consume():
-                return fn(*args, **kwargs)
-            else:
-                raise Exception(f"Rate limit exceeded: {calls} calls per {period}s")
-        return wrapper
-    return decorator
+T = TypeVar("T")
 
 
 class TokenBucket:
     """Token bucket rate limiter.
 
-    Tokens are added at a constant rate up to the capacity.
-    Each consume() removes one token.
-
-    Example:
-        >>> bucket = TokenBucket(capacity=10, refill_rate=1.0)
-        >>> if bucket.consume():
-        ...     do_action()
+    Args:
+        rate: Tokens per second.
+        capacity: Maximum tokens in bucket.
     """
 
-    def __init__(self, capacity: float, refill_rate: float):
-        self.capacity = capacity
-        self.refill_rate = refill_rate
-        self._tokens = float(capacity)
-        self._last_refill = time.monotonic()
+    def __init__(
+        self,
+        rate: float,
+        capacity: float,
+    ) -> None:
+        if rate <= 0 or capacity <= 0:
+            raise ValueError("rate and capacity must be positive")
+        self._rate = rate
+        self._capacity = capacity
+        self._tokens = capacity
+        self._last_update = time.monotonic()
         self._lock = threading.Lock()
 
     def consume(self, tokens: float = 1.0) -> bool:
@@ -81,119 +49,127 @@ class TokenBucket:
             tokens: Number of tokens to consume.
 
         Returns:
-            True if tokens were available and consumed.
+            True if tokens were consumed.
         """
         with self._lock:
-            self._refill()
+            now = time.monotonic()
+            elapsed = now - self._last_update
+            self._tokens = min(
+                self._capacity,
+                self._tokens + elapsed * self._rate,
+            )
+            self._last_update = now
+
             if self._tokens >= tokens:
                 self._tokens -= tokens
                 return True
             return False
 
-    def wait_and_consume(self, tokens: float = 1.0, timeout: Optional[float] = None) -> bool:
-        """Wait until tokens are available and consume them.
+    def wait_for_token(self, tokens: float = 1.0) -> float:
+        """Wait until tokens are available.
 
         Args:
-            tokens: Number of tokens to consume.
-            timeout: Maximum time to wait (None = wait forever).
+            tokens: Number of tokens needed.
 
         Returns:
-            True if consumed, False if timeout.
+            Seconds waited.
         """
         start = time.monotonic()
         while True:
             if self.consume(tokens):
-                return True
-            if timeout is not None and time.monotonic() - start >= timeout:
-                return False
-            time.sleep(0.05)
-
-    def _refill(self) -> None:
-        """Refill tokens based on elapsed time."""
-        now = time.monotonic()
-        elapsed = now - self._last_refill
-        self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_rate)
-        self._last_refill = now
-
-    @property
-    def available_tokens(self) -> float:
-        with self._lock:
-            self._refill()
-            return self._tokens
+                return time.monotonic() - start
+            time.sleep(0.01)
 
 
-class SlidingWindowRateLimiter:
+class SlidingWindowRateLimit:
     """Sliding window rate limiter.
 
-    Tracks the last N calls and enforces a maximum rate
-    over a rolling time window.
-
-    Example:
-        >>> limiter = SlidingWindowRateLimiter(max_calls=10, window=60.0)
-        >>> if limiter.allow():
-        ...     do_action()
+    Args:
+        max_calls: Maximum calls per window.
+        window_seconds: Window size in seconds.
     """
 
-    def __init__(self, max_calls: int, window: float):
-        self.max_calls = max_calls
-        self.window = window
-        self._calls: list[float] = []
+    def __init__(
+        self,
+        max_calls: int,
+        window_seconds: float,
+    ) -> None:
+        if max_calls <= 0 or window_seconds <= 0:
+            raise ValueError("max_calls and window_seconds must be positive")
+        self._max_calls = max_calls
+        self._window = window_seconds
+        self._calls: list = []
         self._lock = threading.Lock()
 
-    def allow(self) -> bool:
-        """Check if a call is allowed under the rate limit.
+    def is_allowed(self) -> bool:
+        """Check if a call is allowed now.
 
         Returns:
-            True if the call is allowed.
+            True if call is allowed.
         """
         with self._lock:
             now = time.monotonic()
-            cutoff = now - self.window
-
-            # Remove old calls
+            cutoff = now - self._window
             self._calls = [t for t in self._calls if t > cutoff]
-
-            if len(self._calls) < self.max_calls:
+            if len(self._calls) < self._max_calls:
                 self._calls.append(now)
                 return True
             return False
 
-    def wait_and_allow(self, timeout: Optional[float] = None) -> bool:
-        """Wait until a call is allowed.
+    def wait_and_call(
+        self,
+        func: Callable[..., T],
+        *args: Any,
+        **kwargs: Any,
+    ) -> T:
+        """Wait for rate limit window then call function.
+
+        Args:
+            func: Function to call.
+            *args: Positional args.
+            **kwargs: Keyword args.
 
         Returns:
-            True if allowed, False if timeout.
+            Function result.
         """
-        start = time.monotonic()
-        while True:
-            if self.allow():
-                return True
-            if timeout is not None and time.monotonic() - start >= timeout:
-                return False
-            time.sleep(0.1)
+        while not self.is_allowed():
+            time.sleep(0.01)
+        return func(*args, **kwargs)
 
     @property
     def remaining(self) -> int:
+        """Remaining calls in current window."""
         with self._lock:
             now = time.monotonic()
-            cutoff = now - self.window
+            cutoff = now - self._window
             self._calls = [t for t in self._calls if t > cutoff]
-            return max(0, self.max_calls - len(self._calls))
+            return max(0, self._max_calls - len(self._calls))
 
 
-class RateLimiter:
-    """Combined rate limiter with both capacity and rate constraints.
+def rate_limit(
+    max_calls: int,
+    period: float = 1.0,
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator to rate-limit a function.
 
-    Useful for API rate limiting with both burst capacity and sustained rate.
+    Args:
+        max_calls: Maximum calls per period.
+        period: Time period in seconds.
+
+    Returns:
+        Decorated function.
     """
+    limiter = SlidingWindowRateLimit(max_calls, period)
 
-    def __init__(self, capacity: int, refill_rate: float):
-        self._bucket = TokenBucket(float(capacity), refill_rate)
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            return limiter.wait_and_call(func, *args, **kwargs)
+        return wrapper
+    return decorator
 
-    def allow(self) -> bool:
-        """Check if an action is allowed."""
-        return self._bucket.consume()
 
-    def wait(self, timeout: Optional[float] = None) -> bool:
-        """Wait until an action is allowed."""
-        return self._bucket.wait_and_consume(timeout=timeout)
+__all__ = [
+    "TokenBucket",
+    "SlidingWindowRateLimit",
+    "rate_limit",
+]
