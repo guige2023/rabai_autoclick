@@ -1,8 +1,8 @@
 """
 Automation SLA Action Module.
 
-Provides SLA monitoring, tracking, and enforcement
-for automated workflows and services.
+Provides SLA monitoring and compliance tracking
+for automation workflows.
 """
 
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -15,285 +15,234 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class SlaStatus(Enum):
-    """SLA status values."""
-    MET = "met"
-    BREACHED = "breached"
+class SLAStatus(Enum):
+    """SLA status."""
+    COMPLIANT = "compliant"
     AT_RISK = "at_risk"
+    BREACHED = "breached"
     UNKNOWN = "unknown"
 
 
 @dataclass
-class SlaDefinition:
-    """SLA definition."""
-    sla_id: str
+class SLAConfig:
+    """SLA configuration."""
     name: str
     metric: str
     target_value: float
-    window: timedelta
-    severity: str = "high"
-    description: str = ""
+    window_seconds: float
+    warning_threshold: float = 0.8
+    critical_threshold: float = 0.95
 
 
 @dataclass
-class SlaMeasurement:
-    """SLA measurement."""
-    sla_id: str
-    measurement_time: datetime
-    actual_value: float
-    target_value: float
-    status: SlaStatus
-    percentile: Optional[str] = None
+class SLAMetric:
+    """SLA metric snapshot."""
+    timestamp: datetime
+    metric: str
+    value: float
+    target: float
 
 
 @dataclass
-class SlaViolation:
-    """SLA violation record."""
-    violation_id: str
-    sla_id: str
-    measured_at: datetime
-    actual_value: float
+class SLAReport:
+    """SLA compliance report."""
+    sla_name: str
+    status: SLAStatus
+    compliance_rate: float
+    total_samples: int
+    breached_samples: int
+    current_value: float
     target_value: float
-    severity: str
-    acknowledged: bool = False
-    resolved_at: Optional[datetime] = None
+    generated_at: datetime = field(default_factory=datetime.now)
 
 
-class SlaTracker:
-    """Tracks SLA compliance."""
+class SLATracker:
+    """Tracks SLA metrics."""
+
+    def __init__(self, config: SLAConfig):
+        self.config = config
+        self.metrics: List[SLAMetric] = []
+        self.breaches: List[SLAMetric] = []
+
+    def record(self, value: float):
+        """Record a metric value."""
+        metric = SLAMetric(
+            timestamp=datetime.now(),
+            metric=self.config.metric,
+            value=value,
+            target=self.config.target_value
+        )
+        self.metrics.append(metric)
+
+        if not self._is_compliant(value):
+            self.breaches.append(metric)
+
+        self._cleanup_old_metrics()
+
+    def _is_compliant(self, value: float) -> bool:
+        """Check if value meets SLA."""
+        if self.config.metric in ("latency", "duration", "time"):
+            return value <= self.config.target_value
+        else:
+            return value >= self.config.target_value
+
+    def _cleanup_old_metrics(self):
+        """Remove old metrics outside window."""
+        cutoff = datetime.now() - timedelta(seconds=self.config.window_seconds)
+        self.metrics = [m for m in self.metrics if m.timestamp >= cutoff]
+        self.breaches = [b for b in self.breaches if b.timestamp >= cutoff]
+
+    def get_status(self) -> SLAStatus:
+        """Get current SLA status."""
+        if not self.metrics:
+            return SLAStatus.UNKNOWN
+
+        self._cleanup_old_metrics()
+
+        if not self.metrics:
+            return SLAStatus.UNKNOWN
+
+        recent_breaches = len(self.breaches)
+        total = len(self.metrics)
+        breach_rate = recent_breaches / total if total > 0 else 0
+
+        if breach_rate >= self.config.critical_threshold:
+            return SLAStatus.BREACHED
+        elif breach_rate >= self.config.warning_threshold:
+            return SLAStatus.AT_RISK
+        else:
+            return SLAStatus.COMPLIANT
+
+    def get_compliance_rate(self) -> float:
+        """Get compliance rate."""
+        if not self.metrics:
+            return 1.0
+
+        self._cleanup_old_metrics()
+
+        compliant = len(self.metrics) - len(self.breaches)
+        return compliant / len(self.metrics) if self.metrics else 1.0
+
+    def get_report(self) -> SLAReport:
+        """Generate SLA report."""
+        current_value = self.metrics[-1].value if self.metrics else 0
+
+        return SLAReport(
+            sla_name=self.config.name,
+            status=self.get_status(),
+            compliance_rate=self.get_compliance_rate(),
+            total_samples=len(self.metrics),
+            breached_samples=len(self.breaches),
+            current_value=current_value,
+            target_value=self.config.target_value
+        )
+
+
+class SLAMonitor:
+    """Monitors multiple SLAs."""
 
     def __init__(self):
-        self.slas: Dict[str, SlaDefinition] = {}
-        self.measurements: Dict[str, List[SlaMeasurement]] = {}
-        self.violations: List[SlaViolation] = []
-        self._handlers: List[Callable] = []
+        self.slas: Dict[str, SLATracker] = {}
+        self.handlers: Dict[SLAStatus, List[Callable]] = {
+            status: [] for status in SLAStatus
+        }
 
-    def add_sla(self, sla: SlaDefinition):
-        """Add SLA definition."""
-        self.slas[sla.sla_id] = sla
-        self.measurements[sla.sla_id] = []
+    def add_sla(self, config: SLAConfig):
+        """Add an SLA to monitor."""
+        self.slas[config.name] = SLATracker(config)
 
-    def remove_sla(self, sla_id: str) -> bool:
-        """Remove SLA definition."""
-        if sla_id in self.slas:
-            del self.slas[sla_id]
+    def remove_sla(self, name: str) -> bool:
+        """Remove an SLA."""
+        if name in self.slas:
+            del self.slas[name]
             return True
         return False
 
-    def add_handler(self, handler: Callable):
-        """Add violation handler."""
-        self._handlers.append(handler)
+    def record(self, sla_name: str, value: float):
+        """Record metric for SLA."""
+        tracker = self.slas.get(sla_name)
+        if tracker:
+            old_status = tracker.get_status()
+            tracker.record(value)
+            new_status = tracker.get_status()
 
-    def measure(
-        self,
-        sla_id: str,
-        actual_value: float,
-        percentile: Optional[str] = None
-    ) -> SlaMeasurement:
-        """Record SLA measurement."""
-        if sla_id not in self.slas:
-            return None
+            if old_status != new_status:
+                self._notify_status_change(sla_name, new_status)
 
-        sla = self.slas[sla_id]
+    def get_status(self, sla_name: str) -> SLAStatus:
+        """Get status of an SLA."""
+        tracker = self.slas.get(sla_name)
+        return tracker.get_status() if tracker else SLAStatus.UNKNOWN
 
-        if actual_value <= sla.target_value:
-            status = SlaStatus.MET
-        elif actual_value <= sla.target_value * 1.1:
-            status = SlaStatus.AT_RISK
-        else:
-            status = SlaStatus.BREACHED
+    def get_all_statuses(self) -> Dict[str, SLAStatus]:
+        """Get statuses of all SLAs."""
+        return {name: tracker.get_status() for name, tracker in self.slas.items()}
 
-        measurement = SlaMeasurement(
-            sla_id=sla_id,
-            measurement_time=datetime.now(),
-            actual_value=actual_value,
-            target_value=sla.target_value,
-            status=status,
-            percentile=percentile
-        )
+    def register_handler(self, status: SLAStatus, handler: Callable):
+        """Register status change handler."""
+        self.handlers[status].append(handler)
 
-        self.measurements[sla_id].append(measurement)
-
-        if len(self.measurements[sla_id]) > 1000:
-            self.measurements[sla_id] = self.measurements[sla_id][-1000:]
-
-        if status == SlaStatus.BREACHED:
-            violation = SlaViolation(
-                violation_id=str(id(measurement)),
-                sla_id=sla_id,
-                measured_at=datetime.now(),
-                actual_value=actual_value,
-                target_value=sla.target_value,
-                severity=sla.severity
-            )
-            self.violations.append(violation)
-
-            for handler in self._handlers:
-                try:
-                    handler(violation)
-                except Exception:
-                    pass
-
-        return measurement
-
-    def get_status(self, sla_id: str) -> SlaStatus:
-        """Get current SLA status."""
-        if sla_id not in self.measurements or not self.measurements[sla_id]:
-            return SlaStatus.UNKNOWN
-
-        recent = self.measurements[sla_id][-10:]
-        breached_count = sum(1 for m in recent if m.status == SlaStatus.BREACHED)
-
-        if breached_count >= 5:
-            return SlaStatus.BREACHED
-        elif breached_count >= 2:
-            return SlaStatus.AT_RISK
-
-        return SlaStatus.MET
-
-    def get_violations(
-        self,
-        sla_id: Optional[str] = None,
-        since: Optional[datetime] = None,
-        unacknowledged_only: bool = False
-    ) -> List[SlaViolation]:
-        """Get SLA violations."""
-        violations = self.violations
-
-        if sla_id:
-            violations = [v for v in violations if v.sla_id == sla_id]
-
-        if since:
-            violations = [v for v in violations if v.measured_at >= since]
-
-        if unacknowledged_only:
-            violations = [v for v in violations if not v.acknowledged]
-
-        return violations
-
-    def acknowledge_violation(self, violation_id: str):
-        """Acknowledge a violation."""
-        for violation in self.violations:
-            if str(id(violation)) == violation_id:
-                violation.acknowledged = True
-
-    def resolve_violation(self, violation_id: str):
-        """Resolve a violation."""
-        for violation in self.violations:
-            if str(id(violation)) == violation_id:
-                violation.resolved_at = datetime.now()
-
-
-class SlaReporter:
-    """Reports SLA status."""
-
-    def __init__(self, tracker: SlaTracker):
-        self.tracker = tracker
-
-    def generate_report(self) -> Dict[str, Any]:
-        """Generate SLA report."""
-        sla_statuses = {}
-
-        for sla_id, sla in self.tracker.slas.items():
-            status = self.tracker.get_status(sla_id)
-            recent_measurements = self.tracker.measurements.get(sla_id, [])[-100:]
-
-            met_count = sum(1 for m in recent_measurements if m.status == SlaStatus.MET)
-            total_count = len(recent_measurements)
-
-            sla_statuses[sla_id] = {
-                "name": sla.name,
-                "status": status.value,
-                "compliance_rate": met_count / total_count if total_count > 0 else 0,
-                "recent_measurements": len(recent_measurements)
-            }
-
-        unacknowledged_violations = self.tracker.get_violations(unacknowledged_only=True)
-
-        return {
-            "report_time": datetime.now().isoformat(),
-            "total_slas": len(self.tracker.slas),
-            "slas": sla_statuses,
-            "unacknowledged_violations": len(unacknowledged_violations)
-        }
-
-
-class SlaEnforcer:
-    """Enforces SLA requirements."""
-
-    def __init__(self, tracker: SlaTracker):
-        self.tracker = tracker
-        self._pre_handlers: Dict[str, List[Callable]] = {}
-        self._post_handlers: Dict[str, List[Callable]] = {}
-
-    def add_pre_handler(self, sla_id: str, handler: Callable):
-        """Add pre-execution handler."""
-        if sla_id not in self._pre_handlers:
-            self._pre_handlers[sla_id] = []
-        self._pre_handlers[sla_id].append(handler)
-
-    def add_post_handler(self, sla_id: str, handler: Callable):
-        """Add post-execution handler."""
-        if sla_id not in self._post_handlers:
-            self._post_handlers[sla_id] = []
-        self._post_handlers[sla_id].append(handler)
-
-    async def execute_with_sla(
-        self,
-        sla_id: str,
-        func: Callable,
-        *args,
-        **kwargs
-    ) -> Any:
-        """Execute function with SLA monitoring."""
-        pre_handlers = self._pre_handlers.get(sla_id, [])
-        post_handlers = self._post_handlers.get(sla_id, [])
-
-        for handler in pre_handlers:
+    def _notify_status_change(self, sla_name: str, status: SLAStatus):
+        """Notify handlers of status change."""
+        for handler in self.handlers[status]:
             try:
-                await handler()
+                handler(sla_name, status)
             except Exception as e:
-                logger.error(f"Pre-handler error: {e}")
+                logger.error(f"SLA handler error: {e}")
 
-        start_time = datetime.now()
-        try:
-            result = await func(*args, **kwargs)
-        finally:
-            duration = (datetime.now() - start_time).total_seconds() * 1000
-            self.tracker.measure(sla_id, duration)
-
-        for handler in post_handlers:
-            try:
-                await handler(result)
-            except Exception as e:
-                logger.error(f"Post-handler error: {e}")
-
-        return result
+    def generate_reports(self) -> List[SLAReport]:
+        """Generate reports for all SLAs."""
+        return [tracker.get_report() for tracker in self.slas.values()]
 
 
-async def main():
-    """Demonstrate SLA tracking."""
-    tracker = SlaTracker()
+class SLAAlerting:
+    """Handles SLA alerting."""
 
-    sla = SlaDefinition(
-        sla_id="sla-1",
-        name="API Response Time",
-        metric="latency_ms",
+    def __init__(self, monitor: SLAMonitor):
+        self.monitor = monitor
+        self.alert_history: List[Dict[str, Any]] = []
+
+    def check_and_alert(self, sla_name: str):
+        """Check SLA and send alerts if needed."""
+        status = self.monitor.get_status(sla_name)
+
+        if status == SLAStatus.BREACHED:
+            self._send_alert(sla_name, status, "SLA BREACHED!")
+        elif status == SLAStatus.AT_RISK:
+            self._send_alert(sla_name, status, "SLA at risk")
+
+    def _send_alert(self, sla_name: str, status: SLAStatus, message: str):
+        """Send alert."""
+        self.alert_history.append({
+            "sla_name": sla_name,
+            "status": status,
+            "message": message,
+            "timestamp": datetime.now()
+        })
+        logger.warning(f"SLA Alert: {sla_name} - {message}")
+
+
+def main():
+    """Demonstrate SLA monitoring."""
+    monitor = SLAMonitor()
+
+    monitor.add_sla(SLAConfig(
+        name="api_latency",
+        metric="latency",
         target_value=100.0,
-        window=timedelta(hours=1)
-    )
-    tracker.add_sla(sla)
+        window_seconds=60
+    ))
 
-    tracker.measure("sla-1", 50.0)
-    tracker.measure("sla-1", 80.0)
-    tracker.measure("sla-1", 120.0)
+    for i in range(10):
+        value = 80.0 + (i % 3) * 20
+        monitor.record("api_latency", value)
 
-    status = tracker.get_status("sla-1")
+    status = monitor.get_status("api_latency")
+    report = monitor.slas["api_latency"].get_report()
+
     print(f"SLA Status: {status.value}")
-
-    violations = tracker.get_violations()
-    print(f"Violations: {len(violations)}")
+    print(f"Compliance: {report.compliance_rate:.1%}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
