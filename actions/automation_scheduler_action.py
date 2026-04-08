@@ -1,488 +1,340 @@
-"""
-Automation Scheduler Action Module.
+"""Automation Scheduler Action Module.
 
-Schedules and executes automation tasks with cron expressions,
-intervals, calendar-based scheduling, and priority queuing.
-
-Author: RabAi Team
+Provides cron-like scheduling, workflow orchestration, and
+task automation with dependency management.
 """
 
-from __future__ import annotations
-
-import json
-import sys
-import os
-import time
-import threading
-import re
-from collections import deque
+from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from datetime import datetime, timedelta
+import asyncio
+import json
+import hashlib
+from croniter import croniter
 
 
 class ScheduleType(Enum):
-    """Types of scheduling strategies."""
-    INTERVAL = "interval"
+    """Types of scheduling mechanisms."""
     CRON = "cron"
-    CALENDAR = "calendar"
+    INTERVAL = "interval"
     ONE_TIME = "one_time"
-    FIXED_RATE = "fixed_rate"
+    CALENDAR = "calendar"
+    EVENT_DRIVEN = "event_driven"
 
 
-class ScheduleState(Enum):
-    """Schedule states."""
+class TaskStatus(Enum):
+    """Task execution status."""
     PENDING = "pending"
     RUNNING = "running"
-    PAUSED = "paused"
     COMPLETED = "completed"
+    FAILED = "failed"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
 
 
 @dataclass
-class ScheduledTask:
-    """A scheduled task definition."""
+class Schedule:
+    """Defines when a task should run."""
+    schedule_type: ScheduleType
+    expression: str
+    timezone: str = "UTC"
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+
+    def is_due(self, last_run: Optional[datetime] = None) -> bool:
+        """Check if the schedule is due to run."""
+        now = datetime.now()
+        if self.start_date and now < self.start_date:
+            return False
+        if self.end_date and now > self.end_date:
+            return False
+
+        if self.schedule_type == ScheduleType.CRON:
+            return self._is_cron_due(last_run)
+        elif self.schedule_type == ScheduleType.INTERVAL:
+            return self._is_interval_due(last_run)
+        elif self.schedule_type == ScheduleType.ONE_TIME:
+            return self._is_one_time_due()
+        return False
+
+    def _is_cron_due(self, last_run: Optional[datetime] = None) -> bool:
+        """Check cron schedule."""
+        try:
+            if last_run:
+                cron = croniter(self.expression, last_run)
+                next_run = cron.get_next(datetime)
+            else:
+                cron = croniter(self.expression, datetime.now())
+                next_run = cron.get_next(datetime)
+            return datetime.now() >= next_run
+        except (ValueError, KeyError):
+            return False
+
+    def _is_interval_due(self, last_run: Optional[datetime] = None) -> bool:
+        """Check interval schedule."""
+        if not last_run:
+            return True
+        interval_seconds = self._parse_interval()
+        elapsed = (datetime.now() - last_run).total_seconds()
+        return elapsed >= interval_seconds
+
+    def _is_one_time_due(self) -> bool:
+        """Check one-time schedule."""
+        try:
+            run_time = datetime.fromisoformat(self.expression)
+            return datetime.now() >= run_time
+        except ValueError:
+            return False
+
+    def _parse_interval(self) -> float:
+        """Parse interval expression to seconds."""
+        if not self.expression:
+            return 0
+        parts = self.expression.lower()
+        if "h" in parts:
+            return float(parts.replace("h", "")) * 3600
+        elif "m" in parts:
+            return float(parts.replace("m", "")) * 60
+        elif "s" in parts:
+            return float(parts.replace("s", ""))
+        return float(parts)
+
+
+@dataclass
+class AutomationTask:
+    """Represents an automatable task."""
     id: str
     name: str
-    action_type: str
-    action_params: Dict[str, Any]
-    schedule_type: ScheduleType
-    schedule_config: Dict[str, Any]
-    priority: int = 0
-    enabled: bool = True
-    max_runs: Optional[int] = None
-    run_count: int = 0
-    state: ScheduleState = ScheduleState.PENDING
-    last_run: Optional[float] = None
-    next_run: Optional[float] = None
-    created_at: float = field(default_factory=time.time)
+    handler: Callable
+    schedule: Schedule
+    dependencies: List[str] = field(default_factory=list)
+    timeout: int = 300
+    retry_count: int = 0
+    retry_delay: int = 60
+    max_retries: int = 3
+    notification_config: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def generate_id(self) -> str:
+        """Generate unique task ID."""
+        content = f"{self.name}:{self.schedule.expression}:{datetime.now().isoformat()}"
+        return hashlib.md5(content.encode()).hexdigest()[:12]
 
 
 @dataclass
-class CronExpression:
-    """Parsed cron expression."""
-    minutes: str
-    hours: str
-    day_of_month: str
-    month: str
-    day_of_week: str
-    
-    def get_next_run(self, from_time: Optional[datetime] = None) -> datetime:
-        """Calculate next run time from cron expression."""
-        if from_time is None:
-            from_time = datetime.now()
-        
-        next_run = from_time + timedelta(minutes=1)
-        
-        for _ in range(366 * 24 * 60):
-            if self._matches(next_run):
-                return next_run
-            next_run += timedelta(minutes=1)
-        
-        return next_run
-    
-    def _matches(self, dt: datetime) -> bool:
-        """Check if datetime matches cron expression."""
-        if not self._match_field(self.minutes, dt.minute):
-            return False
-        if not self._match_field(self.hours, dt.hour):
-            return False
-        if not self._match_field(self.day_of_month, dt.day):
-            return False
-        if not self._match_field(self.month, dt.month):
-            return False
-        if not self._match_field(self.day_of_week, dt.weekday()):
-            return False
-        return True
-    
-    def _match_field(self, field: str, value: int) -> bool:
-        """Match a cron field against a value."""
-        if field == "*":
+class TaskExecution:
+    """Records a task execution."""
+    task_id: str
+    status: TaskStatus
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    result: Optional[Any] = None
+    error: Optional[str] = None
+    retries: int = 0
+    log: List[str] = field(default_factory=list)
+
+
+class AutomationScheduler:
+    """Schedules and executes automated tasks."""
+
+    def __init__(self, max_concurrent: int = 5, default_timezone: str = "UTC"):
+        self._tasks: Dict[str, AutomationTask] = {}
+        self._executions: Dict[str, TaskExecution] = {}
+        self._running_tasks: Dict[str, asyncio.Task] = {}
+        self._last_runs: Dict[str, datetime] = {}
+        self._max_concurrent = max_concurrent
+        self._default_timezone = default_timezone
+        self._listeners: Dict[str, List[Callable]] = {}
+        self._paused: bool = False
+
+    def register_task(self, task: AutomationTask) -> str:
+        """Register a new automation task."""
+        if not task.id:
+            task.id = task.generate_id()
+        self._tasks[task.id] = task
+        return task.id
+
+    def unregister_task(self, task_id: str) -> bool:
+        """Remove a task from the scheduler."""
+        if task_id in self._tasks:
+            del self._tasks[task_id]
             return True
-        
-        for part in field.split(","):
-            if "/" in part:
-                base, step = part.split("/")
-                step = int(step)
-                if base == "*":
-                    return value % step == 0
-                elif "-" in base:
-                    start, end = map(int, base.split("-"))
-                    return any((i - start) % step == 0 for i in range(start, end + 1))
-            elif "-" in part:
-                start, end = map(int, part.split("-"))
-                if not (start <= value <= end):
-                    return False
-            elif part.isdigit():
-                if int(part) != value:
-                    return False
-            else:
+        return False
+
+    def get_task(self, task_id: str) -> Optional[AutomationTask]:
+        """Get task by ID."""
+        return self._tasks.get(task_id)
+
+    def list_tasks(self, status: Optional[TaskStatus] = None) -> List[AutomationTask]:
+        """List all registered tasks."""
+        tasks = list(self._tasks.values())
+        if status:
+            exec_status = {
+                t.task_id: t.status for t in self._executions.values()
+            }
+            tasks = [t for t in tasks if exec_status.get(t.id) == status]
+        return tasks
+
+    def add_dependency(self, task_id: str, depends_on: str):
+        """Add a dependency to a task."""
+        if task_id in self._tasks:
+            self._tasks[task_id].dependencies.append(depends_on)
+
+    async def execute_task(self, task_id: str, force: bool = False) -> TaskExecution:
+        """Execute a task immediately or check if scheduled."""
+        task = self._tasks.get(task_id)
+        if not task:
+            return TaskExecution(
+                task_id=task_id,
+                status=TaskStatus.FAILED,
+                started_at=datetime.now(),
+                error="Task not found",
+            )
+
+        if len(self._running_tasks) >= self._max_concurrent and not force:
+            return TaskExecution(
+                task_id=task_id,
+                status=TaskStatus.PENDING,
+                started_at=datetime.now(),
+            )
+
+        if not force and not task.schedule.is_due(self._last_runs.get(task_id)):
+            return TaskExecution(
+                task_id=task_id,
+                status=TaskStatus.SKIPPED,
+                started_at=datetime.now(),
+            )
+
+        if not self._check_dependencies(task):
+            return TaskExecution(
+                task_id=task_id,
+                status=TaskStatus.SKIPPED,
+                started_at=datetime.now(),
+                log=["Dependencies not met"],
+            )
+
+        execution = TaskExecution(
+            task_id=task_id,
+            status=TaskStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        self._executions[f"{task_id}:{execution.started_at.isoformat()}"] = execution
+
+        try:
+            async with asyncio.timeout(task.timeout):
+                if asyncio.iscoroutinefunction(task.handler):
+                    result = await task.handler()
+                else:
+                    result = task.handler()
+                execution.status = TaskStatus.COMPLETED
+                execution.result = result
+                self._last_runs[task_id] = datetime.now()
+        except asyncio.TimeoutError:
+            execution.status = TaskStatus.FAILED
+            execution.error = f"Task timed out after {task.timeout}s"
+        except Exception as e:
+            execution.status = TaskStatus.FAILED
+            execution.error = str(e)
+            if task.retry_count < task.max_retries:
+                await self._schedule_retry(task, execution)
+
+        execution.completed_at = datetime.now()
+        self._emit_event(task_id, "task_completed", execution)
+        return execution
+
+    def _check_dependencies(self, task: AutomationTask) -> bool:
+        """Check if all dependencies have completed successfully."""
+        for dep_id in task.dependencies:
+            dep_execution = self._get_latest_execution(dep_id)
+            if not dep_execution:
+                return False
+            if dep_execution.status != TaskStatus.COMPLETED:
                 return False
         return True
 
+    def _get_latest_execution(self, task_id: str) -> Optional[TaskExecution]:
+        """Get the most recent execution for a task."""
+        task_execs = [
+            (k, v) for k, v in self._executions.items() if v.task_id == task_id
+        ]
+        if not task_execs:
+            return None
+        return max(task_execs, key=lambda x: x[1].started_at)[1]
 
-@dataclass
-class SchedulerStats:
-    """Scheduler statistics."""
-    total_tasks: int = 0
-    active_tasks: int = 0
-    total_runs: int = 0
-    successful_runs: int = 0
-    failed_runs: int = 0
-    skipped_runs: int = 0
-    average_run_duration: float = 0.0
-    last_update: float = field(default_factory=time.time)
+    async def _schedule_retry(self, task: AutomationTask, execution: TaskExecution):
+        """Schedule a retry for failed task."""
+        execution.retries += 1
+        await asyncio.sleep(task.retry_delay)
+        self._emit_event(task.id, "task_retry", execution)
 
+    def pause(self):
+        """Pause the scheduler."""
+        self._paused = True
 
-class AutomationSchedulerAction(BaseAction):
-    """Automation scheduler action.
-    
-    Schedules and manages automation tasks with support for
-    multiple scheduling strategies and priority execution.
-    """
-    action_type = "automation_scheduler"
-    display_name = "自动化调度器"
-    description = "任务定时调度管理"
-    
-    def __init__(self):
-        super().__init__()
-        self._tasks: Dict[str, ScheduledTask] = {}
-        self._task_queue: deque = deque()
-        self._lock = threading.RLock()
-        self._running = False
-        self._worker_thread: Optional[threading.Thread] = None
-        self._stats = SchedulerStats()
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Schedule or manage automation tasks.
-        
-        Args:
-            context: The execution context.
-            params: Dictionary containing:
-                - operation: Operation to perform (schedule/list/cancel/pause/resume/stats)
-                - task: Task definition for scheduling
-                - task_id: Task ID for management operations
-                
-        Returns:
-            ActionResult with operation results.
-        """
-        start_time = time.time()
-        
-        operation = params.get("operation", "schedule")
-        
-        if operation == "schedule":
-            return self._schedule_task(params, start_time)
-        elif operation == "list":
-            return self._list_tasks(params, start_time)
-        elif operation == "cancel":
-            return self._cancel_task(params, start_time)
-        elif operation == "pause":
-            return self._pause_task(params, start_time)
-        elif operation == "resume":
-            return self._resume_task(params, start_time)
-        elif operation == "stats":
-            return self._get_stats(params, start_time)
-        elif operation == "trigger":
-            return self._trigger_task(params, start_time)
+    def resume(self):
+        """Resume the scheduler."""
+        self._paused = False
+
+    def on_event(self, event: str, callback: Callable):
+        """Register event listener."""
+        if event not in self._listeners:
+            self._listeners[event] = []
+        self._listeners[event].append(callback)
+
+    def _emit_event(self, task_id: str, event: str, execution: TaskExecution):
+        """Emit an event to registered listeners."""
+        for callback in self._listeners.get(event, []):
+            try:
+                callback(task_id, execution)
+            except Exception:
+                pass
+
+    def get_execution_history(
+        self, task_id: Optional[str] = None, limit: int = 100
+    ) -> List[TaskExecution]:
+        """Get execution history for a task or all tasks."""
+        if task_id:
+            execs = [
+                v for v in self._executions.values() if v.task_id == task_id
+            ]
         else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}",
-                duration=time.time() - start_time
-            )
-    
-    def _schedule_task(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Schedule a new task."""
-        task_def = params.get("task", {})
-        
-        task_id = task_def.get("id", str(hash(str(time.time()))))
-        name = task_def.get("name", f"Task-{task_id}")
-        action_type = task_def.get("action_type", "")
-        action_params = task_def.get("action_params", {})
-        schedule_type = ScheduleType(task_def.get("schedule_type", "interval"))
-        schedule_config = task_def.get("schedule_config", {})
-        priority = task_def.get("priority", 0)
-        
-        if not action_type:
-            return ActionResult(
-                success=False,
-                message="Missing required field: action_type",
-                duration=time.time() - start_time
-            )
-        
-        next_run = self._calculate_next_run(schedule_type, schedule_config)
-        
-        task = ScheduledTask(
-            id=task_id,
-            name=name,
-            action_type=action_type,
-            action_params=action_params,
-            schedule_type=schedule_type,
-            schedule_config=schedule_config,
-            priority=priority,
-            next_run=next_run,
-            created_at=time.time()
+            execs = list(self._executions.values())
+        return sorted(execs, key=lambda x: x.started_at, reverse=True)[:limit]
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Cancel a running task."""
+        if task_id in self._running_tasks:
+            self._running_tasks[task_id].cancel()
+            return True
+        return False
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get scheduler metrics."""
+        total_executions = len(self._executions)
+        completed = sum(
+            1 for e in self._executions.values() if e.status == TaskStatus.COMPLETED
         )
-        
-        with self._lock:
-            self._tasks[task_id] = task
-            self._stats.total_tasks += 1
-            self._stats.active_tasks += 1
-            self._resort_queue()
-        
-        return ActionResult(
-            success=True,
-            message=f"Task '{name}' scheduled (ID: {task_id})",
-            data={
-                "task_id": task_id,
-                "name": name,
-                "next_run": next_run,
-                "schedule_type": schedule_type.value
-            },
-            duration=time.time() - start_time
+        failed = sum(
+            1 for e in self._executions.values() if e.status == TaskStatus.FAILED
         )
-    
-    def _calculate_next_run(self, schedule_type: ScheduleType, config: Dict[str, Any]) -> Optional[float]:
-        """Calculate next run time for a schedule."""
-        now = time.time()
-        
-        if schedule_type == ScheduleType.INTERVAL:
-            interval_seconds = config.get("interval_seconds", 60)
-            return now + interval_seconds
-        
-        elif schedule_type == ScheduleType.FIXED_RATE:
-            interval_seconds = config.get("rate_seconds", 60)
-            return now + interval_seconds
-        
-        elif schedule_type == ScheduleType.CRON:
-            cron_expr = config.get("expression", "* * * * *")
-            parts = cron_expr.split()
-            if len(parts) == 5:
-                cron = CronExpression(*parts)
-                next_dt = cron.get_next_run()
-                return next_dt.timestamp()
-            return None
-        
-        elif schedule_type == ScheduleType.ONE_TIME:
-            run_at = config.get("run_at")
-            if run_at:
-                if isinstance(run_at, (int, float)):
-                    return run_at
-                return None
-            return None
-        
-        elif schedule_type == ScheduleType.CALENDAR:
-            run_at = config.get("run_at")
-            if run_at:
-                if isinstance(run_at, (int, float)):
-                    return run_at
-            return None
-        
-        return None
-    
-    def _list_tasks(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """List all scheduled tasks."""
-        with self._lock:
-            task_list = []
-            for task_id, task in self._tasks.items():
-                task_list.append({
-                    "id": task.id,
-                    "name": task.name,
-                    "action_type": task.action_type,
-                    "schedule_type": task.schedule_type.value,
-                    "state": task.state.value,
-                    "priority": task.priority,
-                    "run_count": task.run_count,
-                    "last_run": task.last_run,
-                    "next_run": task.next_run,
-                    "enabled": task.enabled
-                })
-            
-            task_list.sort(key=lambda t: -t["priority"])
-        
-        return ActionResult(
-            success=True,
-            message=f"Found {len(task_list)} tasks",
-            data={"tasks": task_list, "total": len(task_list)},
-            duration=time.time() - start_time
-        )
-    
-    def _cancel_task(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Cancel a scheduled task."""
-        task_id = params.get("task_id")
-        
-        if not task_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: task_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if task_id not in self._tasks:
-                return ActionResult(
-                    success=False,
-                    message=f"Task not found: {task_id}",
-                    duration=time.time() - start_time
-                )
-            
-            task = self._tasks[task_id]
-            task.state = ScheduleState.CANCELLED
-            task.enabled = False
-            self._stats.active_tasks -= 1
-        
-        return ActionResult(
-            success=True,
-            message=f"Task cancelled: {task_id}",
-            duration=time.time() - start_time
-        )
-    
-    def _pause_task(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Pause a scheduled task."""
-        task_id = params.get("task_id")
-        
-        if not task_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: task_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if task_id not in self._tasks:
-                return ActionResult(
-                    success=False,
-                    message=f"Task not found: {task_id}",
-                    duration=time.time() - start_time
-                )
-            
-            task = self._tasks[task_id]
-            if task.state == ScheduleState.RUNNING:
-                return ActionResult(
-                    success=False,
-                    message=f"Cannot pause running task: {task_id}",
-                    duration=time.time() - start_time
-                )
-            
-            task.state = ScheduleState.PAUSED
-            task.enabled = False
-            self._stats.active_tasks -= 1
-        
-        return ActionResult(
-            success=True,
-            message=f"Task paused: {task_id}",
-            duration=time.time() - start_time
-        )
-    
-    def _resume_task(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Resume a paused task."""
-        task_id = params.get("task_id")
-        
-        if not task_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: task_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if task_id not in self._tasks:
-                return ActionResult(
-                    success=False,
-                    message=f"Task not found: {task_id}",
-                    duration=time.time() - start_time
-                )
-            
-            task = self._tasks[task_id]
-            task.state = ScheduleState.PENDING
-            task.enabled = True
-            task.next_run = self._calculate_next_run(task.schedule_type, task.schedule_config)
-            self._stats.active_tasks += 1
-            self._resort_queue()
-        
-        return ActionResult(
-            success=True,
-            message=f"Task resumed: {task_id}",
-            data={"next_run": task.next_run},
-            duration=time.time() - start_time
-        )
-    
-    def _trigger_task(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Manually trigger a task execution."""
-        task_id = params.get("task_id")
-        
-        if not task_id:
-            return ActionResult(
-                success=False,
-                message="Missing required parameter: task_id",
-                duration=time.time() - start_time
-            )
-        
-        with self._lock:
-            if task_id not in self._tasks:
-                return ActionResult(
-                    success=False,
-                    message=f"Task not found: {task_id}",
-                    duration=time.time() - start_time
-                )
-            
-            task = self._tasks[task_id]
-            self._stats.total_runs += 1
-        
-        return ActionResult(
-            success=True,
-            message=f"Task triggered: {task_id}",
-            data={
-                "task_id": task.id,
-                "action_type": task.action_type,
-                "action_params": task.action_params
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _get_stats(self, params: Dict[str, Any], start_time: float) -> ActionResult:
-        """Get scheduler statistics."""
-        with self._lock:
-            stats = {
-                "total_tasks": self._stats.total_tasks,
-                "active_tasks": self._stats.active_tasks,
-                "total_runs": self._stats.total_runs,
-                "successful_runs": self._stats.successful_runs,
-                "failed_runs": self._stats.failed_runs,
-                "skipped_runs": self._stats.skipped_runs,
-                "average_run_duration": self._stats.average_run_duration,
-                "last_update": self._stats.last_update
-            }
-        
-        return ActionResult(
-            success=True,
-            message="Scheduler stats retrieved",
-            data=stats,
-            duration=time.time() - start_time
-        )
-    
-    def _resort_queue(self) -> None:
-        """Resort the task queue by priority and next run time."""
-        tasks = [(t.id, t) for t in self._tasks.values() if t.enabled and t.next_run is not None]
-        tasks.sort(key=lambda x: (-x[1].priority, x[1].next_run or float("inf")))
-        self._task_queue = deque([t[0] for t in tasks])
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate scheduler parameters."""
-        operation = params.get("operation", "schedule")
-        if operation == "schedule":
-            if "task" not in params:
-                return False, "Missing required parameter: task"
-        elif operation in ("cancel", "pause", "resume", "trigger"):
-            if "task_id" not in params:
-                return False, f"Missing required parameter: task_id for {operation}"
-        return True, ""
-    
-    def get_required_params(self) -> List[str]:
-        """Return required parameters."""
-        return ["operation"]
+        return {
+            "total_tasks": len(self._tasks),
+            "running_tasks": len(self._running_tasks),
+            "total_executions": total_executions,
+            "completed": completed,
+            "failed": failed,
+            "success_rate": completed / total_executions if total_executions > 0 else 0,
+            "paused": self._paused,
+        }
+
+
+# Module exports
+__all__ = [
+    "AutomationScheduler",
+    "AutomationTask",
+    "Schedule",
+    "ScheduleType",
+    "TaskExecution",
+    "TaskStatus",
+]
