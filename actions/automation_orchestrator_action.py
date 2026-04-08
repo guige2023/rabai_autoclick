@@ -1,339 +1,328 @@
 """
-Automation Orchestrator Action - Coordinates multiple automation tasks.
+Automation Orchestrator Action Module.
 
-This module provides task orchestration capabilities including dependency
-management, parallel execution, failure handling, and result aggregation.
+Orchestrates multiple automation workflows with dependency management,
+ parallel execution, and state coordination.
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
-import uuid
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable
 from enum import Enum
 from collections import defaultdict
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-class TaskStatus(Enum):
-    """Status of an orchestrated task."""
+class WorkflowState(Enum):
+    """State of a workflow execution."""
     PENDING = "pending"
     RUNNING = "running"
-    COMPLETED = "completed"
+    WAITING = "waiting"
+    SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
-    SKIPPED = "skipped"
 
 
-class RetryPolicy(Enum):
-    """Retry behavior for failed tasks."""
-    NO_RETRY = "no_retry"
-    IMMEDIATE = "immediate"
-    EXPONENTIAL = "exponential"
-    FIXED_INTERVAL = "fixed_interval"
+class ExecutionStrategy(Enum):
+    """Strategy for executing workflows."""
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"
+    DAG = "dag"
 
 
 @dataclass
-class OrchestrationTask:
-    """A single task within an orchestration workflow."""
-    task_id: str
+class WorkflowDependency:
+    """A dependency on another workflow."""
+    workflow_id: str
+    required_states: list[WorkflowState] = field(default_factory=lambda: [WorkflowState.SUCCESS])
+
+
+@dataclass
+class WorkflowDefinition:
+    """Definition of a workflow in the orchestrator."""
+    workflow_id: str
     name: str
-    handler: Callable[[], Awaitable[Any]]
-    dependencies: list[str] = field(default_factory=list)
-    retry_policy: RetryPolicy = RetryPolicy.NO_RETRY
+    func: Callable
+    args: tuple = field(default_factory=tuple)
+    kwargs: dict = field(default_factory=dict)
+    dependencies: list[WorkflowDependency] = field(default_factory=list)
     max_retries: int = 3
-    timeout: float = 60.0
-    retry_delay: float = 1.0
-    status: TaskStatus = TaskStatus.PENDING
+    timeout: Optional[float] = None
+    continue_on_failure: bool = False
+
+
+@dataclass
+class WorkflowExecution:
+    """Runtime state of a workflow execution."""
+    definition: WorkflowDefinition
+    state: WorkflowState = WorkflowState.PENDING
     result: Any = None
-    error: str | None = None
-    attempts: int = 0
-    start_time: float = 0.0
-    end_time: float = 0.0
+    error: Optional[str] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    retry_count: int = 0
 
 
 @dataclass
 class OrchestrationResult:
-    """Result of an orchestrated workflow execution."""
-    workflow_id: str
+    """Result of orchestration execution."""
     success: bool
-    tasks_completed: int = 0
-    tasks_failed: int = 0
+    total_workflows: int
+    completed: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    executions: Dict[str, WorkflowExecution] = field(default_factory=dict)
     total_duration_ms: float = 0.0
-    results: dict[str, Any] = field(default_factory=dict)
-    errors: dict[str, str] = field(default_factory=dict)
-
-
-class Workflow:
-    """
-    A workflow containing multiple tasks with dependencies.
-    
-    Example:
-        workflow = Workflow("data_pipeline")
-        workflow.add_task(TaskA())
-        workflow.add_task(TaskB(), dependencies=["TaskA"])
-        result = await orchestrator.execute(workflow)
-    """
-    
-    def __init__(self, workflow_id: str, name: str | None = None) -> None:
-        self.workflow_id = workflow_id
-        self.name = name or workflow_id
-        self._tasks: dict[str, OrchestrationTask] = {}
-        self._execution_order: list[str] = []
-    
-    def add_task(
-        self,
-        task: OrchestrationTask,
-    ) -> None:
-        """Add a task to the workflow."""
-        self._tasks[task.task_id] = task
-    
-    def task(
-        self,
-        name: str,
-        handler: Callable[[], Awaitable[Any]],
-        dependencies: list[str] | None = None,
-        **kwargs,
-    ) -> Workflow:
-        """Decorator-style task registration."""
-        task = OrchestrationTask(
-            task_id=str(uuid.uuid4()),
-            name=name,
-            handler=handler,
-            dependencies=dependencies or [],
-            **kwargs,
-        )
-        self.add_task(task)
-        return self
-    
-    def _topological_sort(self) -> list[str]:
-        """Sort tasks by dependency order."""
-        in_degree: dict[str, int] = {tid: 0 for tid in self._tasks}
-        adjacency: dict[str, list[str]] = defaultdict(list)
-        
-        for task in self._tasks.values():
-            for dep in task.dependencies:
-                if dep in self._tasks:
-                    adjacency[dep].append(task.task_id)
-                    in_degree[task.task_id] += 1
-        
-        queue = [tid for tid, degree in in_degree.items() if degree == 0]
-        sorted_order = []
-        
-        while queue:
-            current = queue.pop(0)
-            sorted_order.append(current)
-            for neighbor in adjacency[current]:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
-        
-        return sorted_order
-
-
-class AutomationOrchestrator:
-    """
-    Orchestrates execution of multiple automation tasks.
-    
-    Handles parallel/sequential execution, dependency management,
-    retry logic, and result aggregation.
-    """
-    
-    def __init__(
-        self,
-        max_parallel: int = 5,
-        default_timeout: float = 60.0,
-        continue_on_failure: bool = True,
-    ) -> None:
-        self.max_parallel = max_parallel
-        self.default_timeout = default_timeout
-        self.continue_on_failure = continue_on_failure
-        self._semaphore = asyncio.Semaphore(max_parallel)
-        self._active_tasks: dict[str, asyncio.Task] = {}
-    
-    async def execute(
-        self,
-        workflow: Workflow,
-        context: dict[str, Any] | None = None,
-    ) -> OrchestrationResult:
-        """
-        Execute a workflow.
-        
-        Args:
-            workflow: Workflow to execute
-            context: Shared context passed to all tasks
-            
-        Returns:
-            OrchestrationResult with execution summary
-        """
-        start_time = time.time()
-        results: dict[str, Any] = {}
-        errors: dict[str, str] = {}
-        
-        sorted_tasks = workflow._topological_sort()
-        pending: dict[str, OrchestrationTask] = {
-            tid: workflow._tasks[tid] for tid in sorted_tasks
-        }
-        running: list[str] = []
-        completed: set[str] = set()
-        
-        while pending or running:
-            available = [
-                tid for tid in pending
-                if all(dep in completed for dep in pending[tid].dependencies)
-            ]
-            
-            for tid in available[:self.max_parallel - len(running)]:
-                task = pending.pop(tid)
-                running.append(tid)
-                asyncio.create_task(
-                    self._execute_task(task, results, errors, completed, running)
-                )
-            
-            if running and not pending:
-                await asyncio.sleep(0.01)
-            
-            completed_in_cycle = [tid for tid in running if tid not in pending and workflow._tasks[tid].status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)]
-            for tid in completed_in_cycle:
-                running.remove(tid)
-            
-            if not running and pending:
-                if not self.continue_on_failure:
-                    break
-        
-        duration_ms = (time.time() - start_time) * 1000
-        
-        tasks_completed = sum(1 for t in workflow._tasks.values() if t.status == TaskStatus.COMPLETED)
-        tasks_failed = sum(1 for t in workflow._tasks.values() if t.status == TaskStatus.FAILED)
-        
-        return OrchestrationResult(
-            workflow_id=workflow.workflow_id,
-            success=tasks_failed == 0,
-            tasks_completed=tasks_completed,
-            tasks_failed=tasks_failed,
-            total_duration_ms=duration_ms,
-            results=results,
-            errors=errors,
-        )
-    
-    async def _execute_task(
-        self,
-        task: OrchestrationTask,
-        results: dict[str, Any],
-        errors: dict[str, str],
-        completed: set[str],
-        running: list[str],
-    ) -> None:
-        """Execute a single task with retry handling."""
-        async with self._semaphore:
-            task.status = TaskStatus.RUNNING
-            task.start_time = time.time()
-            
-            for attempt in range(task.max_retries + 1):
-                task.attempts += 1
-                try:
-                    result = await asyncio.wait_for(
-                        task.handler(),
-                        timeout=task.timeout,
-                    )
-                    task.result = result
-                    task.status = TaskStatus.COMPLETED
-                    results[task.task_id] = result
-                    break
-                except asyncio.TimeoutError:
-                    task.error = f"Task timed out after {task.timeout}s"
-                    if attempt == task.max_retries:
-                        task.status = TaskStatus.FAILED
-                        errors[task.task_id] = task.error
-                except Exception as e:
-                    task.error = str(e)
-                    if attempt < task.max_retries:
-                        if task.retry_policy == RetryPolicy.EXPONENTIAL:
-                            await asyncio.sleep(task.retry_delay * (2 ** attempt))
-                        elif task.retry_policy == RetryPolicy.FIXED_INTERVAL:
-                            await asyncio.sleep(task.retry_delay)
-                        else:
-                            await asyncio.sleep(task.retry_delay)
-                    else:
-                        task.status = TaskStatus.FAILED
-                        errors[task.task_id] = task.error
-            
-            task.end_time = time.time()
-            completed.add(task.task_id)
 
 
 class AutomationOrchestratorAction:
     """
-    High-level automation orchestrator action.
-    
+    Workflow orchestration engine with DAG support.
+
+    Manages multiple automation workflows with dependency resolution,
+    parallel/sequential execution, and comprehensive state tracking.
+
     Example:
-        action = AutomationOrchestratorAction()
-        
-        @action.task(name="fetch_data")
-        async def fetch():
-            return {"data": [1, 2, 3]}
-        
-        @action.task(name="process", dependencies=["fetch_data"])
-        async def process(result):
-            return {"processed": result["data"]}
-        
-        result = await action.execute()
+        orchestrator = AutomationOrchestratorAction(strategy=ExecutionStrategy.DAG)
+        orchestrator.add_workflow("scrape", scrape_func, dependencies=[login_wf])
+        orchestrator.add_workflow("process", process_func, dependencies=[scrape_wf])
+        result = await orchestrator.execute_all()
     """
-    
+
     def __init__(
         self,
-        max_parallel: int = 5,
-        continue_on_failure: bool = True,
+        strategy: ExecutionStrategy = ExecutionStrategy.PARALLEL,
+        max_concurrent: int = 10,
     ) -> None:
-        self.orchestrator = AutomationOrchestrator(
-            max_parallel=max_parallel,
-            continue_on_failure=continue_on_failure,
-        )
-        self._workflows: dict[str, Workflow] = {}
-    
-    def create_workflow(
+        self.strategy = strategy
+        self.max_concurrent = max_concurrent
+        self._workflows: Dict[str, WorkflowDefinition] = {}
+        self._executions: Dict[str, WorkflowExecution] = {}
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._event_hooks: Dict[str, List[Callable]] = defaultdict(list)
+
+    def add_workflow(
         self,
         workflow_id: str,
-        name: str | None = None,
-    ) -> Workflow:
-        """Create a new workflow."""
-        workflow = Workflow(workflow_id, name)
-        self._workflows[workflow_id] = workflow
-        return workflow
-    
-    async def execute(
+        func: Callable,
+        name: Optional[str] = None,
+        args: tuple = (),
+        kwargs: Optional[dict[str, Any]] = None,
+        dependencies: Optional[list[WorkflowDependency]] = None,
+        max_retries: int = 3,
+        timeout: Optional[float] = None,
+        continue_on_failure: bool = False,
+    ) -> "AutomationOrchestratorAction":
+        """Add a workflow to the orchestrator."""
+        definition = WorkflowDefinition(
+            workflow_id=workflow_id,
+            name=name or workflow_id,
+            func=func,
+            args=args,
+            kwargs=kwargs or {},
+            dependencies=dependencies or [],
+            max_retries=max_retries,
+            timeout=timeout,
+            continue_on_failure=continue_on_failure,
+        )
+        self._workflows[workflow_id] = definition
+        self._executions[workflow_id] = WorkflowExecution(definition=definition)
+        return self
+
+    def on_event(
         self,
-        workflow_id: str | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> OrchestrationResult:
-        """Execute a workflow by ID or the first available."""
-        if workflow_id:
-            if workflow_id not in self._workflows:
-                raise ValueError(f"Workflow {workflow_id} not found")
-            workflow = self._workflows[workflow_id]
-        elif self._workflows:
-            workflow = next(iter(self._workflows.values()))
+        event: str,
+        handler: Callable,
+    ) -> "AutomationOrchestratorAction":
+        """Register an event handler."""
+        self._event_hooks[event].append(handler)
+        return self
+
+    def get_workflow(self, workflow_id: str) -> Optional[WorkflowDefinition]:
+        """Get a workflow definition by ID."""
+        return self._workflows.get(workflow_id)
+
+    def get_execution_state(self, workflow_id: str) -> Optional[WorkflowState]:
+        """Get current execution state of a workflow."""
+        exec = self._executions.get(workflow_id)
+        return exec.state if exec else None
+
+    async def execute_all(self) -> OrchestrationResult:
+        """Execute all registered workflows."""
+        import time
+        start_time = time.monotonic()
+
+        if self.strategy == ExecutionStrategy.SEQUENTIAL:
+            result = await self._execute_sequential()
+        elif self.strategy == ExecutionStrategy.PARALLEL:
+            result = await self._execute_parallel()
+        elif self.strategy == ExecutionStrategy.DAG:
+            result = await self._execute_dag()
         else:
-            raise ValueError("No workflow available to execute")
-        
-        return await self.orchestrator.execute(workflow, context)
-    
-    def get_task_status(self, workflow_id: str, task_id: str) -> TaskStatus | None:
-        """Get status of a specific task."""
-        if workflow_id in self._workflows:
-            task = self._workflows[workflow_id]._tasks.get(task_id)
-            return task.status if task else None
-        return None
+            result = await self._execute_parallel()
 
+        result.total_duration_ms = (time.monotonic() - start_time) * 1000
+        return result
 
-# Export public API
-__all__ = [
-    "TaskStatus",
-    "RetryPolicy",
-    "OrchestrationTask",
-    "OrchestrationResult",
-    "Workflow",
-    "AutomationOrchestrator",
-    "AutomationOrchestratorAction",
-]
+    async def _execute_sequential(self) -> OrchestrationResult:
+        """Execute workflows sequentially."""
+        for wf_id, definition in self._workflows.items():
+            execution = self._executions[wf_id]
+            if execution.state in (WorkflowState.SUCCESS, WorkflowState.FAILED):
+                continue
+
+            await self._execute_workflow(wf_id)
+
+        return self._build_result()
+
+    async def _execute_parallel(self) -> OrchestrationResult:
+        """Execute workflows in parallel with concurrency limit."""
+        self._semaphore = asyncio.Semaphore(self.max_concurrent)
+
+        tasks = [
+            self._execute_workflow_with_semaphore(wf_id)
+            for wf_id in self._workflows.keys()
+        ]
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return self._build_result()
+
+    async def _execute_dag(self) -> OrchestrationResult:
+        """Execute workflows respecting DAG dependencies."""
+        self._semaphore = asyncio.Semaphore(self.max_concurrent)
+
+        while True:
+            ready = self._get_ready_workflows()
+            if not ready:
+                break
+
+            tasks = [
+                self._execute_workflow_with_semaphore(wf_id)
+                for wf_id in ready
+            ]
+
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            await asyncio.sleep(0.1)
+
+        return self._build_result()
+
+    def _get_ready_workflows(self) -> List[str]:
+        """Get workflows that are ready to execute."""
+        ready: List[str] = []
+
+        for wf_id, definition in self._workflows.items():
+            execution = self._executions[wf_id]
+            if execution.state != WorkflowState.PENDING:
+                continue
+
+            deps_satisfied = True
+            for dep in definition.dependencies:
+                dep_exec = self._executions.get(dep.workflow_id)
+                if not dep_exec or dep_exec.state not in dep.required_states:
+                    deps_satisfied = False
+                    break
+
+            if deps_satisfied:
+                ready.append(wf_id)
+
+        return ready
+
+    async def _execute_workflow_with_semaphore(self, workflow_id: str) -> None:
+        """Execute workflow with semaphore control."""
+        if self._semaphore:
+            async with self._semaphore:
+                await self._execute_workflow(workflow_id)
+        else:
+            await self._execute_workflow(workflow_id)
+
+    async def _execute_workflow(self, workflow_id: str) -> None:
+        """Execute a single workflow."""
+        import time
+        execution = self._executions[workflow_id]
+        definition = execution.definition
+
+        execution.state = WorkflowState.RUNNING
+        execution.started_at = time.monotonic()
+        self._trigger_event("workflow_started", workflow_id)
+
+        for retry in range(definition.max_retries + 1):
+            try:
+                if asyncio.iscoroutinefunction(definition.func):
+                    result = await asyncio.wait_for(
+                        definition.func(*definition.args, **definition.kwargs),
+                        timeout=definition.timeout,
+                    )
+                else:
+                    result = definition.func(*definition.args, **definition.kwargs)
+
+                execution.state = WorkflowState.SUCCESS
+                execution.result = result
+                execution.completed_at = time.monotonic()
+                self._trigger_event("workflow_completed", workflow_id, result)
+                return
+
+            except Exception as e:
+                logger.warning(f"Workflow {workflow_id} attempt {retry + 1} failed: {e}")
+                execution.retry_count = retry + 1
+                execution.error = str(e)
+
+                if retry < definition.max_retries:
+                    execution.state = WorkflowState.WAITING
+                    await asyncio.sleep(2 ** retry)
+
+        execution.state = WorkflowState.FAILED
+        execution.completed_at = time.monotonic()
+        self._trigger_event("workflow_failed", workflow_id, execution.error)
+
+    def _trigger_event(self, event: str, *args: Any) -> None:
+        """Trigger event handlers."""
+        for handler in self._event_hooks.get(event, []):
+            try:
+                handler(*args)
+            except Exception as e:
+                logger.error(f"Event handler error for {event}: {e}")
+
+    def _build_result(self) -> OrchestrationResult:
+        """Build orchestration result from executions."""
+        completed = sum(
+            1 for e in self._executions.values()
+            if e.state in (WorkflowState.SUCCESS, WorkflowState.FAILED, WorkflowState.CANCELLED)
+        )
+        failed = sum(
+            1 for e in self._executions.values()
+            if e.state == WorkflowState.FAILED
+        )
+        cancelled = sum(
+            1 for e in self._executions.values()
+            if e.state == WorkflowState.CANCELLED
+        )
+
+        return OrchestrationResult(
+            success=failed == 0,
+            total_workflows=len(self._workflows),
+            completed=completed,
+            failed=failed,
+            cancelled=cancelled,
+            executions=self._executions.copy(),
+        )
+
+    def cancel_workflow(self, workflow_id: str) -> bool:
+        """Cancel a running workflow."""
+        execution = self._executions.get(workflow_id)
+        if execution and execution.state == WorkflowState.RUNNING:
+            execution.state = WorkflowState.CANCELLED
+            return True
+        return False
+
+    def reset(self) -> None:
+        """Reset all workflow executions to pending state."""
+        for wf_id, execution in self._executions.items():
+            execution.state = WorkflowState.PENDING
+            execution.result = None
+            execution.error = None
+            execution.retry_count = 0
