@@ -1,299 +1,188 @@
-"""
-Data Export Action Module.
+"""Data Export Action Module.
 
-Provides data export capabilities for various formats
-including CSV, JSON, XML, and Excel.
+Provides data export to multiple formats:
+JSON, CSV, XML, with schema support.
 """
+from __future__ import annotations
 
-from typing import Any, BinaryIO, Dict, List, Optional, TextIO
+import csv
+import json
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-import asyncio
-import csv
-import io
-import json
+from io import StringIO
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Union
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 class ExportFormat(Enum):
-    """Export formats."""
-    CSV = "csv"
+    """Export format."""
     JSON = "json"
+    JSON_LINES = "jsonl"
+    CSV = "csv"
     XML = "xml"
     TSV = "tsv"
-    Excel = "xlsx"
 
 
 @dataclass
 class ExportConfig:
     """Export configuration."""
-    format: ExportFormat
+    format: ExportFormat = ExportFormat.JSON
+    indent: int = 2
     include_headers: bool = True
-    delimiter: str = ","
-    quote_char: str = '"'
+    date_format: str = "%Y-%m-%dT%H:%M:%S"
     encoding: str = "utf-8"
-    pretty_print: bool = False
 
 
-@dataclass
-class ExportResult:
-    """Result of export operation."""
-    success: bool
-    format: ExportFormat
-    row_count: int
-    byte_count: int
-    output: Optional[str] = None
-    error: Optional[str] = None
+class DataExportAction:
+    """Data exporter to multiple formats.
 
+    Example:
+        exporter = DataExportAction()
 
-class CSVExporter:
-    """Exports data to CSV format."""
+        json_output = exporter.export(data, ExportFormat.JSON)
+        csv_output = exporter.export(data, ExportFormat.CSV)
 
-    def __init__(self, config: ExportConfig):
-        self.config = config
+        await exporter.export_to_file(data, "output.csv")
+    """
 
-    def export(self, data: List[Dict[str, Any]]) -> ExportResult:
-        """Export data to CSV."""
-        try:
-            if not data:
-                return ExportResult(
-                    success=True,
-                    format=ExportFormat.CSV,
-                    row_count=0,
-                    byte_count=0,
-                    output=""
-                )
+    def __init__(self, config: Optional[ExportConfig] = None) -> None:
+        self.config = config or ExportConfig()
 
-            output = io.StringIO()
-            fieldnames = list(data[0].keys())
+    def export(
+        self,
+        data: Any,
+        format: Optional[ExportFormat] = None,
+    ) -> str:
+        """Export data to string.
 
-            writer = csv.DictWriter(
-                output,
-                fieldnames=fieldnames,
-                delimiter=self.config.delimiter,
-                quotechar=self.config.quote_char
-            )
+        Args:
+            data: Data to export
+            format: Export format
 
-            if self.config.include_headers:
-                writer.writeheader()
+        Returns:
+            Exported string
+        """
+        format = format or self.config.format
 
-            for row in data:
+        if format == ExportFormat.JSON:
+            return self._export_json(data)
+        elif format == ExportFormat.JSON_LINES:
+            return self._export_jsonl(data)
+        elif format == ExportFormat.CSV:
+            return self._export_csv(data)
+        elif format == ExportFormat.XML:
+            return self._export_xml(data)
+        elif format == ExportFormat.TSV:
+            return self._export_tsv(data)
+
+        return str(data)
+
+    async def export_to_file(
+        self,
+        data: Any,
+        filepath: str,
+        format: Optional[ExportFormat] = None,
+    ) -> None:
+        """Export data to file.
+
+        Args:
+            data: Data to export
+            filepath: Output file path
+            format: Export format
+        """
+        content = self.export(data, format)
+        output = Path(filepath)
+
+        output.write_text(content, encoding=self.config.encoding)
+
+    def _export_json(self, data: Any) -> str:
+        """Export to JSON."""
+        return json.dumps(
+            data,
+            indent=self.config.indent,
+            default=self._json_default,
+            ensure_ascii=False,
+        )
+
+    def _export_jsonl(self, data: Any) -> str:
+        """Export to JSON Lines."""
+        if isinstance(data, list):
+            return "\n".join(json.dumps(item, default=self._json_default) for item in data)
+        return json.dumps(data, default=self._json_default)
+
+    def _export_csv(self, data: Any) -> str:
+        """Export to CSV."""
+        if not isinstance(data, list):
+            data = [data]
+
+        if not data:
+            return ""
+
+        output = StringIO()
+        headers = list(data[0].keys()) if isinstance(data[0], dict) else []
+
+        if self.config.include_headers and headers:
+            writer = csv.DictWriter(output, fieldnames=headers)
+            writer.writeheader()
+
+        writer = csv.DictWriter(output, fieldnames=headers)
+        for row in data:
+            if isinstance(row, dict):
                 writer.writerow(row)
 
-            csv_content = output.getvalue()
-            return ExportResult(
-                success=True,
-                format=ExportFormat.CSV,
-                row_count=len(data),
-                byte_count=len(csv_content.encode(self.config.encoding)),
-                output=csv_content
-            )
+        return output.getvalue()
 
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                format=ExportFormat.CSV,
-                row_count=0,
-                byte_count=0,
-                error=str(e)
-            )
+    def _export_xml(self, data: Any) -> str:
+        """Export to XML."""
+        root = ET.Element("root")
+        self._dict_to_xml(data, root)
+        return ET.tostring(root, encoding="unicode")
 
-
-class JSONExporter:
-    """Exports data to JSON format."""
-
-    def __init__(self, config: ExportConfig):
-        self.config = config
-
-    def export(self, data: List[Dict[str, Any]]) -> ExportResult:
-        """Export data to JSON."""
-        try:
-            if self.config.pretty_print:
-                json_content = json.dumps(data, indent=2, ensure_ascii=False)
-            else:
-                json_content = json.dumps(data, ensure_ascii=False)
-
-            return ExportResult(
-                success=True,
-                format=ExportFormat.JSON,
-                row_count=len(data),
-                byte_count=len(json_content.encode(self.config.encoding)),
-                output=json_content
-            )
-
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                format=ExportFormat.JSON,
-                row_count=0,
-                byte_count=0,
-                error=str(e)
-            )
-
-
-class XMLExporter:
-    """Exports data to XML format."""
-
-    def __init__(self, config: ExportConfig):
-        self.config = config
-
-    def _dict_to_xml(self, data: Dict[str, Any], root: str = "record") -> str:
-        """Convert dict to XML."""
-        lines = [f"<{root}>"]
-
-        for key, value in data.items():
-            safe_key = str(key).replace(" ", "_")
-            if isinstance(value, dict):
-                lines.append(f"  <{safe_key}>")
-                for k, v in value.items():
-                    lines.append(f"    <{k}>{self._escape_xml(str(v))}</{k}>")
-                lines.append(f"  </{safe_key}>")
-            elif isinstance(value, list):
-                for item in value:
-                    lines.append(f"  <{safe_key}>{self._escape_xml(str(item))}</{safe_key}>")
-            else:
-                lines.append(f"  <{safe_key}>{self._escape_xml(str(value))}</{safe_key}>")
-
-        lines.append(f"</{root}>")
-        return "\n".join(lines)
-
-    def _escape_xml(self, text: str) -> str:
-        """Escape XML special characters."""
-        return (text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&apos;"))
-
-    def export(self, data: List[Dict[str, Any]]) -> ExportResult:
-        """Export data to XML."""
-        try:
-            lines = ['<?xml version="1.0" encoding="UTF-8"?>']
-            lines.append("<data>")
-
-            for record in data:
-                lines.append(self._dict_to_xml(record))
-
-            lines.append("</data>")
-            xml_content = "\n".join(lines)
-
-            return ExportResult(
-                success=True,
-                format=ExportFormat.XML,
-                row_count=len(data),
-                byte_count=len(xml_content.encode(self.config.encoding)),
-                output=xml_content
-            )
-
-        except Exception as e:
-            return ExportResult(
-                success=False,
-                format=ExportFormat.XML,
-                row_count=0,
-                byte_count=0,
-                error=str(e)
-            )
-
-
-class DataExporter:
-    """Main export orchestrator."""
-
-    def __init__(self, config: ExportConfig):
-        self.config = config
-
-    def export(self, data: List[Dict[str, Any]]) -> ExportResult:
-        """Export data based on format."""
-        if self.config.format == ExportFormat.CSV:
-            exporter = CSVExporter(self.config)
-        elif self.config.format == ExportFormat.JSON:
-            exporter = JSONExporter(self.config)
-        elif self.config.format == ExportFormat.XML:
-            exporter = XMLExporter(self.config)
+    def _dict_to_xml(self, data: Any, parent: ET.Element) -> None:
+        """Convert dict to XML element."""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                child = ET.SubElement(parent, str(key))
+                self._dict_to_xml(value, child)
+        elif isinstance(data, list):
+            for item in data:
+                child = ET.SubElement(parent, "item")
+                self._dict_to_xml(item, child)
         else:
-            return ExportResult(
-                success=False,
-                format=self.config.format,
-                row_count=0,
-                byte_count=0,
-                error=f"Unsupported format: {self.config.format}"
-            )
+            parent.text = str(data)
 
-        return exporter.export(data)
+    def _export_tsv(self, data: Any) -> str:
+        """Export to TSV."""
+        if not isinstance(data, list):
+            data = [data]
 
-    def export_to_file(
-        self,
-        data: List[Dict[str, Any]],
-        file_path: str
-    ) -> ExportResult:
-        """Export data to file."""
-        result = self.export(data)
+        if not data:
+            return ""
 
-        if result.success and result.output:
-            with open(file_path, "w", encoding=self.config.encoding) as f:
-                f.write(result.output)
+        output = StringIO()
+        headers = list(data[0].keys()) if isinstance(data[0], dict) else []
 
-        return result
+        if self.config.include_headers and headers:
+            output.write("\t".join(headers) + "\n")
 
+        for row in data:
+            if isinstance(row, dict):
+                values = [str(row.get(h, "")) for h in headers]
+                output.write("\t".join(values) + "\n")
 
-class StreamingExporter:
-    """Exports data in streaming fashion for large datasets."""
+        return output.getvalue()
 
-    def __init__(self, config: ExportConfig):
-        self.config = config
-        self._buffer = io.StringIO()
-        self._row_count = 0
-        self._written = False
+    def _json_default(self, obj: Any) -> str:
+        """JSON serializer for non-serializable objects."""
+        if isinstance(obj, datetime):
+            return obj.strftime(self.config.date_format)
 
-    def write_header(self, fields: List[str]):
-        """Write header row."""
-        if self.config.include_headers:
-            writer = csv.writer(
-                self._buffer,
-                delimiter=self.config.delimiter,
-                quotechar=self.config.quote_char
-            )
-            writer.writerow(fields)
-            self._row_count += 1
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__
 
-    def write_row(self, row: Dict[str, Any]):
-        """Write a single row."""
-        if not self._written:
-            self.write_header(list(row.keys()))
-            self._written = True
-
-        writer = csv.writer(
-            self._buffer,
-            delimiter=self.config.delimiter,
-            quotechar=self.config.quote_char
-        )
-        writer.writerow(list(row.values()))
-        self._row_count += 1
-
-    def flush(self) -> str:
-        """Get exported content."""
-        return self._buffer.getvalue()
-
-
-def main():
-    """Demonstrate data export."""
-    data = [
-        {"name": "Alice", "age": 30, "city": "NYC"},
-        {"name": "Bob", "age": 25, "city": "LA"},
-        {"name": "Charlie", "age": 35, "city": "Chicago"},
-    ]
-
-    config = ExportConfig(format=ExportFormat.CSV, include_headers=True)
-    exporter = DataExporter(config)
-
-    result = exporter.export(data)
-    print(f"Export success: {result.success}")
-    print(f"Rows: {result.row_count}")
-    print(f"Content:\n{result.output}")
-
-
-if __name__ == "__main__":
-    main()
+        return str(obj)
