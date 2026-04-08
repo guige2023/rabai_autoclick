@@ -1,20 +1,15 @@
-"""Cache manager action module for RabAI AutoClick.
+"""Cache action module for RabAI AutoClick.
 
-Provides caching operations:
-- CacheGetAction: Get cached value
-- CacheSetAction: Set cached value
-- CacheDeleteAction: Delete cached value
-- CacheStatsAction: Get cache statistics
+Provides caching utilities:
+- LRUCache: LRU cache implementation
+- TTLCache: TTL-based cache
+- CacheManager: Manage multiple caches
 """
 
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import threading
 import time
 import uuid
-import hashlib
-from typing import Any, Callable, Dict, List, Optional
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-
 
 import sys
 import os
@@ -24,58 +19,133 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class CacheEntry:
-    """Represents a cache entry."""
-    key: str
-    value: Any
-    created_at: datetime
-    accessed_at: datetime
-    ttl_seconds: Optional[float] = None
-    access_count: int = 0
-    hit_count: int = 0
+class LRUCache:
+    """LRU (Least Recently Used) cache."""
 
-
-class CacheManager:
-    """Thread-safe in-memory cache manager."""
-    def __init__(self, max_size: int = 1000):
-        self._cache: Dict[str, CacheEntry] = {}
-        self._max_size = max_size
+    def __init__(self, max_size: int = 100):
+        self.max_size = max_size
+        self._cache: Dict[str, Any] = {}
+        self._access_order: List[str] = []
         self._lock = threading.RLock()
         self._hits = 0
         self._misses = 0
 
     def get(self, key: str) -> Optional[Any]:
+        """Get value from cache."""
         with self._lock:
             if key in self._cache:
-                entry = self._cache[key]
-                if entry.ttl_seconds:
-                    age = (datetime.utcnow() - entry.created_at).total_seconds()
-                    if age > entry.ttl_seconds:
-                        del self._cache[key]
-                        self._misses += 1
-                        return None
-                entry.accessed_at = datetime.utcnow()
-                entry.access_count += 1
-                entry.hit_count += 1
                 self._hits += 1
-                return entry.value
+                self._access_order.remove(key)
+                self._access_order.append(key)
+                return self._cache[key]
             self._misses += 1
             return None
 
-    def set(self, key: str, value: Any, ttl_seconds: Optional[float] = None) -> None:
+    def put(self, key: str, value: Any) -> None:
+        """Put value in cache."""
         with self._lock:
-            if len(self._cache) >= self._max_size and key not in self._cache:
-                self._evict_lru()
-            self._cache[key] = CacheEntry(
-                key=key,
-                value=value,
-                created_at=datetime.utcnow(),
-                accessed_at=datetime.utcnow(),
-                ttl_seconds=ttl_seconds
-            )
+            if key in self._cache:
+                self._access_order.remove(key)
+            elif len(self._cache) >= self.max_size:
+                oldest = self._access_order.pop(0)
+                del self._cache[oldest]
+
+            self._cache[key] = value
+            self._access_order.append(key)
+
+    def has(self, key: str) -> bool:
+        """Check if key exists."""
+        with self._lock:
+            return key in self._cache
 
     def delete(self, key: str) -> bool:
+        """Delete a key."""
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                self._access_order.remove(key)
+                return True
+            return False
+
+    def clear(self) -> None:
+        """Clear cache."""
+        with self._lock:
+            self._cache.clear()
+            self._access_order.clear()
+
+    def size(self) -> int:
+        """Get cache size."""
+        with self._lock:
+            return len(self._cache)
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        with self._lock:
+            total = self._hits + self._misses
+            hit_rate = self._hits / total if total > 0 else 0.0
+            return {
+                "size": len(self._cache),
+                "max_size": self.max_size,
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": hit_rate,
+            }
+
+
+class TTLCache:
+    """TTL (Time To Live) cache."""
+
+    def __init__(self, ttl: float = 300.0, max_size: int = 100):
+        self.ttl = ttl
+        self.max_size = max_size
+        self._cache: Dict[str, Tuple[Any, float]] = {}
+        self._lock = threading.RLock()
+        self._hits = 0
+        self._misses = 0
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache."""
+        with self._lock:
+            if key not in self._cache:
+                self._misses += 1
+                return None
+
+            value, expires_at = self._cache[key]
+
+            if time.time() > expires_at:
+                del self._cache[key]
+                self._misses += 1
+                return None
+
+            self._hits += 1
+            return value
+
+    def put(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
+        """Put value in cache."""
+        with self._lock:
+            self._cleanup_expired()
+
+            if len(self._cache) >= self.max_size:
+                first_key = next(iter(self._cache))
+                del self._cache[first_key]
+
+            ttl = ttl or self.ttl
+            expires_at = time.time() + ttl
+            self._cache[key] = (value, expires_at)
+
+    def has(self, key: str) -> bool:
+        """Check if key exists and is valid."""
+        with self._lock:
+            if key not in self._cache:
+                return False
+            _, expires_at = self._cache[key]
+            if time.time() > expires_at:
+                del self._cache[key]
+                return False
+            return True
+
+    def delete(self, key: str) -> bool:
+        """Delete a key."""
         with self._lock:
             if key in self._cache:
                 del self._cache[key]
@@ -83,154 +153,210 @@ class CacheManager:
             return False
 
     def clear(self) -> None:
+        """Clear cache."""
         with self._lock:
             self._cache.clear()
-            self._hits = 0
-            self._misses = 0
 
-    def _evict_lru(self) -> None:
-        if not self._cache:
-            return
-        lru_key = min(self._cache.keys(), key=lambda k: self._cache[k].accessed_at)
-        del self._cache[lru_key]
+    def size(self) -> int:
+        """Get cache size."""
+        with self._lock:
+            self._cleanup_expired()
+            return len(self._cache)
+
+    def _cleanup_expired(self) -> None:
+        """Remove expired entries."""
+        now = time.time()
+        expired = [k for k, (_, exp) in self._cache.items() if now > exp]
+        for k in expired:
+            del self._cache[k]
 
     def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
         with self._lock:
+            self._cleanup_expired()
             total = self._hits + self._misses
             hit_rate = self._hits / total if total > 0 else 0.0
             return {
                 "size": len(self._cache),
-                "max_size": self._max_size,
+                "max_size": self.max_size,
+                "ttl": self.ttl,
                 "hits": self._hits,
                 "misses": self._misses,
                 "hit_rate": hit_rate,
-                "total_requests": total
             }
 
-    def get_keys(self, pattern: Optional[str] = None) -> List[str]:
+
+class CacheManager:
+    """Manage multiple caches."""
+
+    def __init__(self):
+        self._caches: Dict[str, Any] = {}
+        self._lock = threading.RLock()
+
+    def create_lru(self, name: str, max_size: int = 100) -> LRUCache:
+        """Create LRU cache."""
         with self._lock:
-            keys = list(self._cache.keys())
-            if pattern:
-                import fnmatch
-                keys = fnmatch.filter(keys, pattern)
-            return keys
+            cache = LRUCache(max_size)
+            self._caches[name] = cache
+            return cache
+
+    def create_ttl(self, name: str, ttl: float = 300.0, max_size: int = 100) -> TTLCache:
+        """Create TTL cache."""
+        with self._lock:
+            cache = TTLCache(ttl, max_size)
+            self._caches[name] = cache
+            return cache
+
+    def get_cache(self, name: str) -> Optional[Any]:
+        """Get a cache."""
+        with self._lock:
+            return self._caches.get(name)
+
+    def delete_cache(self, name: str) -> bool:
+        """Delete a cache."""
+        with self._lock:
+            if name in self._caches:
+                del self._caches[name]
+                return True
+            return False
+
+    def list_caches(self) -> List[str]:
+        """List all caches."""
+        with self._lock:
+            return list(self._caches.keys())
 
 
-_cache = CacheManager()
+class CacheAction(BaseAction):
+    """Cache action."""
+    action_type = "cache"
+    display_name = "缓存管理"
+    description = "LRU和TTL缓存"
 
-
-class CacheGetAction(BaseAction):
-    """Get a value from cache."""
-    action_type = "cache_get"
-    display_name = "缓存获取"
-    description = "从缓存获取值"
+    def __init__(self):
+        super().__init__()
+        self._manager = CacheManager()
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            key = params.get("key", "")
-            default = params.get("default", None)
+            operation = params.get("operation", "get")
 
-            if not key:
-                return ActionResult(success=False, message="key is required")
-
-            value = _cache.get(key)
-            if value is not None:
-                return ActionResult(
-                    success=True,
-                    message=f"Cache hit for '{key}'",
-                    data={"key": key, "value": value, "hit": True}
-                )
+            if operation == "create_lru":
+                return self._create_lru(params)
+            elif operation == "create_ttl":
+                return self._create_ttl(params)
+            elif operation == "get":
+                return self._get(params)
+            elif operation == "put":
+                return self._put(params)
+            elif operation == "delete":
+                return self._delete(params)
+            elif operation == "clear":
+                return self._clear(params)
+            elif operation == "stats":
+                return self._stats(params)
+            elif operation == "list":
+                return self._list_caches()
             else:
-                return ActionResult(
-                    success=True,
-                    message=f"Cache miss for '{key}'",
-                    data={"key": key, "value": default, "hit": False}
-                )
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Cache get failed: {str(e)}")
+            return ActionResult(success=False, message=f"Cache error: {str(e)}")
 
+    def _create_lru(self, params: Dict[str, Any]) -> ActionResult:
+        """Create LRU cache."""
+        name = params.get("name", "default")
+        max_size = params.get("max_size", 100)
 
-class CacheSetAction(BaseAction):
-    """Set a value in cache."""
-    action_type = "cache_set"
-    display_name = "缓存设置"
-    description = "设置缓存值"
+        cache = self._manager.create_lru(name, max_size)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            key = params.get("key", "")
-            value = params.get("value", None)
-            ttl_seconds = params.get("ttl_seconds", None)
-            if_exists = params.get("if_exists", False)
+        return ActionResult(success=True, message=f"LRU cache created: {name}", data={"name": name})
 
-            if not key:
-                return ActionResult(success=False, message="key is required")
+    def _create_ttl(self, params: Dict[str, Any]) -> ActionResult:
+        """Create TTL cache."""
+        name = params.get("name", "default")
+        ttl = params.get("ttl", 300.0)
+        max_size = params.get("max_size", 100)
 
-            if if_exists and _cache.get(key) is None:
-                return ActionResult(success=False, message=f"Key '{key}' does not exist")
+        cache = self._manager.create_ttl(name, ttl, max_size)
 
-            _cache.set(key, value, ttl_seconds=ttl_seconds)
+        return ActionResult(success=True, message=f"TTL cache created: {name}", data={"name": name})
 
-            return ActionResult(
-                success=True,
-                message=f"Cache set for '{key}'" + (f" (TTL: {ttl_seconds}s)" if ttl_seconds else ""),
-                data={"key": key, "ttl_seconds": ttl_seconds}
-            )
+    def _get(self, params: Dict[str, Any]) -> ActionResult:
+        """Get from cache."""
+        cache_name = params.get("cache_name", "default")
+        key = params.get("key")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache set failed: {str(e)}")
+        if not key:
+            return ActionResult(success=False, message="key is required")
 
+        cache = self._manager.get_cache(cache_name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache not found: {cache_name}")
 
-class CacheDeleteAction(BaseAction):
-    """Delete a value from cache."""
-    action_type = "cache_delete"
-    display_name = "缓存删除"
-    description = "删除缓存值"
+        value = cache.get(key)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            key = params.get("key", "")
-            pattern = params.get("pattern", None)
+        return ActionResult(success=value is not None, message="Found" if value is not None else "Not found", data={"key": key, "value": value})
 
-            if not key and not pattern:
-                return ActionResult(success=False, message="key or pattern is required")
+    def _put(self, params: Dict[str, Any]) -> ActionResult:
+        """Put into cache."""
+        cache_name = params.get("cache_name", "default")
+        key = params.get("key")
+        value = params.get("value")
+        ttl = params.get("ttl")
 
-            deleted = 0
-            if key:
-                if _cache.delete(key):
-                    deleted = 1
-            if pattern:
-                keys = _cache.get_keys(pattern=pattern)
-                for k in keys:
-                    if _cache.delete(k):
-                        deleted += 1
+        if not key:
+            return ActionResult(success=False, message="key is required")
 
-            return ActionResult(
-                success=True,
-                message=f"Deleted {deleted} cache entries",
-                data={"deleted": deleted}
-            )
+        cache = self._manager.get_cache(cache_name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache not found: {cache_name}")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache delete failed: {str(e)}")
+        cache.put(key, value, ttl)
 
+        return ActionResult(success=True, message=f"Cached: {key}")
 
-class CacheStatsAction(BaseAction):
-    """Get cache statistics."""
-    action_type = "cache_stats"
-    display_name = "缓存统计"
-    description = "获取缓存统计"
+    def _delete(self, params: Dict[str, Any]) -> ActionResult:
+        """Delete from cache."""
+        cache_name = params.get("cache_name", "default")
+        key = params.get("key")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            stats = _cache.get_stats()
-            keys = _cache.get_keys()
-            return ActionResult(
-                success=True,
-                message=f"Cache stats: {stats['size']} entries, {stats['hit_rate']:.2%} hit rate",
-                data={**stats, "keys": keys[:100]}
-            )
+        if not key:
+            return ActionResult(success=False, message="key is required")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache stats failed: {str(e)}")
+        cache = self._manager.get_cache(cache_name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache not found: {cache_name}")
+
+        success = cache.delete(key)
+
+        return ActionResult(success=success, message="Deleted" if success else "Key not found")
+
+    def _clear(self, params: Dict[str, Any]) -> ActionResult:
+        """Clear cache."""
+        cache_name = params.get("cache_name", "default")
+
+        cache = self._manager.get_cache(cache_name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache not found: {cache_name}")
+
+        cache.clear()
+
+        return ActionResult(success=True, message=f"Cache cleared: {cache_name}")
+
+    def _stats(self, params: Dict[str, Any]) -> ActionResult:
+        """Get cache stats."""
+        cache_name = params.get("cache_name", "default")
+
+        cache = self._manager.get_cache(cache_name)
+        if not cache:
+            return ActionResult(success=False, message=f"Cache not found: {cache_name}")
+
+        stats = cache.get_stats()
+
+        return ActionResult(success=True, message="Stats retrieved", data={"name": cache_name, "stats": stats})
+
+    def _list_caches(self) -> ActionResult:
+        """List all caches."""
+        caches = self._manager.list_caches()
+
+        return ActionResult(success=True, message=f"{len(caches)} caches", data={"caches": caches})
