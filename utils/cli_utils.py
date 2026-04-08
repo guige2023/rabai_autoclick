@@ -1,368 +1,224 @@
-"""CLI utilities for RabAI AutoClick.
+"""CLI utilities for building command-line interfaces to automation tools.
 
-Provides:
-- Command-line interface helpers
-- Input validation
-- Progress display
+Provides argument parsing, command registration, and
+interactive prompt helpers for creating CLI tools around
+automation workflows.
+
+Example:
+    >>> from utils.cli_utils import CLI, command, argument
+    >>> cli = CLI('autoclick')
+    >>> @cli.command()
+    ... @argument('--x', type=int)
+    ... def click(args):
+    ...     click_at(args.x, args.y)
+    >>> cli.run()
 """
 
+from __future__ import annotations
+
+import argparse
 import sys
-import getpass
-from typing import Any, Callable, List, Optional
+from typing import Callable, Optional
+
+__all__ = [
+    "CLI",
+    "command",
+    "argument",
+    "prompt",
+    "confirm",
+    "choose",
+    "CLIError",
+]
 
 
-def print_info(message: str) -> None:
-    """Print info message.
+class CLIError(Exception):
+    """Raised when CLI operations fail."""
+    pass
+
+
+# Global argument parser for decorators
+_argument_stack: list = []
+
+
+def argument(*args, **kwargs) -> Callable:
+    """Decorator to add arguments to a CLI command.
+
+    Example:
+        >>> @command()
+        ... @argument('--name', default='World')
+        ... def hello(args):
+        ...     print(f"Hello, {args.name}!")
+    """
+    def decorator(func: Callable) -> Callable:
+        if not hasattr(func, "_cli_args"):
+            func._cli_args = []
+        func._cli_args.insert(0, (args, kwargs))
+        return func
+    return decorator
+
+
+def prompt(message: str, default: Optional[str] = None, password: bool = False) -> str:
+    """Display a prompt and get user input.
 
     Args:
-        message: Message to print.
+        message: Prompt message.
+        default: Default value if user presses Enter.
+        password: If True, use getpass-style input.
+
+    Returns:
+        User input string.
     """
-    print(f"[INFO] {message}")
+    if default:
+        prompt_str = f"{message} [{default}]: "
+    else:
+        prompt_str = f"{message}: "
 
-
-def print_success(message: str) -> None:
-    """Print success message.
-
-    Args:
-        message: Message to print.
-    """
-    print(f"[SUCCESS] {message}")
-
-
-def print_warning(message: str) -> None:
-    """Print warning message.
-
-    Args:
-        message: Message to print.
-    """
-    print(f"[WARNING] {message}")
-
-
-def print_error(message: str) -> None:
-    """Print error message.
-
-    Args:
-        message: Message to print.
-    """
-    print(f"[ERROR] {message}")
-
-
-def print_debug(message: str) -> None:
-    """Print debug message.
-
-    Args:
-        message: Message to print.
-    """
-    print(f"[DEBUG] {message}")
+    try:
+        if password:
+            import getpass
+            return getpass.getpass(prompt_str) or (default or "")
+        else:
+            return input(prompt_str) or (default or "")
+    except (EOFError, KeyboardInterrupt):
+        return default or ""
 
 
 def confirm(message: str, default: bool = False) -> bool:
-    """Ask for confirmation.
+    """Ask a yes/no confirmation question.
 
     Args:
-        message: Prompt message.
-        default: Default value.
+        message: Question text.
+        default: Default answer if user presses Enter.
 
     Returns:
-        True if confirmed.
+        True if user answered yes.
     """
     suffix = " [Y/n]: " if default else " [y/N]: "
     while True:
-        response = input(message + suffix).lower().strip()
+        response = input(message + suffix).strip().lower()
         if not response:
             return default
-        if response in ('y', 'yes'):
+        if response in ("y", "yes"):
             return True
-        if response in ('n', 'no'):
+        if response in ("n", "no"):
             return False
-        print("Please enter 'y' or 'n'")
+        print("Please answer 'y' or 'n'")
 
 
-def prompt(message: str, default: str = None) -> str:
-    """Prompt for input.
-
-    Args:
-        message: Prompt message.
-        default: Default value.
-
-    Returns:
-        User input or default.
-    """
-    if default:
-        response = input(f"{message} [{default}]: ").strip()
-        return response or default
-    return input(f"{message}: ").strip()
-
-
-def prompt_password(message: str) -> str:
-    """Prompt for password input.
+def choose(message: str, options: list[str], default: Optional[int] = None) -> str:
+    """Ask user to choose from a list of options.
 
     Args:
         message: Prompt message.
+        options: List of option strings.
+        default: Default option index if user presses Enter.
 
     Returns:
-        Password input.
+        Selected option string.
     """
-    return getpass.getpass(f"{message}: ")
+    if not options:
+        raise CLIError("No options provided")
 
-
-def prompt_choices(message: str, choices: List[str], default: int = 0) -> str:
-    """Prompt user to choose from list.
-
-    Args:
-        message: Prompt message.
-        choices: List of choices.
-        default: Default choice index.
-
-    Returns:
-        Selected choice.
-    """
     print(message)
-    for i, choice in enumerate(choices):
-        marker = "*" if i == default else " "
-        print(f"  {marker} {i + 1}. {choice}")
+    for i, opt in enumerate(options, 1):
+        marker = "*" if default is not None and default == i - 1 else " "
+        print(f"  {marker} {i}. {opt}")
+
     while True:
         try:
-            response = input("Enter choice number: ").strip()
-            if not response:
-                return choices[default]
-            index = int(response) - 1
-            if 0 <= index < len(choices):
-                return choices[index]
-            print(f"Please enter a number between 1 and {len(choices)}")
+            response = input("Choice: ").strip()
+            if not response and default is not None:
+                return options[default]
+            idx = int(response) - 1
+            if 0 <= idx < len(options):
+                return options[idx]
+            print(f"Please enter a number between 1 and {len(options)}")
         except ValueError:
             print("Please enter a valid number")
 
 
-def print_progress_bar(iteration: int, total: int, prefix: str = "", length: int = 50, fill: str = "█") -> None:
-    """Print progress bar.
+class CLI:
+    """A command-line interface builder.
 
-    Args:
-        iteration: Current iteration.
-        total: Total iterations.
-        prefix: Prefix string.
-        length: Bar length.
-        fill: Fill character.
+    Example:
+        >>> cli = CLI('mytool', description='My automation tool')
+        >>> @cli.command('greet')
+        ... @argument('--name', default='World')
+        ... def greet(args):
+        ...     print(f"Hello, {args.name}!")
+        >>> cli.run()
     """
-    percent = f"{100 * (iteration / float(total)):.1f}"
-    filled_length = int(length * iteration // total)
-    bar = fill * filled_length + '-' * (length - filled_length)
-    print(f"\r{prefix} |{bar}| {percent}% Complete", end='\r')
-    if iteration == total:
-        print()
 
+    def __init__(
+        self,
+        name: str = "cli",
+        description: str = "",
+        version: Optional[str] = None,
+    ):
+        self.name = name
+        self.description = description
+        self.version = version
+        self._commands: dict[str, Callable] = {}
+        self._parser = argparse.ArgumentParser(
+            description=description,
+            prog=name,
+        )
 
-def print_table(headers: List[str], rows: List[List[Any]]) -> None:
-    """Print data as table.
+        if version:
+            self._parser.add_argument("--version", action="version", version=version)
 
-    Args:
-        headers: Column headers.
-        rows: Data rows.
-    """
-    col_widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            col_widths[i] = max(col_widths[i], len(str(cell)))
+        self._subparsers = self._parser.add_subparsers(dest="command")
 
-    def format_row(cells):
-        return " | ".join(str(cell).ljust(width) for cell, width in zip(cells, col_widths))
+    def command(self, name: Optional[str] = None) -> Callable:
+        """Decorator to register a command.
 
-    separator = "-+-".join("-" * width for width in col_widths)
-    print(separator)
-    print(format_row(headers))
-    print(separator)
-    for row in rows:
-        print(format_row(row))
-    print(separator)
+        Args:
+            name: Command name (uses function name if None).
 
+        Returns:
+            Decorator function.
+        """
+        def decorator(fn: Callable) -> Callable:
+            cmd_name = name or fn.__name__
+            self._commands[cmd_name] = fn
 
-def clear_screen() -> None:
-    """Clear the terminal screen."""
-    import os
-    os.system('cls' if os.name == 'nt' else 'clear')
+            cmd_parser = self._subparsers.add_parser(
+                cmd_name,
+                help=fn.__doc__ or "",
+            )
 
+            # Add arguments from decorators
+            args = getattr(fn, "_cli_args", [])
+            for arg_args, arg_kwargs in args:
+                cmd_parser.add_argument(*arg_args, **arg_kwargs)
 
-def print_banner(text: str, width: int = 60) -> None:
-    """Print banner.
+            return fn
+        return decorator
 
-    Args:
-        text: Banner text.
-        width: Banner width.
-    """
-    print("=" * width)
-    print(text.center(width))
-    print("=" * width)
+    def run(self, argv: Optional[list[str]] = None) -> int:
+        """Run the CLI with the given arguments.
 
+        Args:
+            argv: Command line arguments (uses sys.argv if None).
 
-def print_header(text: str) -> None:
-    """Print section header.
+        Returns:
+            Exit code.
+        """
+        args = self._parser.parse_args(argv)
 
-    Args:
-        text: Header text.
-    """
-    print()
-    print(f"=== {text} ===")
-    print()
+        if args.command is None:
+            self._parser.print_help()
+            return 0
 
+        if args.command not in self._commands:
+            self._parser.print_help()
+            return 1
 
-def print_divider(char: str = "-", length: int = 60) -> None:
-    """Print divider line.
-
-    Args:
-        char: Divider character.
-        length: Divider length.
-    """
-    print(char * length)
-
-
-def get_input(prompt_text: str, validator: Callable[[str], Optional[str]] = None) -> str:
-    """Get validated input.
-
-    Args:
-        prompt_text: Prompt to show.
-        validator: Optional validator function that returns error message or None.
-
-    Returns:
-        Validated input.
-    """
-    while True:
-        response = input(prompt_text).strip()
-        if validator:
-            error = validator(response)
-            if error:
-                print(f"Error: {error}")
-                continue
-        return response
-
-
-def parse_args(args: List[str], spec: dict) -> dict:
-    """Parse command-line arguments.
-
-    Args:
-        args: Arguments list.
-        spec: Specification dict mapping flags to help text.
-
-    Returns:
-        Parsed arguments dict.
-    """
-    result = {}
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg.startswith('--'):
-            flag = arg[2:]
-            if flag in spec:
-                if '=' in flag:
-                    key, value = flag.split('=', 1)
-                    result[key] = value
-                else:
-                    if i + 1 < len(args) and not args[i + 1].startswith('--'):
-                        result[flag] = args[i + 1]
-                        i += 1
-                    else:
-                        result[flag] = True
-        i += 1
-    return result
-
-
-def is_interactive() -> bool:
-    """Check if running in interactive mode.
-
-    Returns:
-        True if interactive.
-    """
-    return sys.stdin.isatty()
-
-
-def beep() -> None:
-    """Play beep sound."""
-    import os
-    if os.name == 'nt':
-        import winsound
-        winsound.Beep(1000, 200)
-    else:
-        sys.stdout.write('\a')
-        sys.stdout.flush()
-
-
-def progress_callback(iteration: int, total: int, start_time: float = None) -> None:
-    """Print progress with elapsed time.
-
-    Args:
-        iteration: Current iteration.
-        total: Total iterations.
-        start_time: Start time from time.time().
-    """
-    import time
-    if start_time:
-        elapsed = time.time() - start_time
-        rate = iteration / elapsed if elapsed > 0 else 0
-        eta = (total - iteration) / rate if rate > 0 else 0
-        print(f"Progress: {iteration}/{total} ({100 * iteration / total:.1f}%) - Elapsed: {elapsed:.1f}s - ETA: {eta:.1f}s", end='\r')
-    else:
-        print_progress_bar(iteration, total)
-
-
-def multiline_input(prompt_text: str, terminator: str = ".") -> str:
-    """Get multiline input.
-
-    Args:
-        prompt_text: Initial prompt.
-        terminator: Line that ends input.
-
-    Returns:
-        Multiline input string.
-    """
-    print(prompt_text)
-    lines = []
-    while True:
-        line = input()
-        if line == terminator:
-            break
-        lines.append(line)
-    return '\n'.join(lines)
-
-
-def select_items(items: List[str], message: str = "Select items:", multi: bool = False) -> List[str]:
-    """Select items from list.
-
-    Args:
-        items: Items to select from.
-        message: Selection prompt.
-        multi: Allow multiple selections.
-
-    Returns:
-        Selected items.
-    """
-    print(message)
-    for i, item in enumerate(items):
-        print(f"  {i + 1}. {item}")
-    print("  0. Done")
-
-    selected = []
-    while True:
         try:
-            choice = input("Enter number: ").strip()
-            if not choice:
-                continue
-            num = int(choice)
-            if num == 0:
-                break
-            if 1 <= num <= len(items):
-                item = items[num - 1]
-                if multi:
-                    if item in selected:
-                        selected.remove(item)
-                        print(f"Deselected: {item}")
-                    else:
-                        selected.append(item)
-                        print(f"Selected: {item}")
-                else:
-                    selected = [item]
-                    break
-            else:
-                print(f"Invalid choice: {num}")
-        except ValueError:
-            print("Please enter a number")
-
-    return selected
+            result = self._commands[args.command](args)
+            return result if isinstance(result, int) else 0
+        except SystemExit as e:
+            return e.code if e.code is not None else 0
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
