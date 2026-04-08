@@ -1,321 +1,315 @@
 """Metrics collector action module for RabAI AutoClick.
 
-Provides metrics collection and aggregation for monitoring
-workflow and action performance with various output formats.
+Provides metrics collection with counters, gauges, histograms,
+and time series tracking for monitoring.
 """
 
 import time
-import statistics
 import sys
 import os
 from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from collections import defaultdict, deque
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
+class MetricType(Enum):
+    """Metric types."""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+    TIMER = "timer"
+
+
+from enum import Enum
+
+
+@dataclass
+class MetricValue:
+    """A single metric value."""
+    timestamp: float
+    value: float
+    labels: Dict[str, str] = field(default_factory=dict)
+
+
 class MetricsCollectorAction(BaseAction):
-    """Collect and aggregate performance metrics.
+    """Metrics collector action for monitoring and observability.
     
-    Collects timing, count, and error metrics from
-    action executions and aggregates them.
+    Supports counters, gauges, histograms, and timers with
+    configurable retention and aggregation.
     """
     action_type = "metrics_collector"
-    display_name = "指标收集"
-    description = "收集和聚合性能指标"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Collect or report metrics.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: operation (record|report|reset),
-                   metric_name, value, tags, aggregation_window.
-        
-        Returns:
-            ActionResult with metrics data.
-        """
-        operation = params.get('operation', 'record')
-        metric_name = params.get('metric_name', '')
-        value = params.get('value')
-        tags = params.get('tags', {})
-        window = params.get('aggregation_window', 'minute')
-        start_time = time.time()
-
-        if not hasattr(context, '_metrics'):
-            context._metrics = {}
-
-        if operation == 'record':
-            if metric_name not in context._metrics:
-                context._metrics[metric_name] = {
-                    'values': [],
-                    'tags': [],
-                    'timestamps': []
-                }
-
-            context._metrics[metric_name]['values'].append(value)
-            context._metrics[metric_name]['tags'].append(tags)
-            context._metrics[metric_name]['timestamps'].append(time.time())
-
-            return ActionResult(
-                success=True,
-                message=f"Recorded metric: {metric_name}",
-                data={
-                    'metric_name': metric_name,
-                    'value': value,
-                    'total_samples': len(context._metrics[metric_name]['values'])
-                }
-            )
-
-        elif operation == 'report':
-            if metric_name and metric_name in context._metrics:
-                return ActionResult(
-                    success=True,
-                    message=f"Metrics report for: {metric_name}",
-                    data=self._compute_metrics(metric_name, context._metrics[metric_name])
-                )
-            else:
-                all_metrics = {}
-                for name, data in context._metrics.items():
-                    all_metrics[name] = self._compute_metrics(name, data)
-                return ActionResult(
-                    success=True,
-                    message=f"Report for {len(all_metrics)} metrics",
-                    data={'metrics': all_metrics}
-                )
-
-        elif operation == 'reset':
-            if metric_name and metric_name in context._metrics:
-                del context._metrics[metric_name]
-            else:
-                context._metrics.clear()
-            return ActionResult(
-                success=True,
-                message=f"Reset metrics: {metric_name or 'all'}"
-            )
-
-        return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-    def _compute_metrics(self, name: str, data: Dict) -> Dict:
-        """Compute aggregated metrics."""
-        values = [v for v in data['values'] if isinstance(v, (int, float))]
-        if not values:
-            return {'metric_name': name, 'count': len(data['values']), 'numeric_count': 0}
-
-        sorted_vals = sorted(values)
-        return {
-            'metric_name': name,
-            'count': len(values),
-            'total_samples': len(data['values']),
-            'sum': round(sum(values), 4),
-            'mean': round(statistics.mean(values), 4),
-            'median': round(statistics.median(sorted_vals), 4),
-            'min': round(min(values), 4),
-            'max': round(max(values), 4),
-            'stdev': round(statistics.stdev(values), 4) if len(values) > 1 else 0,
-            'p95': round(sorted_vals[int(len(sorted_vals) * 0.95)], 4),
-            'p99': round(sorted_vals[int(len(sorted_vals) * 0.99)], 4),
-        }
-
-
-class TimerAction(BaseAction):
-    """Time the execution of actions or code blocks.
+    display_name = "指标收集器"
+    description = "监控指标收集与聚合"
     
-    Provides precise timing measurements with
-    start/stop/pause capabilities.
-    """
-    action_type = "timer"
-    display_name = "计时器"
-    description = "计时动作或代码块执行"
-
+    def __init__(self):
+        super().__init__()
+        self._metrics: Dict[str, Dict[str, Any]] = defaultdict(lambda: {'type': None, 'values': deque(maxlen=10000)})
+        self._lock = threading.RLock()
+        self._counters: Dict[str, float] = defaultdict(float)
+        self._gauges: Dict[str, float] = defaultdict(float)
+        self._histograms: Dict[str, List[float]] = defaultdict(list)
+        self._timers: Dict[str, List[float]] = defaultdict(list)
+    
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Control timer.
+        """Execute metrics operations.
         
         Args:
             context: Execution context.
-            params: Dict with keys: operation (start|stop|pause|resume|get),
-                   timer_name, lap.
+            params: Dict with keys:
+                operation: inc|dec|set|gauge|record|get|stats
+                name: Metric name
+                value: Metric value
+                labels: Metric labels.
         
         Returns:
-            ActionResult with timer result.
+            ActionResult with operation result.
         """
         operation = params.get('operation', 'get')
-        timer_name = params.get('timer_name', 'default')
-        start_time = time.time()
-
-        if not hasattr(context, '_timers'):
-            context._timers = {}
-
-        if timer_name not in context._timers:
-            context._timers[timer_name] = {
-                'start': None,
-                'elapsed': 0,
-                'running': False,
-                'laps': []
-            }
-
-        timer = context._timers[timer_name]
-
-        if operation == 'start':
-            timer['start'] = time.time()
-            timer['elapsed'] = 0
-            timer['running'] = True
-            timer['laps'] = []
-            return ActionResult(
-                success=True,
-                message=f"Timer '{timer_name}' started",
-                data={'timer_name': timer_name, 'running': True}
-            )
-
-        elif operation == 'stop':
-            if timer['running'] and timer['start']:
-                timer['elapsed'] += time.time() - timer['start']
-            timer['running'] = False
-            return ActionResult(
-                success=True,
-                message=f"Timer '{timer_name}' stopped",
-                data={
-                    'timer_name': timer_name,
-                    'elapsed_seconds': round(timer['elapsed'], 4),
-                    'laps': timer['laps']
-                }
-            )
-
-        elif operation == 'pause':
-            if timer['running'] and timer['start']:
-                timer['elapsed'] += time.time() - timer['start']
-                timer['running'] = False
-            return ActionResult(
-                success=True,
-                message=f"Timer '{timer_name}' paused",
-                data={'elapsed_seconds': round(timer['elapsed'], 4)}
-            )
-
-        elif operation == 'resume':
-            if not timer['running']:
-                timer['start'] = time.time()
-                timer['running'] = True
-            return ActionResult(
-                success=True,
-                message=f"Timer '{timer_name}' resumed",
-                data={'running': True}
-            )
-
-        elif operation == 'lap':
-            if timer['running'] and timer['start']:
-                lap_time = time.time() - timer['start']
-                timer['elapsed'] = lap_time
-                timer['laps'].append(lap_time)
-                return ActionResult(
-                    success=True,
-                    message=f"Lap {len(timer['laps'])}: {round(lap_time, 4)}s",
-                    data={
-                        'lap': len(timer['laps']),
-                        'lap_time': round(lap_time, 4),
-                        'total_elapsed': round(timer['elapsed'], 4)
-                    }
-                )
-
-        current_elapsed = timer['elapsed']
-        if timer['running'] and timer['start']:
-            current_elapsed = timer['elapsed'] + (time.time() - timer['start'])
-
-        return ActionResult(
-            success=True,
-            message=f"Timer '{timer_name}': {round(current_elapsed, 4)}s",
-            data={
-                'timer_name': timer_name,
-                'elapsed_seconds': round(current_elapsed, 4),
-                'running': timer['running'],
-                'lap_count': len(timer['laps'])
-            }
-        )
-
-
-class CounterAction(BaseAction):
-    """Increment and track counters.
-    
-    Provides atomic counter operations with
-    increment, decrement, and reset capabilities.
-    """
-    action_type = "counter"
-    display_name = "计数器"
-    description = "递增和跟踪计数器"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Operate on counter.
         
-        Args:
-            context: Execution context.
-            params: Dict with keys: operation (inc|dec|get|reset),
-                   counter_name, amount, max_value.
-        
-        Returns:
-            ActionResult with counter value.
-        """
-        operation = params.get('operation', 'get')
-        counter_name = params.get('counter_name', 'default')
-        amount = params.get('amount', 1)
-        max_value = params.get('max_value')
-        start_time = time.time()
-
-        if not hasattr(context, '_counters'):
-            context._counters = {}
-
-        if counter_name not in context._counters:
-            context._counters[counter_name] = {'count': 0, 'history': []}
-
-        counter = context._counters[counter_name]
-
         if operation == 'inc':
-            new_val = counter['count'] + amount
-            if max_value and new_val > max_value:
-                new_val = max_value
-            counter['count'] = new_val
-            counter['history'].append(new_val)
-            return ActionResult(
-                success=True,
-                message=f"Counter '{counter_name}': {new_val}",
-                data={'counter_name': counter_name, 'value': new_val}
-            )
-
+            return self._inc(params)
         elif operation == 'dec':
-            new_val = counter['count'] - amount
-            counter['count'] = max(0, new_val)
-            counter['history'].append(counter['count'])
-            return ActionResult(
-                success=True,
-                message=f"Counter '{counter_name}': {counter['count']}",
-                data={'counter_name': counter_name, 'value': counter['count']}
-            )
-
-        elif operation == 'reset':
-            counter['count'] = 0
-            counter['history'] = []
-            return ActionResult(
-                success=True,
-                message=f"Counter '{counter_name}' reset",
-                data={'counter_name': counter_name, 'value': 0}
-            )
-
+            return self._dec(params)
+        elif operation == 'set':
+            return self._set(params)
+        elif operation == 'gauge':
+            return self._gauge(params)
+        elif operation == 'record':
+            return self._record(params)
+        elif operation == 'get':
+            return self._get(params)
+        elif operation == 'stats':
+            return self._stats(params)
+        else:
+            return ActionResult(success=False, message=f"Unknown operation: {operation}")
+    
+    def _inc(self, params: Dict[str, Any]) -> ActionResult:
+        """Increment counter."""
+        name = params.get('name')
+        value = params.get('value', 1)
+        labels = params.get('labels', {})
+        
+        if not name:
+            return ActionResult(success=False, message="Metric name required")
+        
+        key = self._make_key(name, labels)
+        
+        with self._lock:
+            self._counters[key] += value
+            self._record_metric(name, MetricType.COUNTER, self._counters[key], labels)
+        
         return ActionResult(
             success=True,
-            message=f"Counter '{counter_name}': {counter['count']}",
-            data={
-                'counter_name': counter_name,
-                'value': counter['count'],
-                'history_length': len(counter['history'])
-            }
+            message=f"Incremented {name} by {value}",
+            data={'name': name, 'value': self._counters[key], 'labels': labels}
         )
+    
+    def _dec(self, params: Dict[str, Any]) -> ActionResult:
+        """Decrement counter."""
+        name = params.get('name')
+        value = params.get('value', 1)
+        labels = params.get('labels', {})
+        
+        if not name:
+            return ActionResult(success=False, message="Metric name required")
+        
+        key = self._make_key(name, labels)
+        
+        with self._lock:
+            self._counters[key] -= value
+            self._record_metric(name, MetricType.COUNTER, self._counters[key], labels)
+        
+        return ActionResult(
+            success=True,
+            message=f"Decremented {name} by {value}",
+            data={'name': name, 'value': self._counters[key], 'labels': labels}
+        )
+    
+    def _set(self, params: Dict[str, Any]) -> ActionResult:
+        """Set gauge value."""
+        name = params.get('name')
+        value = params.get('value')
+        labels = params.get('labels', {})
+        
+        if not name or value is None:
+            return ActionResult(success=False, message="Name and value required")
+        
+        key = self._make_key(name, labels)
+        
+        with self._lock:
+            self._gauges[key] = value
+            self._record_metric(name, MetricType.GAUGE, value, labels)
+        
+        return ActionResult(
+            success=True,
+            message=f"Set {name} to {value}",
+            data={'name': name, 'value': value, 'labels': labels}
+        )
+    
+    def _gauge(self, params: Dict[str, Any]) -> ActionResult:
+        """Alias for set."""
+        return self._set(params)
+    
+    def _record(self, params: Dict[str, Any]) -> ActionResult:
+        """Record histogram value or timer."""
+        name = params.get('name')
+        value = params.get('value')
+        metric_type = params.get('type', 'histogram')
+        labels = params.get('labels', {})
+        
+        if not name or value is None:
+            return ActionResult(success=False, message="Name and value required")
+        
+        key = self._make_key(name, labels)
+        
+        with self._lock:
+            if metric_type == 'histogram':
+                self._histograms[key].append(value)
+                self._record_metric(name, MetricType.HISTOGRAM, value, labels)
+            elif metric_type == 'timer':
+                self._timers[key].append(value)
+                self._record_metric(name, MetricType.TIMER, value, labels)
+        
+        return ActionResult(
+            success=True,
+            message=f"Recorded {metric_type} {name}={value}",
+            data={'name': name, 'value': value, 'type': metric_type, 'labels': labels}
+        )
+    
+    def _get(self, params: Dict[str, Any]) -> ActionResult:
+        """Get current metric value."""
+        name = params.get('name')
+        labels = params.get('labels', {})
+        
+        if not name:
+            return ActionResult(success=False, message="Metric name required")
+        
+        key = self._make_key(name, labels)
+        
+        with self._lock:
+            if key in self._counters:
+                value = self._counters[key]
+            elif key in self._gauges:
+                value = self._gauges[key]
+            else:
+                return ActionResult(success=False, message=f"Metric {name} not found")
+        
+        return ActionResult(
+            success=True,
+            message=f"Got {name}={value}",
+            data={'name': name, 'value': value, 'labels': labels}
+        )
+    
+    def _stats(self, params: Dict[str, Any]) -> ActionResult:
+        """Get statistics for all metrics."""
+        name = params.get('name')
+        labels = params.get('labels', {})
+        
+        with self._lock:
+            stats = {}
+            
+            if name:
+                keys = [self._make_key(name, labels)]
+            else:
+                keys = list(set(list(self._counters.keys()) + list(self._gauges.keys())))
+            
+            for key in keys:
+                metric_name = key.split('::')[0] if '::' in key else key
+                label_str = key.split('::')[1] if '::' in key else '{}'
+                
+                if key in self._counters:
+                    stats[metric_name] = {
+                        'type': 'counter',
+                        'value': self._counters[key],
+                        'labels': self._parse_labels(label_str)
+                    }
+                elif key in self._gauges:
+                    stats[metric_name] = {
+                        'type': 'gauge',
+                        'value': self._gauges[key],
+                        'labels': self._parse_labels(label_str)
+                    }
+                elif key in self._histograms:
+                    values = self._histograms[key]
+                    stats[metric_name] = {
+                        'type': 'histogram',
+                        'count': len(values),
+                        'sum': sum(values),
+                        'avg': sum(values) / len(values) if values else 0,
+                        'min': min(values) if values else 0,
+                        'max': max(values) if values else 0,
+                        'p50': self._percentile(values, 50),
+                        'p90': self._percentile(values, 90),
+                        'p99': self._percentile(values, 99),
+                        'labels': self._parse_labels(label_str)
+                    }
+                elif key in self._timers:
+                    values = self._timers[key]
+                    stats[metric_name] = {
+                        'type': 'timer',
+                        'count': len(values),
+                        'sum': sum(values),
+                        'avg': sum(values) / len(values) if values else 0,
+                        'min': min(values) if values else 0,
+                        'max': max(values) if values else 0,
+                        'p50': self._percentile(values, 50),
+                        'p90': self._percentile(values, 90),
+                        'p99': self._percentile(values, 99),
+                        'labels': self._parse_labels(label_str)
+                    }
+        
+        return ActionResult(
+            success=True,
+            message=f"Stats for {len(stats)} metrics",
+            data={'metrics': stats, 'count': len(stats)}
+        )
+    
+    def _record_metric(
+        self,
+        name: str,
+        metric_type: MetricType,
+        value: float,
+        labels: Dict[str, str]
+    ) -> None:
+        """Record metric value in time series."""
+        key = f"{name}"
+        self._metrics[key]['type'] = metric_type.value
+        self._metrics[key]['values'].append(MetricValue(
+            timestamp=time.time(),
+            value=value,
+            labels=labels
+        ))
+    
+    def _make_key(self, name: str, labels: Dict[str, str]) -> str:
+        """Create metric key from name and labels."""
+        if not labels:
+            return name
+        label_str = ','.join(f"{k}={v}" for k, v in sorted(labels.items()))
+        return f"{name}::{label_str}"
+    
+    def _parse_labels(self, label_str: str) -> Dict[str, str]:
+        """Parse labels from string."""
+        if not label_str or label_str == '{}':
+            return {}
+        labels = {}
+        for pair in label_str.split(','):
+            if '=' in pair:
+                k, v = pair.split('=', 1)
+                labels[k] = v
+        return labels
+    
+    def _percentile(self, values: List[float], p: int) -> float:
+        """Calculate percentile of values."""
+        if not values:
+            return 0
+        sorted_values = sorted(values)
+        idx = int(len(sorted_values) * p / 100)
+        return sorted_values[min(idx, len(sorted_values) - 1)]
