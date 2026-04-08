@@ -1,19 +1,15 @@
-"""Throttle and debounce action module for RabAI AutoClick.
+"""Throttle action module for RabAI AutoClick.
 
-Provides throttling and debouncing operations:
-- ThrottleAction: Throttle function calls
-- DebounceAction: Debounce function calls
-- ThrottleStatsAction: Get throttle statistics
-- ThrottleResetAction: Reset throttle counters
+Provides throttling utilities:
+- Throttler: Function throttling
+- RateThrottler: Rate limiting throttle
+- Debouncer: Debounce rapid calls
 """
 
+from typing import Any, Callable, Dict, List, Optional
 import threading
 import time
 import uuid
-from typing import Any, Callable, Dict, List, Optional
-from dataclasses import dataclass, field
-from datetime import datetime
-
 
 import sys
 import os
@@ -23,189 +19,258 @@ sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class ThrottleEntry:
-    """Represents a throttle entry."""
-    key: str
-    call_count: int = 0
-    last_call: Optional[datetime] = None
-    blocked_count: int = 0
+class Throttler:
+    """Function throttler."""
 
-
-class ThrottleManager:
-    """Manages throttling and debouncing."""
-    def __init__(self):
-        self._throttles: Dict[str, float] = {}
-        self._debounce_timers: Dict[str, threading.Timer] = {}
-        self._entries: Dict[str, ThrottleEntry] = {}
+    def __init__(self, min_interval: float = 1.0):
+        self.min_interval = min_interval
+        self._last_call = 0.0
         self._lock = threading.Lock()
+        self._call_count = 0
+        self._total_calls = 0
 
-    def throttle(self, key: str, min_interval: float) -> bool:
-        """Returns True if call should proceed, False if throttled."""
-        now = time.time()
+    def call(self, func: Callable, *args, **kwargs) -> Any:
+        """Call function with throttling."""
         with self._lock:
-            if key not in self._throttles:
-                self._throttles[key] = 0.0
-            last_call = self._throttles[key]
-            if now - last_call >= min_interval:
-                self._throttles[key] = now
-                if key not in self._entries:
-                    self._entries[key] = ThrottleEntry(key=key)
-                self._entries[key].call_count += 1
-                self._entries[key].last_call = datetime.utcnow()
-                return True
-            else:
-                if key in self._entries:
-                    self._entries[key].blocked_count += 1
-                return False
+            now = time.time()
+            elapsed = now - self._last_call
 
-    def debounce(self, key: str, func: Callable, delay: float) -> None:
-        """Debounce a function call."""
+            if elapsed < self.min_interval:
+                wait_time = self.min_interval - elapsed
+                time.sleep(wait_time)
+
+            self._last_call = time.time()
+            self._call_count += 1
+            self._total_calls += 1
+
+        return func(*args, **kwargs)
+
+    def can_call(self) -> bool:
+        """Check if can call now."""
         with self._lock:
-            if key in self._debounce_timers:
-                self._debounce_timers[key].cancel()
-            self._debounce_timers[key] = threading.Timer(delay, self._execute_debounce, args=[key, func])
-            self._debounce_timers[key].start()
+            elapsed = time.time() - self._last_call
+            return elapsed >= self.min_interval
 
-    def _execute_debounce(self, key: str, func: Callable) -> None:
+    def get_stats(self) -> Dict[str, Any]:
+        """Get throttle stats."""
         with self._lock:
-            if key in self._debounce_timers:
-                del self._debounce_timers[key]
-        try:
-            func()
-        except Exception:
-            pass
+            return {
+                "call_count": self._call_count,
+                "total_calls": self._total_calls,
+                "min_interval": self.min_interval,
+                "last_call": self._last_call,
+            }
 
-    def get_stats(self) -> List[Dict[str, Any]]:
+    def reset(self) -> None:
+        """Reset throttler."""
         with self._lock:
-            return [
-                {
-                    "key": e.key,
-                    "call_count": e.call_count,
-                    "blocked_count": e.blocked_count,
-                    "last_call": e.last_call.isoformat() if e.last_call else None
-                }
-                for e in self._entries.values()
-            ]
+            self._last_call = 0.0
+            self._call_count = 0
 
-    def reset(self, key: Optional[str] = None) -> None:
+
+class RateThrottler:
+    """Rate limiting throttler."""
+
+    def __init__(self, max_calls: int, time_window: float = 1.0):
+        self.max_calls = max_calls
+        self.time_window = time_window
+        self._calls: List[float] = []
+        self._lock = threading.Lock()
+        self._total_calls = 0
+
+    def call(self, func: Callable, *args, **kwargs) -> Any:
+        """Call function with rate limiting."""
         with self._lock:
-            if key:
-                if key in self._throttles:
-                    del self._throttles[key]
-                if key in self._entries:
-                    del self._entries[key]
-                if key in self._debounce_timers:
-                    self._debounce_timers[key].cancel()
-                    del self._debounce_timers[key]
-            else:
-                self._throttles.clear()
-                self._entries.clear()
-                for timer in self._debounce_timers.values():
-                    timer.cancel()
-                self._debounce_timers.clear()
+            now = time.time()
+            self._cleanup(now)
+
+            if len(self._calls) >= self.max_calls:
+                sleep_time = self._calls[0] + self.time_window - now
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                now = time.time()
+                self._cleanup(now)
+
+            self._calls.append(now)
+            self._total_calls += 1
+
+        return func(*args, **kwargs)
+
+    def can_call(self) -> bool:
+        """Check if can call now."""
+        with self._lock:
+            self._cleanup(time.time())
+            return len(self._calls) < self.max_calls
+
+    def _cleanup(self, now: float) -> None:
+        """Clean up old calls."""
+        cutoff = now - self.time_window
+        self._calls = [c for c in self._calls if c > cutoff]
+
+    def get_remaining(self) -> int:
+        """Get remaining calls."""
+        with self._lock:
+            self._cleanup(time.time())
+            return self.max_calls - len(self._calls)
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get throttle stats."""
+        with self._lock:
+            self._cleanup(time.time())
+            return {
+                "remaining": self.max_calls - len(self._calls),
+                "used": len(self._calls),
+                "max_calls": self.max_calls,
+                "time_window": self.time_window,
+                "total_calls": self._total_calls,
+            }
 
 
-_manager = ThrottleManager()
+class Debouncer:
+    """Debounce rapid calls."""
+
+    def __init__(self, delay: float = 0.5):
+        self.delay = delay
+        self._pending_call: Optional[threading.Event] = None
+        self._lock = threading.Lock()
+        self._last_call_time = 0.0
+
+    def call(self, func: Callable, *args, **kwargs) -> None:
+        """Debounce function call."""
+        with self._lock:
+            if self._pending_call is not None:
+                self._pending_call.set()
+
+            self._pending_call = threading.Event()
+
+        def delayed():
+            self._pending_call.wait(self.delay)
+            func(*args, **kwargs)
+
+        thread = threading.Thread(target=delayed, daemon=True)
+        thread.start()
+
+    def flush(self) -> None:
+        """Flush pending call."""
+        with self._lock:
+            if self._pending_call is not None:
+                self._pending_call.set()
 
 
 class ThrottleAction(BaseAction):
-    """Throttle function calls."""
+    """Throttle action."""
     action_type = "throttle"
-    display_name = "节流"
-    description = "限制函数调用频率"
+    display_name = "节流器"
+    description = "函数节流控制"
+
+    def __init__(self):
+        super().__init__()
+        self._throttlers: Dict[str, Throttler] = {}
+        self._rate_throttlers: Dict[str, RateThrottler] = {}
+        self._debouncers: Dict[str, Debouncer] = {}
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            key = params.get("key", "default")
-            min_interval = params.get("min_interval", 1.0)
-            func_ref = params.get("func_ref", None)
-            args = params.get("args", [])
-            kwargs = params.get("kwargs", {})
+            operation = params.get("operation", "call")
 
-            allowed = _manager.throttle(key, min_interval)
-
-            if allowed and func_ref:
-                try:
-                    result = func_ref(*args, **kwargs)
-                    return ActionResult(
-                        success=True,
-                        message=f"Throttled call allowed for '{key}'",
-                        data={"allowed": True, "key": key, "result": result}
-                    )
-                except Exception as e:
-                    return ActionResult(success=False, message=f"Call failed: {str(e)}")
+            if operation == "call":
+                return self._call(params)
+            elif operation == "create":
+                return self._create_throttler(params)
+            elif operation == "create_rate":
+                return self._create_rate_throttler(params)
+            elif operation == "can_call":
+                return self._can_call(params)
+            elif operation == "stats":
+                return self._stats(params)
             else:
-                return ActionResult(
-                    success=False,
-                    message=f"Call throttled for '{key}', wait {min_interval}s",
-                    data={"allowed": False, "key": key, "min_interval": min_interval}
-                )
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
         except Exception as e:
-            return ActionResult(success=False, message=f"Throttle failed: {str(e)}")
+            return ActionResult(success=False, message=f"Throttle error: {str(e)}")
 
+    def _create_throttler(self, params: Dict[str, Any]) -> ActionResult:
+        """Create a throttler."""
+        name = params.get("name", str(uuid.uuid4()))
+        interval = params.get("interval", 1.0)
 
-class DebounceAction(BaseAction):
-    """Debounce function calls."""
-    action_type = "debounce"
-    display_name = "防抖"
-    description = "防抖函数调用"
+        throttler = Throttler(min_interval=interval)
+        self._throttlers[name] = throttler
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            key = params.get("key", "default")
-            delay = params.get("delay", 0.5)
-            func_ref = params.get("func_ref", None)
+        return ActionResult(success=True, message=f"Throttler created: {name}", data={"name": name})
 
-            if not func_ref:
-                return ActionResult(success=False, message="func_ref is required")
+    def _create_rate_throttler(self, params: Dict[str, Any]) -> ActionResult:
+        """Create a rate throttler."""
+        name = params.get("name", str(uuid.uuid4()))
+        max_calls = params.get("max_calls", 10)
+        time_window = params.get("time_window", 1.0)
 
-            _manager.debounce(key, func_ref)
+        throttler = RateThrottler(max_calls, time_window)
+        self._rate_throttlers[name] = throttler
 
-            return ActionResult(
-                success=True,
-                message=f"Debounced call scheduled for '{key}' in {delay}s",
-                data={"key": key, "delay": delay}
-            )
+        return ActionResult(success=True, message=f"Rate throttler created: {name}", data={"name": name})
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Debounce failed: {str(e)}")
+    def _call(self, params: Dict[str, Any]) -> ActionResult:
+        """Call throttled function."""
+        name = params.get("name")
+        throttle_type = params.get("type", "throttler")
 
+        if throttle_type == "throttler":
+            if name not in self._throttlers:
+                return ActionResult(success=False, message=f"Throttler not found: {name}")
+            throttler = self._throttlers[name]
 
-class ThrottleStatsAction(BaseAction):
-    """Get throttle statistics."""
-    action_type = "throttle_stats"
-    display_name = "节流统计"
-    description = "获取节流统计数据"
+            def dummy_func():
+                pass
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            stats = _manager.get_stats()
-            return ActionResult(
-                success=True,
-                message=f"Throttle stats: {len(stats)} entries",
-                data={"stats": stats, "count": len(stats)}
-            )
+            throttler.call(dummy_func)
+            return ActionResult(success=True, message=f"Throttled call: {name}")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Throttle stats failed: {str(e)}")
+        elif throttle_type == "rate":
+            if name not in self._rate_throttlers:
+                return ActionResult(success=False, message=f"Rate throttler not found: {name}")
+            throttler = self._rate_throttlers[name]
 
+            def dummy_func():
+                pass
 
-class ThrottleResetAction(BaseAction):
-    """Reset throttle counters."""
-    action_type = "throttle_reset"
-    display_name = "重置节流"
-    description = "重置节流计数器"
+            throttler.call(dummy_func)
+            return ActionResult(success=True, message=f"Rate throttled call: {name}")
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            key = params.get("key", None)
-            _manager.reset(key)
-            return ActionResult(
-                success=True,
-                message=f"Throttle reset for '{key if key else 'all'}'"
-            )
+        return ActionResult(success=False, message=f"Unknown throttle type: {throttle_type}")
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Throttle reset failed: {str(e)}")
+    def _can_call(self, params: Dict[str, Any]) -> ActionResult:
+        """Check if can call."""
+        name = params.get("name")
+        throttle_type = params.get("type", "throttler")
+
+        if throttle_type == "throttler":
+            if name not in self._throttlers:
+                return ActionResult(success=False, message=f"Throttler not found: {name}")
+            can = self._throttlers[name].can_call()
+        elif throttle_type == "rate":
+            if name not in self._rate_throttlers:
+                return ActionResult(success=False, message=f"Rate throttler not found: {name}")
+            can = self._rate_throttlers[name].can_call()
+        else:
+            return ActionResult(success=False, message=f"Unknown throttle type: {throttle_type}")
+
+        return ActionResult(success=True, message="Can call" if can else "Cannot call", data={"can_call": can})
+
+    def _stats(self, params: Dict[str, Any]) -> ActionResult:
+        """Get stats."""
+        name = params.get("name")
+        throttle_type = params.get("type", "throttler")
+
+        if throttle_type == "throttler":
+            if name not in self._throttlers:
+                return ActionResult(success=False, message=f"Throttler not found: {name}")
+            stats = self._throttlers[name].get_stats()
+        elif throttle_type == "rate":
+            if name not in self._rate_throttlers:
+                return ActionResult(success=False, message=f"Rate throttler not found: {name}")
+            stats = self._rate_throttlers[name].get_stats()
+        else:
+            return ActionResult(success=False, message=f"Unknown throttle type: {throttle_type}")
+
+        return ActionResult(success=True, message="Stats retrieved", data={"name": name, "stats": stats})
