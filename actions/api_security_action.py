@@ -1,397 +1,303 @@
 """
-API Security Action Module
+API Security Action Module.
 
-Provides API security features: CORS, headers, sanitization, and protection.
+Provides API security features including
+authentication, authorization, and input validation.
 """
-from typing import Any, Optional, Callable
+
+from typing import Any, Callable, Dict, List, Optional, Set
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
-import re
-import html
+import asyncio
+import hashlib
+import hmac
+import logging
+import secrets
+import time
+
+logger = logging.getLogger(__name__)
 
 
-class ThreatType(Enum):
-    """Types of security threats."""
-    SQL_INJECTION = "sql_injection"
-    XSS = "xss"
-    CSRF = "csrf"
-    RATE_LIMIT = "rate_limit"
-    INVALID_INPUT = "invalid_input"
-    AUTH_BYPASS = "auth_bypass"
+class AuthType(Enum):
+    """Authentication types."""
+    API_KEY = "api_key"
+    BASIC = "basic"
+    BEARER = "bearer"
+    OAUTH2 = "oauth2"
+    JWT = "jwt"
 
 
-@dataclass
-class SecurityConfig:
-    """Security configuration."""
-    enable_cors: bool = True
-    enable_csrf_protection: bool = True
-    enable_input_validation: bool = True
-    enable_rate_limiting: bool = True
-    allowed_origins: list[str] = field(default_factory=lambda: ["*"])
-    allowed_methods: list[str] = field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE"])
-    allowed_headers: list[str] = field(default_factory=lambda: ["Content-Type", "Authorization"])
-    max_request_size_kb: int = 1024
-    sanitization_rules: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class ThreatDetection:
-    """A detected threat."""
-    threat_type: ThreatType
-    severity: str  # low, medium, high, critical
-    description: str
-    request_path: str
-    request_method: str
-    detected_at: datetime = field(default_factory=datetime.now)
-    blocked: bool = False
-    details: dict[str, Any] = field(default_factory=dict)
+class Permission(Enum):
+    """Permission levels."""
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    ADMIN = "admin"
 
 
 @dataclass
-class SanitizationResult:
-    """Result of sanitization."""
-    original: Any
-    sanitized: Any
-    threats_removed: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+class User:
+    """User account."""
+    user_id: str
+    username: str
+    password_hash: str
+    permissions: Set[Permission] = field(default_factory=set)
+    api_keys: List[str] = field(default_factory=list)
+    is_active: bool = True
 
 
-class InputSanitizer:
-    """Sanitizes user input to prevent attacks."""
-    
-    SQL_PATTERNS = [
-        r"(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE)\b)",
-        r"(--|;|/\*|\*/)",
-        r"(\bUNION\b.*\bSELECT\b)",
-        r"('|(\\'\\'))",
-    ]
-    
-    XSS_PATTERNS = [
-        r"<script[^>]*>.*?</script>",
-        r"javascript:",
-        r"on\w+\s*=",
-        r"<iframe[^>]*>",
-        r"<object[^>]*>",
-        r"<embed[^>]*>",
-    ]
-    
+@dataclass
+class AuthToken:
+    """Authentication token."""
+    token: str
+    user_id: str
+    created_at: datetime
+    expires_at: datetime
+    permissions: Set[Permission]
+
+
+@dataclass
+class AuthResult:
+    """Result of authentication."""
+    success: bool
+    user: Optional[User] = None
+    token: Optional[AuthToken] = None
+    error: Optional[str] = None
+
+
+class PasswordHasher:
+    """Handles password hashing."""
+
+    @staticmethod
+    def hash(password: str, salt: Optional[str] = None) -> str:
+        """Hash a password."""
+        if salt is None:
+            salt = secrets.token_hex(16)
+
+        hash_obj = hashlib.pbkdf2_hmac(
+            'sha256',
+            password.encode('utf-8'),
+            salt.encode('utf-8'),
+            100000
+        )
+        return f"{salt}${hash_obj.hex()}"
+
+    @staticmethod
+    def verify(password: str, hashed: str) -> bool:
+        """Verify password against hash."""
+        try:
+            salt, hash_hex = hashed.split('$')
+            expected = hashlib.pbkdf2_hmac(
+                'sha256',
+                password.encode('utf-8'),
+                salt.encode('utf-8'),
+                100000
+            ).hex()
+            return hmac.compare_digest(expected, hash_hex)
+        except:
+            return False
+
+
+class APIKeyManager:
+    """Manages API keys."""
+
     def __init__(self):
-        self._sql_regex = [re.compile(p, re.IGNORECASE) for p in self.SQL_PATTERNS]
-        self._xss_regex = [re.compile(p, re.IGNORECASE) for p in self.XSS_PATTERNS]
-    
-    def sanitize_string(self, value: str) -> SanitizationResult:
-        """Sanitize a string value."""
-        original = value
-        threats = []
-        warnings = []
-        
-        # Check for SQL injection patterns
-        for pattern in self._sql_regex:
-            if pattern.search(value):
-                threats.append("sql_injection_pattern")
-                value = pattern.sub("BLOCKED", value)
-        
-        # Check for XSS patterns
-        for pattern in self._xss_regex:
-            matches = pattern.findall(value)
-            if matches:
-                threats.append("xss_pattern")
-                value = pattern.sub("", value)
-        
-        # HTML escape
-        if "<" in value or ">" in value or "&" in value:
-            value = html.escape(value)
-        
-        # Remove null bytes
-        value = value.replace("\x00", "")
-        
-        return SanitizationResult(
-            original=original,
-            sanitized=value,
-            threats_removed=threats
-        )
-    
-    def sanitize_dict(self, data: dict) -> tuple[dict, list[str]]:
-        """Recursively sanitize dictionary values."""
-        threats = []
-        result = {}
-        
-        for key, value in data.items():
-            if isinstance(value, str):
-                sanitized = self.sanitize_string(value)
-                result[key] = sanitized.sanitized
-                threats.extend(sanitized.threats_removed)
-            elif isinstance(value, dict):
-                sanitized_value, sub_threats = self.sanitize_dict(value)
-                result[key] = sanitized_value
-                threats.extend(sub_threats)
-            elif isinstance(value, list):
-                sanitized_list, list_threats = self.sanitize_list(value)
-                result[key] = sanitized_list
-                threats.extend(list_threats)
-            else:
-                result[key] = value
-        
-        return result, threats
-    
-    def sanitize_list(self, data: list) -> tuple[list, list[str]]:
-        """Recursively sanitize list values."""
-        threats = []
-        result = []
-        
-        for item in data:
-            if isinstance(item, str):
-                sanitized = self.sanitize_string(item)
-                result.append(sanitized.sanitized)
-                threats.extend(sanitized.threats_removed)
-            elif isinstance(item, dict):
-                sanitized_item, sub_threats = self.sanitize_dict(item)
-                result.append(sanitized_item)
-                threats.extend(sub_threats)
-            else:
-                result.append(item)
-        
-        return result, threats
+        self.api_keys: Dict[str, str] = {}
 
+    def generate_key(self, user_id: str) -> str:
+        """Generate new API key."""
+        key = f"sk_{secrets.token_urlsafe(32)}"
+        self.api_keys[key] = user_id
+        return key
 
-class ApiSecurityAction:
-    """Main API security action handler."""
-    
-    def __init__(self, config: Optional[SecurityConfig] = None):
-        self.config = config or SecurityConfig()
-        self._sanitizer = InputSanitizer()
-        self._threat_log: list[ThreatDetection] = []
-        self._rate_limiters: dict[str, list[datetime]] = {}
-        self._csrf_tokens: dict[str, tuple[str, datetime]] = {}
-        self._stats: dict[str, Any] = defaultdict(int)
-    
-    async def check_request_security(
-        self,
-        request: dict[str, Any]
-    ) -> tuple[bool, list[ThreatDetection]]:
-        """
-        Check request for security threats.
-        
-        Args:
-            request: Request data
-            
-        Returns:
-            Tuple of (is_safe, list of detected threats)
-        """
-        threats = []
-        
-        # Check request size
-        body_size = len(str(request.get("body", "")))
-        if body_size > self.config.max_request_size_kb * 1024:
-            threats.append(ThreatDetection(
-                threat_type=ThreatType.INVALID_INPUT,
-                severity="medium",
-                description=f"Request body too large: {body_size} bytes",
-                request_path=request.get("path", ""),
-                request_method=request.get("method", "")
-            ))
-        
-        # Check input sanitization
-        if self.config.enable_input_validation:
-            input_threats = await self._check_input(request)
-            threats.extend(input_threats)
-        
-        # Check rate limiting
-        if self.config.enable_rate_limiting:
-            client_ip = request.get("client_ip", "unknown")
-            if self._is_rate_limited(client_ip):
-                threats.append(ThreatDetection(
-                    threat_type=ThreatType.RATE_LIMIT,
-                    severity="high",
-                    description="Rate limit exceeded",
-                    request_path=request.get("path", ""),
-                    request_method=request.get("method", ""),
-                    blocked=True
-                ))
-        
-        # Check CSRF
-        if self.config.enable_csrf_protection:
-            csrf_threat = await self._check_csrf(request)
-            if csrf_threat:
-                threats.append(csrf_threat)
-        
-        # Log threats
-        for threat in threats:
-            self._threat_log.append(threat)
-            self._stats["threats_detected"] += 1
-            if threat.blocked:
-                self._stats["threats_blocked"] += 1
-        
-        return len([t for t in threats if t.blocked]) == 0, threats
-    
-    async def _check_input(self, request: dict) -> list[ThreatDetection]:
-        """Check input for malicious patterns."""
-        threats = []
-        
-        body = request.get("body")
-        if isinstance(body, dict):
-            _, threats_found = self._sanitizer.sanitize_dict(body.copy())
-            
-            for threat in threats_found:
-                threats.append(ThreatDetection(
-                    threat_type=ThreatType.SQL_INJECTION if "sql" in threat else ThreatType.XSS,
-                    severity="high",
-                    description=f"Malicious input pattern detected: {threat}",
-                    request_path=request.get("path", ""),
-                    request_method=request.get("method", "")
-                ))
-        
-        return threats
-    
-    def _is_rate_limited(self, client_ip: str, max_requests: int = 100, window_seconds: int = 60) -> bool:
-        """Check if client IP is rate limited."""
-        now = datetime.now()
-        
-        if client_ip not in self._rate_limiters:
-            self._rate_limiters[client_ip] = []
-        
-        # Clean old requests
-        self._rate_limiters[client_ip] = [
-            t for t in self._rate_limiters[client_ip]
-            if (now - t).total_seconds() < window_seconds
-        ]
-        
-        # Check limit
-        if len(self._rate_limiters[client_ip]) >= max_requests:
+    def validate_key(self, key: str) -> Optional[str]:
+        """Validate API key and return user ID."""
+        return self.api_keys.get(key)
+
+    def revoke_key(self, key: str) -> bool:
+        """Revoke an API key."""
+        if key in self.api_keys:
+            del self.api_keys[key]
             return True
-        
-        self._rate_limiters[client_ip].append(now)
         return False
-    
-    async def _check_csrf(self, request: dict) -> Optional[ThreatDetection]:
-        """Check for CSRF token validity."""
-        method = request.get("method", "")
-        
-        # Only check state-changing methods
-        if method not in ["POST", "PUT", "DELETE", "PATCH"]:
-            return None
-        
-        token = request.get("headers", {}).get("X-CSRF-Token")
-        
-        if not token:
-            # CSRF token required
-            return ThreatDetection(
-                threat_type=ThreatType.CSRF,
-                severity="high",
-                description="Missing CSRF token",
-                request_path=request.get("path", ""),
-                request_method=method,
-                blocked=True
-            )
-        
-        # Validate token
-        if token not in self._csrf_tokens:
-            return ThreatDetection(
-                threat_type=ThreatType.CSRF,
-                severity="critical",
-                description="Invalid CSRF token",
-                request_path=request.get("path", ""),
-                request_method=method,
-                blocked=True
-            )
-        
-        token_value, token_time = self._csrf_tokens[token]
-        age = (datetime.now() - token_time).total_seconds()
-        
-        # Token expires after 1 hour
-        if age > 3600:
-            return ThreatDetection(
-                threat_type=ThreatType.CSRF,
-                severity="medium",
-                description="CSRF token expired",
-                request_path=request.get("path", ""),
-                request_method=method
-            )
-        
-        return None
-    
-    def generate_csrf_token(self, session_id: str) -> str:
-        """Generate a CSRF token for a session."""
-        import secrets
-        token = secrets.token_urlsafe(32)
-        self._csrf_tokens[token] = (session_id, datetime.now())
-        return token
-    
-    def sanitize_input(self, data: Any) -> SanitizationResult:
-        """Sanitize input data."""
-        if isinstance(data, str):
-            return self._sanitizer.sanitize_string(data)
-        elif isinstance(data, dict):
-            sanitized, threats = self._sanitizer.sanitize_dict(data)
-            return SanitizationResult(
-                original=data,
-                sanitized=sanitized,
-                threats_removed=threats
-            )
-        elif isinstance(data, list):
-            sanitized, threats = self._sanitizer.sanitize_list(data)
-            return SanitizationResult(
-                original=data,
-                sanitized=sanitized,
-                threats_removed=threats
-            )
-        
-        return SanitizationResult(
-            original=data,
-            sanitized=data,
-            threats_removed=[]
+
+
+class JWTHandler:
+    """Handles JWT tokens."""
+
+    def __init__(self, secret: str, expiry_seconds: int = 3600):
+        self.secret = secret
+        self.expiry_seconds = expiry_seconds
+
+    def create_token(self, user_id: str, permissions: Set[Permission]) -> AuthToken:
+        """Create JWT token."""
+        import base64
+        import json
+
+        now = datetime.now()
+        expires = now + timedelta(seconds=self.expiry_seconds)
+
+        header = {"alg": "HS256", "typ": "JWT"}
+        payload = {
+            "sub": user_id,
+            "perms": [p.value for p in permissions],
+            "iat": int(now.timestamp()),
+            "exp": int(expires.timestamp())
+        }
+
+        header_b64 = base64.urlsafe_b64encode(
+            json.dumps(header).encode()
+        ).decode().rstrip('=')
+        payload_b64 = base64.urlsafe_b64encode(
+            json.dumps(payload).encode()
+        ).decode().rstrip('=')
+
+        signature = hmac.new(
+            self.secret.encode(),
+            f"{header_b64}.{payload_b64}".encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        token_str = f"{header_b64}.{payload_b64}.{signature}"
+
+        return AuthToken(
+            token=token_str,
+            user_id=user_id,
+            created_at=now,
+            expires_at=expires,
+            permissions=permissions
         )
-    
-    def get_security_headers(self) -> dict[str, str]:
-        """Get security headers for responses."""
-        headers = {
-            "X-Content-Type-Options": "nosniff",
-            "X-Frame-Options": "DENY",
-            "X-XSS-Protection": "1; mode=block",
-            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-            "Content-Security-Policy": "default-src 'self'",
-            "Referrer-Policy": "strict-origin-when-cross-origin",
-        }
-        
-        if self.config.enable_cors:
-            headers["Access-Control-Allow-Origin"] = ", ".join(self.config.allowed_origins)
-            headers["Access-Control-Allow-Methods"] = ", ".join(self.config.allowed_methods)
-            headers["Access-Control-Allow-Headers"] = ", ".join(self.config.allowed_headers)
-        
-        return headers
-    
-    def get_threat_log(
+
+    def validate_token(self, token: str) -> Optional[AuthToken]:
+        """Validate JWT token."""
+        import base64
+        import json
+
+        try:
+            parts = token.split('.')
+            if len(parts) != 3:
+                return None
+
+            header_b64, payload_b64, signature = parts
+
+            expected_sig = hmac.new(
+                self.secret.encode(),
+                f"{header_b64}.{payload_b64}".encode(),
+                hashlib.sha256
+            ).hexdigest()
+
+            if not hmac.compare_digest(signature, expected_sig):
+                return None
+
+            payload = json.loads(
+                base64.urlsafe_b64decode(payload_b64 + '==')
+            )
+
+            if payload["exp"] < int(time.time()):
+                return None
+
+            return AuthToken(
+                token=token,
+                user_id=payload["sub"],
+                created_at=datetime.fromtimestamp(payload["iat"]),
+                expires_at=datetime.fromtimestamp(payload["exp"]),
+                permissions={Permission(p) for p in payload.get("perms", [])}
+            )
+
+        except Exception as e:
+            logger.error(f"JWT validation error: {e}")
+            return None
+
+
+class AuthManager:
+    """Main authentication manager."""
+
+    def __init__(self):
+        self.users: Dict[str, User] = {}
+        self.api_key_manager = APIKeyManager()
+        self.jwt_handler: Optional[JWTHandler] = None
+        self.active_tokens: Dict[str, AuthToken] = {}
+
+    def add_user(
         self,
-        severity: Optional[str] = None,
-        limit: int = 100
-    ) -> list[dict[str, Any]]:
-        """Get threat detection log."""
-        log = self._threat_log
-        
-        if severity:
-            log = [t for t in log if t.severity == severity]
-        
-        log = log[-limit:]
-        
-        return [
-            {
-                "type": t.threat_type.value,
-                "severity": t.severity,
-                "description": t.description,
-                "path": t.request_path,
-                "method": t.request_method,
-                "blocked": t.blocked,
-                "detected_at": t.detected_at.isoformat()
-            }
-            for t in log
-        ]
-    
-    def get_stats(self) -> dict[str, Any]:
-        """Get security statistics."""
-        return {
-            **dict(self._stats),
-            "threats_logged": len(self._threat_log),
-            "rate_limited_ips": len(self._rate_limiters),
-            "active_csrf_tokens": len(self._csrf_tokens)
-        }
+        user_id: str,
+        username: str,
+        password: str,
+        permissions: Optional[Set[Permission]] = None
+    ) -> User:
+        """Add a new user."""
+        password_hash = PasswordHasher.hash(password)
+        user = User(
+            user_id=user_id,
+            username=username,
+            password_hash=password_hash,
+            permissions=permissions or {Permission.READ}
+        )
+        self.users[user_id] = user
+        self.users[username] = user
+        return user
+
+    def authenticate_basic(
+        self,
+        username: str,
+        password: str
+    ) -> AuthResult:
+        """Authenticate with username/password."""
+        user = self.users.get(username)
+
+        if not user or not user.is_active:
+            return AuthResult(success=False, error="Invalid credentials")
+
+        if not PasswordHasher.verify(password, user.password_hash):
+            return AuthResult(success=False, error="Invalid credentials")
+
+        if self.jwt_handler:
+            token = self.jwt_handler.create_token(user.user_id, user.permissions)
+            self.active_tokens[token.token] = token
+            return AuthResult(success=True, user=user, token=token)
+
+        return AuthResult(success=True, user=user)
+
+    def authenticate_api_key(self, key: str) -> AuthResult:
+        """Authenticate with API key."""
+        user_id = self.api_key_manager.validate_key(key)
+
+        if not user_id:
+            return AuthResult(success=False, error="Invalid API key")
+
+        user = self.users.get(user_id)
+
+        if not user or not user.is_active:
+            return AuthResult(success=False, error="User not found")
+
+        return AuthResult(success=True, user=user)
+
+    def check_permission(self, token: str, required: Permission) -> bool:
+        """Check if token has permission."""
+        auth_token = self.active_tokens.get(token)
+
+        if not auth_token:
+            return False
+
+        if auth_token.expires_at < datetime.now():
+            return False
+
+        return required in auth_token.permissions or Permission.ADMIN in auth_token.permissions
+
+
+def main():
+    """Demonstrate API security."""
+    manager = AuthManager()
+
+    manager.add_user("1", "admin", "password123", {Permission.ADMIN})
+
+    result = manager.authenticate_basic("admin", "password123")
+    print(f"Auth success: {result.success}")
+
+    if result.token:
+        print(f"Token: {result.token.token[:20]}...")
+
+
+if __name__ == "__main__":
+    main()

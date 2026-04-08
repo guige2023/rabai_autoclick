@@ -1,241 +1,226 @@
-"""Data deduplication action module for RabAI AutoClick.
+"""
+Data Deduplication Action Module.
 
-Provides deduplication operations:
-- ExactDedupeAction: Exact match deduplication
-- FuzzyDedupeAction: Fuzzy string matching deduplication
-- DedupeByKeyAction: Deduplication by specific keys
-- NearDuplicateDetectionAction: Detect near-duplicate records
+Provides data deduplication with various
+matching strategies and duplicate handling.
 """
 
-import hashlib
-from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+import logging
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ExactDedupeAction(BaseAction):
+class MatchStrategy(Enum):
+    """Match strategies for deduplication."""
+    EXACT = "exact"
+    FUZZY = "fuzzy"
+    SIGNATURE = "signature"
+    COMPOSITE = "composite"
+
+
+@dataclass
+class DuplicateGroup:
+    """Group of duplicate records."""
+    group_id: str
+    records: List[Dict[str, Any]]
+    canonical_record: Optional[Dict[str, Any]] = None
+    confidence: float = 1.0
+
+
+@dataclass
+class DeduplicationResult:
+    """Result of deduplication."""
+    original_count: int
+    unique_count: int
+    duplicate_count: int
+    duplicate_groups: List[DuplicateGroup]
+
+
+class ExactMatcher:
     """Exact match deduplication."""
-    action_type = "exact_dedupe"
-    display_name = "精确去重"
-    description = "基于完全匹配的数据去重"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            key_field = params.get("key_field", None)
-            keep = params.get("keep", "first")
+    def __init__(self, key_fields: List[str]):
+        self.key_fields = key_fields
 
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
+    def _make_key(self, record: Dict[str, Any]) -> Tuple:
+        """Create key from record."""
+        return tuple(record.get(field) for field in self.key_fields)
 
-            if not data:
-                return ActionResult(success=True, message="Empty dataset", data={"deduped": [], "removed": 0})
+    def find_duplicates(self, data: List[Dict[str, Any]]) -> List[Set[int]]:
+        """Find duplicate record indices."""
+        key_to_indices: Dict[Tuple, List[int]] = {}
 
-            if key_field:
-                seen: Set[str] = set()
-                deduped = []
-                removed = 0
-                for item in data:
-                    if isinstance(item, dict):
-                        key = str(item.get(key_field, ""))
-                    else:
-                        key = str(item)
-                    if key not in seen:
-                        seen.add(key)
-                        deduped.append(item)
-                    else:
-                        removed += 1
+        for i, record in enumerate(data):
+            key = self._make_key(record)
+            if key not in key_to_indices:
+                key_to_indices[key] = []
+            key_to_indices[key].append(i)
+
+        duplicates = [
+            set(indices)
+            for indices in key_to_indices.values()
+            if len(indices) > 1
+        ]
+
+        return duplicates
+
+
+class SignatureMatcher:
+    """Signature-based fuzzy matching."""
+
+    def __init__(self, normalize_func: Optional[Callable] = None):
+        self.normalize_func = normalize_func or (lambda x: x.lower().strip())
+
+    def _create_signature(self, text: str) -> Set[str]:
+        """Create signature tokens from text."""
+        import re
+        tokens = re.findall(r'\w+', self.normalize_func(text))
+        return set(tokens)
+
+    def _jaccard_similarity(self, sig1: Set[str], sig2: Set[str]) -> float:
+        """Calculate Jaccard similarity."""
+        if not sig1 or not sig2:
+            return 0.0
+        intersection = len(sig1 & sig2)
+        union = len(sig1 | sig2)
+        return intersection / union if union > 0 else 0.0
+
+    def find_similar(
+        self,
+        data: List[Dict[str, Any]],
+        field: str,
+        threshold: float = 0.8
+    ) -> List[Tuple[int, int, float]]:
+        """Find similar records."""
+        signatures = [
+            (i, self._create_signature(str(record.get(field, ""))))
+            for i, record in enumerate(data)
+        ]
+
+        similar_pairs = []
+
+        for i, (idx1, sig1) in enumerate(signatures):
+            for idx2, sig2 in signatures[i + 1:]:
+                similarity = self._jaccard_similarity(sig1, sig2)
+                if similarity >= threshold:
+                    similar_pairs.append((idx1, idx2, similarity))
+
+        return similar_pairs
+
+
+class DataDeduper:
+    """Main deduplication orchestrator."""
+
+    def __init__(self, match_strategy: MatchStrategy = MatchStrategy.EXACT):
+        self.match_strategy = match_strategy
+        self.matchers = {}
+
+    def add_exact_matcher(self, key_fields: List[str]):
+        """Add exact matcher."""
+        self.matchers["exact"] = ExactMatcher(key_fields)
+
+    def add_signature_matcher(self, normalize_func: Optional[Callable] = None):
+        """Add signature matcher."""
+        self.matchers["signature"] = SignatureMatcher(normalize_func)
+
+    def deduplicate(
+        self,
+        data: List[Dict[str, Any]],
+        **kwargs
+    ) -> DeduplicationResult:
+        """Deduplicate data."""
+        duplicate_indices = []
+
+        if self.match_strategy == MatchStrategy.EXACT:
+            if "exact" in self.matchers:
+                duplicate_indices = self.matchers["exact"].find_duplicates(data)
             else:
-                seen: Set[str] = set()
-                deduped = []
-                removed = 0
-                for item in data:
-                    key = str(item)
-                    if key not in seen:
-                        seen.add(key)
-                        deduped.append(item)
+                key_fields = kwargs.get("key_fields", ["id"])
+                matcher = ExactMatcher(key_fields)
+                duplicate_indices = matcher.find_duplicates(data)
+
+        duplicate_groups = []
+        seen = set()
+        group_id = 0
+
+        for indices in duplicate_indices:
+            group_records = []
+            for idx in indices:
+                if idx not in seen:
+                    group_records.append(data[idx])
+                    seen.add(idx)
+
+            if group_records:
+                duplicate_groups.append(DuplicateGroup(
+                    group_id=str(group_id),
+                    records=group_records,
+                    canonical_record=group_records[0]
+                ))
+                group_id += 1
+
+        unique_records = [
+            data[i] for i in range(len(data))
+            if i not in seen
+        ]
+
+        return DeduplicationResult(
+            original_count=len(data),
+            unique_count=len(unique_records) + len(duplicate_groups),
+            duplicate_count=len(data) - (len(unique_records) + len(duplicate_groups)),
+            duplicate_groups=duplicate_groups
+        )
+
+    def remove_duplicates(
+        self,
+        data: List[Dict[str, Any]],
+        keep: str = "first"
+    ) -> List[Dict[str, Any]]:
+        """Remove duplicates from data."""
+        result = self.deduplicate(data)
+        seen = set()
+
+        duplicates_to_remove = set()
+        for group in result.duplicate_groups:
+            canonical_idx = None
+            for idx, record in enumerate(data):
+                if record in group.records:
+                    if canonical_idx is None:
+                        canonical_idx = idx
                     else:
-                        removed += 1
+                        duplicates_to_remove.add(idx)
 
-            return ActionResult(
-                success=True,
-                message=f"Deduplication: removed {removed} duplicates from {len(data)}",
-                data={"deduped": deduped, "removed": removed, "original_count": len(data), "final_count": len(deduped)},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"ExactDedupe error: {e}")
-
-
-class FuzzyDedupeAction(BaseAction):
-    """Fuzzy string matching deduplication."""
-    action_type = "fuzzy_dedupe"
-    display_name = "模糊去重"
-    description = "基于模糊匹配的重复数据检测"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            text_field = params.get("text_field", "text")
-            threshold = params.get("threshold", 0.85)
-            keep = params.get("keep", "first")
-
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
-
-            if not data:
-                return ActionResult(success=True, message="Empty dataset", data={"deduped": [], "groups": []})
-
-            groups: List[List[int]] = []
-            used_indices: Set[int] = set()
-
-            for i, item in enumerate(data):
-                if i in used_indices:
-                    continue
-                if not isinstance(item, dict):
-                    text_a = str(item)
-                else:
-                    text_a = str(item.get(text_field, ""))
-
-                group = [i]
-                for j in range(i + 1, len(data)):
-                    if j in used_indices:
-                        continue
-                    item_b = data[j]
-                    if isinstance(item_b, dict):
-                        text_b = str(item_b.get(text_field, ""))
-                    else:
-                        text_b = str(item_b)
-                    ratio = SequenceMatcher(None, text_a, text_b).ratio()
-                    if ratio >= threshold:
-                        group.append(j)
-                        used_indices.add(j)
-                groups.append(group)
-                used_indices.add(i)
-
-            deduped = []
-            for group in groups:
-                idx = group[0] if keep == "first" else group[-1]
-                deduped.append(data[idx])
-
-            return ActionResult(
-                success=True,
-                message=f"Fuzzy dedupe: {len(data)} -> {len(deduped)} ({len(groups)} groups)",
-                data={
-                    "deduped": deduped,
-                    "groups": [{"size": len(g), "indices": g} for g in groups],
-                    "original_count": len(data),
-                    "final_count": len(deduped),
-                },
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"FuzzyDedupe error: {e}")
+        if keep == "first":
+            return [
+                data[i] for i in range(len(data))
+                if i not in duplicates_to_remove
+            ]
+        else:
+            return [
+                data[i] for i in range(len(data))
+                if i not in duplicates_to_remove
+            ]
 
 
-class DedupeByKeyAction(BaseAction):
-    """Deduplication by specific keys."""
-    action_type = "dedupe_by_key"
-    display_name = "键值去重"
-    description = "基于指定键组合去重"
+def main():
+    """Demonstrate deduplication."""
+    data = [
+        {"id": 1, "name": "Alice", "email": "alice@example.com"},
+        {"id": 2, "name": "Bob", "email": "bob@example.com"},
+        {"id": 3, "name": "Alice", "email": "alice@example.com"},
+        {"id": 4, "name": "Charlie", "email": "charlie@example.com"},
+    ]
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            keys = params.get("keys", [])
-            keep = params.get("keep", "first")
-            strategies = params.get("strategies", {})
+    deduper = DataDeduper(MatchStrategy.EXACT)
+    result = deduper.deduplicate(data, key_fields=["email"])
 
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
-
-            if not keys:
-                return ActionResult(success=False, message="keys is required")
-
-            seen: Dict[Tuple, Dict] = {}
-            duplicates: List[Dict] = []
-
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                key_tuple = tuple(str(item.get(k, "")) for k in keys)
-                if key_tuple in seen:
-                    duplicates.append(item)
-                    if strategies.get("merge"):
-                        existing = seen[key_tuple]
-                        for k, v in item.items():
-                            if k not in existing or strategies.get("prefer") == "new":
-                                existing[k] = v
-                        seen[key_tuple] = existing
-                else:
-                    seen[key_tuple] = {**(strategies.get("merge") or {}), **item}
-                    if keep == "last":
-                        seen[key_tuple] = item
-
-            deduped = list(seen.values())
-
-            return ActionResult(
-                success=True,
-                message=f"Key dedupe: {len(data)} -> {len(deduped)}",
-                data={"deduped": deduped, "duplicates": duplicates, "removed": len(duplicates)},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"DedupeByKey error: {e}")
+    print(f"Original: {result.original_count}")
+    print(f"Unique: {result.unique_count}")
+    print(f"Duplicates: {result.duplicate_count}")
 
 
-class NearDuplicateDetectionAction(BaseAction):
-    """Detect near-duplicate records using MinHash."""
-    action_type = "near_duplicate_detection"
-    display_name = "近似重复检测"
-    description = "检测近似重复的记录"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            text_fields = params.get("text_fields", ["text"])
-            jaccard_threshold = params.get("jaccard_threshold", 0.5)
-            shingle_size = params.get("shingle_size", 3)
-
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be list")
-
-            def get_shingles(text: str, size: int) -> Set[str]:
-                text = text.lower()
-                return set(text[i : i + size] for i in range(max(1, len(text) - size + 1)))
-
-            def jaccard(s1: Set[str], s2: Set[str]) -> float:
-                if not s1 or not s2:
-                    return 0.0
-                return len(s1 & s2) / len(s1 | s2)
-
-            records = []
-            for i, item in enumerate(data):
-                if isinstance(item, dict):
-                    combined = " ".join(str(item.get(f, "")) for f in text_fields)
-                else:
-                    combined = str(item)
-                shingles = get_shingles(combined, shingle_size)
-                records.append({"index": i, "item": item, "shingles": shingles})
-
-            duplicates: List[Dict] = []
-            for i, rec_a in enumerate(records):
-                for j, rec_b in enumerate(records[i + 1 :], start=i + 1):
-                    similarity = jaccard(rec_a["shingles"], rec_b["shingles"])
-                    if similarity >= jaccard_threshold:
-                        duplicates.append({
-                            "index_a": rec_a["index"],
-                            "index_b": rec_b["index"],
-                            "similarity": round(similarity, 4),
-                        })
-
-            return ActionResult(
-                success=True,
-                message=f"Near-duplicate detection: found {len(duplicates)} similar pairs",
-                data={"duplicates": duplicates, "pairs_found": len(duplicates)},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"NearDuplicateDetection error: {e}")
+if __name__ == "__main__":
+    main()
