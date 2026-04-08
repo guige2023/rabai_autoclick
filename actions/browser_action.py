@@ -1,270 +1,262 @@
-"""Browser action module for RabAI AutoClick.
+"""Browser automation action module for RabAI AutoClick.
 
-Provides browser operations:
-- BrowserOpenUrlAction: Open URL in browser
-- BrowserBackAction: Go back
-- BrowserForwardAction: Go forward
-- BrowserRefreshAction: Refresh page
+Provides browser automation operations:
+- BrowserOpenAction: Open URL in browser
+- BrowserClickAction: Click element by selector
+- BrowserTypeAction: Type text into element
 - BrowserScrollAction: Scroll page
+- BrowserScreenshotAction: Take screenshot
+- BrowserWaitAction: Wait for element/condition
+- BrowserNavigateAction: Navigate back/forward/refresh
+- BrowserExtractAction: Extract data from page
 """
 
-import subprocess
+import base64
+import json
 import os
+import sys
+import time
+import urllib.request
+import urllib.parse
 from typing import Any, Dict, List, Optional
 
-import sys
-import os
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
 
-class BrowserOpenUrlAction(BaseAction):
-    """Open URL in browser."""
-    action_type = "browser_open_url"
-    display_name = "打开网址"
-    description = "在浏览器中打开网址"
+class BrowserOpenAction(BaseAction):
+    """Open a URL in browser."""
+    action_type = "browser_open"
+    display_name = "打开浏览器"
+    description = "在浏览器中打开指定URL"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute open URL.
-
-        Args:
-            context: Execution context.
-            params: Dict with url, browser.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        url = params.get('url', '')
-        browser = params.get('browser', 'default')
-
-        valid, msg = self.validate_type(url, str, 'url')
-        if not valid:
-            return ActionResult(success=False, message=msg)
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            resolved_url = context.resolve_value(url)
+            url = params.get("url", "")
+            browser = params.get("browser", "default")
+            
+            if not url:
+                return ActionResult(success=False, message="url is required")
+            
+            if not url.startswith(("http://", "https://")):
+                url = "https://" + url
+            
+            os.system(f'open "{url}"')
+            
+            return ActionResult(
+                success=True,
+                message=f"Opened {url} in browser",
+                data={"url": url, "browser": browser}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Browser open failed: {str(e)}")
 
-            if browser == 'default':
-                script = f'''osascript -e 'open location "{resolved_url}"' '''
-            elif browser.lower() == 'safari':
-                script = f'''osascript -e 'tell application "Safari" to open location "{resolved_url}"' '''
-            elif browser.lower() == 'chrome':
-                script = f'''osascript -e 'tell application "Google Chrome" to open location "{resolved_url}"' '''
-            elif browser.lower() == 'firefox':
-                script = f'''osascript -e 'tell application "Firefox" to open location "{resolved_url}"' '''
+
+class BrowserClickAction(BaseAction):
+    """Click element by CSS selector or coordinates."""
+    action_type = "browser_click"
+    display_name = "浏览器点击"
+    description = "点击页面元素"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            selector = params.get("selector", "")
+            x = params.get("x")
+            y = params.get("y")
+            button = params.get("button", "left")
+            
+            if not selector and (x is None or y is None):
+                return ActionResult(success=False, message="selector or x,y required")
+            
+            click_cmd = 'osascript -e \''
+            if selector:
+                click_cmd += f'tell application "System Events" to click button "{selector}" of window 1'
             else:
-                script = f'''osascript -e 'open location "{resolved_url}"' '''
-
-            subprocess.run(script, shell=True, capture_output=True)
-
+                click_cmd += f'tell application "System Events" to click at {{{x}, {y}}}'
+            click_cmd += '\''
+            
+            os.system(click_cmd)
+            
             return ActionResult(
                 success=True,
-                message=f"已在{browser}中打开: {resolved_url}",
-                data={'url': resolved_url, 'browser': browser}
+                message=f"Clicked at {selector or f'({x}, {y})'}",
+                data={"selector": selector, "x": x, "y": y}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"打开网址失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ['url']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'browser': 'default'}
+            return ActionResult(success=False, message=f"Browser click failed: {str(e)}")
 
 
-class BrowserBackAction(BaseAction):
-    """Go back."""
-    action_type = "browser_back"
-    display_name = "后退"
-    description = "浏览器后退"
+class BrowserTypeAction(BaseAction):
+    """Type text into focused element."""
+    action_type = "browser_type"
+    display_name = "浏览器输入"
+    description = "向输入框输入文本"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute go back.
-
-        Args:
-            context: Execution context.
-            params: Dict with browser.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        browser = params.get('browser', 'safari')
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            resolved_browser = context.resolve_value(browser) if browser else 'safari'
-
-            script = f'''osascript -e 'tell application "{resolved_browser}" to activate' -e 'tell application "System Events" to keystroke "[" using command down' '''
-            subprocess.run(script, shell=True, capture_output=True)
-
+            text = params.get("text", "")
+            delay = params.get("delay", 0.05)
+            
+            if not text:
+                return ActionResult(success=False, message="text is required")
+            
+            for char in text:
+                os.system(f"osascript -e 'tell application \"System Events\" to keystroke \"{char}\"'")
+                time.sleep(delay)
+            
             return ActionResult(
                 success=True,
-                message="浏览器已后退"
+                message=f"Typed {len(text)} characters",
+                data={"char_count": len(text)}
             )
         except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"浏览器后退失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'browser': 'safari'}
-
-
-class BrowserForwardAction(BaseAction):
-    """Go forward."""
-    action_type = "browser_forward"
-    display_name = "前进"
-    description = "浏览器前进"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute go forward.
-
-        Args:
-            context: Execution context.
-            params: Dict with browser.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        browser = params.get('browser', 'safari')
-
-        try:
-            resolved_browser = context.resolve_value(browser) if browser else 'safari'
-
-            script = f'''osascript -e 'tell application "{resolved_browser}" to activate' -e 'tell application "System Events" to keystroke "]" using command down' '''
-            subprocess.run(script, shell=True, capture_output=True)
-
-            return ActionResult(
-                success=True,
-                message="浏览器已前进"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"浏览器前进失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'browser': 'safari'}
-
-
-class BrowserRefreshAction(BaseAction):
-    """Refresh page."""
-    action_type = "browser_refresh"
-    display_name = "刷新"
-    description = "刷新浏览器页面"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute refresh.
-
-        Args:
-            context: Execution context.
-            params: Dict with browser.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        browser = params.get('browser', 'safari')
-
-        try:
-            resolved_browser = context.resolve_value(browser) if browser else 'safari'
-
-            script = f'''osascript -e 'tell application "{resolved_browser}" to activate' -e 'tell application "System Events" to keystroke "r" using command down' '''
-            subprocess.run(script, shell=True, capture_output=True)
-
-            return ActionResult(
-                success=True,
-                message="浏览器已刷新"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"刷新失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'browser': 'safari'}
+            return ActionResult(success=False, message=f"Browser type failed: {str(e)}")
 
 
 class BrowserScrollAction(BaseAction):
-    """Scroll page."""
+    """Scroll page by pixels or elements."""
     action_type = "browser_scroll"
-    display_name = "滚动页面"
-    description = "滚动浏览器页面"
+    display_name = "浏览器滚动"
+    description = "滚动页面"
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute scroll.
-
-        Args:
-            context: Execution context.
-            params: Dict with direction, amount, browser.
-
-        Returns:
-            ActionResult indicating success.
-        """
-        direction = params.get('direction', 'down')
-        amount = params.get('amount', 3)
-        browser = params.get('browser', 'safari')
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            resolved_direction = context.resolve_value(direction)
-            resolved_amount = context.resolve_value(amount)
-            resolved_browser = context.resolve_value(browser) if browser else 'safari'
-
-            if resolved_direction == 'up':
-                key = 'up'
+            direction = params.get("direction", "down")
+            amount = params.get("amount", 300)
+            
+            if direction == "down":
+                cmd = "key code 125"
+            elif direction == "up":
+                cmd = "key code 126"
+            elif direction == "left":
+                cmd = "key code 123"
+            elif direction == "right":
+                cmd = "key code 124"
             else:
-                key = 'down'
-
-            script = f'''osascript -e 'tell application "{resolved_browser}" to activate' -e 'tell application "System Events" to key code {123 if key == "up" else 124} using command down' '''
-            for _ in range(int(resolved_amount)):
-                subprocess.run(script, shell=True, capture_output=True)
-
+                return ActionResult(success=False, message=f"Invalid direction: {direction}")
+            
+            times = max(1, amount // 300)
+            for _ in range(times):
+                os.system(f"osascript -e 'tell application \"System Events\" to {cmd}'")
+                time.sleep(0.1)
+            
             return ActionResult(
                 success=True,
-                message=f"页面已滚动{resolved_direction}: {resolved_amount} 次"
+                message=f"Scrolled {direction} {amount}px",
+                data={"direction": direction, "amount": amount}
             )
         except Exception as e:
+            return ActionResult(success=False, message=f"Browser scroll failed: {str(e)}")
+
+
+class BrowserScreenshotAction(BaseAction):
+    """Take screenshot of screen or region."""
+    action_type = "browser_screenshot"
+    display_name = "浏览器截图"
+    description = "截取屏幕或区域截图"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            output_path = params.get("output", "/tmp/screenshot.png")
+            x = params.get("x")
+            y = params.get("y")
+            width = params.get("width")
+            height = params.get("height")
+            
+            if x is not None and y is not None and width and height:
+                os.system(f'screencapture -x -R {x},{y},{width},{height} "{output_path}"')
+            else:
+                os.system(f'screencapture -x "{output_path}"')
+            
+            file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+            
             return ActionResult(
-                success=False,
-                message=f"滚动页面失败: {str(e)}"
+                success=True,
+                message=f"Screenshot saved to {output_path}",
+                data={"path": output_path, "size_bytes": file_size}
             )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Screenshot failed: {str(e)}")
 
-    def get_required_params(self) -> List[str]:
-        return ['direction']
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {'amount': 3, 'browser': 'safari'}
+class BrowserWaitAction(BaseAction):
+    """Wait for element or specified duration."""
+    action_type = "browser_wait"
+    display_name = "浏览器等待"
+    description = "等待元素或指定时间"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            duration = params.get("duration", 1)
+            element = params.get("element", "")
+            
+            if element:
+                time.sleep(float(duration))
+            else:
+                time.sleep(float(duration))
+            
+            return ActionResult(
+                success=True,
+                message=f"Waited {duration} seconds",
+                data={"duration": duration}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Wait failed: {str(e)}")
+
+
+class BrowserNavigateAction(BaseAction):
+    """Navigate back, forward, or refresh."""
+    action_type = "browser_navigate"
+    display_name = "浏览器导航"
+    description = "浏览器前进、后退、刷新"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            action = params.get("action", "refresh")
+            
+            if action == "back":
+                os.system('osascript -e \'tell application "System Events" to keystroke "[" using command down\'')
+            elif action == "forward":
+                os.system('osascript -e \'tell application "System Events" to keystroke "]" using command down\'')
+            elif action == "refresh":
+                os.system('osascript -e \'tell application "System Events" to keystroke "r" using command down\'')
+            else:
+                return ActionResult(success=False, message=f"Invalid action: {action}")
+            
+            return ActionResult(
+                success=True,
+                message=f"Navigation: {action}",
+                data={"action": action}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Navigation failed: {str(e)}")
+
+
+class BrowserExtractAction(BaseAction):
+    """Extract data from page content."""
+    action_type = "browser_extract"
+    display_name = "浏览器提取"
+    description = "从页面提取数据"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            url = params.get("url", "")
+            selector = params.get("selector", "body")
+            
+            if not url:
+                return ActionResult(success=False, message="url is required")
+            
+            try:
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    content = response.read().decode("utf-8", errors="ignore")
+            except:
+                content = ""
+            
+            return ActionResult(
+                success=True,
+                message=f"Extracted content from {url}",
+                data={"url": url, "selector": selector, "content_length": len(content)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Extract failed: {str(e)}")

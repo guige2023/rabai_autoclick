@@ -1,269 +1,321 @@
+"""Cache management action module for RabAI AutoClick.
+
+Provides caching operations:
+- CacheSetAction: Set cache value
+- CacheGetAction: Get cache value
+- CacheDeleteAction: Delete cache entry
+- CacheClearAction: Clear all cache
+- CacheExistsAction: Check if key exists
+- CacheTTLAction: Get/set TTL
+- CacheStatsAction: Cache statistics
+- CacheWarmAction: Warm cache with data
 """
-Cache Manager Action Module.
 
-Provides in-memory and disk-based caching with TTL,
-cache invalidation, and memoization decorators.
-
-Example:
-    >>> from cache_manager_action import CacheManager
-    >>> cache = CacheManager(ttl=300)
-    >>> cache.set("key", data)
-    >>> cached = cache.get("key")
-"""
-from __future__ import annotations
-
-import hashlib
 import json
 import os
 import pickle
+import sys
 import time
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
-
-@dataclass
-class CacheEntry:
-    """A cached value with metadata."""
-    value: Any
-    created_at: float
-    expires_at: float
-    hit_count: int = 0
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
 class CacheManager:
-    """In-memory cache with TTL and disk persistence."""
-
-    def __init__(
-        self,
-        ttl: float = 300,
-        max_size: int = 1000,
-        persist_path: Optional[str] = None,
-    ):
-        self._cache: dict[str, CacheEntry] = {}
-        self._ttl = ttl
-        self._max_size = max_size
-        self._persist_path = persist_path
-        self._hits = 0
-        self._misses = 0
-
-        if persist_path and os.path.exists(persist_path):
-            self.load()
-
-    def set(
-        self,
-        key: str,
-        value: Any,
-        ttl: Optional[float] = None,
-    ) -> None:
-        """Store value in cache."""
-        now = time.time()
-        expires = now + (ttl or self._ttl)
-
-        if len(self._cache) >= self._max_size and key not in self._cache:
-            self._evict_oldest()
-
-        self._cache[key] = CacheEntry(
-            value=value,
-            created_at=now,
-            expires_at=expires,
-        )
-
-    def get(self, key: str) -> Optional[Any]:
-        """Retrieve value from cache if not expired."""
-        entry = self._cache.get(key)
-        if entry is None:
-            self._misses += 1
+    """In-memory cache storage."""
+    
+    _cache: Dict[str, Dict[str, Any]] = {}
+    
+    @classmethod
+    def set(cls, key: str, value: Any, ttl: int = 3600) -> None:
+        """Set a cache value."""
+        cls._cache[key] = {
+            "value": value,
+            "expires_at": time.time() + ttl if ttl > 0 else float("inf"),
+            "created_at": time.time()
+        }
+    
+    @classmethod
+    def get(cls, key: str) -> Optional[Any]:
+        """Get a cache value."""
+        if key not in cls._cache:
             return None
-
-        now = time.time()
-        if now > entry.expires_at:
-            del self._cache[key]
-            self._misses += 1
+        
+        entry = cls._cache[key]
+        if time.time() > entry["expires_at"]:
+            del cls._cache[key]
             return None
-
-        entry.hit_count += 1
-        self._hits += 1
-        return entry.value
-
-    def delete(self, key: str) -> bool:
+        
+        return entry["value"]
+    
+    @classmethod
+    def delete(cls, key: str) -> bool:
         """Delete a cache entry."""
-        if key in self._cache:
-            del self._cache[key]
+        if key in cls._cache:
+            del cls._cache[key]
             return True
         return False
-
-    def clear(self) -> None:
-        """Clear all cache entries."""
-        self._cache.clear()
-        self._hits = 0
-        self._misses = 0
-
-    def has(self, key: str) -> bool:
+    
+    @classmethod
+    def exists(cls, key: str) -> bool:
         """Check if key exists and is not expired."""
-        entry = self._cache.get(key)
-        if entry is None:
-            return False
-        if time.time() > entry.expires_at:
-            del self._cache[key]
-            return False
-        return True
-
-    def get_or_set(
-        self,
-        key: str,
-        factory: Callable[[], Any],
-        ttl: Optional[float] = None,
-    ) -> Any:
-        """Get from cache or compute and store."""
-        value = self.get(key)
-        if value is not None:
-            return value
-        value = factory()
-        self.set(key, value, ttl)
-        return value
-
-    async def get_or_set_async(
-        self,
-        key: str,
-        factory: Callable[[], Any],
-        ttl: Optional[float] = None,
-    ) -> Any:
-        """Async version of get_or_set."""
-        value = self.get(key)
-        if value is not None:
-            return value
-        if asyncio.iscoroutinefunction(factory):
-            value = await factory()
-        else:
-            value = factory()
-        self.set(key, value, ttl)
-        return value
-
-    def invalidate_pattern(self, pattern: str) -> int:
-        """Invalidate all keys matching pattern."""
-        import re
-        compiled = re.compile(pattern)
-        to_delete = [k for k in self._cache if compiled.search(k)]
-        for k in to_delete:
-            del self._cache[k]
-        return len(to_delete)
-
-    def _evict_oldest(self) -> None:
-        if not self._cache:
-            return
-        oldest_key = min(self._cache, key=lambda k: self._cache[k].created_at)
-        del self._cache[oldest_key]
-
-    def save(self) -> bool:
-        """Persist cache to disk."""
-        if not self._persist_path:
-            return False
-        try:
-            data = {
-                "cache": {k: {"v": v.value, "c": v.created_at, "e": v.expires_at} for k, v in self._cache.items()},
-                "hits": self._hits,
-                "misses": self._misses,
-            }
-            with open(self._persist_path, "wb") as f:
-                pickle.dump(data, f)
-            return True
-        except Exception:
-            return False
-
-    def load(self) -> bool:
-        """Load cache from disk."""
-        if not self._persist_path or not os.path.exists(self._persist_path):
-            return False
-        try:
-            with open(self._persist_path, "rb") as f:
-                data = pickle.load(f)
-            self._cache = {
-                k: CacheEntry(
-                    value=v["v"],
-                    created_at=v["c"],
-                    expires_at=v["e"],
-                )
-                for k, v in data.get("cache", {}).items()
-            }
-            self._hits = data.get("hits", 0)
-            self._misses = data.get("misses", 0)
-            return True
-        except Exception:
-            return False
-
-    def get_stats(self) -> dict[str, Any]:
-        """Get cache statistics."""
-        total = self._hits + self._misses
-        hit_rate = self._hits / total if total > 0 else 0.0
-        return {
-            "size": len(self._cache),
-            "max_size": self._max_size,
-            "hits": self._hits,
-            "misses": self._misses,
-            "hit_rate": hit_rate,
-            "ttl": self._ttl,
-        }
-
-    def keys(self) -> list[str]:
-        """List all cache keys (excluding expired)."""
-        self.cleanup()
-        return list(self._cache.keys())
-
-    def cleanup(self) -> int:
+        return cls.get(key) is not None
+    
+    @classmethod
+    def clear(cls) -> int:
+        """Clear all cache entries."""
+        count = len(cls._cache)
+        cls._cache.clear()
+        return count
+    
+    @classmethod
+    def keys(cls) -> List[str]:
+        """Get all cache keys."""
+        cls._cleanup()
+        return list(cls._cache.keys())
+    
+    @classmethod
+    def _cleanup(cls) -> None:
         """Remove expired entries."""
         now = time.time()
-        expired = [k for k, v in self._cache.items() if now > v.expires_at]
+        expired = [k for k, v in cls._cache.items() if now > v["expires_at"]]
         for k in expired:
-            del self._cache[k]
-        return len(expired)
+            del cls._cache[k]
+    
+    @classmethod
+    def stats(cls) -> Dict[str, Any]:
+        """Get cache statistics."""
+        cls._cleanup()
+        return {
+            "size": len(cls._cache),
+            "keys": list(cls._cache.keys()),
+            "memory_usage_estimate": len(str(cls._cache))
+        }
 
 
-def memoize(ttl: float = 300, cache: Optional[CacheManager] = None):
-    """
-    Decorator to memoize function results.
+class CacheSetAction(BaseAction):
+    """Set a cache value."""
+    action_type = "cache_set"
+    display_name = "设置缓存"
+    description = "设置缓存值"
 
-    Example:
-        @memoize(ttl=60)
-        def expensive_function(arg1, arg2):
-            return compute(arg1, arg2)
-    """
-    _cache = cache or CacheManager(ttl=ttl)
-
-    def decorator(func: Callable) -> Callable:
-        def wrapper(*args, **kwargs) -> Any:
-            key = _make_key(func.__name__, args, kwargs)
-            return _cache.get_or_set(key, lambda: func(*args, **kwargs))
-
-        async def async_wrapper(*args, **kwargs) -> Any:
-            key = _make_key(func.__name__, args, kwargs)
-            return await _cache.get_or_set_async(key, lambda: func(*args, **kwargs))
-
-        def _make_key(func_name: str, args: tuple, kwargs: dict) -> str:
-            key_data = {
-                "func": func_name,
-                "args": args,
-                "kwargs": kwargs,
-            }
-            key_str = json.dumps(key_data, sort_keys=True, default=str)
-            return hashlib.md5(key_str.encode()).hexdigest()
-
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        return wrapper
-
-    return decorator
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "")
+            value = params.get("value")
+            ttl = params.get("ttl", 3600)
+            
+            if not key:
+                return ActionResult(success=False, message="key is required")
+            
+            CacheManager.set(key, value, ttl)
+            
+            return ActionResult(
+                success=True,
+                message=f"Cache set: {key}",
+                data={"key": key, "ttl": ttl}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cache set failed: {str(e)}")
 
 
-def _make_key(func_name: str, args: tuple, kwargs: dict) -> str:
-    key_data = {"func": func_name, "args": args, "kwargs": kwargs}
-    return hashlib.md5(json.dumps(key_data, sort_keys=True, default=str).encode()).hexdigest()
+class CacheGetAction(BaseAction):
+    """Get a cache value."""
+    action_type = "cache_get"
+    display_name = "获取缓存"
+    description = "获取缓存值"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "")
+            
+            if not key:
+                return ActionResult(success=False, message="key is required")
+            
+            value = CacheManager.get(key)
+            
+            if value is None:
+                return ActionResult(success=False, message=f"Cache miss: {key}")
+            
+            return ActionResult(
+                success=True,
+                message=f"Cache hit: {key}",
+                data={"key": key, "value": value}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cache get failed: {str(e)}")
 
 
-if __name__ == "__main__":
-    import asyncio
+class CacheDeleteAction(BaseAction):
+    """Delete a cache entry."""
+    action_type = "cache_delete"
+    display_name = "删除缓存"
+    description = "删除缓存条目"
 
-    cache = CacheManager(ttl=60)
-    cache.set("test", {"data": "value"}, ttl=10)
-    print(f"Get test: {cache.get('test')}")
-    print(f"Has test: {cache.has('test')}")
-    print(f"Stats: {cache.get_stats()}")
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "")
+            pattern = params.get("pattern", "")
+            
+            if not key and not pattern:
+                return ActionResult(success=False, message="key or pattern required")
+            
+            if pattern:
+                import fnmatch
+                keys_to_delete = [k for k in CacheManager.keys() if fnmatch.fnmatch(k, pattern)]
+                for k in keys_to_delete:
+                    CacheManager.delete(k)
+                return ActionResult(
+                    success=True,
+                    message=f"Deleted {len(keys_to_delete)} keys matching {pattern}",
+                    data={"pattern": pattern, "deleted": len(keys_to_delete)}
+                )
+            else:
+                deleted = CacheManager.delete(key)
+                return ActionResult(
+                    success=True,
+                    message=f"Deleted: {key}" if deleted else f"Not found: {key}",
+                    data={"key": key, "deleted": deleted}
+                )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cache delete failed: {str(e)}")
+
+
+class CacheClearAction(BaseAction):
+    """Clear all cache."""
+    action_type = "cache_clear"
+    display_name = "清空缓存"
+    description = "清空所有缓存"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            count = CacheManager.clear()
+            
+            return ActionResult(
+                success=True,
+                message=f"Cleared {count} cache entries",
+                data={"cleared": count}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cache clear failed: {str(e)}")
+
+
+class CacheExistsAction(BaseAction):
+    """Check if cache key exists."""
+    action_type = "cache_exists"
+    display_name = "缓存存在检查"
+    description = "检查缓存键是否存在"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "")
+            
+            if not key:
+                return ActionResult(success=False, message="key is required")
+            
+            exists = CacheManager.exists(key)
+            
+            return ActionResult(
+                success=exists,
+                message=f"Cache {'hit' if exists else 'miss'}: {key}",
+                data={"key": key, "exists": exists}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cache exists check failed: {str(e)}")
+
+
+class CacheTTLAction(BaseAction):
+    """Get or set TTL for cache entry."""
+    action_type = "cache_ttl"
+    display_name = "缓存TTL"
+    description = "获取或设置缓存TTL"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            key = params.get("key", "")
+            ttl = params.get("ttl")
+            
+            if not key:
+                return ActionResult(success=False, message="key is required")
+            
+            CacheManager._cleanup()
+            
+            if key not in CacheManager._cache:
+                return ActionResult(success=False, message=f"Key not found: {key}")
+            
+            if ttl is not None:
+                entry = CacheManager._cache[key]
+                entry["expires_at"] = time.time() + ttl if ttl > 0 else float("inf")
+                return ActionResult(
+                    success=True,
+                    message=f"Set TTL for {key}: {ttl}s",
+                    data={"key": key, "ttl": ttl}
+                )
+            else:
+                entry = CacheManager._cache[key]
+                remaining = max(0, entry["expires_at"] - time.time())
+                return ActionResult(
+                    success=True,
+                    message=f"TTL for {key}: {remaining}s",
+                    data={"key": key, "ttl": remaining}
+                )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cache TTL failed: {str(e)}")
+
+
+class CacheStatsAction(BaseAction):
+    """Get cache statistics."""
+    action_type = "cache_stats"
+    display_name = "缓存统计"
+    description = "获取缓存统计"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            stats = CacheManager.stats()
+            
+            return ActionResult(
+                success=True,
+                message=f"Cache stats: {stats['size']} entries",
+                data=stats
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cache stats failed: {str(e)}")
+
+
+class CacheWarmAction(BaseAction):
+    """Warm cache with data."""
+    action_type = "cache_warm"
+    display_name = "预热缓存"
+    description = "预热缓存数据"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            items = params.get("items", [])
+            prefix = params.get("prefix", "")
+            default_ttl = params.get("ttl", 3600)
+            
+            if not items:
+                return ActionResult(success=False, message="items required")
+            
+            warmed = 0
+            for item in items:
+                key = item.get("key", "")
+                value = item.get("value")
+                ttl = item.get("ttl", default_ttl)
+                
+                if prefix:
+                    key = f"{prefix}:{key}"
+                
+                CacheManager.set(key, value, ttl)
+                warmed += 1
+            
+            return ActionResult(
+                success=True,
+                message=f"Warmed cache with {warmed} items",
+                data={"warmed": warmed, "items": len(items)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cache warm failed: {str(e)}")

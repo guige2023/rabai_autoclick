@@ -1,348 +1,310 @@
-"""File watcher action for monitoring file system changes.
+"""File watcher action module for RabAI AutoClick.
 
-This module provides file and directory monitoring with
-support for events, filtering, and recursive watching.
-
-Example:
-    >>> action = FileWatcherAction()
-    >>> result = action.execute(command="watch", path="/tmp", events=["created"])
+Provides file monitoring operations:
+- FileMonitorAction: Monitor file changes
+- FileCreateAction: Create new file
+- FileDeleteAction: Delete file
+- FileMoveAction: Move/rename file
+- FileCopyAction: Copy file
+- FileModifyAction: Modify file content
+- FileBackupAction: Backup file
+- FileRestoreAction: Restore from backup
 """
 
-from __future__ import annotations
-
+import hashlib
+import json
 import os
+import shutil
+import sys
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class FileEvent:
-    """Represents a file system event."""
-    event_type: str
-    path: str
-    timestamp: float
-    is_directory: bool = False
+class FileMonitorAction(BaseAction):
+    """Monitor file for changes."""
+    action_type = "file_monitor"
+    display_name = "文件监控"
+    description = "监控文件变化"
 
-
-@dataclass
-class WatchConfig:
-    """Configuration for file watching."""
-    recursive: bool = True
-    ignored_patterns: list[str] = field(default_factory=lambda: ["*.pyc", ".git", "__pycache__"])
-    debounce_seconds: float = 0.5
-
-
-class FileWatcherAction:
-    """File system watcher action.
-
-    Monitors files and directories for changes with
-    support for event filtering and callbacks.
-
-    Example:
-        >>> action = FileWatcherAction()
-        >>> result = action.execute(
-        ...     command="watch",
-        ...     path="/tmp",
-        ...     callback=my_callback
-        ... )
-    """
-
-    def __init__(self, config: Optional[WatchConfig] = None) -> None:
-        """Initialize file watcher.
-
-        Args:
-            config: Optional watch configuration.
-        """
-        self.config = config or WatchConfig()
-        self._watching = False
-        self._events: list[FileEvent] = []
-
-    def execute(
-        self,
-        command: str,
-        path: Optional[str] = None,
-        events: Optional[list[str]] = None,
-        pattern: Optional[str] = None,
-        callback: Optional[Callable[[FileEvent], None]] = None,
-        timeout: float = 10.0,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Execute file watcher command.
-
-        Args:
-            command: Watch command (watch, stop, get_events, wait_for).
-            path: Path to watch.
-            events: Event types to watch (created, modified, deleted, moved).
-            pattern: File pattern to match.
-            callback: Event callback function.
-            timeout: Wait timeout.
-            **kwargs: Additional parameters.
-
-        Returns:
-            Watch result dictionary.
-
-        Raises:
-            ValueError: If command is invalid.
-        """
-        cmd = command.lower()
-        result: dict[str, Any] = {"command": cmd, "success": True}
-
-        if cmd == "watch":
-            if not path:
-                raise ValueError("path required for 'watch' command")
-            result.update(self._start_watch(path, events, pattern, callback))
-
-        elif cmd == "stop":
-            result.update(self._stop_watch())
-
-        elif cmd == "get_events":
-            result["events"] = [
-                {"type": e.event_type, "path": e.path, "timestamp": e.timestamp}
-                for e in self._events
-            ]
-            result["count"] = len(self._events)
-
-        elif cmd == "wait_for":
-            event_type = kwargs.get("event_type")
-            file_path = kwargs.get("path")
-            result.update(self._wait_for_event(event_type, file_path, timeout))
-
-        elif cmd == "clear":
-            self._events.clear()
-            result["cleared"] = True
-
-        elif cmd == "exists":
-            check_path = kwargs.get("path")
-            if not check_path:
-                raise ValueError("path required for 'exists'")
-            result["exists"] = os.path.exists(check_path)
-            result["is_file"] = os.path.isfile(check_path) if result["exists"] else False
-            result["is_dir"] = os.path.isdir(check_path) if result["exists"] else False
-
-        elif cmd == "list_dir":
-            list_path = kwargs.get("path", ".")
-            result.update(self._list_directory(list_path, kwargs.get("recursive", False)))
-
-        elif cmd == "get_info":
-            info_path = kwargs.get("path")
-            if not info_path:
-                raise ValueError("path required for 'get_info'")
-            result.update(self._get_file_info(info_path))
-
-        else:
-            raise ValueError(f"Unknown command: {command}")
-
-        return result
-
-    def _start_watch(
-        self,
-        path: str,
-        events: Optional[list[str]],
-        pattern: Optional[str],
-        callback: Optional[Callable[[FileEvent], None]],
-    ) -> dict[str, Any]:
-        """Start watching path.
-
-        Args:
-            path: Path to watch.
-            events: Event types to watch.
-            pattern: File pattern.
-            callback: Event callback.
-
-        Returns:
-            Result dictionary.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            from watchdog.observers import Observer
-            from watchdog.events import FileSystemEventHandler, FileSystemEvent
-        except ImportError:
-            return {
-                "success": False,
-                "error": "watchdog not installed. Run: pip install watchdog",
-            }
+            file_path = params.get("file_path", "")
+            watch_events = params.get("events", ["modify", "delete", "create"])
+            timeout = params.get("timeout", 60)
+            
+            if not file_path:
+                return ActionResult(success=False, message="file_path is required")
+            
+            if not os.path.exists(file_path):
+                return ActionResult(success=False, message=f"File not found: {file_path}")
+            
+            mtime_before = os.path.getmtime(file_path)
+            size_before = os.path.getsize(file_path)
+            
+            start_time = time.time()
+            triggered = None
+            
+            while time.time() - start_time < timeout:
+                if os.path.exists(file_path):
+                    mtime_now = os.path.getmtime(file_path)
+                    size_now = os.path.getsize(file_path)
+                    
+                    if mtime_now != mtime_before:
+                        triggered = "modify"
+                        break
+                    if size_now != size_before:
+                        triggered = "modify"
+                        break
+                else:
+                    triggered = "delete"
+                    break
+                
+                time.sleep(0.5)
+            
+            if triggered is None:
+                return ActionResult(success=True, message="No changes detected within timeout", data={"timeout": timeout})
+            
+            return ActionResult(
+                success=True,
+                message=f"File event: {triggered}",
+                data={"event": triggered, "file_path": file_path}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"File monitor failed: {str(e)}")
 
-        if self._watching:
-            return {"success": False, "error": "Already watching"}
 
-        events = events or ["created", "modified", "deleted", "moved"]
+class FileCreateAction(BaseAction):
+    """Create a new file."""
+    action_type = "file_create"
+    display_name = "创建文件"
+    description = "创建新文件"
 
-        class EventHandler(FileSystemEventHandler):
-            def __init__(self, outer):
-                self.outer = outer
-
-            def on_any_event(self, event: FileSystemEvent):
-                if event.is_directory:
-                    return
-                if self.outer._should_ignore(event.src_path):
-                    return
-
-                event_type = event.event_type
-                file_event = FileEvent(
-                    event_type=event_type,
-                    path=event.src_path,
-                    timestamp=time.time(),
-                )
-                self.outer._events.append(file_event)
-                if self.outer._callback:
-                    self.outer._callback(file_event)
-
-        self._callback = callback
-        self._observer = Observer()
-        handler = EventHandler(self)
-        self._observer.schedule(handler, path, recursive=self.config.recursive)
-        self._observer.start()
-        self._watching = True
-
-        return {
-            "watching": True,
-            "path": path,
-            "events": events,
-            "recursive": self.config.recursive,
-        }
-
-    def _stop_watch(self) -> dict[str, Any]:
-        """Stop watching.
-
-        Returns:
-            Result dictionary.
-        """
-        if hasattr(self, "_observer") and self._observer:
-            self._observer.stop()
-            self._observer.join()
-            self._watching = False
-            return {"stopped": True}
-
-        return {"stopped": True, "was_not_watching": True}
-
-    def _should_ignore(self, path: str) -> bool:
-        """Check if path should be ignored.
-
-        Args:
-            path: File path.
-
-        Returns:
-            True if should ignore.
-        """
-        import fnmatch
-        for pattern in self.config.ignored_patterns:
-            if fnmatch.fnmatch(path, pattern):
-                return True
-        return False
-
-    def _wait_for_event(
-        self,
-        event_type: Optional[str],
-        path: Optional[str],
-        timeout: float,
-    ) -> dict[str, Any]:
-        """Wait for specific event.
-
-        Args:
-            event_type: Type of event to wait for.
-            path: Optional file path.
-            timeout: Maximum wait time.
-
-        Returns:
-            Result dictionary.
-        """
-        start_time = time.time()
-        initial_count = len(self._events)
-
-        while time.time() - start_time < timeout:
-            for event in self._events[initial_count:]:
-                if event_type and event.event_type != event_type:
-                    continue
-                if path and path not in event.path:
-                    continue
-                return {
-                    "found": True,
-                    "event": {
-                        "type": event.event_type,
-                        "path": event.path,
-                        "timestamp": event.timestamp,
-                    },
-                    "wait_time": time.time() - start_time,
-                }
-            time.sleep(0.1)
-
-        return {
-            "found": False,
-            "timeout": True,
-            "wait_time": timeout,
-        }
-
-    def _list_directory(self, path: str, recursive: bool) -> dict[str, Any]:
-        """List directory contents.
-
-        Args:
-            path: Directory path.
-            recursive: Whether to recurse.
-
-        Returns:
-            Result dictionary.
-        """
-        files = []
-        dirs = []
-
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            if recursive:
-                for root, directories, filenames in os.walk(path):
-                    for d in directories:
-                        dirs.append(os.path.join(root, d))
-                    for f in filenames:
-                        files.append(os.path.join(root, f))
+            file_path = params.get("file_path", "")
+            content = params.get("content", "")
+            encoding = params.get("encoding", "utf-8")
+            
+            if not file_path:
+                return ActionResult(success=False, message="file_path is required")
+            
+            os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+            
+            with open(file_path, "w", encoding=encoding) as f:
+                f.write(content)
+            
+            return ActionResult(
+                success=True,
+                message=f"Created file: {file_path}",
+                data={"path": file_path, "size": len(content)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"File create failed: {str(e)}")
+
+
+class FileDeleteAction(BaseAction):
+    """Delete a file or directory."""
+    action_type = "file_delete"
+    display_name = "删除文件"
+    description = "删除文件或目录"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            file_path = params.get("file_path", "")
+            recursive = params.get("recursive", False)
+            
+            if not file_path:
+                return ActionResult(success=False, message="file_path is required")
+            
+            if not os.path.exists(file_path):
+                return ActionResult(success=False, message=f"File not found: {file_path}")
+            
+            if os.path.isdir(file_path):
+                if recursive:
+                    shutil.rmtree(file_path)
+                else:
+                    os.rmdir(file_path)
             else:
-                for item in os.listdir(path):
-                    full_path = os.path.join(path, item)
-                    if os.path.isdir(full_path):
-                        dirs.append(full_path)
-                    else:
-                        files.append(full_path)
-
+                os.remove(file_path)
+            
+            return ActionResult(
+                success=True,
+                message=f"Deleted: {file_path}",
+                data={"path": file_path, "type": "directory" if os.path.isdir(file_path) else "file"}
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"File delete failed: {str(e)}")
 
-        return {
-            "files": files,
-            "directories": dirs,
-            "file_count": len(files),
-            "dir_count": len(dirs),
-        }
 
-    def _get_file_info(self, path: str) -> dict[str, Any]:
-        """Get file information.
+class FileMoveAction(BaseAction):
+    """Move or rename a file."""
+    action_type = "file_move"
+    display_name = "移动文件"
+    description = "移动或重命名文件"
 
-        Args:
-            path: File path.
-
-        Returns:
-            Result dictionary.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            stat = os.stat(path)
-            return {
-                "path": path,
-                "exists": True,
-                "size": stat.st_size,
-                "modified": stat.st_mtime,
-                "created": stat.st_ctime,
-                "is_file": os.path.isfile(path),
-                "is_dir": os.path.isdir(path),
-                "is_link": os.path.islink(path),
-            }
+            source = params.get("source", "")
+            destination = params.get("destination", "")
+            
+            if not source or not destination:
+                return ActionResult(success=False, message="source and destination required")
+            
+            if not os.path.exists(source):
+                return ActionResult(success=False, message=f"Source not found: {source}")
+            
+            os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
+            shutil.move(source, destination)
+            
+            return ActionResult(
+                success=True,
+                message=f"Moved {source} -> {destination}",
+                data={"source": source, "destination": destination}
+            )
         except Exception as e:
-            return {"exists": False, "error": str(e)}
+            return ActionResult(success=False, message=f"File move failed: {str(e)}")
 
-    def is_watching(self) -> bool:
-        """Check if currently watching.
 
-        Returns:
-            True if watching.
-        """
-        return self._watching
+class FileCopyAction(BaseAction):
+    """Copy a file or directory."""
+    action_type = "file_copy"
+    display_name = "复制文件"
+    description = "复制文件或目录"
 
-    def __del__(self) -> None:
-        """Cleanup on destruction."""
-        if self._watching:
-            self._stop_watch()
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            source = params.get("source", "")
+            destination = params.get("destination", "")
+            overwrite = params.get("overwrite", True)
+            
+            if not source or not destination:
+                return ActionResult(success=False, message="source and destination required")
+            
+            if not os.path.exists(source):
+                return ActionResult(success=False, message=f"Source not found: {source}")
+            
+            if os.path.exists(destination) and not overwrite:
+                return ActionResult(success=False, message="Destination exists, overwrite=False")
+            
+            os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
+            
+            if os.path.isdir(source):
+                shutil.copytree(source, destination, dirs_exist_ok=overwrite)
+            else:
+                shutil.copy2(source, destination)
+            
+            return ActionResult(
+                success=True,
+                message=f"Copied {source} -> {destination}",
+                data={"source": source, "destination": destination}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"File copy failed: {str(e)}")
+
+
+class FileModifyAction(BaseAction):
+    """Modify file content."""
+    action_type = "file_modify"
+    display_name = "修改文件"
+    description = "修改文件内容"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            file_path = params.get("file_path", "")
+            content = params.get("content", "")
+            mode = params.get("mode", "replace")
+            append = params.get("append", False)
+            
+            if not file_path:
+                return ActionResult(success=False, message="file_path is required")
+            
+            os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+            
+            if append:
+                with open(file_path, "a", encoding="utf-8") as f:
+                    f.write(content)
+                message = f"Appended to {file_path}"
+            else:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                message = f"Replaced content in {file_path}"
+            
+            return ActionResult(
+                success=True,
+                message=message,
+                data={"path": file_path, "size": len(content)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"File modify failed: {str(e)}")
+
+
+class FileBackupAction(BaseAction):
+    """Backup a file."""
+    action_type = "file_backup"
+    display_name = "文件备份"
+    description = "备份文件"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            file_path = params.get("file_path", "")
+            backup_dir = params.get("backup_dir", "/tmp/backups")
+            suffix = params.get("suffix", ".bak")
+            
+            if not file_path:
+                return ActionResult(success=False, message="file_path is required")
+            
+            if not os.path.exists(file_path):
+                return ActionResult(success=False, message=f"File not found: {file_path}")
+            
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            filename = os.path.basename(file_path)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_name = f"{filename}_{timestamp}{suffix}"
+            backup_path = os.path.join(backup_dir, backup_name)
+            
+            shutil.copy2(file_path, backup_path)
+            
+            return ActionResult(
+                success=True,
+                message=f"Backed up to {backup_path}",
+                data={"original": file_path, "backup": backup_path}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Backup failed: {str(e)}")
+
+
+class FileRestoreAction(BaseAction):
+    """Restore file from backup."""
+    action_type = "file_restore"
+    display_name = "文件恢复"
+    description = "从备份恢复文件"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            backup_path = params.get("backup_path", "")
+            restore_path = params.get("restore_path", "")
+            
+            if not backup_path:
+                return ActionResult(success=False, message="backup_path is required")
+            
+            if not os.path.exists(backup_path):
+                return ActionResult(success=False, message=f"Backup not found: {backup_path}")
+            
+            if not restore_path:
+                restore_path = backup_path.rsplit("_", 2)[0]
+            
+            shutil.copy2(backup_path, restore_path)
+            
+            return ActionResult(
+                success=True,
+                message=f"Restored {backup_path} -> {restore_path}",
+                data={"backup": backup_path, "restored": restore_path}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Restore failed: {str(e)}")

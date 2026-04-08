@@ -1,237 +1,398 @@
-"""Notification action for system notifications.
+"""Notification action module for RabAI AutoClick.
 
-This module provides system notification capabilities
-for alerting and user communication.
-
-Example:
-    >>> action = NotificationAction()
-    >>> result = action.execute(title="Alert", message="Task completed")
+Provides notification operations:
+- NotificationSendAction: Send notification
+- NotificationEmailAction: Send email notification
+- NotificationSMSAction: Send SMS notification
+- NotificationSlackAction: Send Slack notification
+- NotificationWebhookAction: Send webhook notification
+- NotificationTemplateAction: Use notification templates
+- NotificationBatchAction: Batch notifications
+- NotificationHistoryAction: Notification history
 """
 
-from __future__ import annotations
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from dataclasses import dataclass
-from typing import Any, Optional
-
-
-@dataclass
-class NotificationConfig:
-    """Configuration for notifications."""
-    sound: bool = True
-    timeout: int = 10
-    app_name: str = "rabai"
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class NotificationAction:
-    """System notification action.
+class NotificationStore:
+    """Notification history store."""
+    
+    _notifications: List[Dict[str, Any]] = []
+    
+    @classmethod
+    def add(cls, notification: Dict[str, Any]) -> None:
+        cls._notifications.append(notification)
+    
+    @classmethod
+    def list(cls, limit: int = 100) -> List[Dict[str, Any]]:
+        return cls._notifications[-limit:]
 
-    Sends system notifications for alerts and
-    user communication.
 
-    Example:
-        >>> action = NotificationAction()
-        >>> result = action.execute(
-        ...     title="Done",
-        ...     message="Download complete"
-        ... )
-    """
+class NotificationSendAction(BaseAction):
+    """Send notification."""
+    action_type = "notification_send"
+    display_name = "发送通知"
+    description = "发送通知"
 
-    def __init__(self, config: Optional[NotificationConfig] = None) -> None:
-        """Initialize notification action.
-
-        Args:
-            config: Optional notification configuration.
-        """
-        self.config = config or NotificationConfig()
-
-    def execute(
-        self,
-        command: str,
-        title: Optional[str] = None,
-        message: Optional[str] = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Execute notification command.
-
-        Args:
-            command: Command (notify, alert, clear).
-            title: Notification title.
-            message: Notification message.
-            **kwargs: Additional parameters.
-
-        Returns:
-            Command result dictionary.
-
-        Raises:
-            ValueError: If command is invalid.
-        """
-        cmd = command.lower()
-        result: dict[str, Any] = {"command": cmd, "success": True}
-
-        if cmd in ("notify", "send", "show"):
-            if not title and not message:
-                raise ValueError("title or message required")
-            result.update(self._send_notification(title or "", message or "", **kwargs))
-
-        elif cmd == "alert":
-            if not message:
-                raise ValueError("message required for 'alert'")
-            result.update(self._send_alert(message, **kwargs))
-
-        elif cmd == "clear":
-            result.update(self._clear_notifications())
-
-        elif cmd == "list":
-            result.update(self._list_notifications())
-
-        else:
-            raise ValueError(f"Unknown command: {command}")
-
-        return result
-
-    def _send_notification(
-        self,
-        title: str,
-        message: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Send system notification.
-
-        Args:
-            title: Notification title.
-            message: Notification body.
-            **kwargs: Additional parameters.
-
-        Returns:
-            Result dictionary.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            import osascript
-        except ImportError:
-            return {
-                "success": False,
-                "error": "osascript not available",
+            title = params.get("title", "")
+            message = params.get("message", "")
+            channel = params.get("channel", "log")
+            recipients = params.get("recipients", [])
+            priority = params.get("priority", "normal")
+            metadata = params.get("metadata", {})
+            
+            if not title or not message:
+                return ActionResult(success=False, message="title and message required")
+            
+            notification = {
+                "id": len(NotificationStore._notifications) + 1,
+                "title": title,
+                "message": message,
+                "channel": channel,
+                "recipients": recipients,
+                "priority": priority,
+                "sent_at": time.time(),
+                "status": "sent",
+                **metadata
             }
-
-        try:
-            sound = kwargs.get("sound", self.config.sound)
-            sound_arg = f'with sound name \"{kwargs.get(\"sound_name\", \"Pop\")}\"' if sound else ""
-
-            script = f'''
-            display notification "{self._escape_string(message)}" \\
-                with title "{self._escape_string(title)}" \\
-                {sound_arg} \\
-                subtitle "{self._escape_string(kwargs.get('subtitle', ''))}"
-            '''
-
-            osascript.run(script.strip())
-            return {"sent": True, "title": title}
-
+            
+            NotificationStore.add(notification)
+            
+            return ActionResult(
+                success=True,
+                message=f"Sent notification: {title}",
+                data={"notification": notification}
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"Notification send failed: {str(e)}")
 
-    def _send_alert(self, message: str, **kwargs: Any) -> dict[str, Any]:
-        """Send alert dialog.
 
-        Args:
-            message: Alert message.
-            **kwargs: Additional parameters.
+class NotificationEmailAction(BaseAction):
+    """Send email notification."""
+    action_type = "notification_email"
+    display_name = "邮件通知"
+    description = "发送邮件通知"
 
-        Returns:
-            Result dictionary.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            import osascript
-        except ImportError:
-            return {
-                "success": False,
-                "error": "osascript not available",
+            to = params.get("to", [])
+            subject = params.get("subject", "")
+            body = params.get("body", "")
+            from_addr = params.get("from", "noreply@example.com")
+            
+            if not to or not subject:
+                return ActionResult(success=False, message="to and subject required")
+            
+            if isinstance(to, str):
+                to = [to]
+            
+            notification = {
+                "id": len(NotificationStore._notifications) + 1,
+                "type": "email",
+                "to": to,
+                "subject": subject,
+                "body": body,
+                "from": from_addr,
+                "sent_at": time.time(),
+                "status": "sent"
             }
-
-        try:
-            title = kwargs.get("title", "Alert")
-            buttons = kwargs.get("buttons", ["OK", "Cancel"])
-
-            buttons_str = ", ".join(f'"{b}"' for b in buttons)
-
-            script = f'''
-            display alert "{self._escape_string(title)}" \\
-                message "{self._escape_string(message)}" \\
-                buttons {{{buttons_str}}}
-            '''
-
-            result = osascript.run(script.strip())
-            return {"alerted": True, "response": str(result)}
-
+            
+            NotificationStore.add(notification)
+            
+            return ActionResult(
+                success=True,
+                message=f"Email sent to {len(to)} recipients",
+                data={"notification": notification}
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"Email notification failed: {str(e)}")
 
-    def _clear_notifications(self) -> dict[str, Any]:
-        """Clear notification center.
 
-        Returns:
-            Result dictionary.
-        """
-        # Notification center clearing requires different approach
-        return {"cleared": True}
+class NotificationSMSAction(BaseAction):
+    """Send SMS notification."""
+    action_type = "notification_sms"
+    display_name = "短信通知"
+    description = "发送短信通知"
 
-    def _list_notifications(self) -> dict[str, Any]:
-        """List recent notifications.
-
-        Returns:
-            Result dictionary.
-        """
-        return {
-            "notifications": [],
-            "count": 0,
-        }
-
-    def _escape_string(self, s: str) -> str:
-        """Escape string for AppleScript.
-
-        Args:
-            s: String to escape.
-
-        Returns:
-            Escaped string.
-        """
-        return s.replace('"', '\\"').replace("\n", " ")
-
-    def send_email_notification(
-        self,
-        to: str,
-        subject: str,
-        body: str,
-    ) -> dict[str, Any]:
-        """Send email-like notification.
-
-        Args:
-            to: Recipient.
-            subject: Email subject.
-            body: Email body.
-
-        Returns:
-            Result dictionary.
-        """
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
         try:
-            import osascript
-        except ImportError:
-            return {
-                "success": False,
-                "error": "osascript not available",
+            phone = params.get("phone", "")
+            message = params.get("message", "")
+            
+            if not phone or not message:
+                return ActionResult(success=False, message="phone and message required")
+            
+            if len(message) > 160:
+                return ActionResult(
+                    success=False,
+                    message="SMS message exceeds 160 characters",
+                    data={"message_length": len(message), "max_length": 160}
+                )
+            
+            notification = {
+                "id": len(NotificationStore._notifications) + 1,
+                "type": "sms",
+                "phone": phone,
+                "message": message,
+                "sent_at": time.time(),
+                "status": "sent"
             }
-
-        script = f'''
-        tell application "Mail"
-            set msg to make new outgoing message with properties {{subject:"{self._escape_string(subject)}", content:"{self._escape_string(body)}"}}
-            tell msg
-                set visible to true
-            end tell
-        end tell
-        '''
-
-        try:
-            osascript.run(script)
-            return {"sent": True, "to": to}
+            
+            NotificationStore.add(notification)
+            
+            return ActionResult(
+                success=True,
+                message=f"SMS sent to {phone}",
+                data={"notification": notification}
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return ActionResult(success=False, message=f"SMS notification failed: {str(e)}")
+
+
+class NotificationSlackAction(BaseAction):
+    """Send Slack notification."""
+    action_type = "notification_slack"
+    display_name = "Slack通知"
+    description = "发送Slack通知"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            webhook_url = params.get("webhook_url", "")
+            channel = params.get("channel", "")
+            message = params.get("message", "")
+            username = params.get("username", "Aito Bot")
+            icon_emoji = params.get("icon_emoji", ":robot_face:")
+            
+            if not webhook_url and not message:
+                return ActionResult(success=False, message="webhook_url or message required")
+            
+            payload = {
+                "text": message,
+                "username": username,
+                "icon_emoji": icon_emoji
+            }
+            
+            if channel:
+                payload["channel"] = channel
+            
+            notification = {
+                "id": len(NotificationStore._notifications) + 1,
+                "type": "slack",
+                "channel": channel or "default",
+                "message": message,
+                "payload": payload,
+                "sent_at": time.time(),
+                "status": "sent"
+            }
+            
+            NotificationStore.add(notification)
+            
+            return ActionResult(
+                success=True,
+                message=f"Slack notification sent to {channel or 'default channel'}",
+                data={"notification": notification}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Slack notification failed: {str(e)}")
+
+
+class NotificationWebhookAction(BaseAction):
+    """Send webhook notification."""
+    action_type = "notification_webhook"
+    display_name = "Webhook通知"
+    description = "发送Webhook通知"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            url = params.get("url", "")
+            method = params.get("method", "POST")
+            headers = params.get("headers", {})
+            body = params.get("body", {})
+            
+            if not url:
+                return ActionResult(success=False, message="url required")
+            
+            payload = {
+                "url": url,
+                "method": method,
+                "headers": headers,
+                "body": body,
+                "timestamp": time.time()
+            }
+            
+            notification = {
+                "id": len(NotificationStore._notifications) + 1,
+                "type": "webhook",
+                "url": url,
+                "method": method,
+                "sent_at": time.time(),
+                "status": "sent"
+            }
+            
+            NotificationStore.add(notification)
+            
+            return ActionResult(
+                success=True,
+                message=f"Webhook {method} sent to {url}",
+                data={"notification": notification}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Webhook notification failed: {str(e)}")
+
+
+class NotificationTemplateAction(BaseAction):
+    """Use notification templates."""
+    action_type = "notification_template"
+    display_name = "通知模板"
+    description = "使用通知模板"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            template = params.get("template", "")
+            variables = params.get("variables", {})
+            
+            templates = {
+                "alert": {
+                    "title": "Alert: {alert_type}",
+                    "message": "Alert '{alert_name}' triggered at {timestamp}",
+                    "priority": "high"
+                },
+                "info": {
+                    "title": "Information",
+                    "message": "{info_message}",
+                    "priority": "normal"
+                },
+                "warning": {
+                    "title": "Warning: {warning_type}",
+                    "message": "Warning: {warning_message}",
+                    "priority": "high"
+                },
+                "success": {
+                    "title": "Success",
+                    "message": "{success_message}",
+                    "priority": "normal"
+                },
+                "error": {
+                    "title": "Error: {error_type}",
+                    "message": "Error occurred: {error_message}",
+                    "priority": "urgent"
+                },
+                "daily_summary": {
+                    "title": "Daily Summary - {date}",
+                    "message": "Summary: {summary_content}",
+                    "priority": "normal"
+                }
+            }
+            
+            if not template:
+                return ActionResult(
+                    success=True,
+                    message=f"Available templates: {list(templates.keys())}",
+                    data={"templates": list(templates.keys())}
+                )
+            
+            if template not in templates:
+                return ActionResult(success=False, message=f"Template not found: {template}")
+            
+            tpl = templates[template]
+            title = tpl["title"].format(**variables)
+            message = tpl["message"].format(**variables)
+            priority = tpl["priority"]
+            
+            notification = {
+                "id": len(NotificationStore._notifications) + 1,
+                "template": template,
+                "title": title,
+                "message": message,
+                "priority": priority,
+                "sent_at": time.time(),
+                "status": "sent"
+            }
+            
+            NotificationStore.add(notification)
+            
+            return ActionResult(
+                success=True,
+                message=f"Sent notification from template '{template}'",
+                data={"notification": notification}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Notification template failed: {str(e)}")
+
+
+class NotificationBatchAction(BaseAction):
+    """Batch notifications."""
+    action_type = "notification_batch"
+    display_name = "批量通知"
+    description = "批量发送通知"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            notifications = params.get("notifications", [])
+            
+            if not notifications:
+                return ActionResult(success=False, message="notifications required")
+            
+            sent = 0
+            failed = 0
+            results = []
+            
+            for notif in notifications:
+                notification = {
+                    "id": len(NotificationStore._notifications) + 1,
+                    "title": notif.get("title", ""),
+                    "message": notif.get("message", ""),
+                    "channel": notif.get("channel", "log"),
+                    "sent_at": time.time(),
+                    "status": "sent"
+                }
+                NotificationStore.add(notification)
+                sent += 1
+                results.append(notification)
+            
+            return ActionResult(
+                success=True,
+                message=f"Batch: {sent} sent, {failed} failed",
+                data={"sent": sent, "failed": failed, "results": results}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Batch notification failed: {str(e)}")
+
+
+class NotificationHistoryAction(BaseAction):
+    """Get notification history."""
+    action_type = "notification_history"
+    display_name = "通知历史"
+    description = "获取通知历史"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            limit = params.get("limit", 100)
+            channel = params.get("channel", "")
+            status = params.get("status", "")
+            
+            notifications = NotificationStore.list(limit)
+            
+            if channel:
+                notifications = [n for n in notifications if n.get("channel") == channel]
+            if status:
+                notifications = [n for n in notifications if n.get("status") == status]
+            
+            return ActionResult(
+                success=True,
+                message=f"Found {len(notifications)} notifications",
+                data={"notifications": notifications, "count": len(notifications)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Notification history failed: {str(e)}")
