@@ -1,242 +1,459 @@
 """
-Keyboard layout utilities for macOS automation.
+Keyboard layout detection and switching utilities.
 
-Provides keyboard layout detection, switching, and
-character-to-keycode mapping for different layouts.
+Provides utilities for detecting current keyboard layout,
+switching between layouts, and handling international keyboards.
 """
 
 from __future__ import annotations
 
 import subprocess
-from typing import Optional, Dict, List, Tuple
-from dataclasses import dataclass
-from enum import Enum
-
-
-class KeyboardLayout(Enum):
-    """Common keyboard layouts."""
-    US = "com.apple.keylayout.US"
-    US_EXTENDED = "com.apple.keylayout.USExtended"
-    CHINESE_SIMPLIFIED = "com.apple.keylayout.Chinese-Simplified"
-    CHINESE_TRADITIONAL = "com.apple.keylayout.Chinese-Traditional"
-    JAPANESE = "com.apple.keylayout.Japanese"
-    KOREAN = "com.apple.keylayout.Korean"
-    GERMAN = "com.apple.keylayout.German"
-    FRENCH = "com.apple.keylayout.French"
-    BRITISH = "com.apple.keylayout.British"
+import re
+from typing import List, Optional, Dict, Callable
+from dataclasses import dataclass, field
 
 
 @dataclass
-class KeyMapping:
-    """Key mapping for a character."""
-    character: str
-    key_code: int
-    shift_needed: bool
-    alt_needed: bool
-    layout_specific: bool
-
-
-@dataclass
-class LayoutInfo:
-    """Keyboard layout information."""
+class KeyboardLayoutInfo:
+    """Information about a keyboard layout."""
     id: str
     name: str
-    source: str
-    is_active: bool
+    localized_name: str
+    source: str = "unknown"
+    
+    @property
+    def is_asian_ime(self) -> bool:
+        """Check if this is an Asian input method."""
+        asian_names = ["pinyin", "wubi", "zhuyin", "hangul", "hiragana", "katakana", "kana", "chinese", "japanese", "korean"]
+        return any(name in self.name.lower() for name in asian_names)
 
 
-class KeyboardLayoutManager:
-    """Manages keyboard layouts."""
+class KeyboardLayoutDetector:
+    """Detects and tracks keyboard layout changes."""
     
     def __init__(self):
-        self._current_layout: Optional[str] = None
-        self._refresh_current()
+        """Initialize detector."""
+        self._callbacks: List[Callable[[KeyboardLayoutInfo], None]] = []
+        self._last_layout: Optional[KeyboardLayoutInfo] = None
+        self._cache: Dict[str, KeyboardLayoutInfo] = {}
     
-    def _refresh_current(self) -> None:
-        """Refresh current layout info."""
-        self._current_layout = self.get_current_layout_id()
-    
-    def get_current_layout_id(self) -> Optional[str]:
-        """
-        Get current keyboard layout ID.
+    def get_current_layout(self) -> KeyboardLayoutInfo:
+        """Get the currently active keyboard layout.
         
         Returns:
-            Layout ID string or None.
+            KeyboardLayoutInfo for the current layout
         """
         try:
-            script = '''
-            tell application "System Events"
-                return current application's text input source's identifier
-            end tell
-            '''
+            # Use macOS defaults to get current layout
             result = subprocess.run(
-                ["osascript", "-e", script],
+                ["defaults", "read", "com.apple.HIToolbox", "AppleCurrentKeyboardLayoutInputSourceID"],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=2
             )
+            
             if result.returncode == 0:
-                return result.stdout.strip()
+                layout_id = result.stdout.strip()
+                
+                # Get all layouts to find the name
+                layouts = self.get_available_layouts()
+                for layout in layouts:
+                    if layout.id == layout_id or layout_id.endswith(layout.id):
+                        self._last_layout = layout
+                        return layout
+                
+                # Return with unknown name if not found
+                return KeyboardLayoutInfo(
+                    id=layout_id,
+                    name="Unknown",
+                    localized_name=layout_id
+                )
         except Exception:
             pass
-        return None
-    
-    def get_current_layout(self) -> Optional[LayoutInfo]:
-        """
-        Get current keyboard layout info.
         
-        Returns:
-            LayoutInfo or None.
-        """
-        layout_id = self.get_current_layout_id()
-        if not layout_id:
-            return None
+        # Fallback to keyboard input source
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 
+                 'tell application "System Events" to key code 0 using command down'],
+                capture_output=True,
+                timeout=2
+            )
+        except Exception:
+            pass
         
-        return LayoutInfo(
-            id=layout_id,
-            name=layout_id.split('.')[-1],
-            source="system",
-            is_active=True
+        return KeyboardLayoutInfo(
+            id="com.apple.keylayout.US",
+            name="U.S.",
+            localized_name="U.S. English"
         )
     
-    def list_available_layouts(self) -> List[LayoutInfo]:
-        """
-        List all available keyboard layouts.
+    def get_available_layouts(self) -> List[KeyboardLayoutInfo]:
+        """Get all available keyboard layouts.
         
         Returns:
-            List of LayoutInfo.
+            List of available keyboard layouts
         """
         layouts = []
         
         try:
+            # Use macOS to get all input sources
             result = subprocess.run(
-                ["ls", "/Library/Keyboard%20Drives/System/"],
+                ["osascript", "-e", '''
+                tell application "System Events"
+                    get the name of every file of folder "Keyboard Layouts" of folder "Resources" of folder "System" of folder "Library" of startup disk
+                end tell
+                '''],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=5
             )
             
-            for line in result.stdout.split('\n'):
-                if line.endswith('.keylayout'):
-                    name = line.replace('.keylayout', '')
-                    layouts.append(LayoutInfo(
-                        id=name,
-                        name=name,
-                        source="system",
-                        is_active=name == self._current_layout
-                    ))
+            if result.returncode == 0:
+                for name in result.stdout.strip().split(", "):
+                    if name.endswith(".keylayout"):
+                        layout_name = name.replace(".keylayout", "")
+                        layouts.append(KeyboardLayoutInfo(
+                            id=f"com.apple.keylayout.{layout_name}",
+                            name=layout_name,
+                            localized_name=layout_name
+                        ))
         except Exception:
             pass
         
+        # Add common layouts if detection failed
+        common_layouts = [
+            ("com.apple.keylayout.US", "U.S.", "U.S. English"),
+            ("com.apple.keylayout.ABC", "ABC", "ABC"),
+            ("com.apple.keylayout.French", "French", "French"),
+            ("com.apple.keylayout.German", "German", "German"),
+            ("com.apple.keylayout.Spanish", "Spanish", "Spanish"),
+            ("com.apple.keylayout.Italian", "Italian", "Italian"),
+            ("com.apple.keylayout.Portuguese", "Portuguese", "Portuguese"),
+            ("com.apple.keylayout.Russian", "Russian", "Russian"),
+            ("com.apple.keylayout.Japanese", "Japanese", "Japanese"),
+            ("com.apple.keylayout.TraditionalChinese", "Chinese", "Traditional Chinese"),
+            ("com.apple.keylayout.SimplifiedChinese", "Chinese", "Simplified Chinese"),
+            ("com.apple.keylayout.Korean", "Korean", "Korean"),
+        ]
+        
+        for layout_id, name, localized in common_layouts:
+            found = False
+            for existing in layouts:
+                if existing.id == layout_id:
+                    found = True
+                    break
+            if not found:
+                layouts.append(KeyboardLayoutInfo(
+                    id=layout_id,
+                    name=name,
+                    localized_name=localized
+                ))
+        
         return layouts
     
-    def set_layout(self, layout_id: str) -> bool:
-        """
-        Set keyboard layout by ID.
+    def switch_layout(self, layout_id: str) -> bool:
+        """Switch to a specific keyboard layout.
         
         Args:
-            layout_id: Layout identifier.
+            layout_id: Layout identifier (e.g., 'com.apple.keylayout.US')
             
         Returns:
-            True if successful, False otherwise.
+            True if switch was successful
         """
         try:
+            # Use AppleScript to switch layout
             script = f'''
             tell application "System Events"
-                set the layout to "{layout_id}"
+                set the enabled input sources to a reference to every file of folder "{layout_id}" of folder "Keyboard Layouts" of folder "Resources" of folder "System" of folder "Library" of startup disk
             end tell
             '''
-            subprocess.run(["osascript", "-e", script], capture_output=True)
-            self._refresh_current()
+            subprocess.run(["osascript", "-e", script], capture_output=True, timeout=2)
             return True
         except Exception:
-            return False
+            pass
+        
+        # Try alternative method using defaults
+        try:
+            subprocess.run(
+                ["defaults", "write", "-g", "AppleInputSourceHistory", 
+                 f'-dict-add "KeyboardLayout ID" -int 0'],
+                capture_output=True,
+                timeout=2
+            )
+        except Exception:
+            pass
+        
+        return False
     
-    def get_layout_for_character(self, char: str) -> Optional[KeyMapping]:
+    def next_layout(self) -> KeyboardLayoutInfo:
+        """Switch to the next keyboard layout.
+        
+        Returns:
+            New current layout
         """
-        Get key mapping for character in current layout.
+        layouts = self.get_available_layouts()
+        if not layouts:
+            return self.get_current_layout()
+        
+        current = self.get_current_layout()
+        
+        # Find current index
+        current_idx = -1
+        for i, layout in enumerate(layouts):
+            if layout.id == current.id:
+                current_idx = i
+                break
+        
+        # Get next layout
+        next_idx = (current_idx + 1) % len(layouts)
+        next_layout = layouts[next_idx]
+        
+        self.switch_layout(next_layout.id)
+        return next_layout
+    
+    def previous_layout(self) -> KeyboardLayoutInfo:
+        """Switch to the previous keyboard layout.
+        
+        Returns:
+            New current layout
+        """
+        layouts = self.get_available_layouts()
+        if not layouts:
+            return self.get_current_layout()
+        
+        current = self.get_current_layout()
+        
+        # Find current index
+        current_idx = -1
+        for i, layout in enumerate(layouts):
+            if layout.id == current.id:
+                current_idx = i
+                break
+        
+        # Get previous layout
+        prev_idx = (current_idx - 1) % len(layouts)
+        prev_layout = layouts[prev_idx]
+        
+        self.switch_layout(prev_layout.id)
+        return prev_layout
+    
+    def on_layout_change(self, callback: Callable[[KeyboardLayoutInfo], None]) -> None:
+        """Register a callback for layout changes.
         
         Args:
-            char: Character to map.
+            callback: Function to call when layout changes
+        """
+        self._callbacks.append(callback)
+    
+    def check_for_changes(self) -> Optional[KeyboardLayoutInfo]:
+        """Check if layout has changed since last call.
+        
+        Returns:
+            New layout if changed, None otherwise
+        """
+        current = self.get_current_layout()
+        
+        if self._last_layout is None or current.id != self._last_layout.id:
+            self._last_layout = current
+            
+            for callback in self._callbacks:
+                try:
+                    callback(current)
+                except Exception:
+                    pass
+            
+            return current
+        
+        return None
+
+
+class KeyboardLayoutSwitcher:
+    """High-level keyboard layout switching with context management."""
+    
+    def __init__(self):
+        """Initialize switcher."""
+        self.detector = KeyboardLayoutDetector()
+        self._saved_layout: Optional[KeyboardLayoutInfo] = None
+        self._context_stack: List[KeyboardLayoutInfo] = []
+    
+    def save_current(self) -> KeyboardLayoutInfo:
+        """Save current layout for later restoration.
+        
+        Returns:
+            The saved layout
+        """
+        self._saved_layout = self.detector.get_current_layout()
+        return self._saved_layout
+    
+    def restore(self) -> bool:
+        """Restore the previously saved layout.
+        
+        Returns:
+            True if restoration was successful
+        """
+        if self._saved_layout is None:
+            return False
+        
+        result = self.detector.switch_layout(self._saved_layout.id)
+        return result
+    
+    def push_layout(self, layout_id: str) -> bool:
+        """Push a layout onto the stack (for temporary switching).
+        
+        Args:
+            layout_id: Layout to switch to
             
         Returns:
-            KeyMapping or None.
+            True if switch was successful
         """
-        code = ord(char) if char.isascii() else 0
+        # Save current before switching
+        current = self.detector.get_current_layout()
+        self._context_stack.append(current)
         
-        if not code:
+        return self.detector.switch_layout(layout_id)
+    
+    def pop_layout(self) -> Optional[KeyboardLayoutInfo]:
+        """Pop the last layout from the stack and switch to it.
+        
+        Returns:
+            The restored layout, or None if stack was empty
+        """
+        if not self._context_stack:
             return None
         
-        needs_shift = char.isupper() or char in '!@#$%^&*()_+{}|:"<>?'
-        needs_alt = char in '[];,./\\`'
+        layout = self._context_stack.pop()
+        self.detector.switch_layout(layout.id)
+        return layout
+    
+    def with_layout(self, layout_id: str) -> Callable:
+        """Decorator context manager for temporary layout switching.
         
-        return KeyMapping(
-            character=char,
-            key_code=code,
-            shift_needed=needs_shift,
-            alt_needed=needs_alt,
-            layout_specific=True
-        )
+        Args:
+            layout_id: Layout to switch to during execution
+            
+        Returns:
+            Decorator function
+        """
+        def decorator(func: Callable) -> Callable:
+            def wrapper(*args, **kwargs):
+                self.push_layout(layout_id)
+                try:
+                    return func(*args, **kwargs)
+                finally:
+                    self.pop_layout()
+            return wrapper
+        return decorator
 
 
-def get_current_input_source() -> Optional[str]:
+def get_key_for_keycode(keycode: int, layout: Optional[str] = None) -> str:
+    """Get the key character for a macOS keycode in the given layout.
+    
+    Args:
+        keycode: macOS keycode (0-127)
+        layout: Optional layout identifier
+        
+    Returns:
+        Key character or keycode string
     """
-    Get current input source.
+    # Common keycode mappings for US layout
+    KEYCODE_MAP = {
+        0: "a", 1: "s", 2: "d", 3: "f", 4: "h", 5: "g", 6: "z", 7: "x",
+        8: "c", 9: "v", 11: "b", 12: "q", 13: "w", 14: "e", 15: "r",
+        16: "y", 17: "t", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6",
+        23: "5", 24: "=", 25: "9", 26: "7", 27: "-", 28: "8", 29: "0",
+        30: "]", 31: "o", 32: "u", 33: "[", 34: "i", 35: "p", 36: "return",
+        37: "l", 38: "j", 39: "'", 40: "k", 41: ";", 42: "\\", 43: ",",
+        44: "/", 45: "n", 46: "m", 47: ".", 48: "tab", 49: "space",
+        50: "`", 51: "delete", 52: "enter", 53: "escape",
+        56: "shift", 57: "capslock", 58: "option", 59: "control",
+        60: "rightShift", 61: "rightOption", 62: "rightControl", 63: "function",
+    }
+    
+    # Number pad
+    NUMPAD_MAP = {
+        82: "0", 83: "1", 84: "2", 85: "3", 86: "4", 87: "5", 88: "6",
+        89: "7", 91: "8", 92: "9", 96: "+", 85: "/", 87: "*", 89: "-",
+    }
+    
+    if keycode in KEYCODE_MAP:
+        return KEYCODE_MAP[keycode]
+    if keycode in NUMPAD_MAP:
+        return NUMPAD_MAP[keycode]
+    
+    return f"keycode_{keycode}"
+
+
+def parse_layout_from_system() -> Dict[str, any]:
+    """Parse keyboard layout information from system.
     
     Returns:
-        Input source ID or None.
+        Dictionary with layout information
     """
+    info = {
+        "layouts": [],
+        "current": None,
+        "input_methods": [],
+    }
+    
+    # Get current input source
     try:
-        script = '''
-        tell application "System Events"
-            return text input sources's current
-        end tell
-        '''
         result = subprocess.run(
-            ["osascript", "-e", script],
+            ["defaults", "read", "com.apple.HIToolbox", "AppleSelectedInputSources"],
             capture_output=True,
-            text=True
+            text=True,
+            timeout=2
         )
+        
         if result.returncode == 0:
-            return result.stdout.strip()
+            # Parse the plist-like output
+            content = result.stdout
+            layouts = re.findall(r'TRSInputSourceID" = "([^"]+)"', content)
+            info["input_methods"] = layouts
+            if layouts:
+                info["current"] = layouts[0]
     except Exception:
         pass
-    return None
-
-
-def switch_input_source(source_id: str) -> bool:
-    """
-    Switch input source.
     
-    Args:
-        source_id: Input source ID.
+    # Get all input sources
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "com.apple.HIToolbox", "AppleInputSourceHistory"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
         
+        if result.returncode == 0:
+            content = result.stdout
+            all_layouts = re.findall(r'TRSInputSourceID" = "([^"]+)"', content)
+            info["layouts"] = all_layouts
+    except Exception:
+        pass
+    
+    return info
+
+
+def is_ime_active() -> bool:
+    """Check if an Input Method Editor (IME) is currently active.
+    
     Returns:
-        True if successful, False otherwise.
+        True if IME is active
     """
     try:
-        script = f'''
-        tell application "System Events"
-            set frontmost to true
-            tell process "System Events"
-                key code 49 using {{option down, shift down}}
-            end tell
-        end tell
-        '''
-        subprocess.run(["osascript", "-e", script], capture_output=True)
-        return True
-    except Exception:
-        return False
-
-
-def get_keycode_for_char(char: str, layout: str = "com.apple.keylayout.US") -> Optional[int]:
-    """
-    Get keycode for character in specific layout.
-    
-    Args:
-        char: Character.
-        layout: Layout ID.
+        # Check if any Asian input method is selected
+        result = subprocess.run(
+            ["defaults", "read", "com.apple.HIToolbox", "AppleCurrentKeyboardLayoutInputSourceID"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
         
-    Returns:
-        Keycode or None.
-    """
-    char_code = ord(char) if len(char) == 1 else 0
-    return char_code if char_code else None
+        if result.returncode == 0:
+            layout_id = result.stdout.strip().lower()
+            asian_imes = ["pinyin", "wubi", "zhuyin", "hangul", "hiragana", "katakana", "kana"]
+            return any(ime in layout_id for ime in asian_imes)
+    except Exception:
+        pass
+    
+    return False
