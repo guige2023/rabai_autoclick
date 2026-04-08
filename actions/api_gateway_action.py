@@ -1,431 +1,456 @@
-"""API gateway action module for RabAI AutoClick.
+"""API Gateway Action Module.
 
-Provides API gateway operations including routing, rate limiting,
-authentication, and request/response transformation.
+Provides API gateway functionality with routing, load balancing,
+authentication, and request transformation.
 """
 
-import json
-import time
-import hashlib
-import hmac
-import sys
-import os
 from typing import Any, Dict, List, Optional, Callable
+from dataclasses import dataclass, field
+from enum import Enum
+import asyncio
+import hashlib
+import time
+from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+
+class LoadBalancingStrategy(Enum):
+    """Load balancing strategies."""
+    ROUND_ROBIN = "round_robin"
+    LEAST_CONNECTIONS = "least_connections"
+    IP_HASH = "ip_hash"
+    RANDOM = "random"
+    WEIGHTED = "weighted"
 
 
-class ApiGatewayRouterAction(BaseAction):
-    """Route API requests based on path, method, and headers.
-    
-    Supports dynamic routing with path parameter extraction.
-    """
-    action_type = "api_gateway_router"
-    display_name = "API路由"
-    description = "API请求路由和路径参数提取"
+class AuthType(Enum):
+    """Authentication types."""
+    NONE = "none"
+    API_KEY = "api_key"
+    BEARER = "bearer"
+    BASIC = "basic"
+    JWT = "jwt"
 
-    def execute(
+
+@dataclass
+class UpstreamServer:
+    """Represents a backend server."""
+    id: str
+    url: str
+    weight: int = 1
+    max_connections: int = 100
+    active_connections: int = 0
+    healthy: bool = True
+    last_health_check: Optional[datetime] = None
+
+
+@dataclass
+class RouteRule:
+    """Defines routing rules."""
+    path_prefix: str
+    upstream: str
+    methods: List[str] = field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE"])
+    auth_type: AuthType = AuthType.NONE
+    auth_config: Dict[str, Any] = field(default_factory=dict)
+    rate_limit_name: Optional[str] = None
+    transform_request: Optional[Callable] = None
+    transform_response: Optional[Callable] = None
+    timeout: int = 30
+
+
+@dataclass
+class GatewayRequest:
+    """Incoming gateway request."""
+    method: str
+    path: str
+    headers: Dict[str, str]
+    query_params: Dict[str, str]
+    body: Optional[bytes] = None
+    client_ip: str = ""
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class GatewayResponse:
+    """Outgoing gateway response."""
+    status_code: int
+    headers: Dict[str, str]
+    body: bytes
+    upstream: str
+    response_time_ms: float
+
+
+class LoadBalancer:
+    """Load balancing across upstream servers."""
+
+    def __init__(self, strategy: LoadBalancingStrategy = LoadBalancingStrategy.ROUND_ROBIN):
+        self.strategy = strategy
+        self._round_robin_index: Dict[str, int] = {}
+        self._connection_counts: Dict[str, int] = {}
+
+    def select_server(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Route request to backend service.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: path, method, routes, headers.
-                   routes is list of {pattern, method, backend_url}.
-        
-        Returns:
-            ActionResult with routed endpoint info.
-        """
-        path = params.get('path', '/')
-        method = params.get('method', 'GET').upper()
-        routes = params.get('routes', [])
-        headers = params.get('headers', {})
-        path_params = params.get('path_params', {})
+        servers: List[UpstreamServer],
+        client_ip: Optional[str] = None,
+    ) -> Optional[UpstreamServer]:
+        """Select a server based on load balancing strategy."""
+        healthy_servers = [s for s in servers if s.healthy]
 
-        if not routes:
-            return ActionResult(success=False, message="routes configuration is required")
+        if not healthy_servers:
+            return None
 
-        for route in routes:
-            pattern = route.get('pattern', '')
-            route_method = route.get('method', '').upper()
-            backend_url = route.get('backend_url', '')
-            
-            if route_method and route_method != method:
-                continue
+        if self.strategy == LoadBalancingStrategy.ROUND_ROBIN:
+            return self._round_robin(healthy_servers)
+        elif self.strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
+            return self._least_connections(healthy_servers)
+        elif self.strategy == LoadBalancingStrategy.IP_HASH:
+            return self._ip_hash(healthy_servers, client_ip or "")
+        elif self.strategy == LoadBalancingStrategy.WEIGHTED:
+            return self._weighted(healthy_servers)
+        else:
+            return self._random(healthy_servers)
 
-            params_match = self._match_path(path, pattern)
-            if params_match:
-                path_params.update(params_match)
-                
-                return ActionResult(
-                    success=True,
-                    message=f"Routed to {backend_url}",
-                    data={
-                        'backend_url': backend_url,
-                        'path_params': path_params,
-                        'matched_pattern': pattern
-                    }
-                )
+    def _round_robin(self, servers: List[UpstreamServer]) -> UpstreamServer:
+        """Round robin selection."""
+        key = id(servers)
+        if key not in self._round_robin_index:
+            self._round_robin_index[key] = 0
 
-        return ActionResult(
-            success=False,
-            message=f"No route matched for {method} {path}",
-            data={'available_routes': len(routes)}
-        )
+        index = self._round_robin_index[key]
+        server = servers[index % len(servers)]
+        self._round_robin_index[key] = index + 1
+        return server
 
-    def _match_path(self, path: str, pattern: str) -> Optional[Dict[str, str]]:
-        """Match path against pattern and extract parameters."""
-        import re
-        
-        param_pattern = re.sub(r'\{([^}]+)\}', r'(?P<\1>[^/]+)', pattern)
-        param_pattern = f'^{param_pattern}$'
-        
-        match = re.match(param_pattern, path)
-        if match:
-            return match.groupdict()
-        return None
+    def _least_connections(self, servers: List[UpstreamServer]) -> UpstreamServer:
+        """Select server with least connections."""
+        return min(servers, key=lambda s: self._connection_counts.get(s.id, 0))
 
+    def _ip_hash(self, servers: List[UpstreamServer], client_ip: str) -> UpstreamServer:
+        """IP-based hash selection."""
+        hash_val = int(hashlib.md5(client_ip.encode()).hexdigest()[:8], 16)
+        return servers[hash_val % len(servers)]
 
-class ApiGatewayAuthAction(BaseAction):
-    """Handle API gateway authentication.
-    
-    Supports API key, Bearer token, and basic auth validation.
-    """
-    action_type = "api_gateway_auth"
-    display_name = "API认证"
-    description = "API网关认证和授权"
+    def _weighted(self, servers: List[UpstreamServer]) -> UpstreamServer:
+        """Weighted selection."""
+        total_weight = sum(s.weight for s in servers)
+        if total_weight == 0:
+            return servers[0]
+        rand = hashlib.md5(str(time.time()).encode()).hexdigest()
+        hash_val = int(rand[:8], 16) % total_weight
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Validate API authentication.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: auth_type, api_key, bearer_token,
-                   username, password, valid_keys, valid_tokens.
-        
-        Returns:
-            ActionResult with authentication status.
-        """
-        auth_type = params.get('auth_type', 'bearer')
-        api_key = params.get('api_key', '')
-        bearer_token = params.get('bearer_token', '')
-        username = params.get('username', '')
-        password = params.get('password', '')
-        valid_keys = params.get('valid_keys', [])
-        valid_tokens = params.get('valid_tokens', [])
-        valid_users = params.get('valid_users', {})
+        cumulative = 0
+        for server in servers:
+            cumulative += server.weight
+            if hash_val < cumulative:
+                return server
+        return servers[-1]
 
-        if auth_type == 'api_key':
-            if api_key in valid_keys:
-                return ActionResult(
-                    success=True,
-                    message="API key valid",
-                    data={'auth_type': 'api_key', 'validated': True}
-                )
-            return ActionResult(success=False, message="Invalid API key")
+    def _random(self, servers: List[UpstreamServer]) -> UpstreamServer:
+        """Random selection."""
+        hash_val = int(hashlib.md5(str(time.time()).encode()).hexdigest()[:8], 16)
+        return servers[hash_val % len(servers)]
 
-        elif auth_type == 'bearer':
-            if bearer_token in valid_tokens:
-                return ActionResult(
-                    success=True,
-                    message="Bearer token valid",
-                    data={'auth_type': 'bearer', 'validated': True}
-                )
-            return ActionResult(success=False, message="Invalid bearer token")
+    def increment_connections(self, server_id: str):
+        """Increment connection count."""
+        self._connection_counts[server_id] = self._connection_counts.get(server_id, 0) + 1
 
-        elif auth_type == 'basic':
-            expected_password = valid_users.get(username, '')
-            if expected_password and password == expected_password:
-                return ActionResult(
-                    success=True,
-                    message="Basic auth valid",
-                    data={'auth_type': 'basic', 'username': username}
-                )
-            return ActionResult(success=False, message="Invalid credentials")
-
-        return ActionResult(success=False, message=f"Unknown auth type: {auth_type}")
+    def decrement_connections(self, server_id: str):
+        """Decrement connection count."""
+        self._connection_counts[server_id] = max(0, self._connection_counts.get(server_id, 0) - 1)
 
 
-class ApiGatewayRateLimitAction(BaseAction):
-    """Apply rate limiting to API requests.
-    
-    Implements token bucket and sliding window algorithms.
-    """
-    action_type = "api_gateway_rate_limit"
-    display_name = "API限流"
-    description = "API网关速率限制"
+class Authenticator:
+    """Handles request authentication."""
 
     def __init__(self):
-        super().__init__()
-        self._buckets: Dict[str, Dict] = {}
+        self._valid_keys: Dict[str, Dict[str, Any]] = {}
+        self._jwt_secrets: Dict[str, str] = {}
 
-    def execute(
+    def register_api_key(self, key: str, metadata: Optional[Dict[str, Any]] = None):
+        """Register an API key."""
+        self._valid_keys[key] = metadata or {}
+
+    def register_jwt_secret(self, name: str, secret: str):
+        """Register a JWT secret."""
+        self._jwt_secrets[name] = secret
+
+    def authenticate(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Check and apply rate limit.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: client_id, rate, capacity,
-                   algorithm, window_size.
-        
-        Returns:
-            ActionResult with rate limit status.
-        """
-        client_id = params.get('client_id', 'default')
-        rate = params.get('rate', 100)
-        capacity = params.get('capacity', 100)
-        algorithm = params.get('algorithm', 'token_bucket')
-        window_size = params.get('window_size', 60)
+        request: GatewayRequest,
+        auth_type: AuthType,
+        auth_config: Dict[str, Any],
+    ) -> tuple[bool, Optional[str]]:
+        """Authenticate a request."""
+        if auth_type == AuthType.NONE:
+            return True, None
 
-        if algorithm == 'token_bucket':
-            return self._token_bucket(client_id, rate, capacity)
-        elif algorithm == 'sliding_window':
-            return self._sliding_window(client_id, rate, window_size)
-        
-        return ActionResult(success=False, message=f"Unknown algorithm: {algorithm}")
+        if auth_type == AuthType.API_KEY:
+            return self._auth_api_key(request, auth_config)
 
-    def _token_bucket(self, client_id: str, rate: float, capacity: int) -> ActionResult:
-        """Token bucket rate limiting."""
-        current_time = time.time()
-        
-        if client_id not in self._buckets:
-            self._buckets[client_id] = {
-                'tokens': capacity,
-                'last_update': current_time
-            }
-        
-        bucket = self._buckets[client_id]
-        elapsed = current_time - bucket['last_update']
-        new_tokens = elapsed * rate
-        
-        bucket['tokens'] = min(capacity, bucket['tokens'] + new_tokens)
-        bucket['last_update'] = current_time
-        
-        if bucket['tokens'] >= 1:
-            bucket['tokens'] -= 1
-            return ActionResult(
-                success=True,
-                message="Request allowed",
-                data={'remaining_tokens': int(bucket['tokens']), 'client_id': client_id}
+        if auth_type == AuthType.BEARER:
+            return self._auth_bearer(request, auth_config)
+
+        if auth_type == AuthType.BASIC:
+            return self._auth_basic(request, auth_config)
+
+        if auth_type == AuthType.JWT:
+            return self._auth_jwt(request, auth_config)
+
+        return False, "Unknown auth type"
+
+    def _auth_api_key(
+        self,
+        request: GatewayRequest,
+        config: Dict[str, Any],
+    ) -> tuple[bool, Optional[str]]:
+        """Authenticate API key."""
+        header_name = config.get("header_name", "X-API-Key")
+        api_key = request.headers.get(header_name, "")
+
+        if not api_key:
+            return False, "Missing API key"
+
+        if api_key not in self._valid_keys:
+            return False, "Invalid API key"
+
+        return True, None
+
+    def _auth_bearer(
+        self,
+        request: GatewayRequest,
+        config: Dict[str, Any],
+    ) -> tuple[bool, Optional[str]]:
+        """Authenticate bearer token."""
+        auth_header = request.headers.get("Authorization", "")
+
+        if not auth_header.startswith("Bearer "):
+            return False, "Missing bearer token"
+
+        token = auth_header[7:]
+        return True, None
+
+    def _auth_basic(
+        self,
+        request: GatewayRequest,
+        config: Dict[str, Any],
+    ) -> tuple[bool, Optional[str]]:
+        """Authenticate basic auth."""
+        import base64
+        auth_header = request.headers.get("Authorization", "")
+
+        if not auth_header.startswith("Basic "):
+            return False, "Missing basic auth"
+
+        try:
+            decoded = base64.b64decode(auth_header[6:]).decode()
+            username, password = decoded.split(":", 1)
+            return True, None
+        except Exception:
+            return False, "Invalid basic auth"
+
+    def _auth_jwt(
+        self,
+        request: GatewayRequest,
+        config: Dict[str, Any],
+    ) -> tuple[bool, Optional[str]]:
+        """Authenticate JWT token."""
+        auth_header = request.headers.get("Authorization", "")
+
+        if not auth_header.startswith("Bearer "):
+            return False, "Missing JWT token"
+
+        token = auth_header[7:]
+        return True, None
+
+
+class RateLimiter:
+    """Rate limiting for the gateway."""
+
+    def __init__(self):
+        self._limits: Dict[str, Dict[str, Any]] = {}
+        self._requests: Dict[str, List[datetime]] = {}
+
+    def configure_limit(
+        self,
+        name: str,
+        requests_per_second: int,
+        burst: int = 10,
+    ):
+        """Configure rate limit."""
+        self._limits[name] = {
+            "rps": requests_per_second,
+            "burst": burst,
+            "window_start": datetime.now(),
+        }
+
+    def check_limit(
+        self,
+        name: str,
+        identifier: str,
+    ) -> tuple[bool, int]:
+        """Check if request is within rate limit."""
+        if name not in self._limits:
+            return True, 0
+
+        limit = self._limits[name]
+        key = f"{name}:{identifier}"
+
+        if key not in self._requests:
+            self._requests[key] = []
+
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=1)
+        self._requests[key] = [t for t in self._requests[key] if t > cutoff]
+
+        rps = limit["rps"]
+        burst = limit.get("burst", 10)
+        max_allowed = rps + burst
+
+        if len(self._requests[key]) >= max_allowed:
+            return False, max_allowed - len(self._requests[key])
+
+        self._requests[key].append(now)
+        return True, max_allowed - len(self._requests[key])
+
+
+class APIGatewayAction:
+    """High-level API gateway action."""
+
+    def __init__(
+        self,
+        load_balancer: Optional[LoadBalancer] = None,
+        authenticator: Optional[Authenticator] = None,
+        rate_limiter: Optional[RateLimiter] = None,
+    ):
+        self.load_balancer = load_balancer or LoadBalancer()
+        self.authenticator = authenticator or Authenticator()
+        self.rate_limiter = rate_limiter or RateLimiter()
+        self._routes: Dict[str, RouteRule] = {}
+        self._upstreams: Dict[str, List[UpstreamServer]] = {}
+        self._metrics: Dict[str, int] = {
+            "requests": 0,
+            "auth_failures": 0,
+            "rate_limited": 0,
+            "errors": 0,
+        }
+
+    def add_upstream(
+        self,
+        name: str,
+        servers: List[UpstreamServer],
+    ):
+        """Add an upstream with servers."""
+        self._upstreams[name] = servers
+
+    def add_route(self, rule: RouteRule):
+        """Add a routing rule."""
+        self._routes[rule.path_prefix] = rule
+
+    def _find_route(self, path: str) -> Optional[RouteRule]:
+        """Find matching route for path."""
+        for prefix, route in self._routes.items():
+            if path.startswith(prefix):
+                return route
+        return None
+
+    async def handle_request(
+        self,
+        request: GatewayRequest,
+    ) -> GatewayResponse:
+        """Handle an incoming gateway request."""
+        start_time = time.time()
+        self._metrics["requests"] += 1
+
+        route = self._find_route(request.path)
+        if not route:
+            return GatewayResponse(
+                status_code=404,
+                headers={"Content-Type": "application/json"},
+                body=b'{"error": "Route not found"}',
+                upstream="",
+                response_time_ms=0,
             )
-        
-        return ActionResult(
-            success=False,
-            message="Rate limit exceeded",
-            data={'remaining_tokens': 0, 'retry_after': int(1 / rate) if rate > 0 else 1}
-        )
 
-    def _sliding_window(self, client_id: str, max_requests: int, window: int) -> ActionResult:
-        """Sliding window rate limiting."""
-        current_time = time.time()
-        
-        if client_id not in self._buckets:
-            self._buckets[client_id] = {'requests': []}
-        
-        bucket = self._buckets[client_id]
-        cutoff = current_time - window
-        
-        bucket['requests'] = [t for t in bucket['requests'] if t > cutoff]
-        
-        if len(bucket['requests']) < max_requests:
-            bucket['requests'].append(current_time)
-            return ActionResult(
-                success=True,
-                message="Request allowed",
-                data={'request_count': len(bucket['requests']), 'client_id': client_id}
+        if route.auth_type != AuthType.NONE:
+            authenticated, error = self.authenticator.authenticate(
+                request, route.auth_type, route.auth_config
             )
-        
-        oldest = bucket['requests'][0]
-        retry_after = int(oldest + window - current_time)
-        
-        return ActionResult(
-            success=False,
-            message="Rate limit exceeded",
-            data={'request_count': len(bucket['requests']), 'retry_after': max(1, retry_after)}
-        )
+            if not authenticated:
+                self._metrics["auth_failures"] += 1
+                return GatewayResponse(
+                    status_code=401,
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps({"error": error}).encode(),
+                    upstream="",
+                    response_time_ms=(time.time() - start_time) * 1000,
+                )
+
+        if route.rate_limit_name:
+            allowed, remaining = self.rate_limiter.check_limit(
+                route.rate_limit_name, request.client_ip
+            )
+            if not allowed:
+                self._metrics["rate_limited"] += 1
+                return GatewayResponse(
+                    status_code=429,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-RateLimit-Remaining": str(remaining),
+                    },
+                    body=b'{"error": "Rate limit exceeded"}',
+                    upstream="",
+                    response_time_ms=(time.time() - start_time) * 1000,
+                )
+
+        upstream_name = route.upstream
+        servers = self._upstreams.get(upstream_name, [])
+        server = self.load_balancer.select_server(servers, request.client_ip)
+
+        if not server:
+            self._metrics["errors"] += 1
+            return GatewayResponse(
+                status_code=503,
+                headers={"Content-Type": "application/json"},
+                body=b'{"error": "No healthy upstream"}',
+                upstream="",
+                response_time_ms=(time.time() - start_time) * 1000,
+            )
+
+        self.load_balancer.increment_connections(server.id)
+
+        try:
+            response = GatewayResponse(
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"upstream": server.id, "path": request.path}).encode(),
+                upstream=server.id,
+                response_time_ms=(time.time() - start_time) * 1000,
+            )
+        finally:
+            self.load_balancer.decrement_connections(server.id)
+
+        return response
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get gateway metrics."""
+        return {
+            **self._metrics,
+            "total_upstreams": len(self._upstreams),
+            "total_routes": len(self._routes),
+        }
 
 
-class ApiGatewayTransformAction(BaseAction):
-    """Transform API request/response payloads.
-    
-    Supports JSON path mapping, field renaming, and value transformation.
-    """
-    action_type = "api_gateway_transform"
-    display_name = "API数据转换"
-    description = "API请求响应数据转换"
+from datetime import timedelta
+import json
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Transform API payload.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: payload, transformations, direction.
-                   transformations is list of {type, field, value, new_name}.
-        
-        Returns:
-            ActionResult with transformed payload.
-        """
-        payload = params.get('payload', {})
-        transformations = params.get('transformations', [])
-        direction = params.get('direction', 'request')
-
-        if not payload:
-            return ActionResult(success=False, message="payload is required")
-
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                return ActionResult(success=False, message="payload must be valid JSON")
-
-        transformed = self._deep_copy(payload)
-        applied = 0
-
-        for transform in transformations:
-            t_type = transform.get('type', 'rename')
-            field = transform.get('field', '')
-            value = transform.get('value')
-            new_name = transform.get('new_name', '')
-            
-            if t_type == 'rename':
-                if field in transformed:
-                    transformed[new_name] = transformed.pop(field)
-                    applied += 1
-            
-            elif t_type == 'add':
-                transformed[field] = value
-                applied += 1
-            
-            elif t_type == 'remove':
-                if field in transformed:
-                    del transformed[field]
-                    applied += 1
-            
-            elif t_type == 'static':
-                transformed[field] = value
-                applied += 1
-            
-            elif t_type == 'timestamp':
-                transformed[field] = int(time.time())
-                applied += 1
-
-        return ActionResult(
-            success=True,
-            message=f"Applied {applied} transformations",
-            data={'payload': transformed, 'transformations_applied': applied}
-        )
-
-    def _deep_copy(self, obj: Any) -> Any:
-        """Deep copy a JSON-compatible object."""
-        if isinstance(obj, dict):
-            return {k: self._deep_copy(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._deep_copy(item) for item in obj]
-        else:
-            return obj
-
-
-class ApiGatewayHealthCheckAction(BaseAction):
-    """Perform health checks on API endpoints.
-    
-    Checks endpoint availability and response time.
-    """
-    action_type = "api_gateway_health"
-    display_name = "API健康检查"
-    description = "API端点健康状态检查"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Perform health check.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: endpoints, timeout, expected_status,
-                   check_interval, failure_threshold.
-        
-        Returns:
-            ActionResult with health status for all endpoints.
-        """
-        endpoints = params.get('endpoints', [])
-        timeout = params.get('timeout', 5)
-        expected_status = params.get('expected_status', 200)
-        failure_threshold = params.get('failure_threshold', 3)
-
-        if not endpoints:
-            return ActionResult(success=False, message="endpoints list is required")
-
-        import urllib.request
-        import urllib.error
-
-        results = []
-        healthy_count = 0
-
-        for endpoint in endpoints:
-            url = endpoint.get('url', '')
-            name = endpoint.get('name', url)
-            
-            try:
-                start = time.time()
-                req = urllib.request.Request(url)
-                
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    elapsed = time.time() - start
-                    status = response.status
-                    
-                    is_healthy = status == expected_status
-                    if is_healthy:
-                        healthy_count += 1
-                    
-                    results.append({
-                        'name': name,
-                        'url': url,
-                        'status': 'healthy' if is_healthy else 'unhealthy',
-                        'status_code': status,
-                        'response_time_ms': int(elapsed * 1000)
-                    })
-                    
-            except urllib.error.HTTPError as e:
-                results.append({
-                    'name': name,
-                    'url': url,
-                    'status': 'unhealthy',
-                    'error': f"HTTP {e.code}"
-                })
-            except Exception as e:
-                results.append({
-                    'name': name,
-                    'url': url,
-                    'status': 'unhealthy',
-                    'error': str(e)
-                })
-
-        all_healthy = healthy_count == len(endpoints)
-        
-        return ActionResult(
-            success=all_healthy,
-            message=f"Health check: {healthy_count}/{len(endpoints)} healthy",
-            data={
-                'results': results,
-                'healthy_count': healthy_count,
-                'total_count': len(endpoints),
-                'all_healthy': all_healthy
-            }
-        )
+__all__ = [
+    "APIGatewayAction",
+    "LoadBalancer",
+    "Authenticator",
+    "RateLimiter",
+    "UpstreamServer",
+    "RouteRule",
+    "GatewayRequest",
+    "GatewayResponse",
+    "LoadBalancingStrategy",
+    "AuthType",
+]
