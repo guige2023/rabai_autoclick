@@ -1,327 +1,279 @@
-"""API transform action module for RabAI AutoClick.
+"""API request/response transformation and mapping.
 
-Provides API data transformation operations:
-- ResponseTransformAction: Transform API response data structure
-- RequestTransformAction: Transform request data before sending
-- DataMapperAction: Map fields between different schemas
-- SchemaConverterAction: Convert between data schemas
-- ResponseEnricherAction: Enrich response with additional data
+This module provides request and response transformation capabilities:
+- Request envelope/wrapper creation
+- Response normalization
+- Field mapping and renaming
+- Data type conversion
+
+Example:
+    >>> from actions.api_transform_action import RequestTransformer, ResponseNormalizer
+    >>> transformer = RequestTransformer()
+    >>> normalized = transformer.normalize_response(raw_data, schema)
 """
 
-import json
-from typing import Any, Dict, List, Optional, Callable, Union
-from datetime import datetime
+from __future__ import annotations
 
-import sys
-import os
+import logging
+from typing import Any, Optional, Callable
+from dataclasses import dataclass, field
+from enum import Enum
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ResponseTransformAction(BaseAction):
-    """Transform API response data structure."""
-    action_type = "api_response_transform"
-    display_name = "响应转换"
-    description = "转换API响应数据结构"
+class TransformType(Enum):
+    """Type of transformation to apply."""
+    RENAME = "rename"
+    TYPE_CONVERT = "type_convert"
+    COMPUTE = "compute"
+    OMIT = "omit"
+    ADD = "add"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            response = params.get("response", {})
-            transform_type = params.get("transform_type", "flatten")
-            rename_map = params.get("rename_map", {})
-            exclude_fields = params.get("exclude_fields", [])
-            include_fields = params.get("include_fields")
-            wrap_key = params.get("wrap_key")
 
-            if isinstance(response, str):
-                try:
-                    response = json.loads(response)
-                except Exception:
-                    response = {"raw": response}
+@dataclass
+class FieldMapping:
+    """Mapping configuration for a field."""
+    source: str
+    target: str
+    transform_type: TransformType = TransformType.RENAME
+    default: Any = None
+    converter: Optional[Callable[[Any], Any]] = None
 
-            if transform_type == "flatten":
-                flat = self._flatten_dict(response)
-                result = flat
-            elif transform_type == "compact":
-                result = {k: v for k, v in response.items() if v is not None and v != ""}
-            elif transform_type == "expand":
-                result = self._expand_dict(response)
+
+@dataclass
+class TransformSchema:
+    """Schema for request/response transformation."""
+    field_mappings: list[FieldMapping] = field(default_factory=list)
+    root_key: Optional[str] = None
+    envelope_key: Optional[str] = None
+
+
+class RequestTransformer:
+    """Transform API requests before sending.
+
+    Applies field mappings, type conversions, and envelope wrapping.
+    """
+
+    def __init__(self, schema: Optional[TransformSchema] = None) -> None:
+        self.schema = schema
+
+    def transform(
+        self,
+        data: dict[str, Any],
+        schema: Optional[TransformSchema] = None,
+    ) -> dict[str, Any]:
+        """Transform request data.
+
+        Args:
+            data: Input request data.
+            schema: Optional transformation schema.
+
+        Returns:
+            Transformed request data.
+        """
+        schema = schema or self.schema
+        if not schema:
+            return data
+
+        result = {}
+        data_keys = set(data.keys())
+        mapping_dict = {m.source: m for m in schema.field_mappings}
+
+        for key in data_keys:
+            mapping = mapping_dict.get(key)
+            if mapping and mapping.transform_type == TransformType.OMIT:
+                continue
+            if mapping:
+                result[mapping.target] = self._apply_transform(
+                    data[key], mapping
+                )
             else:
-                result = response
+                result[key] = data[key]
 
-            if rename_map:
-                result = {rename_map.get(k, k): v for k, v in result.items()}
+        for mapping in schema.field_mappings:
+            if mapping.target not in result:
+                result[mapping.target] = mapping.default
 
-            if exclude_fields:
-                result = {k: v for k, v in result.items() if k not in exclude_fields}
+        if schema.envelope_key:
+            result = {schema.envelope_key: result}
 
-            if include_fields:
-                result = {k: v for k, v in result.items() if k in include_fields}
+        return result
 
-            if wrap_key:
-                result = {wrap_key: result}
+    def _apply_transform(self, value: Any, mapping: FieldMapping) -> Any:
+        """Apply a single field transformation."""
+        if mapping.converter:
+            try:
+                return mapping.converter(value)
+            except Exception as e:
+                logger.warning(f"Converter failed for {mapping.source}: {e}")
+                return value
+        if mapping.transform_type == TransformType.TYPE_CONVERT:
+            return self._convert_type(value, mapping.default)
+        return value
 
-            return ActionResult(
-                success=True,
-                data={
-                    "transformed": result,
-                    "transform_type": transform_type,
-                    "original_keys": len(response) if isinstance(response, dict) else 0,
-                    "transformed_keys": len(result) if isinstance(result, dict) else 0
-                },
-                message=f"Transformed response using {transform_type}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Response transform error: {str(e)}")
+    def _convert_type(self, value: Any, target_type: Any) -> Any:
+        """Convert value to target type."""
+        if target_type is bool:
+            return bool(value)
+        elif target_type is int:
+            return int(value)
+        elif target_type is float:
+            return float(value)
+        elif target_type is str:
+            return str(value)
+        return value
 
-    def _flatten_dict(self, d: Dict, parent_key: str = "", sep: str = ".") -> Dict:
-        items = []
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            if isinstance(v, dict):
-                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
-            elif isinstance(v, list):
-                for i, item in enumerate(v):
+
+class ResponseNormalizer:
+    """Normalize API responses to a standard format.
+
+    Flattens nested structures, renames fields, and handles pagination.
+    """
+
+    def __init__(
+        self,
+        schema: Optional[TransformSchema] = None,
+        flatten: bool = True,
+        separator: str = ".",
+    ) -> None:
+        self.schema = schema
+        self.flatten = flatten
+        self.separator = separator
+
+    def normalize(
+        self,
+        response: Any,
+        schema: Optional[TransformSchema] = None,
+    ) -> dict[str, Any]:
+        """Normalize a response.
+
+        Args:
+            response: Raw API response.
+            schema: Optional transformation schema.
+
+        Returns:
+            Normalized response data.
+        """
+        schema = schema or self.schema
+        if isinstance(response, dict):
+            data = response
+        elif isinstance(response, list):
+            data = {"items": response, "count": len(response)}
+        else:
+            data = {"value": response}
+
+        if self.flatten:
+            data = self._flatten_dict(data)
+
+        if schema:
+            data = self._apply_schema(data, schema)
+
+        return data
+
+    def _flatten_dict(
+        self,
+        data: dict[str, Any],
+        parent_key: str = "",
+        sep: str = ".",
+    ) -> dict[str, Any]:
+        """Flatten nested dictionary."""
+        items: list[tuple[str, Any]] = []
+        for key, value in data.items():
+            new_key = f"{parent_key}{sep}{key}" if parent_key else key
+            if isinstance(value, dict):
+                items.extend(self._flatten_dict(value, new_key, sep).items())
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
                     if isinstance(item, dict):
-                        items.extend(self._flatten_dict(item, f"{new_key}[{i}]", sep=sep).items())
+                        items.extend(
+                            self._flatten_dict(item, f"{new_key}[{i}]", sep).items()
+                        )
                     else:
                         items.append((f"{new_key}[{i}]", item))
             else:
-                items.append((new_key, v))
+                items.append((new_key, value))
         return dict(items)
 
-    def _expand_dict(self, d: Dict, sep: str = ".") -> Dict:
+    def _apply_schema(
+        self,
+        data: dict[str, Any],
+        schema: TransformSchema,
+    ) -> dict[str, Any]:
+        """Apply transformation schema to data."""
+        mapping_dict = {m.source: m for m in schema.field_mappings}
         result = {}
-        for key, value in d.items():
-            parts = key.split(sep)
-            current = result
-            for part in parts[:-1]:
-                if part not in current:
-                    current[part] = {}
-                current = current[part]
-            current[parts[-1]] = value
+        for key, value in data.items():
+            mapping = mapping_dict.get(key)
+            if mapping:
+                if mapping.transform_type == TransformType.OMIT:
+                    continue
+                result[mapping.target] = self._apply_transform(value, mapping)
+            else:
+                result[key] = value
         return result
 
-    def get_required_params(self) -> List[str]:
-        return ["response"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"transform_type": "flatten", "rename_map": {}, "exclude_fields": [], "include_fields": None, "wrap_key": None}
-
-
-class RequestTransformAction(BaseAction):
-    """Transform request data before sending."""
-    action_type = "api_request_transform"
-    display_name = "请求转换"
-    description = "发送前转换请求数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            request_data = params.get("request_data", {})
-            transform_rules = params.get("transform_rules", {})
-            default_values = params.get("default_values", {})
-            coerce_types = params.get("coerce_types", {})
-
-            result = dict(request_data)
-
-            for field, default in default_values.items():
-                if field not in result or result[field] is None:
-                    result[field] = default
-
-            for field, type_name in coerce_types.items():
-                if field in result:
-                    try:
-                        if type_name == "int":
-                            result[field] = int(result[field])
-                        elif type_name == "float":
-                            result[field] = float(result[field])
-                        elif type_name == "str":
-                            result[field] = str(result[field])
-                        elif type_name == "bool":
-                            result[field] = bool(result[field])
-                    except (ValueError, TypeError):
-                        pass
-
-            for rule_name, rule_config in transform_rules.items():
-                transform_type = rule_config.get("type")
-                field = rule_config.get("field")
-                if field not in result:
-                    continue
-                if transform_type == "uppercase":
-                    result[field] = str(result[field]).upper()
-                elif transform_type == "lowercase":
-                    result[field] = str(result[field]).lower()
-                elif transform_type == "trim":
-                    result[field] = str(result[field]).strip()
-                elif transform_type == "capitalize":
-                    result[field] = str(result[field]).capitalize()
-
-            return ActionResult(
-                success=True,
-                data={
-                    "transformed_request": result,
-                    "fields_transformed": list(transform_rules.keys()),
-                },
-                message=f"Transformed request with {len(transform_rules)} rules"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Request transform error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["request_data"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"transform_rules": {}, "default_values": {}, "coerce_types": {}}
+    def _apply_transform(self, value: Any, mapping: FieldMapping) -> Any:
+        """Apply field transformation."""
+        if mapping.transform_type == TransformType.COMPUTE and mapping.converter:
+            return mapping.converter(value)
+        return value
 
 
-class DataMapperAction(BaseAction):
-    """Map fields between different schemas."""
-    action_type = "api_data_mapper"
-    display_name = "数据映射器"
-    description = "在不同schema之间映射字段"
+class PaginationTransformer:
+    """Handle pagination in API responses.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", {})
-            mapping = params.get("mapping", {})
-            reverse = params.get("reverse", False)
-            skip_missing = params.get("skip_missing", True)
+    Supports cursor-based and offset-based pagination.
+    """
 
-            if reverse:
-                mapping = {v: k for k, v in mapping.items()}
+    def __init__(self, page_size: int = 20) -> None:
+        self.page_size = page_size
 
-            mapped = {}
-            for source_key, target_key in mapping.items():
-                value = data.get(source_key)
-                if value is not None or not skip_missing:
-                    mapped[target_key] = value
+    def extract_pagination_info(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Extract pagination metadata from response.
 
-            return ActionResult(
-                success=True,
-                data={
-                    "mapped_data": mapped,
-                    "fields_mapped": len(mapping),
-                },
-                message=f"Mapped {len(mapping)} fields"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Data mapper error: {str(e)}")
+        Args:
+            response: API response with pagination info.
 
-    def get_required_params(self) -> List[str]:
-        return ["data", "mapping"]
+        Returns:
+            Pagination metadata.
+        """
+        return {
+            "has_more": response.get("has_more", response.get("hasNextPage", False)),
+            "next_cursor": response.get("next_cursor", response.get("cursor", None)),
+            "total": response.get("total", response.get("total_count", None)),
+            "page_size": self.page_size,
+        }
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"reverse": False, "skip_missing": True}
+    def get_page(
+        self,
+        items: list[Any],
+        page: int,
+    ) -> list[Any]:
+        """Get a specific page of items.
 
+        Args:
+            items: All items.
+            page: Page number (1-indexed).
 
-class SchemaConverterAction(BaseAction):
-    """Convert between data schemas."""
-    action_type = "api_schema_converter"
-    display_name = "Schema转换器"
-    description = "在不同数据schema之间转换"
+        Returns:
+            Items for the requested page.
+        """
+        start = (page - 1) * self.page_size
+        end = start + self.page_size
+        return items[start:end]
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", {})
-            source_schema = params.get("source_schema", "json")
-            target_schema = params.get("target_schema", "xml")
-
-            converted = data
-
-            if source_schema == "json" and target_schema == "xml":
-                converted = self._json_to_xml(data)
-            elif source_schema == "xml" and target_schema == "json":
-                converted = self._xml_to_json(data)
-            elif source_schema == "json" and target_schema == "csv":
-                converted = self._json_to_csv(data)
-            elif source_schema == "csv" and target_schema == "json":
-                converted = self._csv_to_json(data)
-
-            return ActionResult(
-                success=True,
-                data={
-                    "converted": converted,
-                    "source_schema": source_schema,
-                    "target_schema": target_schema,
-                },
-                message=f"Converted from {source_schema} to {target_schema}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Schema converter error: {str(e)}")
-
-    def _json_to_xml(self, data: Dict) -> str:
-        items = []
-        for key, value in data.items():
-            items.append(f"<{key}>{value}</{key}>")
-        return f"<root>{''.join(items)}</root>"
-
-    def _xml_to_json(self, xml_str: str) -> Dict:
-        import re
-        pattern = r"<(\w+)>([^<]*)</\1>"
-        matches = re.findall(pattern, xml_str)
-        return {k: v for k, v in matches}
-
-    def _json_to_csv(self, data: Union[Dict, List]) -> str:
-        if isinstance(data, dict):
-            data = [data]
-        if not data:
-            return ""
-        headers = list(data[0].keys())
-        rows = [",".join(str(row.get(h, "")) for h in headers) for row in data]
-        return "\n".join([",".join(headers), *rows])
-
-    def _csv_to_json(self, csv_str: str) -> List[Dict]:
-        lines = csv_str.strip().split("\n")
-        if len(lines) < 2:
-            return []
-        headers = lines[0].split(",")
-        return [dict(zip(headers, line.split(","))) for line in lines[1:]]
-
-    def get_required_params(self) -> List[str]:
-        return ["data"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"source_schema": "json", "target_schema": "xml"}
-
-
-class ResponseEnricherAction(BaseAction):
-    """Enrich response with additional data."""
-    action_type = "api_response_enricher"
-    display_name = "响应富化"
-    description = "用附加数据富化响应"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            response = params.get("response", {})
-            enrichments = params.get("enrichments", {})
-            merge_strategy = params.get("merge_strategy", "shallow")
-            prefix = params.get("prefix", "")
-
-            enriched = dict(response)
-
-            for key, value in enrichments.items():
-                final_key = f"{prefix}{key}" if prefix else key
-                if merge_strategy == "deep" and isinstance(value, dict) and isinstance(enriched.get(key), dict):
-                    enriched[key] = {**enriched[key], **value}
-                else:
-                    enriched[final_key] = value
-
-            return ActionResult(
-                success=True,
-                data={
-                    "enriched": enriched,
-                    "enrichments_added": len(enrichments),
-                    "merge_strategy": merge_strategy,
-                },
-                message=f"Enriched response with {len(enrichments)} additions"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Response enricher error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["response"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"enrichments": {}, "merge_strategy": "shallow", "prefix": ""}
+    def merge_pages(
+        self,
+        page1: list[Any],
+        page2: list[Any],
+    ) -> list[Any]:
+        """Merge two pages of items."""
+        seen = set()
+        result = []
+        for item in page1 + page2:
+            item_id = id(item)
+            if item_id not in seen:
+                seen.add(item_id)
+                result.append(item)
+        return result
