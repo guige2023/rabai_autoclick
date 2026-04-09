@@ -145,11 +145,16 @@ class HealthReport:
 class WorkflowDiagnosticsV2:
     """增强版智能工作流诊断室"""
     
-    def __init__(self, data_dir: str = "./data"):
+    def __init__(self, data_dir: str = "./data", flow_engine_callback: Optional[Callable] = None):
         self.data_dir = data_dir
+        self.flow_engine_callback = flow_engine_callback
         self.execution_history: Dict[str, List[Dict]] = defaultdict(list)
         self.workflow_definitions: Dict[str, Dict] = {}
+        # Health score trending
+        self.health_score_history: Dict[str, List[Dict]] = defaultdict(list)
+        self._ensure_data_dir()
         self._load_data()
+        self._load_health_score_history()
         
     def _load_data(self) -> None:
         """加载数据"""
@@ -176,6 +181,173 @@ class WorkflowDiagnosticsV2:
         with open(f"{self.data_dir}/execution_history.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     
+    def _ensure_data_dir(self) -> None:
+        """确保数据目录存在"""
+        os.makedirs(self.data_dir, exist_ok=True)
+    
+    def _load_health_score_history(self) -> None:
+        """加载健康分数历史"""
+        try:
+            with open(f"{self.data_dir}/health_score_history.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for wf_id, scores in data.items():
+                    self.health_score_history[wf_id] = scores
+        except FileNotFoundError:
+            pass
+    
+    def _save_health_score_history(self) -> None:
+        """保存健康分数历史"""
+        data = {}
+        for wf_id, scores in self.health_score_history.items():
+            data[wf_id] = scores[-100:]  # 保留最近100条
+        with open(f"{self.data_dir}/health_score_history.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    
+    def get_health_score_trend(self, workflow_id: str, period_hours: int = 168) -> Dict[str, Any]:
+        """获取健康分数趋势
+        
+        Args:
+            workflow_id: 工作流ID
+            period_hours: 统计周期（默认168小时=7天）
+            
+        Returns:
+            趋势信息字典
+        """
+        scores = self.health_score_history.get(workflow_id, [])
+        if not scores:
+            return {"status": "no_data", "trend": "unknown"}
+        
+        now = time.time()
+        cutoff = now - (period_hours * 3600)
+        recent_scores = [s for s in scores if s.get("timestamp", 0) > cutoff]
+        
+        if len(recent_scores) < 2:
+            return {"status": "insufficient_data", "trend": "unknown"}
+        
+        # 计算趋势
+        first_half = recent_scores[:len(recent_scores)//2]
+        second_half = recent_scores[len(recent_scores)//2:]
+        
+        first_avg = sum(s.get("score", 0) for s in first_half) / len(first_half)
+        second_avg = sum(s.get("score", 0) for s in second_half) / len(second_half)
+        
+        change = second_avg - first_avg
+        
+        if change > 5:
+            trend = "improving"
+        elif change < -5:
+            trend = "declining"
+        else:
+            trend = "stable"
+        
+        return {
+            "status": "ok",
+            "trend": trend,
+            "change": change,
+            "current_score": recent_scores[-1].get("score", 0),
+            "avg_score": (first_avg + second_avg) / 2,
+            "data_points": len(recent_scores),
+            "period_hours": period_hours
+        }
+    
+    def perform_root_cause_analysis(self, workflow_id: str) -> Dict[str, Any]:
+        """执行根因分析
+        
+        Args:
+            workflow_id: 工作流ID
+            
+        Returns:
+            根因分析结果
+        """
+        executions = self.execution_history.get(workflow_id, [])
+        if not executions:
+            return {"status": "no_data", "causes": []}
+        
+        # 收集失败信息
+        failures = [e for e in executions if not e.get("success")]
+        if not failures:
+            return {"status": "healthy", "causes": []}
+        
+        # 按根因分组
+        cause_counts = defaultdict(int)
+        cause_examples = defaultdict(list)
+        
+        for failure in failures:
+            error = failure.get("error", "Unknown error")
+            cause = self._infer_root_cause(error)
+            cause_counts[cause.value] += 1
+            if len(cause_examples[cause.value]) < 3:
+                cause_examples[cause.value].append(error[:100])
+        
+        # 计算百分比
+        total_failures = len(failures)
+        causes = []
+        for cause_value, count in sorted(cause_counts.items(), key=lambda x: -x[1]):
+            percentage = (count / total_failures) * 100
+            causes.append({
+                "cause": cause_value,
+                "count": count,
+                "percentage": round(percentage, 1),
+                "examples": cause_examples[cause_value],
+                "recommendation": self._get_suggestion_for_error(
+                    RootCause(cause_value), ""
+                )
+            })
+        
+        # 时序分析
+        time_patterns = self._analyze_failure_time_pattern(failures)
+        
+        return {
+            "status": "analyzed",
+            "total_failures": total_failures,
+            "causes": causes,
+            "time_patterns": time_patterns
+        }
+    
+    def _analyze_failure_time_pattern(self, failures: List[Dict]) -> Dict:
+        """分析失败时间模式"""
+        if not failures:
+            return {"pattern": "none"}
+        
+        hours = defaultdict(int)
+        weekdays = defaultdict(int)
+        
+        for f in failures:
+            ts = f.get("timestamp", 0)
+            if ts:
+                dt = datetime.fromtimestamp(ts)
+                hours[dt.hour] += 1
+                weekdays[dt.weekday()] += 1
+        
+        # 找出高发时段
+        peak_hour = max(hours.items(), key=lambda x: x[1]) if hours else (0, 0)
+        peak_weekday = max(weekdays.items(), key=lambda x: x[1]) if weekdays else (0, 0)
+        
+        weekdays_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        
+        return {
+            "peak_hour": peak_hour[0],
+            "peak_hour_count": peak_hour[1],
+            "peak_weekday": weekdays_names[peak_weekday[0]] if peak_weekday[0] < 7 else "未知",
+            "peak_weekday_count": peak_weekday[1]
+        }
+    
+    def set_flow_engine_callback(self, callback: Callable) -> None:
+        """设置 FlowEngine 回调函数
+        
+        Args:
+            callback: 回调函数，签名为 (event_type: str, data: Dict) -> None
+        """
+        self.flow_engine_callback = callback
+    
+    def _notify_flow_engine(self, event_type: str, data: Dict) -> None:
+        """通知 FlowEngine 事件"""
+        if self.flow_engine_callback:
+            try:
+                self.flow_engine_callback(event_type, data)
+            except Exception:
+                pass
+    
     def record_execution(self, workflow_id: str, workflow_name: str,
                         step_results: List[Dict[str, Any]],
                         duration: float, success: bool,
@@ -201,6 +373,21 @@ class WorkflowDiagnosticsV2:
                 self.execution_history[workflow_id][-1000:]
         
         self._save_history()
+        
+        # 记录健康分数到历史
+        report = self.diagnose(workflow_id)
+        self.health_score_history[workflow_id].append({
+            "timestamp": time.time(),
+            "score": report.health_score,
+            "success": success
+        })
+        self._save_health_score_history()
+        
+        # 通知 FlowEngine
+        self._notify_flow_engine("execution_recorded", {
+            "workflow_id": workflow_id,
+            "success": success
+        })
     
     def diagnose(self, workflow_id: str) -> HealthReport:
         """诊断工作流 - 增强版"""
@@ -252,7 +439,7 @@ class WorkflowDiagnosticsV2:
         # 与平均水平对比
         comparison = self._compare_to_average(workflow_id, health_score)
         
-        return HealthReport(
+        report = HealthReport(
             workflow_id=workflow_id,
             workflow_name=executions[0].get("workflow_name", workflow_id),
             overall_health=overall_health,
@@ -274,6 +461,15 @@ class WorkflowDiagnosticsV2:
             last_execution=executions[-1].get("timestamp"),
             comparison_to_average=comparison
         )
+        
+        # 通知 FlowEngine
+        self._notify_flow_engine("diagnosis_complete", {
+            "workflow_id": workflow_id,
+            "health_score": health_score,
+            "health_level": overall_health.value
+        })
+        
+        return report
     
     def _empty_report(self, workflow_id: str) -> HealthReport:
         """空报告"""
@@ -877,6 +1073,20 @@ class WorkflowDiagnosticsV2:
             "avg_duration": sum(r.avg_duration for r in reports) / len(reports),
             "needs_attention": [r.workflow_name for r in reports if r.health_score < 50]
         }
+    
+    @property
+    def health_level(self) -> str:
+        """获取所有工作流的总体健康等级（枚举值）
+        
+        Returns:
+            HealthLevel enum value string
+        """
+        reports = self.get_all_workflows_health()
+        if not reports:
+            return HealthLevel.FAIR.value
+        
+        avg_score = sum(r.health_score for r in reports) / len(reports)
+        return self._get_health_level(avg_score).value
 
 
 # 兼容旧版本
