@@ -1,215 +1,460 @@
-"""
-Data Encoder Action Module.
+"""Data Encoder Action Module.
 
-Encoding and decoding for data serialization,
-supports JSON, Base64, URL encoding, and custom formats.
+Provides encoding, decoding, and serialization for various data formats
+including JSON, base64, URL encoding, hex, and custom encodings.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Union
-from dataclasses import dataclass
-from enum import Enum
-import logging
 import base64
-import urllib.parse
 import json
-import pickle
+import logging
+import quopri
+import urllib.parse
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
 
 class EncodingType(Enum):
-    """Encoding types."""
-    JSON = "json"
+    """Supported encoding types."""
     BASE64 = "base64"
+    BASE64_URL_SAFE = "base64_url_safe"
+    BASE16 = "hex"
+    BASE32 = "base32"
+    BASE85 = "base85"
     URL = "url"
-    PICKLE = "pickle"
-    HEX = "hex"
-    CUSTOM = "custom"
+    URL_COMPONENT = "url_component"
+    HTML = "html"
+    JSON = "json"
+    XML = "xml"
+    QUOTED_PRINTABLE = "quoted_printable"
+    MIME = "mime"
+    UTF8 = "utf8"
+    ASCII = "ascii"
+    UNICODE_ESCAPE = "unicode_escape"
 
 
 @dataclass
-class EncodingConfig:
-    """Encoding configuration."""
-    encoding: EncodingType
-    custom_encoder: Optional[Callable[[Any], Any]] = None
-    custom_decoder: Optional[Callable[[Any], Any]] = None
+class EncoderConfig:
+    """Configuration for encoding operations."""
+    encoding: str = "utf-8"
+    encoding_type: EncodingType = EncodingType.UTF8
+    error_handling: str = "strict"  # strict, ignore, replace
+    indent: Optional[int] = None
+    sort_keys: bool = False
+
+
+class Base64Encoder:
+    """Base64 encoding/decoding."""
+
+    @staticmethod
+    def encode(data: bytes) -> str:
+        """Encode bytes to base64 string."""
+        return base64.b64encode(data).decode("ascii")
+
+    @staticmethod
+    def decode(data: str) -> bytes:
+        """Decode base64 string to bytes."""
+        # Handle URL-safe base64
+        data = data.replace("-", "+").replace("_", "/")
+        padding = len(data) % 4
+        if padding:
+            data += "=" * (4 - padding)
+        return base64.b64decode(data)
+
+    @staticmethod
+    def encode_url_safe(data: bytes) -> str:
+        """Encode bytes to URL-safe base64 string."""
+        return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def decode_url_safe(data: str) -> bytes:
+        """Decode URL-safe base64 string to bytes."""
+        padding = len(data) % 4
+        if padding:
+            data += "=" * (4 - padding)
+        return base64.urlsafe_b64decode(data)
+
+
+class HexEncoder:
+    """Hexadecimal encoding/decoding."""
+
+    @staticmethod
+    def encode(data: bytes) -> str:
+        """Encode bytes to hex string."""
+        return data.hex()
+
+    @staticmethod
+    def decode(data: str) -> bytes:
+        """Decode hex string to bytes."""
+        return bytes.fromhex(data)
+
+
+class Base32Encoder:
+    """Base32 encoding/decoding."""
+
+    @staticmethod
+    def encode(data: bytes) -> str:
+        """Encode bytes to base32 string."""
+        return base64.b32encode(data).decode("ascii")
+
+    @staticmethod
+    def decode(data: str) -> bytes:
+        """Decode base32 string to bytes."""
+        return base64.b32decode(data.upper())
+
+
+class Base85Encoder:
+    """Base85 encoding/decoding."""
+
+    @staticmethod
+    def encode(data: bytes) -> str:
+        """Encode bytes to base85 string."""
+        return base64.b85encode(data).decode("ascii")
+
+    @staticmethod
+    def decode(data: str) -> bytes:
+        """Decode base85 string to bytes."""
+        return base64.b85decode(data)
+
+
+class URLEncoder:
+    """URL encoding/decoding."""
+
+    @staticmethod
+    def encode(data: str, safe: str = "") -> str:
+        """Encode string to URL-safe format."""
+        return urllib.parse.quote(data, safe=safe)
+
+    @staticmethod
+    def decode(data: str) -> str:
+        """Decode URL-encoded string."""
+        return urllib.parse.unquote(data)
+
+    @staticmethod
+    def encode_component(data: str) -> str:
+        """Encode string as URL component."""
+        return urllib.parse.quote_plus(data)
+
+    @staticmethod
+    def decode_component(data: str) -> str:
+        """Decode URL component."""
+        return urllib.parse.unquote_plus(data)
+
+    @staticmethod
+    def encode_dict(data: Dict[str, Any]) -> str:
+        """Encode dictionary to URL query string."""
+        return urllib.parse.urlencode(data)
+
+    @staticmethod
+    def decode_dict(data: str) -> Dict[str, str]:
+        """Decode URL query string to dictionary."""
+        return dict(urllib.parse.parse_qsl(data))
+
+
+class HTMLEncoder:
+    """HTML entity encoding/decoding."""
+
+    HTML_ENTITIES = {
+        "<": "&lt;",
+        ">": "&gt;",
+        "&": "&amp;",
+        '"': "&quot;",
+        "'": "&#39;",
+    }
+
+    HTML_ENTITIES_REVERSE = {v: k for k, v in HTML_ENTITIES.items()}
+
+    @classmethod
+    def encode(cls, data: str) -> str:
+        """Encode string with HTML entities."""
+        result = data
+        for char, entity in cls.HTML_ENTITIES.items():
+            result = result.replace(char, entity)
+        return result
+
+    @classmethod
+    def decode(cls, data: str) -> str:
+        """Decode HTML entities."""
+        result = data
+        for entity, char in cls.HTML_ENTITIES_REVERSE.items():
+            result = result.replace(entity, char)
+        return result
+
+    @classmethod
+    def encode_all(cls, data: str) -> str:
+        """Encode all non-ASCII characters."""
+        return data.encode("ascii", "xmlcharrefreplace").decode("ascii")
+
+
+class JSONEncoder:
+    """JSON encoding/decoding."""
+
+    @staticmethod
+    def encode(
+        data: Any,
+        indent: Optional[int] = None,
+        sort_keys: bool = False
+    ) -> str:
+        """Encode data to JSON string."""
+        return json.dumps(
+            data,
+            indent=indent,
+            sort_keys=sort_keys,
+            ensure_ascii=False
+        )
+
+    @staticmethod
+    def decode(data: str) -> Any:
+        """Decode JSON string to data."""
+        return json.loads(data)
+
+
+class QuotedPrintableEncoder:
+    """Quoted-printable encoding/decoding."""
+
+    @staticmethod
+    def encode(data: bytes) -> str:
+        """Encode bytes to quoted-printable string."""
+        return quopri.encodestring(data).decode("ascii")
+
+    @staticmethod
+    def decode(data: str) -> bytes:
+        """Decode quoted-printable string to bytes."""
+        return quopri.decodestring(data.encode("ascii"))
+
+
+class EncoderChain:
+    """Chain multiple encodings together."""
+
+    def __init__(self):
+        self._encoders: List[tuple[int, EncodingType, Dict[str, Any]]] = []
+
+    def add_encoding(
+        self,
+        encoding_type: EncodingType,
+        priority: int = 0,
+        config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Add an encoding step to the chain."""
+        self._encoders.append((priority, encoding_type, config or {}))
+        self._encoders.sort(key=lambda x: x[0])
+
+    async def encode(self, data: Union[bytes, str]) -> str:
+        """Encode data through the chain."""
+        current: Union[bytes, str] = data if isinstance(data, bytes) else data.encode("utf-8")
+
+        for _, enc_type, config in self._encoders:
+            if enc_type == EncodingType.BASE64:
+                current = Base64Encoder.encode(current if isinstance(current, bytes) else current.encode())
+            elif enc_type == EncodingType.BASE64_URL_SAFE:
+                current = Base64Encoder.encode_url_safe(current if isinstance(current, bytes) else current.encode())
+            elif enc_type == EncodingType.BASE16:
+                current = HexEncoder.encode(current if isinstance(current, bytes) else current.encode())
+            elif enc_type == EncodingType.BASE32:
+                current = Base32Encoder.encode(current if isinstance(current, bytes) else current.encode())
+            elif enc_type == EncodingType.BASE85:
+                current = Base85Encoder.encode(current if isinstance(current, bytes) else current.encode())
+            elif enc_type == EncodingType.URL:
+                current = URLEncoder.encode(current if isinstance(current, str) else current.decode())
+            elif enc_type == EncodingType.URL_COMPONENT:
+                current = URLEncoder.encode_component(current if isinstance(current, str) else current.decode())
+            elif enc_type == EncodingType.HTML:
+                current = HTMLEncoder.encode(current if isinstance(current, str) else current.decode())
+            elif enc_type == EncodingType.JSON:
+                current = JSONEncoder.encode(current)
+            elif enc_type == EncodingType.UTF8:
+                if isinstance(current, bytes):
+                    current = current.decode("utf-8")
+            elif enc_type == EncodingType.QUOTED_PRINTABLE:
+                current = QuotedPrintableEncoder.encode(current if isinstance(current, bytes) else current.encode())
+
+        return current if isinstance(current, str) else current.decode()
+
+    async def decode(self, data: str) -> Union[bytes, str]:
+        """Decode data through the chain in reverse."""
+        current = data
+
+        for _, enc_type, config in reversed(self._encoders):
+            if enc_type == EncodingType.BASE64:
+                current = Base64Encoder.decode(current)
+            elif enc_type == EncodingType.BASE64_URL_SAFE:
+                current = Base64Encoder.decode_url_safe(current)
+            elif enc_type == EncodingType.BASE16:
+                current = HexEncoder.decode(current)
+            elif enc_type == EncodingType.BASE32:
+                current = Base32Encoder.decode(current)
+            elif enc_type == EncodingType.BASE85:
+                current = Base85Encoder.decode(current)
+            elif enc_type == EncodingType.URL:
+                current = URLEncoder.decode(current)
+            elif enc_type == EncodingType.URL_COMPONENT:
+                current = URLEncoder.decode_component(current)
+            elif enc_type == EncodingType.HTML:
+                current = HTMLEncoder.decode(current)
+            elif enc_type == EncodingType.JSON:
+                current = JSONEncoder.decode(current)
+            elif enc_type == EncodingType.UTF8:
+                if isinstance(current, bytes):
+                    current = current.decode("utf-8")
+
+        return current
 
 
 class DataEncoderAction:
-    """
-    Data encoding and decoding utilities.
+    """Main action class for data encoding."""
 
-    Encodes/decodes data for storage or transmission,
-    supports chained encoding operations.
+    def __init__(self):
+        self._chain = EncoderChain()
 
-    Example:
-        encoder = DataEncoderAction()
-        encoded = encoder.encode(data, EncodingType.BASE64)
-        decoded = encoder.decode(encoded, EncodingType.BASE64)
-    """
-
-    def __init__(self, default_encoding: EncodingType = EncodingType.JSON) -> None:
-        self.default_encoding = default_encoding
-        self._encoders: dict[EncodingType, Callable[[Any], Any]] = {
-            EncodingType.JSON: self._encode_json,
-            EncodingType.BASE64: self._encode_base64,
-            EncodingType.URL: self._encode_url,
-            EncodingType.PICKLE: self._encode_pickle,
-            EncodingType.HEX: self._encode_hex,
-        }
-        self._decoders: dict[EncodingType, Callable[[Any], Any]] = {
-            EncodingType.JSON: self._decode_json,
-            EncodingType.BASE64: self._decode_base64,
-            EncodingType.URL: self._decode_url,
-            EncodingType.PICKLE: self._decode_pickle,
-            EncodingType.HEX: self._decode_hex,
-        }
+    def add_encoding(self, encoding_type: EncodingType, priority: int = 0) -> None:
+        """Add an encoding to the chain."""
+        self._chain.add_encoding(encoding_type, priority)
 
     def encode(
         self,
-        data: Any,
-        encoding: Optional[EncodingType] = None,
+        data: Union[bytes, str],
+        encoding_type: EncodingType
     ) -> str:
-        """Encode data to string."""
-        enc_type = encoding or self.default_encoding
+        """Encode data using specified encoding."""
+        encoders = {
+            EncodingType.BASE64: lambda d: Base64Encoder.encode(d if isinstance(d, bytes) else d.encode()),
+            EncodingType.BASE64_URL_SAFE: lambda d: Base64Encoder.encode_url_safe(d if isinstance(d, bytes) else d.encode()),
+            EncodingType.BASE16: lambda d: HexEncoder.encode(d if isinstance(d, bytes) else d.encode()),
+            EncodingType.BASE32: lambda d: Base32Encoder.encode(d if isinstance(d, bytes) else d.encode()),
+            EncodingType.BASE85: lambda d: Base85Encoder.encode(d if isinstance(d, bytes) else d.encode()),
+            EncodingType.URL: lambda d: URLEncoder.encode(d if isinstance(d, str) else d.decode()),
+            EncodingType.URL_COMPONENT: lambda d: URLEncoder.encode_component(d if isinstance(d, str) else d.decode()),
+            EncodingType.HTML: lambda d: HTMLEncoder.encode(d if isinstance(d, str) else d.decode()),
+            EncodingType.JSON: lambda d: JSONEncoder.encode(d),
+            EncodingType.UTF8: lambda d: d if isinstance(d, str) else d.decode("utf-8"),
+            EncodingType.QUOTED_PRINTABLE: lambda d: QuotedPrintableEncoder.encode(d if isinstance(d, bytes) else d.encode()),
+        }
 
-        encoder = self._encoders.get(enc_type)
-        if encoder:
-            return encoder(data)
-
-        raise ValueError(f"No encoder for {enc_type}")
+        encoder = encoders.get(encoding_type)
+        if not encoder:
+            raise ValueError(f"Unsupported encoding: {encoding_type}")
+        return encoder(data)
 
     def decode(
         self,
         data: str,
-        encoding: Optional[EncodingType] = None,
-    ) -> Any:
-        """Decode string back to data."""
-        enc_type = encoding or self.default_encoding
+        encoding_type: EncodingType
+    ) -> Union[bytes, str]:
+        """Decode data using specified encoding."""
+        decoders = {
+            EncodingType.BASE64: Base64Encoder.decode,
+            EncodingType.BASE64_URL_SAFE: Base64Encoder.decode_url_safe,
+            EncodingType.BASE16: HexEncoder.decode,
+            EncodingType.BASE32: Base32Encoder.decode,
+            EncodingType.BASE85: Base85Encoder.decode,
+            EncodingType.URL: URLEncoder.decode,
+            EncodingType.URL_COMPONENT: URLEncoder.decode_component,
+            EncodingType.HTML: HTMLEncoder.decode,
+            EncodingType.JSON: JSONEncoder.decode,
+            EncodingType.QUOTED_PRINTABLE: QuotedPrintableEncoder.decode,
+        }
 
-        decoder = self._decoders.get(enc_type)
-        if decoder:
-            return decoder(data)
+        decoder = decoders.get(encoding_type)
+        if not decoder:
+            raise ValueError(f"Unsupported encoding: {encoding_type}")
+        return decoder(data)
 
-        raise ValueError(f"No decoder for {enc_type}")
-
-    def encode_chain(
+    async def execute(
         self,
-        data: Any,
-        encodings: list[EncodingType],
-    ) -> str:
-        """Apply multiple encodings in sequence."""
-        result = data
-        for enc in encodings:
-            result = self.encode(result, enc)
-        return result
+        context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute the data encoder action.
 
-    def decode_chain(
-        self,
-        data: str,
-        encodings: list[EncodingType],
-    ) -> Any:
-        """Reverse multiple encodings in sequence."""
-        result = data
-        for enc in reversed(encodings):
-            result = self.decode(result, enc)
-        return result
+        Args:
+            context: Dictionary containing:
+                - operation: Operation to perform (encode, decode, chain)
+                - data: Data to encode/decode
+                - encoding: Encoding type
+                - indent: JSON indent level
+                - sort_keys: Sort JSON keys
 
-    def _encode_json(self, data: Any) -> str:
-        """Encode to JSON."""
-        return json.dumps(data, default=str, ensure_ascii=False)
+        Returns:
+            Dictionary with encoding results.
+        """
+        operation = context.get("operation", "encode")
 
-    def _decode_json(self, data: str) -> Any:
-        """Decode from JSON."""
-        return json.loads(data)
+        if operation == "encode":
+            data = context.get("data", "")
+            enc_str = context.get("encoding", "base64")
+            try:
+                enc_type = EncodingType(enc_str)
+            except ValueError:
+                return {"success": False, "error": f"Unknown encoding: {enc_str}"}
 
-    def _encode_base64(self, data: Any) -> str:
-        """Encode to Base64."""
-        if isinstance(data, str):
-            data = data.encode()
-        elif not isinstance(data, bytes):
-            data = str(data).encode()
+            try:
+                result = self.encode(data, enc_type)
+                return {
+                    "success": True,
+                    "encoded": result,
+                    "encoding": enc_str
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
-        return base64.b64encode(data).decode("ascii")
+        elif operation == "decode":
+            data = context.get("data", "")
+            enc_str = context.get("encoding", "base64")
+            try:
+                enc_type = EncodingType(enc_str)
+            except ValueError:
+                return {"success": False, "error": f"Unknown encoding: {enc_str}"}
 
-    def _decode_base64(self, data: str) -> Any:
-        """Decode from Base64."""
-        decoded = base64.b64decode(data)
-        try:
-            return decoded.decode("utf-8")
-        except UnicodeDecodeError:
-            return decoded
+            try:
+                result = self.decode(data, enc_type)
+                return {
+                    "success": True,
+                    "decoded": result,
+                    "encoding": enc_str
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
-    def _encode_url(self, data: Any) -> str:
-        """Encode for URL."""
-        return urllib.parse.quote(str(data))
+        elif operation == "chain_encode":
+            data = context.get("data", "")
+            encodings = context.get("encodings", [])
 
-    def _decode_url(self, data: str) -> str:
-        """Decode from URL."""
-        return urllib.parse.unquote(data)
+            temp_chain = EncoderChain()
+            for i, enc_str in enumerate(encodings):
+                try:
+                    enc_type = EncodingType(enc_str)
+                    temp_chain.add_encoding(enc_type, priority=i)
+                except ValueError:
+                    return {"success": False, "error": f"Unknown encoding: {enc_str}"}
 
-    def _encode_pickle(self, data: Any) -> str:
-        """Encode using pickle."""
-        pickled = pickle.dumps(data)
-        return base64.b64encode(pickled).decode("ascii")
+            try:
+                result = await temp_chain.encode(data)
+                return {
+                    "success": True,
+                    "encoded": result,
+                    "chain": encodings
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
-    def _decode_pickle(self, data: str) -> Any:
-        """Decode using pickle."""
-        decoded = base64.b64decode(data)
-        return pickle.loads(decoded)
+        elif operation == "url_encode_dict":
+            data = context.get("data", {})
+            try:
+                result = URLEncoder.encode_dict(data)
+                return {"success": True, "encoded": result}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
-    def _encode_hex(self, data: Any) -> str:
-        """Encode to hex."""
-        if isinstance(data, str):
-            data = data.encode()
-        elif not isinstance(data, bytes):
-            data = str(data).encode()
+        elif operation == "url_decode_dict":
+            data = context.get("data", "")
+            try:
+                result = URLEncoder.decode_dict(data)
+                return {"success": True, "decoded": result}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
-        return data.hex()
-
-    def _decode_hex(self, data: str) -> str:
-        """Decode from hex."""
-        decoded = bytes.fromhex(data)
-        try:
-            return decoded.decode("utf-8")
-        except UnicodeDecodeError:
-            return decoded
-
-    def compress_encode(
-        self,
-        data: Any,
-        encoding: EncodingType = EncodingType.BASE64,
-    ) -> str:
-        """Compress then encode data."""
-        import zlib
-
-        if isinstance(data, str):
-            data = data.encode()
-
-        compressed = zlib.compress(data)
-        return self.encode(compressed, encoding)
-
-    def decode_decompress(
-        self,
-        data: str,
-        encoding: EncodingType = EncodingType.BASE64,
-        output_type: str = "str",
-    ) -> Any:
-        """Decode then decompress data."""
-        import zlib
-
-        decoded = self.decode(data, encoding)
-
-        if isinstance(decoded, str):
-            decoded = decoded.encode()
-
-        decompressed = zlib.decompress(decoded)
-
-        if output_type == "str":
-            return decompressed.decode("utf-8")
-        elif output_type == "bytes":
-            return decompressed
         else:
-            return decompressed
+            return {"success": False, "error": f"Unknown operation: {operation}"}
