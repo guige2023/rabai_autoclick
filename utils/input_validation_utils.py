@@ -1,317 +1,318 @@
 """
-Input validation utilities for automation workflows.
+Input Validation Utilities for UI Automation.
 
-Provides validation of mouse coordinates, keyboard input,
-and action parameters for safe automation execution.
+This module provides comprehensive input validation utilities for
+validating coordinates, actions, and automation parameters.
+
+Author: AI Assistant
+License: MIT
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
-from typing import Optional, Tuple, List, Any, Callable
+import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
+from typing import Any, Optional, Callable
 
 
 class ValidationError(Exception):
-    """Validation error exception."""
-    pass
-
-
-class CoordinateSystem(Enum):
-    """Coordinate system types."""
-    SCREEN = "screen"
-    DISPLAY = "display"
-    WINDOW = "window"
-    NORMALIZED = "normalized"
-
-
-@dataclass
-class ScreenBounds:
-    """Screen bounds."""
-    x: int
-    y: int
-    width: int
-    height: int
-    index: int = 0
+    """Custom validation error exception."""
+    def __init__(self, field: str, message: str):
+        self.field = field
+        self.message = message
+        super().__init__(f"{field}: {message}")
 
 
 @dataclass
 class ValidationResult:
-    """Validation result."""
+    """Result of a validation operation."""
     valid: bool
-    message: str
-    details: dict = None
+    errors: list[str] = None
+    
+    def __post_init__(self):
+        if self.errors is None:
+            self.errors = []
+    
+    @classmethod
+    def success(cls) -> 'ValidationResult':
+        """Create a successful validation result."""
+        return cls(valid=True)
+    
+    @classmethod
+    def failure(cls, *errors: str) -> 'ValidationResult':
+        """Create a failed validation result."""
+        return cls(valid=False, errors=list(errors))
+    
+    def add_error(self, error: str) -> None:
+        """Add an error message."""
+        self.errors.append(error)
+        self.valid = False
+    
+    def merge(self, other: 'ValidationResult') -> None:
+        """Merge another validation result into this one."""
+        if not other.valid:
+            self.valid = False
+            self.errors.extend(other.errors)
 
 
-def get_screen_bounds_list() -> List[ScreenBounds]:
+class Validator:
     """
-    Get bounds of all connected screens.
-    
-    Returns:
-        List of ScreenBounds for each display.
+    Base validator class with common validation methods.
     """
-    bounds = []
     
-    try:
-        import Quartz
-        for i, screen in enumerate(Quartz.NSScreen.screens()):
-            frame = screen.frame()
-            bounds.append(ScreenBounds(
-                x=int(frame.origin.x),
-                y=int(frame.origin.y),
-                width=int(frame.size.width),
-                height=int(frame.size.height),
-                index=i
-            ))
-    except Exception:
-        bounds.append(ScreenBounds(0, 0, 1920, 1080, 0))
+    @staticmethod
+    def required(value: Any, field_name: str) -> ValidationResult:
+        """Validate that a value is not None or empty."""
+        if value is None:
+            return ValidationResult.failure(f"{field_name} is required")
+        if isinstance(value, str) and not value.strip():
+            return ValidationResult.failure(f"{field_name} cannot be empty")
+        return ValidationResult.success()
     
-    return bounds
-
-
-def validate_coordinate(x: int, y: int,
-                        coordinate_system: CoordinateSystem = CoordinateSystem.SCREEN) -> ValidationResult:
-    """
-    Validate screen coordinate is valid.
-    
-    Args:
-        x: X coordinate.
-        y: Y coordinate.
-        coordinate_system: Coordinate system type.
-        
-    Returns:
-        ValidationResult.
-    """
-    if coordinate_system == CoordinateSystem.NORMALIZED:
-        if not (0 <= x <= 1 and 0 <= y <= 1):
-            return ValidationResult(
-                valid=False,
-                message=f"Normalized coordinates must be in [0,1], got ({x}, {y})"
+    @staticmethod
+    def min_value(value: float, min_val: float, field_name: str) -> ValidationResult:
+        """Validate minimum numeric value."""
+        if value < min_val:
+            return ValidationResult.failure(
+                f"{field_name} must be at least {min_val}, got {value}"
             )
-        return ValidationResult(valid=True, message="Valid normalized coordinates")
+        return ValidationResult.success()
     
-    screens = get_screen_bounds_list()
-    
-    if not screens:
-        return ValidationResult(
-            valid=False,
-            message="No screens detected"
-        )
-    
-    if coordinate_system == CoordinateSystem.SCREEN or coordinate_system == CoordinateSystem.DISPLAY:
-        all_bounds = _union_all_bounds(screens)
-        
-        if not (all_bounds.x <= x < all_bounds.x + all_bounds.width and
-                all_bounds.y <= y < all_bounds.y + all_bounds.height):
-            return ValidationResult(
-                valid=False,
-                message=f"Coordinate ({x}, {y}) outside screen bounds",
-                details={
-                    'screen_bounds': {
-                        'x': all_bounds.x,
-                        'y': all_bounds.y,
-                        'width': all_bounds.width,
-                        'height': all_bounds.height
-                    }
-                }
+    @staticmethod
+    def max_value(value: float, max_val: float, field_name: str) -> ValidationResult:
+        """Validate maximum numeric value."""
+        if value > max_val:
+            return ValidationResult.failure(
+                f"{field_name} must be at most {max_val}, got {value}"
             )
+        return ValidationResult.success()
     
-    return ValidationResult(
-        valid=True,
-        message=f"Valid {coordinate_system.value} coordinate"
-    )
-
-
-def _union_all_bounds(screens: List[ScreenBounds]) -> ScreenBounds:
-    """Get union bounds of all screens."""
-    min_x = min(s.x for s in screens)
-    min_y = min(s.y for s in screens)
-    max_x = max(s.x + s.width for s in screens)
-    max_y = max(s.y + s.height for s in screens)
-    return ScreenBounds(min_x, min_y, max_x - min_x, max_y - min_y)
-
-
-def normalize_coordinate(x: int, y: int,
-                        from_bounds: ScreenBounds) -> Tuple[float, float]:
-    """
-    Normalize coordinate to [0,1] range.
+    @staticmethod
+    def range(
+        value: float, 
+        min_val: float, 
+        max_val: float, 
+        field_name: str
+    ) -> ValidationResult:
+        """Validate value is within range."""
+        result = ValidationResult.success()
+        result.merge(Validator.min_value(value, min_val, field_name))
+        result.merge(Validator.max_value(value, max_val, field_name))
+        return result
     
-    Args:
-        x: X coordinate.
-        y: Y coordinate.
-        from_bounds: Source bounds.
-        
-    Returns:
-        Tuple of normalized (x, y).
-    """
-    norm_x = (x - from_bounds.x) / from_bounds.width
-    norm_y = (y - from_bounds.y) / from_bounds.height
-    return (max(0.0, min(1.0, norm_x)), max(0.0, min(1.0, norm_y)))
-
-
-def denormalize_coordinate(x: float, y: float,
-                           to_bounds: ScreenBounds) -> Tuple[int, int]:
-    """
-    Denormalize [0,1] coordinate to screen pixels.
-    
-    Args:
-        x: Normalized X (0-1).
-        y: Normalized Y (0-1).
-        to_bounds: Target bounds.
-        
-    Returns:
-        Tuple of pixel (x, y).
-    """
-    px = int(to_bounds.x + x * to_bounds.width)
-    py = int(to_bounds.y + y * to_bounds.height)
-    return (px, py)
-
-
-def validate_key_string(key_string: str) -> ValidationResult:
-    """
-    Validate key string format.
-    
-    Args:
-        key_string: Key combination string.
-        
-    Returns:
-        ValidationResult.
-    """
-    if not key_string:
-        return ValidationResult(
-            valid=False,
-            message="Key string is empty"
-        )
-    
-    valid_modifiers = {'cmd', 'command', 'ctrl', 'control', 'alt', 'option', 'shift', 'fn'}
-    parts = key_string.lower().replace('-', '+').replace('_', '+').split('+')
-    
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-    
-    return ValidationResult(
-        valid=True,
-        message="Valid key string"
-    )
-
-
-def validate_click_parameters(x: int, y: int,
-                              button: str = "left",
-                              click_count: int = 1) -> ValidationResult:
-    """
-    Validate click action parameters.
-    
-    Args:
-        x: X coordinate.
-        y: Y coordinate.
-        button: Mouse button.
-        click_count: Number of clicks.
-        
-    Returns:
-        ValidationResult.
-    """
-    coord_result = validate_coordinate(x, y)
-    if not coord_result.valid:
-        return coord_result
-    
-    valid_buttons = {'left', 'right', 'middle'}
-    if button.lower() not in valid_buttons:
-        return ValidationResult(
-            valid=False,
-            message=f"Invalid button '{button}', must be one of {valid_buttons}"
-        )
-    
-    if click_count < 1 or click_count > 3:
-        return ValidationResult(
-            valid=False,
-            message=f"click_count must be 1-3, got {click_count}"
-        )
-    
-    return ValidationResult(
-        valid=True,
-        message="Valid click parameters",
-        details={'x': x, 'y': y, 'button': button, 'click_count': click_count}
-    )
-
-
-def validate_text_input(text: str,
-                        max_length: Optional[int] = None,
-                        allowed_chars: Optional[str] = None) -> ValidationResult:
-    """
-    Validate text input parameters.
-    
-    Args:
-        text: Text to validate.
-        max_length: Optional max length.
-        allowed_chars: Optional allowed character set.
-        
-    Returns:
-        ValidationResult.
-    """
-    if not isinstance(text, str):
-        return ValidationResult(
-            valid=False,
-            message=f"Text must be str, got {type(text)}"
-        )
-    
-    if max_length and len(text) > max_length:
-        return ValidationResult(
-            valid=False,
-            message=f"Text length {len(text)} exceeds max {max_length}"
-        )
-    
-    if allowed_chars:
-        invalid = set(text) - set(allowed_chars)
-        if invalid:
-            return ValidationResult(
-                valid=False,
-                message=f"Text contains invalid characters: {invalid}"
+    @staticmethod
+    def length(
+        value: str, 
+        min_length: int, 
+        max_length: int, 
+        field_name: str
+    ) -> ValidationResult:
+        """Validate string length."""
+        if len(value) < min_length:
+            return ValidationResult.failure(
+                f"{field_name} must be at least {min_length} characters"
             )
+        if len(value) > max_length:
+            return ValidationResult.failure(
+                f"{field_name} must be at most {max_length} characters"
+            )
+        return ValidationResult.success()
     
-    return ValidationResult(
-        valid=True,
-        message="Valid text input",
-        details={'length': len(text)}
-    )
+    @staticmethod
+    def pattern(value: str, pattern: str, field_name: str) -> ValidationResult:
+        """Validate string matches regex pattern."""
+        if not re.match(pattern, value):
+            return ValidationResult.failure(
+                f"{field_name} does not match required pattern"
+            )
+        return ValidationResult.success()
+    
+    @staticmethod
+    def one_of(
+        value: Any, 
+        allowed: list[Any], 
+        field_name: str
+    ) -> ValidationResult:
+        """Validate value is one of allowed values."""
+        if value not in allowed:
+            return ValidationResult.failure(
+                f"{field_name} must be one of {allowed}, got {value}"
+            )
+        return ValidationResult.success()
+    
+    @staticmethod
+    def type_check(
+        value: Any, 
+        expected_type: type, 
+        field_name: str
+    ) -> ValidationResult:
+        """Validate value is of expected type."""
+        if not isinstance(value, expected_type):
+            return ValidationResult.failure(
+                f"{field_name} must be of type {expected_type.__name__}, "
+                f"got {type(value).__name__}"
+            )
+        return ValidationResult.success()
 
 
-def validate_bounds(x: int, y: int, width: int, height: int) -> ValidationResult:
-    """
-    Validate rectangular bounds.
+class CoordinateValidator:
+    """Validates screen/UI coordinates."""
     
-    Args:
-        x: X position.
-        y: Y position.
-        width: Width.
-        height: Height.
+    @staticmethod
+    def screen_position(
+        x: float, 
+        y: float, 
+        screen_width: float, 
+        screen_height: float
+    ) -> ValidationResult:
+        """
+        Validate screen coordinates are within bounds.
         
-    Returns:
-        ValidationResult.
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            screen_width: Screen width
+            screen_height: Screen height
+            
+        Returns:
+            ValidationResult
+        """
+        result = ValidationResult.success()
+        result.merge(Validator.range(x, 0, screen_width, "x"))
+        result.merge(Validator.range(y, 0, screen_height, "y"))
+        return result
+    
+    @staticmethod
+    def normalized_position(x: float, y: float) -> ValidationResult:
+        """Validate normalized coordinates (0.0 - 1.0)."""
+        result = ValidationResult.success()
+        result.merge(Validator.range(x, 0.0, 1.0, "x"))
+        result.merge(Validator.range(y, 0.0, 1.0, "y"))
+        return result
+    
+    @staticmethod
+    def point_tuple(point: tuple[float, float], field_name: str = "point") -> ValidationResult:
+        """Validate a point tuple (x, y)."""
+        result = ValidationResult.success()
+        result.merge(Validator.type_check(point, tuple, field_name))
+        if isinstance(point, tuple) and len(point) != 2:
+            result.add_error(f"{field_name} must have exactly 2 elements")
+        elif isinstance(point, tuple):
+            result.merge(Validator.type_check(point[0], (int, float), f"{field_name}[0]"))
+            result.merge(Validator.type_check(point[1], (int, float), f"{field_name}[1]"))
+        return result
+
+
+class ActionValidator:
+    """Validates automation action parameters."""
+    
+    VALID_ACTIONS = {
+        "click", "double_click", "right_click", "middle_click",
+        "hover", "move_to", "drag", "drop",
+        "type", "press_key", "press_keys",
+        "scroll", "scroll_to", "swipe", "fling",
+        "screenshot", "wait", "execute_script"
+    }
+    
+    VALID_KEYS = {
+        "enter", "return", "tab", "escape", "esc", "space",
+        "backspace", "delete", "del",
+        "arrow_up", "arrow_down", "arrow_left", "arrow_right",
+        "page_up", "page_down", "home", "end",
+        "ctrl", "alt", "shift", "meta", "command",
+        "f1", "f2", "f3", "f4", "f5", "f6",
+        "f7", "f8", "f9", "f10", "f11", "f12"
+    }
+    
+    @classmethod
+    def action_type(cls, action: str) -> ValidationResult:
+        """Validate action type."""
+        return Validator.one_of(action, list(cls.VALID_ACTIONS), "action")
+    
+    @classmethod
+    def key_name(cls, key: str) -> ValidationResult:
+        """Validate key name."""
+        key_lower = key.lower()
+        return Validator.one_of(key_lower, list(cls.VALID_KEYS), "key")
+    
+    @classmethod
+    def click_count(cls, count: int) -> ValidationResult:
+        """Validate click count."""
+        result = ValidationResult.success()
+        result.merge(Validator.type_check(count, int, "click_count"))
+        result.merge(Validator.range(count, 1, 10, "click_count"))
+        return result
+    
+    @classmethod
+    def duration(cls, duration_ms: float) -> ValidationResult:
+        """Validate duration in milliseconds."""
+        result = ValidationResult.success()
+        result.merge(Validator.type_check(duration_ms, (int, float), "duration"))
+        result.merge(Validator.min_value(duration_ms, 0, "duration"))
+        result.merge(Validator.max_value(duration_ms, 60000, "duration"))
+        return result
+    
+    @classmethod
+    def text_input(cls, text: str, max_length: int = 10000) -> ValidationResult:
+        """Validate text input."""
+        result = ValidationResult.success()
+        result.merge(Validator.type_check(text, str, "text"))
+        result.merge(Validator.length(text, 0, max_length, "text"))
+        return result
+
+
+class ConfigValidator:
+    """Validates configuration parameters."""
+    
+    @staticmethod
+    def timeout(timeout: float) -> ValidationResult:
+        """Validate timeout value."""
+        result = ValidationResult.success()
+        result.merge(Validator.type_check(timeout, (int, float), "timeout"))
+        result.merge(Validator.min_value(timeout, 0, "timeout"))
+        result.merge(Validator.max_value(timeout, 300, "timeout"))
+        return result
+    
+    @staticmethod
+    def retry_count(count: int) -> ValidationResult:
+        """Validate retry count."""
+        result = ValidationResult.success()
+        result.merge(Validator.type_check(count, int, "retry_count"))
+        result.merge(Validator.range(count, 0, 10, "retry_count"))
+        return result
+    
+    @staticmethod
+    def polling_interval(interval: float) -> ValidationResult:
+        """Validate polling interval."""
+        result = ValidationResult.success()
+        result.merge(Validator.type_check(interval, (int, float), "polling_interval"))
+        result.merge(Validator.range(interval, 0.01, 60, "polling_interval"))
+        return result
+
+
+class ValidationChain:
     """
-    coord_result = validate_coordinate(x, y)
-    if not coord_result.valid:
-        return coord_result
+    Chain multiple validations together.
     
-    if width <= 0 or height <= 0:
-        return ValidationResult(
-            valid=False,
-            message=f"Width and height must be positive, got ({width}, {height})"
-        )
+    Example:
+        result = (ValidationChain()
+            .add(Validator.required(value, "field"))
+            .add(Validator.range(value, 0, 100, "field"))
+            .validate())
+    """
     
-    screens = get_screen_bounds_list()
-    all_bounds = _union_all_bounds(screens)
+    def __init__(self):
+        self._results: list[ValidationResult] = []
     
-    if x + width > all_bounds.x + all_bounds.width or y + height > all_bounds.y + all_bounds.height:
-        return ValidationResult(
-            valid=False,
-            message=f"Bounds ({x}, {y}, {width}, {height}) exceed screen"
-        )
+    def add(self, result: ValidationResult) -> 'ValidationChain':
+        """Add a validation result to the chain."""
+        self._results.append(result)
+        return self
     
-    return ValidationResult(
-        valid=True,
-        message="Valid bounds"
-    )
+    def validate(self) -> ValidationResult:
+        """Execute all validations and return combined result."""
+        combined = ValidationResult.success()
+        for result in self._results:
+            combined.merge(result)
+        return combined
