@@ -1,306 +1,248 @@
-"""Interpolation utilities for RabAI AutoClick.
+"""Interpolation and easing function utilities.
 
-Provides:
-- Various interpolation methods (linear, cubic, hermite, etc.)
-- Multi-dimensional interpolation
-- Step interpolation variants
-- 2D bilinear and bicubic interpolation
+Provides various interpolation methods for smooth transitions,
+animation timing, and value remapping.
 """
 
-from typing import List, Tuple, Callable, Optional, Dict
+from __future__ import annotations
+
+from typing import Callable, Sequence, Tuple, Optional
+from enum import Enum, auto
 import math
 
 
-def lerp(a: float, b: float, t: float) -> float:
-    """Linear interpolation."""
-    return a + (b - a) * t
+class InterpolationType(Enum):
+    """Supported interpolation methods."""
+    LINEAR = auto()
+    EASE_IN = auto()
+    EASE_OUT = auto()
+    EASE_IN_OUT = auto()
+    STEP = auto()
+    SMOOTHSTEP = auto()
+    SIGMOID = auto()
+    BOUNCE = auto()
+    ELASTIC = auto()
+    SPRING = auto()
+    CUBIC = auto()
+    QUINTIC = auto()
+    CIRCULAR = auto()
+    EXPONENTIAL = auto()
 
 
-def inv_lerp(a: float, b: float, v: float) -> float:
-    """Inverse linear interpolation (find t such that lerp(a,b,t) = v)."""
-    if abs(b - a) < 1e-10:
-        return 0.0
-    return (v - a) / (b - a)
+# Easing functions
+def ease_in(t: float, power: float = 2.0) -> float:
+    """Ease-in: starts slow, ends fast (inverse of ease-out)."""
+    return math.pow(max(0.0, min(1.0, t)), power)
 
 
-def remap(
-    value: float,
-    in_min: float,
-    in_max: float,
-    out_min: float,
-    out_max: float,
-) -> float:
-    """Remap value from input range to output range."""
-    t = inv_lerp(in_min, in_max, value)
-    return lerp(out_min, out_max, t)
+def ease_out(t: float, power: float = 2.0) -> float:
+    """Ease-out: starts fast, ends slow."""
+    return 1.0 - math.pow(max(0.0, min(1.0, 1.0 - t)), power)
 
 
-def step(t: float) -> float:
-    """Step function: 0 if t < 0.5, 1 otherwise."""
-    return 0.0 if t < 0.5 else 1.0
+def ease_in_out(t: float) -> float:
+    """Ease-in-out: slow start, fast middle, slow end."""
+    t = max(0.0, min(1.0, t))
+    if t < 0.5:
+        return 2.0 * t * t
+    return 1.0 - math.pow(-2.0 * t + 2.0, 2.0) / 2.0
+
+
+def step(t: float, steps: int = 1) -> float:
+    """Step function: discretizes the value into steps."""
+    return math.floor(t * (steps + 1)) / steps
 
 
 def smoothstep(t: float) -> float:
-    """Smoothstep (Perlin ease)."""
+    """Smoothstep: smooth Hermite interpolation (0 at 0, 1 at 1)."""
     t = max(0.0, min(1.0, t))
-    return t * t * (3 - 2 * t)
+    return t * t * (3.0 - 2.0 * t)
 
 
-def smootherstep(t: float) -> float:
-    """Smootherstep (Ken Perlin's improved version)."""
+def sigmoid(t: float, center: float = 0.5, steepness: float = 10.0) -> float:
+    """Sigmoid/s-curve interpolation."""
     t = max(0.0, min(1.0, t))
-    return t * t * t * (t * (t * 6 - 15) + 10)
+    return 1.0 / (1.0 + math.exp(-steepness * (t - center)))
 
 
-def ease_in_quad(t: float) -> float:
-    """Quadratic ease in."""
-    return t * t
+def bounce(t: float, bounces: int = 3) -> float:
+    """Bounce easing: like a bouncing ball."""
+    t = max(0.0, min(1.0, t))
+    if t < 0.5:
+        return (1.0 - math.cos(t * math.pi * bounces * 2) *
+                (1.0 - t * 2))
+    return 1.0 + math.sin((t - 0.5) * math.pi * bounces * 2) * (t * 2 - 1)
 
 
-def ease_out_quad(t: float) -> float:
-    """Quadratic ease out."""
-    return t * (2 - t)
+def elastic(t: float, oscillations: float = 4.0) -> float:
+    """Elastic easing: like a spring snapping into place."""
+    t = max(0.0, min(1.0, t))
+    return (
+        math.pow(2.0, -10.0 * t)
+        * math.sin((t - oscillations / 20.0) * (2.0 * math.pi) / oscillations)
+        + 1.0
+    )
 
 
-def ease_in_out_quad(t: float) -> float:
-    """Quadratic ease in-out."""
-    return 2 * t * t if t < 0.5 else -1 + (4 - 2 * t) * t
+def spring(t: float, stiffness: float = 100.0, damping: float = 10.0) -> float:
+    """Spring physics-based interpolation."""
+    t = max(0.0, min(1.0, t))
+    return 1.0 - math.exp(-damping * t) * math.cos(stiffness * t)
 
 
-def ease_in_cubic(t: float) -> float:
-    """Cubic ease in."""
-    return t * t * t
+def cubic_ease(t: float) -> float:
+    """Cubic ease-in-out."""
+    t = max(0.0, min(1.0, t))
+    if t < 0.5:
+        return 4.0 * t * t * t
+    return 1.0 - math.pow(-2.0 * t + 2.0, 3.0) / 2.0
 
 
-def ease_out_cubic(t: float) -> float:
-    """Cubic ease out."""
-    return (t - 1) ** 3 + 1
+def quintic_ease(t: float) -> float:
+    """Quintic ease-in-out (smoother than cubic)."""
+    t = max(0.0, min(1.0, t))
+    if t < 0.5:
+        return 16.0 * t * t * t * t * t
+    return 1.0 - math.pow(-2.0 * t + 2.0, 5.0) / 2.0
 
 
-def ease_in_out_cubic(t: float) -> float:
-    """Cubic ease in-out."""
-    return 4 * t * t * t if t < 0.5 else 1 - (-2 * t + 2) ** 3 / 2
+def circular_ease(t: float) -> float:
+    """Circular ease-in-out."""
+    t = max(0.0, min(1.0, t))
+    if t < 0.5:
+        return (1.0 - math.sqrt(1.0 - math.pow(2.0 * t, 2.0))) / 2.0
+    return (math.sqrt(1.0 - math.pow(-2.0 * t + 2.0, 2.0)) + 1.0) / 2.0
 
 
-def ease_in_out_sine(t: float) -> float:
-    """Sine ease in-out."""
-    return -(math.cos(math.pi * t) - 1) / 2
-
-
-def ease_in_elastic(t: float) -> float:
-    """Elastic ease in."""
-    if t == 0 or t == 1:
-        return t
-    p = 0.3
-    return -2 ** (10 * t - 10) * math.sin((t * 10 - 10.75) * (2 * math.pi) / p)
-
-
-def ease_out_elastic(t: float) -> float:
-    """Elastic ease out."""
-    if t == 0 or t == 1:
-        return t
-    p = 0.3
-    return 2 ** (-10 * t) * math.sin((t * 10 - 0.75) * (2 * math.pi) / p) + 1
-
-
-def ease_out_bounce(t: float) -> float:
-    """Bounce ease out."""
-    n1 = 7.5625
-    d1 = 2.75
-    if t < 1 / d1:
-        return n1 * t * t
-    elif t < 2 / d1:
-        t -= 1.5 / d1
-        return n1 * t * t + 0.75
-    elif t < 2.5 / d1:
-        t -= 2.25 / d1
-        return n1 * t * t + 0.9375
-    else:
-        t -= 2.625 / d1
-        return n1 * t * t + 0.984375
-
-
-def hermite_interpolate(
-    p0: float, p1: float,
-    m0: float, m1: float,
-    t: float,
-) -> float:
-    """Hermite cubic interpolation with tangent control.
-
-    Args:
-        p0: Start value.
-        p1: End value.
-        m0: Tangent at start.
-        m1: Tangent at end.
-        t: Parameter [0, 1].
-
-    Returns:
-        Interpolated value.
-    """
-    t2 = t * t
-    t3 = t2 * t
-    h00 = 2 * t3 - 3 * t2 + 1
-    h10 = t3 - 2 * t2 + t
-    h01 = -2 * t3 + 3 * t2
-    h11 = t3 - t2
-    return h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1
-
-
-def cubic_interpolate(
-    points: List[float],
-    t: float,
-) -> float:
-    """Cubic interpolation from 4 control points.
-
-    Args:
-        points: 4 values [p0, p1, p2, p3].
-        t: Parameter [0, 1].
-
-    Returns:
-        Interpolated value.
-    """
-    if len(points) < 4:
-        return lerp(points[0], points[-1], t) if points else 0.0
-    p0, p1, p2, p3 = points[0], points[1], points[2], points[3]
-    a0 = -p0 / 2 + 3 * p1 / 2 - 3 * p2 / 2 + p3 / 2
-    a1 = p0 - 5 * p1 / 2 + 2 * p2 - p3 / 2
-    a2 = -p0 / 2 + p2 / 2
-    a3 = p1
-    t2 = t * t
-    return a0 * t * t2 + a1 * t2 + a2 * t + a3
-
-
-def bilinear_interpolate(
-    q00: float, q10: float,
-    q01: float, q11: float,
-    tx: float, ty: float,
-) -> float:
-    """Bilinear interpolation on a 2x2 grid.
-
-    Args:
-        q00: Top-left value.
-        q10: Top-right value.
-        q01: Bottom-left value.
-        q11: Bottom-right value.
-        tx: X parameter [0, 1].
-        ty: Y parameter [0, 1].
-
-    Returns:
-        Interpolated value.
-    """
-    x0 = lerp(q00, q10, tx)
-    x1 = lerp(q01, q11, tx)
-    return lerp(x0, x1, ty)
-
-
-def bicubic_interpolate(
-    grid: List[List[float]],
-    tx: float,
-    ty: float,
-) -> float:
-    """Bicubic interpolation on a 4x4 grid.
-
-    Args:
-        grid: 4x4 values (rows of columns).
-        tx, ty: Parameters [0, 1].
-
-    Returns:
-        Interpolated value.
-    """
-    if len(grid) < 4 or len(grid[0]) < 4:
-        return bilinear_interpolate(
-            grid[0][0], grid[0][1] if len(grid[0]) > 1 else grid[0][0],
-            grid[1][0] if len(grid) > 1 else grid[0][0],
-            grid[1][1] if len(grid) > 1 and len(grid[0]) > 1 else grid[0][0],
-            tx, ty
-        )
-
-    # Apply cubic interpolation row-wise, then column-wise
-    row_vals: List[float] = []
-    for row in grid[:4]:
-        row_vals.append(cubic_interpolate(row[:4], tx))
-
-    return cubic_interpolate(row_vals, ty)
-
-
-def nearest_interpolate(
-    points: List[float],
-    t: float,
-) -> float:
-    """Nearest-neighbor interpolation."""
-    if not points:
+def exponential_ease(t: float, base: float = 2.0) -> float:
+    """Exponential ease-in-out."""
+    t = max(0.0, min(1.0, t))
+    if t == 0.0:
         return 0.0
-    n = len(points)
-    idx = max(0, min(n - 1, int(t * n)))
-    return points[idx]
+    if t == 1.0:
+        return 1.0
+    if t < 0.5:
+        return math.pow(base, 10.0 * (2.0 * t - 1.0)) / 2.0
+    return (2.0 - math.pow(base, 10.0 * (-2.0 * t + 1.0))) / 2.0
 
 
-EASING_FUNCTIONS: Dict[str, Callable[[float], float]] = {
-    "linear": lambda t: t,
-    "step": step,
-    "smoothstep": smoothstep,
-    "smootherstep": smootherstep,
-    "ease_in_quad": ease_in_quad,
-    "ease_out_quad": ease_out_quad,
-    "ease_in_out_quad": ease_in_out_quad,
-    "ease_in_cubic": ease_in_cubic,
-    "ease_out_cubic": ease_out_cubic,
-    "ease_in_out_cubic": ease_in_out_cubic,
-    "ease_in_out_sine": ease_in_out_sine,
-    "ease_in_elastic": ease_in_elastic,
-    "ease_out_elastic": ease_out_elastic,
-    "ease_out_bounce": ease_out_bounce,
-}
+class Interpolator:
+    """Configurable interpolator with multiple easing methods.
+
+    Example:
+        interp = Interpolator(InterpolationType.EASE_IN_OUT)
+        value = interp.interpolate(0.5)  # Returns 0.5 with eased timing
+    """
+
+    def __init__(
+        self,
+        interp_type: InterpolationType = InterpolationType.LINEAR,
+        custom_fn: Optional[Callable[[float], float]] = None,
+    ) -> None:
+        self.interp_type = interp_type
+        self.custom_fn = custom_fn
+
+    def interpolate(self, t: float) -> float:
+        """Apply interpolation to normalized input [0, 1]."""
+        if self.custom_fn is not None:
+            return self.custom_fn(t)
+        return self._interpolate(t)
+
+    def _interpolate(self, t: float) -> float:
+        """Apply the configured interpolation method."""
+        t = max(0.0, min(1.0, t))
+        if self.interp_type == InterpolationType.LINEAR:
+            return t
+        elif self.interp_type == InterpolationType.EASE_IN:
+            return ease_in(t)
+        elif self.interp_type == InterpolationType.EASE_OUT:
+            return ease_out(t)
+        elif self.interp_type == InterpolationType.EASE_IN_OUT:
+            return ease_in_out(t)
+        elif self.interp_type == InterpolationType.STEP:
+            return step(t)
+        elif self.interp_type == InterpolationType.SMOOTHSTEP:
+            return smoothstep(t)
+        elif self.interp_type == InterpolationType.SIGMOID:
+            return sigmoid(t)
+        elif self.interp_type == InterpolationType.BOUNCE:
+            return bounce(t)
+        elif self.interp_type == InterpolationType.ELASTIC:
+            return elastic(t)
+        elif self.interp_type == InterpolationType.SPRING:
+            return spring(t)
+        elif self.interp_type == InterpolationType.CUBIC:
+            return cubic_ease(t)
+        elif self.interp_type == InterpolationType.QUINTIC:
+            return quintic_ease(t)
+        elif self.interp_type == InterpolationType.CIRCULAR:
+            return circular_ease(t)
+        elif self.interp_type == InterpolationType.EXPONENTIAL:
+            return exponential_ease(t)
+        return t
+
+    def remap(
+        self, t: float, in_min: float, in_max: float, out_min: float, out_max: float
+    ) -> float:
+        """Remap input from [in_min, in_max] to [out_min, out_max] with easing."""
+        t_norm = (t - in_min) / (in_max - in_min)
+        t_eased = self.interpolate(t_norm)
+        return out_min + t_eased * (out_max - out_min)
 
 
-def interpolate_values(
-    values: List[float],
-    t: float,
-    easing: str = "linear",
+def lerp(a: float, b: float, t: float) -> float:
+    """Linear interpolation between two values."""
+    return a + (b - a) * max(0.0, min(1.0, t))
+
+
+def lerp_points(
+    p1: Tuple[float, float], p2: Tuple[float, float], t: float
+) -> Tuple[float, float]:
+    """Linear interpolation between two 2D points."""
+    return (lerp(p1[0], p2[0], t), lerp(p1[1], p2[1], t))
+
+
+def lerp_sequence(
+    values: Sequence[float], t: float
 ) -> float:
-    """Interpolate between values with easing.
+    """Interpolate along a sequence of values.
 
-    Args:
-        values: List of values to interpolate through.
-        t: Overall parameter [0, 1].
-        easing: Easing function name.
-
-    Returns:
-        Interpolated value.
+    Example:
+        lerp_sequence([0, 50, 100], 0.5)  # Returns 50
     """
     if len(values) < 2:
-        return values[0] if values else 0.0
-
-    n = len(values)
-    scaled_t = t * (n - 1)
-    index = int(scaled_t)
-    frac = scaled_t - index
-
-    easing_fn = EASING_FUNCTIONS.get(easing, lerp)
-    frac = easing_fn(frac)
-
-    i0 = min(index, n - 1)
-    i1 = min(index + 1, n - 1)
-
-    return lerp(values[i0], values[i1], frac)
+        raise ValueError("Sequence must have at least 2 values")
+    t = max(0.0, min(1.0, t))
+    idx = t * (len(values) - 1)
+    lower = int(math.floor(idx))
+    upper = min(lower + 1, len(values) - 1)
+    frac = idx - lower
+    return lerp(values[lower], values[upper], frac)
 
 
-def multistep_interpolate(
-    values: List[float],
-    t: float,
-    steps: int = 5,
+def catmull_rom(
+    p0: float, p1: float, p2: float, p3: float, t: float
 ) -> float:
-    """Multi-step interpolation (quantizes output).
+    """Catmull-Rom spline interpolation between points."""
+    t = max(0.0, min(1.0, t))
+    t2 = t * t
+    t3 = t2 * t
+    return 0.5 * (
+        (2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    )
 
-    Args:
-        values: Values to interpolate.
-        t: Parameter [0, 1].
-        steps: Number of discrete output levels.
 
-    Returns:
-        Quantized interpolated value.
-    """
-    if not values:
-        return 0.0
-    scaled = interpolate_values(values, t, "linear")
-    return round(scaled * steps) / steps
+def bezier_cubic(
+    p0: float, p1: float, p2: float, p3: float, t: float
+) -> float:
+    """Cubic Bezier curve interpolation."""
+    t = max(0.0, min(1.0, t))
+    t2 = t * t
+    t3 = t2 * t
+    mt = 1.0 - t
+    mt2 = mt * mt
+    mt3 = mt2 * mt
+    return mt3 * p0 + 3.0 * mt2 * t * p1 + 3.0 * mt * t2 * p2 + t3 * p3

@@ -1,266 +1,233 @@
-"""Transformation matrix utilities for RabAI AutoClick.
+"""Transform matrix and affine transformation utilities.
 
-Provides:
-- 2D and 3D transformation matrices
-- Matrix composition and decomposition
-- Common transformations (translate, rotate, scale)
-- Homogeneous coordinates
+Provides 2D/3D transformation matrices, affine transforms,
+rotation, scaling, translation, and composition operations.
 """
 
-from typing import List, Tuple, Optional
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Tuple, List, Optional, Sequence
+from enum import Enum, auto
 import math
 
 
-Matrix3 = List[List[float]]
-Matrix4 = List[List[float]]
+class TransformType(Enum):
+    """Types of geometric transforms."""
+    IDENTITY = auto()
+    TRANSLATE = auto()
+    SCALE = auto()
+    ROTATE = auto()
+    SHEAR = auto()
+    REFLECT = auto()
+    COMPOSITE = auto()
 
 
-def identity3() -> Matrix3:
-    """Create 3x3 identity matrix."""
-    return [
-        [1, 0, 0],
-        [0, 1, 0],
-        [0, 0, 1],
-    ]
+@dataclass
+class Transform2D:
+    """2D affine transformation matrix [a b c; d e f; 0 0 1].
 
-
-def identity4() -> Matrix4:
-    """Create 4x4 identity matrix."""
-    return [
-        [1, 0, 0, 0],
-        [0, 1, 0, 0],
-        [0, 0, 1, 0],
-        [0, 0, 0, 1],
-    ]
-
-
-def mat3_mul(a: Matrix3, b: Matrix3) -> Matrix3:
-    """Multiply two 3x3 matrices."""
-    result: Matrix3 = [[0.0] * 3 for _ in range(3)]
-    for i in range(3):
-        for j in range(3):
-            for k in range(3):
-                result[i][j] += a[i][k] * b[k][j]
-    return result
-
-
-def mat4_mul(a: Matrix4, b: Matrix4) -> Matrix4:
-    """Multiply two 4x4 matrices."""
-    result: Matrix4 = [[0.0] * 4 for _ in range(4)]
-    for i in range(4):
-        for j in range(4):
-            for k in range(4):
-                result[i][j] += a[i][k] * b[k][j]
-    return result
-
-
-def mat3_transform_point(m: Matrix3, x: float, y: float) -> Tuple[float, float]:
-    """Transform 2D point by 3x3 matrix (homogeneous)."""
-    wx = m[0][0] * x + m[0][1] * y + m[0][2]
-    wy = m[1][0] * x + m[1][1] * y + m[1][2]
-    w = m[2][0] * x + m[2][1] * y + m[2][2]
-    if abs(w) < 1e-10:
-        return (wx, wy)
-    return (wx / w, wy / w)
-
-
-def mat4_transform_point(m: Matrix4, x: float, y: float, z: float) -> Tuple[float, float, float]:
-    """Transform 3D point by 4x4 matrix (homogeneous)."""
-    wx = m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3]
-    wy = m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3]
-    wz = m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3]
-    w = m[3][0] * x + m[3][1] * y + m[3][2] * z + m[3][3]
-    if abs(w) < 1e-10:
-        return (wx, wy, wz)
-    return (wx / w, wy / w, wz / w)
-
-
-def translation_matrix2d(dx: float, dy: float) -> Matrix3:
-    """Create 2D translation matrix."""
-    return [
-        [1, 0, dx],
-        [0, 1, dy],
-        [0, 0, 1],
-    ]
-
-
-def rotation_matrix2d(angle: float) -> Matrix3:
-    """Create 2D rotation matrix (radians)."""
-    c = math.cos(angle)
-    s = math.sin(angle)
-    return [
-        [c, -s, 0],
-        [s, c, 0],
-        [0, 0, 1],
-    ]
-
-
-def scale_matrix2d(sx: float, sy: Optional[float] = None) -> Matrix3:
-    """Create 2D scale matrix."""
-    if sy is None:
-        sy = sx
-    return [
-        [sx, 0, 0],
-        [0, sy, 0],
-        [0, 0, 1],
-    ]
-
-
-def shear_matrix2d(shx: float, shy: float) -> Matrix3:
-    """Create 2D shear matrix."""
-    return [
-        [1, shx, 0],
-        [shy, 1, 0],
-        [0, 0, 1],
-    ]
-
-
-def translation_matrix3d(dx: float, dy: float, dz: float) -> Matrix4:
-    """Create 3D translation matrix."""
-    return [
-        [1, 0, 0, dx],
-        [0, 1, 0, dy],
-        [0, 0, 1, dz],
-        [0, 0, 0, 1],
-    ]
-
-
-def rotation_x_matrix3d(angle: float) -> Matrix4:
-    """Create 3D rotation matrix around X axis."""
-    c = math.cos(angle)
-    s = math.sin(angle)
-    return [
-        [1, 0, 0, 0],
-        [0, c, -s, 0],
-        [0, s, c, 0],
-        [0, 0, 0, 1],
-    ]
-
-
-def rotation_y_matrix3d(angle: float) -> Matrix4:
-    """Create 3D rotation matrix around Y axis."""
-    c = math.cos(angle)
-    s = math.sin(angle)
-    return [
-        [c, 0, s, 0],
-        [0, 1, 0, 0],
-        [-s, 0, c, 0],
-        [0, 0, 0, 1],
-    ]
-
-
-def rotation_z_matrix3d(angle: float) -> Matrix4:
-    """Create 3D rotation matrix around Z axis."""
-    c = math.cos(angle)
-    s = math.sin(angle)
-    return [
-        [c, -s, 0, 0],
-        [s, c, 0, 0],
-        [0, 0, 1, 0],
-        [0, 0, 0, 1],
-    ]
-
-
-def scale_matrix3d(sx: float, sy: float, sz: float) -> Matrix4:
-    """Create 3D scale matrix."""
-    return [
-        [sx, 0, 0, 0],
-        [0, sy, 0, 0],
-        [0, 0, sz, 0],
-        [0, 0, 0, 1],
-    ]
-
-
-def perspective_matrix(
-    fov: float,
-    aspect: float,
-    near: float,
-    far: float,
-) -> Matrix4:
-    """Create perspective projection matrix."""
-    f = 1.0 / math.tan(fov / 2)
-    return [
-        [f / aspect, 0, 0, 0],
-        [0, f, 0, 0],
-        [0, 0, (far + near) / (near - far), (2 * far * near) / (near - far)],
-        [0, 0, -1, 0],
-    ]
-
-
-def look_at_matrix(
-    eye: Tuple[float, float, float],
-    target: Tuple[float, float, float],
-    up: Tuple[float, float, float] = (0, 1, 0),
-) -> Matrix4:
-    """Create look-at view matrix."""
-    fx = target[0] - eye[0]
-    fy = target[1] - eye[1]
-    fz = target[2] - eye[2]
-    flen = math.sqrt(fx * fx + fy * fy + fz * fz)
-    fx /= flen
-    fy /= flen
-    fz /= flen
-
-    rx = fy * up[2] - fz * up[1]
-    ry = fz * up[0] - fx * up[2]
-    rz = fx * up[1] - fy * up[0]
-    rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
-    rx /= rlen
-    ry /= rlen
-    rz /= rlen
-
-    ux = ry * fz - rz * fy
-    uy = rz * fx - rx * fz
-    uz = rx * fy - ry * fx
-
-    return [
-        [rx, ux, -fx, 0],
-        [ry, uy, -fy, 0],
-        [rz, uz, -fz, 0],
-        [-rx * eye[0] - ry * eye[1] - rz * eye[2],
-         -ux * eye[0] - uy * eye[1] - uz * eye[2],
-         fx * eye[0] + fy * eye[1] + fz * eye[2],
-         1],
-    ]
-
-
-def decompose_matrix2d(m: Matrix3) -> Tuple[float, float, float, float, float, float]:
-    """Decompose 2D matrix into (translation, rotation, scale).
-
-    Returns:
-        (tx, ty, rotation, sx, sy, shear)
+    The transformation is applied as: [x' y'] = [x y 1] @ matrix
     """
-    tx = m[0][2]
-    ty = m[1][2]
-    sx = math.sqrt(m[0][0] * m[0][0] + m[1][0] * m[1][0])
-    sy = math.sqrt(m[0][1] * m[0][1] + m[1][1] * m[1][1])
-    rotation = math.atan2(m[1][0], m[0][0])
-    shear = math.atan2(m[0][1], m[1][1]) - math.pi / 2
-    return (tx, ty, rotation, sx, sy, shear)
+    a: float = 1.0  # scale x
+    b: float = 0.0  # shear y
+    c: float = 0.0  # translate x
+    d: float = 0.0  # shear x
+    e: float = 1.0  # scale y
+    f: float = 0.0  # translate y
+
+    @classmethod
+    def identity(cls) -> Transform2D:
+        """Create identity transform."""
+        return cls(a=1.0, b=0.0, c=0.0, d=0.0, e=1.0, f=0.0)
+
+    @classmethod
+    def translation(cls, tx: float, ty: float) -> Transform2D:
+        """Create translation transform."""
+        return cls(a=1.0, b=0.0, c=tx, d=0.0, e=1.0, f=ty)
+
+    @classmethod
+    def scaling(cls, sx: float, sy: Optional[float] = None) -> Transform2D:
+        """Create scaling transform."""
+        sy = sy if sy is not None else sx
+        return cls(a=sx, b=0.0, c=0.0, d=0.0, e=sy, f=0.0)
+
+    @classmethod
+    def rotation(cls, angle_rad: float) -> Transform2D:
+        """Create rotation transform around origin."""
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        return cls(a=cos_a, b=sin_a, c=0.0, d=-sin_a, e=cos_a, f=0.0)
+
+    @classmethod
+    def rotation_around_point(
+        cls, angle_rad: float, px: float, py: float
+    ) -> Transform2D:
+        """Create rotation transform around a specific point."""
+        t1 = cls.translation(-px, -py)
+        t2 = cls.rotation(angle_rad)
+        t3 = cls.translation(px, py)
+        return t1.compose(t2).compose(t3)
+
+    @classmethod
+    def shear(cls, shx: float = 0.0, shy: float = 0.0) -> Transform2D:
+        """Create shear transform."""
+        return cls(a=1.0, b=shy, c=0.0, d=shx, e=1.0, f=0.0)
+
+    @classmethod
+    def reflection(cls, axis: str) -> Transform2D:
+        """Create reflection across axis ('x', 'y', or 'origin')."""
+        if axis == "x":
+            return cls(a=1.0, b=0.0, c=0.0, d=0.0, e=-1.0, f=0.0)
+        elif axis == "y":
+            return cls(a=-1.0, b=0.0, c=0.0, d=0.0, e=1.0, f=0.0)
+        else:  # origin
+            return cls(a=-1.0, b=0.0, c=0.0, d=0.0, e=-1.0, f=0.0)
+
+    def transform_point(self, x: float, y: float) -> Tuple[float, float]:
+        """Apply transform to a single point."""
+        new_x = self.a * x + self.b * y + self.c
+        new_y = self.d * x + self.e * y + self.f
+        return (new_x, new_y)
+
+    def transform_points(
+        self, points: Sequence[Tuple[float, float]]
+    ) -> List[Tuple[float, float]]:
+        """Apply transform to multiple points."""
+        return [self.transform_point(x, y) for x, y in points]
+
+    def compose(self, other: Transform2D) -> Transform2D:
+        """Compose this transform with another (self @ other)."""
+        return Transform2D(
+            a=self.a * other.a + self.b * other.d,
+            b=self.a * other.b + self.b * other.e,
+            c=self.a * other.c + self.b * other.f + self.c,
+            d=self.d * other.a + self.e * other.d,
+            e=self.d * other.b + self.e * other.e,
+            f=self.d * other.c + self.e * other.f + self.f,
+        )
+
+    def inverse(self) -> Transform2D:
+        """Compute inverse transformation."""
+        det = self.a * self.e - self.b * self.d
+        if abs(det) < 1e-10:
+            raise ValueError("Transform is not invertible")
+        inv_det = 1.0 / det
+        return Transform2D(
+            a=inv_det * self.e,
+            b=inv_det * -self.b,
+            c=inv_det * (self.b * self.f - self.c * self.e),
+            d=inv_det * -self.d,
+            e=inv_det * self.a,
+            f=inv_det * (self.c * self.d - self.a * self.f),
+        )
+
+    def determinant(self) -> float:
+        """Get determinant of transformation matrix."""
+        return self.a * self.e - self.b * self.d
+
+    def is_identity(self, tol: float = 1e-9) -> bool:
+        """Check if transform is identity (within tolerance)."""
+        return (
+            abs(self.a - 1.0) < tol
+            and abs(self.b) < tol
+            and abs(self.c) < tol
+            and abs(self.d) < tol
+            and abs(self.e - 1.0) < tol
+            and abs(self.f) < tol
+        )
+
+    def to_matrix(self) -> Tuple[float, float, float, float, float, float]:
+        """Get flat tuple representation."""
+        return (self.a, self.b, self.c, self.d, self.e, self.f)
+
+    def __repr__(self) -> str:
+        return (
+            f"Transform2D(a={self.a:.4f}, b={self.b:.4f}, c={self.c:.4f}, "
+            f"d={self.d:.4f}, e={self.e:.4f}, f={self.f:.4f})"
+        )
 
 
-def invert_matrix3(m: Matrix3) -> Optional[Matrix3]:
-    """Invert 3x3 matrix."""
-    det = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-           - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-           + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
-    if abs(det) < 1e-10:
-        return None
-    inv_det = 1.0 / det
-    return [
-        [
-            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det,
-            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
-            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det,
-        ],
-        [
-            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det,
-            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det,
-            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv_det,
-        ],
-        [
-            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_det,
-            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_det,
-            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
-        ],
-    ]
+@dataclass
+class BoundingBox:
+    """Axis-aligned bounding box in 2D."""
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+
+    @classmethod
+    def from_points(
+        cls, points: Sequence[Tuple[float, float]]
+    ) -> BoundingBox:
+        """Create bounding box from a set of points."""
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        return cls(x_min=min(xs), y_min=min(ys), x_max=max(xs), y_max=max(ys))
+
+    @classmethod
+    def from_center_size(
+        cls, cx: float, cy: float, width: float, height: float
+    ) -> BoundingBox:
+        """Create bounding box from center and dimensions."""
+        hw, hh = width / 2.0, height / 2.0
+        return cls(
+            x_min=cx - hw, y_min=cy - hh,
+            x_max=cx + hw, y_max=cy + hh
+        )
+
+    def transform(self, transform: Transform2D) -> BoundingBox:
+        """Transform this bounding box."""
+        corners = [
+            (self.x_min, self.y_min),
+            (self.x_max, self.y_min),
+            (self.x_min, self.y_max),
+            (self.x_max, self.y_max),
+        ]
+        transformed = transform.transform_points(corners)
+        xs = [p[0] for p in transformed]
+        ys = [p[1] for p in transformed]
+        return BoundingBox(x_min=min(xs), y_min=min(ys),
+                           x_max=max(xs), y_max=max(ys))
+
+    @property
+    def width(self) -> float:
+        return self.x_max - self.x_min
+
+    @property
+    def height(self) -> float:
+        return self.y_max - self.y_min
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        return ((self.x_min + self.x_max) / 2.0,
+                (self.y_min + self.y_max) / 2.0)
+
+    def contains_point(self, x: float, y: float) -> bool:
+        """Check if point is inside bounding box."""
+        return self.x_min <= x <= self.x_max and self.y_min <= y <= self.y_max
+
+    def intersects(self, other: BoundingBox) -> bool:
+        """Check if two bounding boxes intersect."""
+        return not (
+            self.x_max < other.x_min or self.x_min > other.x_max
+            or self.y_max < other.y_min or self.y_min > other.y_max
+        )
+
+    def union(self, other: BoundingBox) -> BoundingBox:
+        """Get union of two bounding boxes."""
+        return BoundingBox(
+            x_min=min(self.x_min, other.x_min),
+            y_min=min(self.y_min, other.y_min),
+            x_max=max(self.x_max, other.x_max),
+            y_max=max(self.y_max, other.y_max),
+        )
+
+    def expand(self, margin: float) -> BoundingBox:
+        """Expand bounding box by margin."""
+        return BoundingBox(
+            x_min=self.x_min - margin,
+            y_min=self.y_min - margin,
+            x_max=self.x_max + margin,
+            y_max=self.y_max + margin,
+        )
