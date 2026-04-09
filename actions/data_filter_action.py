@@ -1,286 +1,262 @@
-"""Data filtering and projection utilities.
+"""Data Filter Engine.
 
-This module provides data filtering capabilities:
-- Field selection and exclusion
-- Conditional filtering
-- Data projection and transformation
-- Set operations on collections
+This module provides advanced data filtering:
+- Multi-condition filtering
+- Field projection
+- Custom filter functions
+- Filter optimization
 
 Example:
-    >>> from actions.data_filter_action import DataFilter, filter_by, project
-    >>> filtered = filter_by(users, age__gte=18)
-    >>> projected = project(users, fields=["name", "email"])
+    >>> from actions.data_filter_action import DataFilter
+    >>> f = DataFilter()
+    >>> result = f.filter(records, conditions=[{"field": "status", "op": "==", "value": "active"}])
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import re
 from typing import Any, Callable, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 
-class DataFilter:
-    """Filter and project collections of data.
+class FilterOperator(Enum):
+    """Filter operators."""
+    EQ = "eq"
+    NE = "ne"
+    GT = "gt"
+    GE = "ge"
+    LT = "lt"
+    LE = "le"
+    IN = "in"
+    NOT_IN = "not_in"
+    CONTAINS = "contains"
+    STARTS_WITH = "starts_with"
+    ENDS_WITH = "ends_with"
+    REGEX = "regex"
+    EXISTS = "exists"
+    EMPTY = "empty"
 
-    Example:
-        >>> filter = DataFilter()
-        >>> result = filter.where(users, age__gte=18).sort_by("name").execute()
-    """
+
+@dataclass
+class FilterCondition:
+    """A single filter condition."""
+    field: str
+    operator: str
+    value: Any = None
+
+
+@dataclass
+class FilterResult:
+    """Result of a filter operation."""
+    passed: bool
+    passed_count: int
+    filtered_count: int
+    total_count: int
+
+
+class DataFilter:
+    """Advanced data filtering engine."""
+
+    OPERATORS = {
+        "==": lambda a, b: a == b,
+        "!=": lambda a, b: a != b,
+        "eq": lambda a, b: a == b,
+        "ne": lambda a, b: a != b,
+        ">": lambda a, b: a > b,
+        "gt": lambda a, b: a > b,
+        ">=": lambda a, b: a >= b,
+        "ge": lambda a, b: a >= b,
+        "<": lambda a, b: a < b,
+        "lt": lambda a, b: a < b,
+        "<=": lambda a, b: a <= b,
+        "le": lambda a, b: a <= b,
+    }
 
     def __init__(self) -> None:
-        self._data: list[Any] = []
-        self._filters: list[Callable[[dict[str, Any]], bool]] = []
-        self._sort_key: Optional[str] = None
-        self._sort_reverse: bool = False
-        self._limit_value: Optional[int] = None
-        self._offset_value: int = 0
+        """Initialize the data filter."""
+        self._lock = threading.Lock()
+        self._stats = {"records_filtered": 0, "conditions_applied": 0}
 
-    def where(self, data: list[Any], **conditions: Any) -> DataFilter:
-        """Add filter conditions.
-
-        Args:
-            data: Collection to filter.
-            **conditions: Field__operator=value conditions.
-
-        Returns:
-            Self for chaining.
-        """
-        self._data = data
-        for field, value in conditions.items():
-            filter_func = self._parse_condition(field, value)
-            if filter_func:
-                self._filters.append(filter_func)
-        return self
-
-    def sort_by(self, key: str, reverse: bool = False) -> DataFilter:
-        """Sort the filtered data.
-
-        Args:
-            key: Field to sort by.
-            reverse: Sort in descending order.
-
-        Returns:
-            Self for chaining.
-        """
-        self._sort_key = key
-        self._sort_reverse = reverse
-        return self
-
-    def limit(self, count: int, offset: int = 0) -> DataFilter:
-        """Limit result set size.
-
-        Args:
-            count: Maximum number of results.
-            offset: Number of results to skip.
-
-        Returns:
-            Self for chaining.
-        """
-        self._limit_value = count
-        self._offset_value = offset
-        return self
-
-    def execute(self) -> list[Any]:
-        """Execute the filter chain.
-
-        Returns:
-            Filtered and projected results.
-        """
-        result = self._data
-        for filter_func in self._filters:
-            result = [item for item in result if self._apply_filter(item, filter_func)]
-        if self._sort_key:
-            result = sorted(
-                result,
-                key=lambda x: self._get_value(x, self._sort_key),
-                reverse=self._sort_reverse,
-            )
-        result = result[self._offset_value:]
-        if self._limit_value is not None:
-            result = result[:self._limit_value]
-        return result
-
-    def _parse_condition(
+    def filter(
         self,
-        field_op: str,
-        value: Any,
-    ) -> Optional[Callable[[dict[str, Any]], bool]]:
-        """Parse a field__operator condition."""
-        parts = field_op.rsplit("__", 1)
-        field = parts[0]
-        if len(parts) == 1:
-            op = "eq"
-        else:
-            op = parts[1]
-        ops = {
-            "eq": lambda v, o: v == o,
-            "ne": lambda v, o: v != o,
-            "gt": lambda v, o: v > o,
-            "gte": lambda v, o: v >= o,
-            "lt": lambda v, o: v < o,
-            "lte": lambda v, o: v <= o,
-            "in": lambda v, o: v in o,
-            "nin": lambda v, o: v not in o,
-            "contains": lambda v, o: o in v if v else False,
-            "icontains": lambda v, o: o.lower() in v.lower() if v else False,
-            "startswith": lambda v, o: v.startswith(o) if v else False,
-            "endswith": lambda v, o: v.endswith(o) if v else False,
-            "exists": lambda v, o: (v is not None) == o,
-        }
-        if op not in ops:
-            return None
-        def make_filter(item_val: Any) -> bool:
-            item_val = self._get_value(item_val, field)
-            return ops[op](item_val, value)
-        return make_filter
+        records: list[dict[str, Any]],
+        conditions: list[FilterCondition],
+        mode: str = "AND",
+    ) -> list[dict[str, Any]]:
+        """Filter records by conditions.
 
-    def _apply_filter(
-        self,
-        item: Any,
-        filter_func: Callable[[dict[str, Any]], bool],
-    ) -> bool:
-        """Apply a filter function to an item."""
-        if isinstance(item, dict):
-            return filter_func(item)
-        return True
+        Args:
+            records: List of record dicts.
+            conditions: List of FilterConditions.
+            mode: "AND" or "OR" combination.
 
-    def _get_value(self, item: Any, path: str) -> Any:
-        """Get a value from an item by dot-notation path."""
-        parts = path.split(".")
-        value = item
-        for part in parts:
-            if isinstance(value, dict):
-                value = value.get(part)
+        Returns:
+            Filtered records.
+        """
+        with self._lock:
+            self._stats["conditions_applied"] += len(conditions)
+
+        if not conditions:
+            with self._lock:
+                self._stats["records_filtered"] += len(records)
+            return list(records)
+
+        result = []
+        for record in records:
+            if mode == "AND":
+                if all(self._evaluate_condition(record, cond) for cond in conditions):
+                    result.append(record)
             else:
-                return None
-        return value
+                if any(self._evaluate_condition(record, cond) for cond in conditions):
+                    result.append(record)
 
+        with self._lock:
+            self._stats["records_filtered"] += len(result)
 
-def filter_by(data: list[dict[str, Any]], **conditions: Any) -> list[dict[str, Any]]:
-    """Filter a collection by conditions.
-
-    Args:
-        data: Collection to filter.
-        **conditions: Field__operator=value conditions.
-
-    Returns:
-        Filtered collection.
-    """
-    return DataFilter().where(data, **conditions).execute()
-
-
-def project(
-    data: list[dict[str, Any]],
-    fields: list[str],
-    exclude: Optional[list[str]] = None,
-) -> list[dict[str, Any]]:
-    """Project fields from a collection.
-
-    Args:
-        data: Collection to project.
-        fields: Fields to include.
-        exclude: Fields to exclude.
-
-    Returns:
-        Projected collection.
-    """
-    if exclude:
-        fields = [f for f in fields if f not in exclude]
-    return [{k: item.get(k) for k in fields} for item in data]
-
-
-def group_by(
-    data: list[dict[str, Any]],
-    key: str,
-    agg_func: Optional[Callable[[list[Any]], Any]] = None,
-) -> dict[Any, list[Any]]:
-    """Group a collection by a field.
-
-    Args:
-        data: Collection to group.
-        key: Field to group by.
-        agg_func: Optional aggregation function.
-
-    Returns:
-        Dictionary of grouped items.
-    """
-    groups: dict[Any, list[Any]] = {}
-    for item in data:
-        group_key = item.get(key)
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(item)
-    if agg_func:
-        return {k: agg_func(v) for k, v in groups.items()}
-    return groups
-
-
-def distinct(
-    data: list[dict[str, Any]],
-    field: Optional[str] = None,
-) -> list[Any]:
-    """Get distinct values or items.
-
-    Args:
-        data: Collection.
-        field: Optional field to get distinct values from.
-
-    Returns:
-        List of distinct values or items.
-    """
-    if field:
-        seen: set[Any] = set()
-        result = []
-        for item in data:
-            value = item.get(field)
-            if value not in seen:
-                seen.add(value)
-                result.append(value)
-        return result
-    else:
-        seen: set[Any] = set()
-        result = []
-        for item in data:
-            if item not in seen:
-                seen.add(item)
-                result.append(item)
         return result
 
+    def _evaluate_condition(self, record: dict[str, Any], cond: FilterCondition) -> bool:
+        """Evaluate a single condition against a record."""
+        value = record.get(cond.field)
 
-def union(*collections: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Union of multiple collections.
+        op = cond.operator.lower()
 
-    Args:
-        *collections: Collections to union.
+        if op == "in":
+            return value in cond.value
+        elif op == "not_in":
+            return value not in cond.value
+        elif op == "contains":
+            return cond.value in str(value) if value is not None else False
+        elif op == "starts_with":
+            return str(value).startswith(cond.value) if value is not None else False
+        elif op == "ends_with":
+            return str(value).endswith(cond.value) if value is not None else False
+        elif op == "regex":
+            try:
+                return bool(re.match(cond.value, str(value)))
+            except re.error:
+                return False
+        elif op == "exists":
+            return value is not None
+        elif op == "empty":
+            return value is None or value == "" or value == []
+        elif op in self.OPERATORS:
+            try:
+                return self.OPERATORS[op](value, cond.value)
+            except (TypeError, ValueError):
+                return False
 
-    Returns:
-        Combined collection with duplicates removed.
-    """
-    seen: set[int] = set()
-    result = []
-    for coll in collections:
-        for item in coll:
-            item_id = id(item)
-            if item_id not in seen:
-                seen.add(item_id)
-                result.append(item)
-    return result
+        return False
 
+    def filter_and_project(
+        self,
+        records: list[dict[str, Any]],
+        conditions: list[FilterCondition],
+        fields: list[str],
+    ) -> list[dict[str, Any]]:
+        """Filter records and project specified fields.
 
-def intersect(*collections: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Intersection of multiple collections.
+        Args:
+            records: List of record dicts.
+            conditions: Filter conditions.
+            fields: Fields to include in output.
 
-    Args:
-        *collections: Collections to intersect.
+        Returns:
+            Filtered and projected records.
+        """
+        filtered = self.filter(records, conditions)
+        return [{k: r.get(k) for k in fields if k in r} for r in filtered]
 
-    Returns:
-        Items common to all collections.
-    """
-    if not collections:
-        return []
-    result = collections[0]
-    for coll in collections[1:]:
-        result = [item for item in result if item in coll]
-    return result
+    def create_condition(
+        self,
+        field: str,
+        operator: str,
+        value: Any = None,
+    ) -> FilterCondition:
+        """Create a filter condition.
+
+        Args:
+            field: Field name.
+            operator: Operator name.
+            value: Comparison value.
+
+        Returns:
+            FilterCondition.
+        """
+        return FilterCondition(field=field, operator=operator, value=value)
+
+    def exclude_fields(
+        self,
+        records: list[dict[str, Any]],
+        fields: list[str],
+    ) -> list[dict[str, Any]]:
+        """Exclude fields from records.
+
+        Args:
+            records: List of records.
+            fields: Fields to exclude.
+
+        Returns:
+            Records without excluded fields.
+        """
+        fields_set = set(fields)
+        return [{k: v for k, v in r.items() if k not in fields_set} for r in records]
+
+    def distinct(
+        self,
+        records: list[dict[str, Any]],
+        field: str,
+    ) -> list[Any]:
+        """Get distinct values for a field.
+
+        Args:
+            records: List of records.
+            field: Field name.
+
+        Returns:
+            List of distinct values.
+        """
+        seen = set()
+        result = []
+        for r in records:
+            val = r.get(field)
+            if val not in seen:
+                seen.add(val)
+                result.append(val)
+        return result
+
+    def sort_and_filter(
+        self,
+        records: list[dict[str, Any]],
+        conditions: list[FilterCondition],
+        sort_by: str,
+        reverse: bool = False,
+        limit: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Filter, sort, and limit records.
+
+        Args:
+            records: List of records.
+            conditions: Filter conditions.
+            sort_by: Field to sort by.
+            reverse: Sort descending.
+            limit: Maximum records.
+
+        Returns:
+            Processed records.
+        """
+        filtered = self.filter(records, conditions)
+        sorted_recs = sorted(filtered, key=lambda r: r.get(sort_by, ""), reverse=reverse)
+        if limit:
+            sorted_recs = sorted_recs[:limit]
+        return sorted_recs
+
+    def get_stats(self) -> dict[str, int]:
+        """Get filter statistics."""
+        with self._lock:
+            return dict(self._stats)
