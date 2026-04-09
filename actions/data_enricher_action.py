@@ -1,146 +1,210 @@
-"""Data Enricher Action Module.
+"""
+Data Enricher Action Module.
 
-Enrich data with external sources and computed fields.
+Enriches data with lookups, computations, and external data.
 """
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Callable
 import time
+from typing import Any, Callable, Dict, List, Optional
 
 
-@dataclass
-class EnrichmentSource:
-    """Data enrichment source."""
-    name: str
-    fetch_fn: Callable[[dict], Any]
-    output_field: str
-    cache_ttl: float = 300.0
-    timeout: float = 10.0
+class DataEnricherAction:
+    """
+    Data enrichment with lookups and transformations.
 
-
-@dataclass
-class EnrichmentResult:
-    """Result of enrichment operation."""
-    enriched: dict
-    sources_used: list[str]
-    fetch_time: float
-    errors: dict[str, str] = field(default_factory=dict)
-
-
-class DataEnricher:
-    """Enrich data with external sources and computed fields."""
+    Supports field enrichment, computed fields, and lookup tables.
+    """
 
     def __init__(self) -> None:
-        self._sources: dict[str, EnrichmentSource] = {}
-        self._computed_fields: list[tuple[str, Callable[[dict], Any]]] = []
-        self._cache: dict[str, tuple[Any, float]] = {}
+        self._lookup_tables: Dict[str, Dict[str, Any]] = {}
+        self._enrichment_funcs: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_ttl: float = 300.0
 
-    def add_source(self, source: EnrichmentSource) -> None:
-        """Add an enrichment source."""
-        self._sources[source.name] = source
+    def add_lookup_table(
+        self,
+        name: str,
+        data: Dict[str, Any],
+    ) -> None:
+        """
+        Add a lookup table.
 
-    def add_computed_field(
+        Args:
+            name: Table name
+            data: Dict mapping keys to values
+        """
+        self._lookup_tables[name] = data
+
+    def add_enrichment_func(
         self,
         field_name: str,
-        compute_fn: Callable[[dict], Any]
+        func: Callable[[Dict[str, Any]], Any],
     ) -> None:
-        """Add a computed field."""
-        self._computed_fields.append((field_name, compute_fn))
+        """
+        Add an enrichment function.
 
-    async def enrich(
+        Args:
+            field_name: Field to add/enrich
+            func: Function that takes full record and returns value
+        """
+        self._enrichment_funcs[field_name] = func
+
+    def enrich(
         self,
-        data: dict,
-        source_names: list[str] | None = None
-    ) -> EnrichmentResult:
-        """Enrich data with specified sources."""
-        start = time.monotonic()
-        enriched = dict(data)
-        sources_used = []
-        errors = {}
-        targets = source_names or list(self._sources.keys())
-        for name in targets:
-            source = self._sources.get(name)
-            if not source:
+        record: Dict[str, Any],
+        fields: Optional[List[str]] = None,
+        use_cache: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Enrich a record.
+
+        Args:
+            record: Record to enrich
+            fields: Specific fields to enrich (None = all)
+            use_cache: Whether to use lookup cache
+
+        Returns:
+            Enriched record
+        """
+        result = record.copy()
+
+        for field_name, func in self._enrichment_funcs.items():
+            if fields is not None and field_name not in fields:
                 continue
+
             try:
-                value = await self._fetch_with_cache(source, data)
-                enriched[source.output_field] = value
-                sources_used.append(name)
-            except Exception as e:
-                errors[name] = str(e)
-        for field_name, compute_fn in self._computed_fields:
-            try:
-                enriched[field_name] = compute_fn(enriched)
+                result[field_name] = func(result)
             except Exception:
                 pass
-        return EnrichmentResult(
-            enriched=enriched,
-            sources_used=sources_used,
-            fetch_time=time.monotonic() - start,
-            errors=errors
-        )
 
-    async def enrich_batch(
+        return result
+
+    def enrich_batch(
         self,
-        records: list[dict],
-        source_names: list[str] | None = None,
-        max_concurrency: int = 5
-    ) -> list[EnrichmentResult]:
-        """Enrich multiple records with controlled concurrency."""
-        semaphore = asyncio.Semaphore(max_concurrency)
-        async def enrich_with_limit(record: dict) -> EnrichmentResult:
-            async with semaphore:
-                return await self.enrich(record, source_names)
-        return await asyncio.gather(*[enrich_with_limit(r) for r in records])
+        records: List[Dict[str, Any]],
+        fields: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Enrich multiple records.
 
-    async def _fetch_with_cache(
-        self,
-        source: EnrichmentSource,
-        data: dict
-    ) -> Any:
-        """Fetch from source with caching."""
-        cache_key = f"{source.name}:{str(sorted(data.items()))}"
-        now = time.time()
-        if cache_key in self._cache:
-            value, cached_at = self._cache[cache_key]
-            if now - cached_at < source.cache_ttl:
-                return value
-        try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(source.fetch_fn, data),
-                timeout=source.timeout
-            )
-            self._cache[cache_key] = (result, now)
-            return result
-        except asyncio.TimeoutError:
-            raise Exception(f"Source {source.name} timed out")
+        Args:
+            records: List of records
+            fields: Specific fields to enrich
 
-
-class LookupEnricher:
-    """Enrich data using lookup tables."""
-
-    def __init__(self) -> None:
-        self._lookups: dict[str, dict] = {}
-
-    def add_lookup(self, name: str, mapping: dict) -> None:
-        """Add a lookup table."""
-        self._lookups[name] = mapping
+        Returns:
+            List of enriched records
+        """
+        return [self.enrich(r, fields) for r in records]
 
     def lookup(
         self,
-        data: dict,
-        lookup_field: str,
-        lookup_name: str,
-        output_field: str | None = None,
-        default: Any = None
-    ) -> dict:
-        """Perform lookup enrichment on data."""
-        result = dict(data)
-        lookup_table = self._lookups.get(lookup_name, {})
-        key = data.get(lookup_field)
-        output = output_field or f"{lookup_name}_{lookup_field}"
-        result[output] = lookup_table.get(key, default)
+        table_name: str,
+        key: str,
+        field: Optional[str] = None,
+        default: Any = None,
+    ) -> Any:
+        """
+        Lookup a value in a table.
+
+        Args:
+            table_name: Name of lookup table
+            key: Key to lookup
+            field: Specific field to return (None = entire record)
+            default: Default if not found
+
+        Returns:
+            Lookup result or default
+        """
+        if table_name not in self._lookup_tables:
+            return default
+
+        table = self._lookup_tables[table_name]
+
+        if key not in table:
+            return default
+
+        record = table[key]
+
+        if field is not None:
+            return record.get(field, default) if isinstance(record, dict) else default
+
+        return record
+
+    def lookup_with_cache(
+        self,
+        table_name: str,
+        key: str,
+        fetch_func: Callable[[str], Any],
+        ttl: Optional[float] = None,
+    ) -> Any:
+        """
+        Lookup with caching.
+
+        Args:
+            table_name: Cache key prefix
+            key: Lookup key
+            fetch_func: Function to fetch if not cached
+            ttl: Cache TTL in seconds
+
+        Returns:
+            Lookup result
+        """
+        cache_key = f"{table_name}:{key}"
+        ttl = ttl or self._cache_ttl
+
+        if cache_key in self._cache:
+            entry = self._cache[cache_key]
+            if time.time() - entry["timestamp"] < ttl:
+                return entry["value"]
+
+        value = fetch_func(key)
+
+        self._cache[cache_key] = {
+            "value": value,
+            "timestamp": time.time(),
+        }
+
+        return value
+
+    def enrich_from_lookups(
+        self,
+        record: Dict[str, Any],
+        lookup_mappings: Dict[str, tuple[str, str]],
+    ) -> Dict[str, Any]:
+        """
+        Enrich record using lookup tables.
+
+        Args:
+            record: Record to enrich
+            lookup_mappings: Dict mapping target_field to (table_name, key_field)
+
+        Returns:
+            Enriched record
+        """
+        result = record.copy()
+
+        for target_field, (table_name, key_field) in lookup_mappings.items():
+            if key_field not in result:
+                continue
+
+            key = result[key_field]
+            value = self.lookup(table_name, key)
+
+            if value is not None:
+                result[target_field] = value
+
         return result
+
+    def clear_cache(self) -> None:
+        """Clear the lookup cache."""
+        self._cache.clear()
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        return {
+            "entries": len(self._cache),
+            "tables": list(self._lookup_tables.keys()),
+            "enrichment_funcs": list(self._enrichment_funcs.keys()),
+        }

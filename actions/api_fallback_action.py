@@ -1,240 +1,220 @@
-"""API fallback and degradation handling.
+"""
+API Fallback Action Module.
 
-This module provides fallback strategies:
-- Multiple fallback levels
-- Degradation levels
-- Cached fallback responses
-- Circuit breaker integration
-
-Example:
-    >>> from actions.api_fallback_action import FallbackManager
-    >>> manager = FallbackManager()
-    >>> result = manager.execute_with_fallback(primary_func, [fallback1, fallback2])
+Fallback chain for API requests with degradation handling.
 """
 
 from __future__ import annotations
 
-import time
-import logging
-import threading
-from typing import Any, Callable, Optional
-from dataclasses import dataclass, field
-from enum import Enum
-
-logger = logging.getLogger(__name__)
+import asyncio
+from typing import Any, Callable, Coroutine, Dict, List, Optional, TypeVar
 
 
-class DegradationLevel(Enum):
-    """Service degradation levels."""
-    HEALTHY = 0
-    DEGRADED = 1
-    PARTIAL = 2
-    FULL = 3
+T = TypeVar("T")
+
+
+class FallbackError(Exception):
+    """All fallbacks failed."""
+    pass
 
 
 @dataclass
-class FallbackStrategy:
-    """A fallback strategy definition."""
-    name: str
-    func: Callable[..., Any]
-    timeout: float = 5.0
-    condition: Optional[Callable[[Exception], bool]] = None
-    cache_ttl: Optional[float] = None
+class FallbackConfig:
+    """Configuration for fallback behavior."""
+    timeout_seconds: float = 5.0
+    max_retries: int = 2
+    retry_delay_seconds: float = 1.0
 
 
-@dataclass
-class CachedFallback:
-    """Cached fallback response."""
-    data: Any
-    cached_at: float
-    ttl: float
-
-
-class FallbackManager:
-    """Manage fallback strategies for API calls.
-
-    Example:
-        >>> manager = FallbackManager()
-        >>> manager.add_fallback("cache", self._get_cached)
-        >>> result = manager.execute(primary_call, fallback_levels=["cache", "default"])
+class ApiFallbackAction:
     """
+    Fallback chain for API requests.
 
-    def __init__(self, default_timeout: float = 5.0) -> None:
-        self.default_timeout = default_timeout
-        self._fallbacks: dict[str, FallbackStrategy] = {}
-        self._cache: dict[str, CachedFallback] = {}
-        self._cache_lock = threading.RLock()
-        self._degradation_level = DegradationLevel.HEALTHY
-        logger.info("FallbackManager initialized")
-
-    def register_fallback(
-        self,
-        name: str,
-        func: Callable[..., Any],
-        timeout: Optional[float] = None,
-        condition: Optional[Callable[[Exception], bool]] = None,
-        cache_ttl: Optional[float] = None,
-    ) -> None:
-        """Register a fallback strategy.
-
-        Args:
-            name: Strategy name.
-            func: Fallback function.
-            timeout: Timeout for this fallback.
-            condition: Optional condition to trigger this fallback.
-            cache_ttl: Optional TTL for caching fallback responses.
-        """
-        self._fallbacks[name] = FallbackStrategy(
-            name=name,
-            func=func,
-            timeout=timeout or self.default_timeout,
-            condition=condition,
-            cache_ttl=cache_ttl,
-        )
-        logger.debug(f"Registered fallback: {name}")
-
-    def execute_with_fallback(
-        self,
-        primary_func: Callable[..., Any],
-        fallbacks: Optional[list[str]] = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute primary function with fallback support.
-
-        Args:
-            primary_func: Primary function to call.
-            fallbacks: List of fallback names to try in order.
-            *args: Arguments for the functions.
-            **kwargs: Keyword arguments for the functions.
-
-        Returns:
-            Result from primary or fallback function.
-
-        Raises:
-            Exception: If all functions fail.
-        """
-        fallback_names = fallbacks or list(self._fallbacks.keys())
-        last_error: Optional[Exception] = None
-        for name in fallback_names:
-            fallback = self._fallbacks.get(name)
-            if not fallback:
-                continue
-            if fallback.condition:
-                try:
-                    result = primary_func(*args, **kwargs)
-                    return result
-                except Exception as e:
-                    if not fallback.condition(e):
-                        raise
-                    last_error = e
-            try:
-                result = self._call_with_timeout(fallback, *args, **kwargs)
-                if fallback.cache_ttl:
-                    self._cache_fallback(name, result, fallback.cache_ttl)
-                return result
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Fallback '{name}' failed: {e}")
-        if last_error:
-            raise last_error
-        raise RuntimeError("No fallback available")
-
-    def _call_with_timeout(
-        self,
-        fallback: FallbackStrategy,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        """Call fallback with timeout (simplified)."""
-        return fallback.func(*args, **kwargs)
-
-    def _cache_fallback(
-        self,
-        name: str,
-        data: Any,
-        ttl: float,
-    ) -> None:
-        """Cache a fallback response."""
-        with self._cache_lock:
-            self._cache[name] = CachedFallback(
-                data=data,
-                cached_at=time.time(),
-                ttl=ttl,
-            )
-
-    def get_cached_fallback(self, name: str) -> Optional[Any]:
-        """Get cached fallback if available and not expired."""
-        with self._cache_lock:
-            cached = self._cache.get(name)
-            if not cached:
-                return None
-            if time.time() - cached.cached_at > cached.ttl:
-                del self._cache[name]
-                return None
-            return cached.data
-
-    def set_degradation_level(self, level: DegradationLevel) -> None:
-        """Set the current degradation level."""
-        self._degradation_level = level
-        logger.info(f"Degradation level set to: {level.name}")
-
-    def get_degradation_level(self) -> DegradationLevel:
-        """Get current degradation level."""
-        return self._degradation_level
-
-    def clear_cache(self) -> None:
-        """Clear all cached fallbacks."""
-        with self._cache_lock:
-            self._cache.clear()
-
-
-class GracefulDegradation:
-    """Context manager for graceful degradation based on degradation level."""
+    Tries handlers in sequence until one succeeds.
+    """
 
     def __init__(
         self,
-        fallback_manager: FallbackManager,
-        required_level: DegradationLevel = DegradationLevel.HEALTHY,
+        config: Optional[FallbackConfig] = None,
     ) -> None:
-        self.fallback_manager = fallback_manager
-        self.required_level = required_level
+        self.config = config or FallbackConfig()
+        self._handlers: List[Callable[..., Coroutine[Any, Any, T]]] = []
+        self._stats: Dict[str, int] = {}
 
-    def __enter__(self) -> bool:
-        current_level = self.fallback_manager.get_degradation_level()
-        if current_level.value > self.required_level.value:
-            return False
-        return True
+    def add_handler(
+        self,
+        handler: Callable[..., Coroutine[Any, Any, T]],
+    ) -> "ApiFallbackAction":
+        """
+        Add a handler to the fallback chain.
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        pass
+        Args:
+            handler: Async function to try
+
+        Returns:
+            Self for chaining
+        """
+        self._handlers.append(handler)
+        return self
+
+    async def execute(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> T:
+        """
+        Execute fallback chain.
+
+        Tries each handler in order until one succeeds.
+
+        Args:
+            *args: Positional arguments for handlers
+            **kwargs: Keyword arguments for handlers
+
+        Returns:
+            Result from first successful handler
+
+        Raises:
+            FallbackError: If all handlers fail
+        """
+        errors = []
+
+        for i, handler in enumerate(self._handlers):
+            handler_name = f"{handler.__name__}_{i}"
+
+            for attempt in range(self.config.max_retries + 1):
+                try:
+                    result = await asyncio.wait_for(
+                        handler(*args, **kwargs),
+                        timeout=self.config.timeout_seconds,
+                    )
+                    self._record_success(handler_name)
+                    return result
+
+                except asyncio.TimeoutError:
+                    error = f"Timeout on {handler_name}"
+                    errors.append(error)
+                    self._record_failure(handler_name)
+
+                except Exception as e:
+                    error = f"{type(e).__name__}: {e}"
+                    errors.append(f"{handler_name}: {error}")
+                    self._record_failure(handler_name)
+
+                if attempt < self.config.max_retries:
+                    await asyncio.sleep(self.config.retry_delay_seconds)
+
+        raise FallbackError(f"All {len(self._handlers)} handlers failed: {errors}")
+
+    def _record_success(self, handler_name: str) -> None:
+        """Record successful call."""
+        self._stats[f"{handler_name}_success"] = self._stats.get(f"{handler_name}_success", 0) + 1
+
+    def _record_failure(self, handler_name: str) -> None:
+        """Record failed call."""
+        self._stats[f"{handler_name}_failure"] = self._stats.get(f"{handler_name}_failure", 0) + 1
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get fallback statistics."""
+        return {
+            "handlers_count": len(self._handlers),
+            "stats": self._stats,
+        }
+
+    def clear_handlers(self) -> None:
+        """Clear all handlers."""
+        self._handlers.clear()
+
+    def clear_stats(self) -> None:
+        """Clear statistics."""
+        self._stats.clear()
 
 
-def create_circuit_breaker_fallback(
-    func: Callable[..., Any],
-    fallback: Callable[..., Any],
-    failure_threshold: int = 5,
-    timeout: float = 60.0,
-) -> Callable[..., Any]:
-    """Create a function with circuit breaker and fallback.
+@dataclass
+class DegradationLevel:
+    """A degradation level configuration."""
+    name: str
+    enabled_handlers: int
+    description: str = ""
 
-    Args:
-        func: Primary function.
-        fallback: Fallback function.
-        failure_threshold: Number of failures before opening circuit.
-        timeout: Timeout in seconds.
 
-    Returns:
-        Wrapped function with circuit breaker.
+class ApiDegradationAction:
     """
-    from actions.circuit_breaker_action import CircuitBreaker
-    cb = CircuitBreaker(
-        name=func.__name__,
-        failure_threshold=failure_threshold,
-        timeout=timeout,
-    )
+    Progressive API degradation.
 
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return cb.call(func, *args, fallback=fallback, **kwargs)
+    Starts with full feature set, degrades gracefully under load.
+    """
 
-    return wrapper
+    def __init__(self) -> None:
+        self._levels: List[DegradationLevel] = []
+        self._current_level: int = 0
+        self._fallback = ApiFallbackAction()
+
+    def add_level(
+        self,
+        name: str,
+        enabled_handlers: int,
+        description: str = "",
+    ) -> "ApiDegradationAction":
+        """
+        Add a degradation level.
+
+        Args:
+            name: Level name
+            enabled_handlers: Number of handlers to enable
+            description: Human-readable description
+
+        Returns:
+            Self for chaining
+        """
+        self._levels.append(DegradationLevel(
+            name=name,
+            enabled_handlers=enabled_handlers,
+            description=description,
+        ))
+        return self
+
+    def set_level(self, level: int) -> bool:
+        """
+        Set current degradation level.
+
+        Args:
+            level: Level index
+
+        Returns:
+            True if level was set
+        """
+        if 0 <= level < len(self._levels):
+            self._current_level = level
+            return True
+        return False
+
+    def get_current_level(self) -> Optional[DegradationLevel]:
+        """Get current degradation level."""
+        if self._levels:
+            return self._levels[self._current_level]
+        return None
+
+    def degrade(self) -> bool:
+        """
+        Increase degradation by one level.
+
+        Returns:
+            True if degraded, False if at max
+        """
+        if self._current_level < len(self._levels) - 1:
+            self._current_level += 1
+            return True
+        return False
+
+    def recover(self) -> bool:
+        """
+        Decrease degradation by one level.
+
+        Returns:
+            True if recovered, False if at min
+        """
+        if self._current_level > 0:
+            self._current_level -= 1
+            return True
+        return False
