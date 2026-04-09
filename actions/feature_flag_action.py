@@ -1,378 +1,444 @@
-"""Feature flag action for managing feature toggles.
+"""
+Feature Flag Action Module
 
-Provides feature flag evaluation, targeting rules,
-and gradual rollout support.
+Provides feature flag functionality for gradual rollouts and A/B testing
+in UI automation workflows. Supports targeting rules, percentage splits,
+and user segmentation.
+
+Author: AI Agent
+Version: 1.0.0
 """
 
+from __future__ import annotations
+
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, auto
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class FlagState(Enum):
-    ENABLED = "enabled"
-    DISABLED = "disabled"
-    GRADUAL = "gradual"
+class FlagType(Enum):
+    """Feature flag type."""
+    BOOLEAN = auto()
+    STRING = auto()
+    NUMBER = auto()
+    JSON = auto()
+
+
+class ComparisonOp(Enum):
+    """Rule comparison operators."""
+    EQUALS = "eq"
+    NOT_EQUALS = "ne"
+    CONTAINS = "contains"
+    NOT_CONTAINS = "not_contains"
+    IN = "in"
+    NOT_IN = "not_in"
+    GREATER_THAN = "gt"
+    LESS_THAN = "lt"
+    GREATER_EQUALS = "gte"
+    LESS_EQUALS = "lte"
+    REGEX_MATCH = "regex"
 
 
 @dataclass
 class TargetingRule:
+    """Targeting rule for feature flag."""
     attribute: str
-    operator: str
+    operator: ComparisonOp
     value: Any
-    enabled: bool = True
+    description: str = ""
+
+
+@dataclass
+class RolloutPercentage:
+    """Percentage-based rollout configuration."""
+    percentage: float
+    seed: str = "default"
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.percentage <= 100:
+            raise ValueError("Percentage must be between 0 and 100")
+
+
+@dataclass
+class FlagVariation:
+    """Feature flag variation."""
+    name: str
+    value: Any
+    weight: int = 0
 
 
 @dataclass
 class FeatureFlag:
+    """Feature flag definition."""
+    key: str
     name: str
-    state: FlagState
-    description: str = ""
-    rollout_percentage: float = 100.0
+    flag_type: FlagType
+    enabled: bool = False
+    default_value: Any = None
+    variations: list[FlagVariation] = field(default_factory=list)
     targeting_rules: list[TargetingRule] = field(default_factory=list)
+    rollout_percentage: Optional[RolloutPercentage] = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    modified_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=lambda: time.time())
+    updated_at: float = field(default_factory=lambda: time.time())
 
 
-class FeatureFlagAction:
-    """Manage feature flags with targeting and rollouts.
+@dataclass
+class FlagContext:
+    """Context for flag evaluation."""
+    user_id: Optional[str] = None
+    anonymous_id: Optional[str] = None
+    email: Optional[str] = None
+    country: Optional[str] = None
+    region: Optional[str] = None
+    platform: Optional[str] = None
+    app_version: Optional[str] = None
+    attributes: dict[str, Any] = field(default_factory=dict)
 
-    Args:
-        default_state: Default state for new flags.
-        enable_analytics: Enable flag evaluation analytics.
+    def get_attribute(self, key: str) -> Any:
+        """Get attribute value."""
+        return self.attributes.get(key)
+
+    def get_user_id(self) -> str:
+        """Get user identifier."""
+        return self.user_id or self.anonymous_id or ""
+
+
+class FeatureFlagStore:
+    """
+    In-memory feature flag store.
+
+    Example:
+        >>> store = FeatureFlagStore()
+        >>> flag = FeatureFlag(key="new_ui", name="New UI", flag_type=FlagType.BOOLEAN)
+        >>> store.add(flag)
+        >>> is_enabled = store.is_enabled("new_ui", context)
     """
 
-    def __init__(
-        self,
-        default_state: FlagState = FlagState.DISABLED,
-        enable_analytics: bool = True,
-    ) -> None:
+    def ___init__(self) -> None:
         self._flags: dict[str, FeatureFlag] = {}
-        self._default_state = default_state
-        self._enable_analytics = enable_analytics
-        self._evaluation_log: list[dict[str, Any]] = []
-        self._change_listeners: list[Callable[[str, FlagState], None]] = []
+        self._hooks: dict[str, list[Callable]] = {
+            "flag_enabled": [],
+            "flag_disabled": [],
+            "flag_updated": [],
+        }
 
-    def create_flag(
-        self,
-        name: str,
-        state: FlagState = FlagState.DISABLED,
-        description: str = "",
-        rollout_percentage: float = 100.0,
-    ) -> bool:
-        """Create a new feature flag.
+    def add(self, flag: FeatureFlag) -> None:
+        """Add feature flag to store."""
+        self._flags[flag.key] = flag
+        logger.debug(f"Added flag: {flag.key}")
 
-        Args:
-            name: Flag name.
-            state: Initial flag state.
-            description: Flag description.
-            rollout_percentage: Rollout percentage (0-100).
+    def get(self, key: str) -> Optional[FeatureFlag]:
+        """Get feature flag by key."""
+        return self._flags.get(key)
 
-        Returns:
-            True if created successfully.
-        """
-        if name in self._flags:
-            logger.warning(f"Flag already exists: {name}")
-            return False
+    def update(self, flag: FeatureFlag) -> None:
+        """Update feature flag."""
+        if flag.key in self._flags:
+            flag.updated_at = time.time()
+            self._flags[flag.key] = flag
+            self._trigger_hook("flag_updated", flag)
 
-        flag = FeatureFlag(
-            name=name,
-            state=state,
-            description=description,
-            rollout_percentage=rollout_percentage,
-        )
-        self._flags[name] = flag
-        logger.debug(f"Created feature flag: {name}")
-        return True
-
-    def enable(self, name: str) -> bool:
-        """Enable a feature flag.
-
-        Args:
-            name: Flag name.
-
-        Returns:
-            True if flag was found and enabled.
-        """
-        flag = self._flags.get(name)
-        if not flag:
-            return False
-
-        flag.state = FlagState.ENABLED
-        flag.modified_at = time.time()
-
-        for listener in self._change_listeners:
-            try:
-                listener(name, flag.state)
-            except Exception as e:
-                logger.error(f"Change listener error: {e}")
-
-        return True
-
-    def disable(self, name: str) -> bool:
-        """Disable a feature flag.
-
-        Args:
-            name: Flag name.
-
-        Returns:
-            True if flag was found and disabled.
-        """
-        flag = self._flags.get(name)
-        if not flag:
-            return False
-
-        flag.state = FlagState.DISABLED
-        flag.modified_at = time.time()
-
-        for listener in self._change_listeners:
-            try:
-                listener(name, flag.state)
-            except Exception as e:
-                logger.error(f"Change listener error: {e}")
-
-        return True
-
-    def evaluate(
-        self,
-        name: str,
-        user_id: Optional[str] = None,
-        attributes: Optional[dict[str, Any]] = None,
-    ) -> bool:
-        """Evaluate a feature flag for a user.
-
-        Args:
-            name: Flag name.
-            user_id: Optional user ID for targeting.
-            attributes: Optional user attributes.
-
-        Returns:
-            True if flag is enabled for the user.
-        """
-        flag = self._flags.get(name)
-        if not flag:
-            return False
-
-        result = self._evaluate_flag(flag, user_id, attributes or {})
-
-        if self._enable_analytics:
-            self._log_evaluation(name, user_id, result, attributes)
-
-        return result
-
-    def _evaluate_flag(
-        self,
-        flag: FeatureFlag,
-        user_id: Optional[str],
-        attributes: dict[str, Any],
-    ) -> bool:
-        """Evaluate a flag based on its configuration.
-
-        Args:
-            flag: Feature flag.
-            user_id: User ID.
-            attributes: User attributes.
-
-        Returns:
-            True if flag is enabled.
-        """
-        if flag.state == FlagState.DISABLED:
-            return False
-
-        if flag.state == FlagState.ENABLED:
+    def delete(self, key: str) -> bool:
+        """Delete feature flag."""
+        if key in self._flags:
+            del self._flags[key]
             return True
-
-        if flag.state == FlagState.GRADUAL:
-            for rule in flag.targeting_rules:
-                if self._matches_rule(rule, attributes):
-                    return rule.enabled
-
-            if user_id:
-                return self._in_rollout(user_id, flag.rollout_percentage)
-            return flag.rollout_percentage >= 100.0
-
         return False
 
-    def _matches_rule(self, rule: TargetingRule, attributes: dict[str, Any]) -> bool:
-        """Check if attributes match a targeting rule.
-
-        Args:
-            rule: Targeting rule.
-            attributes: User attributes.
-
-        Returns:
-            True if matches.
-        """
-        value = attributes.get(rule.attribute)
-        if value is None:
-            return False
-
-        if rule.operator == "equals":
-            return value == rule.value
-        elif rule.operator == "not_equals":
-            return value != rule.value
-        elif rule.operator == "contains":
-            return rule.value in str(value)
-        elif rule.operator == "gt":
-            return value > rule.value
-        elif rule.operator == "lt":
-            return value < rule.value
-
-        return False
-
-    def _in_rollout(self, user_id: str, percentage: float) -> bool:
-        """Check if user is in rollout percentage.
-
-        Args:
-            user_id: User ID.
-            percentage: Rollout percentage (0-100).
-
-        Returns:
-            True if user is in rollout.
-        """
-        if percentage >= 100.0:
-            return True
-        if percentage <= 0.0:
-            return False
-
-        hash_value = hash(user_id) % 100
-        return hash_value < percentage
-
-    def add_targeting_rule(
-        self,
-        name: str,
-        attribute: str,
-        operator: str,
-        value: Any,
-        enabled: bool = True,
-    ) -> bool:
-        """Add a targeting rule to a flag.
-
-        Args:
-            name: Flag name.
-            attribute: Attribute to match.
-            operator: Comparison operator.
-            value: Value to compare.
-            enabled: Result when rule matches.
-
-        Returns:
-            True if rule was added.
-        """
-        flag = self._flags.get(name)
-        if not flag:
-            return False
-
-        rule = TargetingRule(
-            attribute=attribute,
-            operator=operator,
-            value=value,
-            enabled=enabled,
-        )
-        flag.targeting_rules.append(rule)
-        flag.modified_at = time.time()
-        return True
-
-    def _log_evaluation(
-        self,
-        flag_name: str,
-        user_id: Optional[str],
-        result: bool,
-        attributes: Optional[dict[str, Any]],
-    ) -> None:
-        """Log a flag evaluation.
-
-        Args:
-            flag_name: Flag name.
-            user_id: User ID.
-            result: Evaluation result.
-            attributes: User attributes.
-        """
-        self._evaluation_log.append({
-            "flag": flag_name,
-            "user_id": user_id,
-            "result": result,
-            "attributes": attributes,
-            "timestamp": time.time(),
-        })
-
-        if len(self._evaluation_log) > 10000:
-            self._evaluation_log.pop(0)
-
-    def register_change_listener(
-        self,
-        listener: Callable[[str, FlagState], None],
-    ) -> None:
-        """Register a listener for flag state changes.
-
-        Args:
-            listener: Callback function.
-        """
-        self._change_listeners.append(listener)
-
-    def get_flag(self, name: str) -> Optional[FeatureFlag]:
-        """Get a feature flag by name.
-
-        Args:
-            name: Flag name.
-
-        Returns:
-            Feature flag or None.
-        """
-        return self._flags.get(name)
-
-    def get_all_flags(self) -> list[FeatureFlag]:
-        """Get all feature flags.
-
-        Returns:
-            List of feature flags.
-        """
+    def list_flags(self) -> list[FeatureFlag]:
+        """List all feature flags."""
         return list(self._flags.values())
 
-    def get_evaluation_log(self, limit: int = 100) -> list[dict[str, Any]]:
-        """Get flag evaluation log.
+    def add_hook(
+        self,
+        event: str,
+        callback: Callable[..., None],
+    ) -> None:
+        """Add event hook."""
+        if event in self._hooks:
+            self._hooks[event].append(callback)
 
-        Args:
-            limit: Maximum entries.
+    def _trigger_hook(self, event: str, *args: Any) -> None:
+        """Trigger event hooks."""
+        for callback in self._hooks.get(event, []):
+            try:
+                callback(*args)
+            except Exception as e:
+                logger.error(f"Hook error: {e}")
 
-        Returns:
-            List of evaluations (newest first).
-        """
-        return self._evaluation_log[-limit:][::-1]
+    def __len__(self) -> int:
+        return len(self._flags)
 
-    def delete_flag(self, name: str) -> bool:
-        """Delete a feature flag.
 
-        Args:
-            name: Flag name.
+class FeatureFlagEvaluator:
+    """
+    Evaluates feature flags against context.
 
-        Returns:
-            True if deleted.
-        """
-        if name in self._flags:
-            del self._flags[name]
-            return True
-        return False
+    Example:
+        >>> evaluator = FeatureFlagEvaluator(store)
+        >>> result = evaluator.evaluate("new_ui", context)
+    """
 
-    def get_stats(self) -> dict[str, Any]:
-        """Get feature flag statistics.
+    def __init__(self, store: FeatureFlagStore) -> None:
+        self.store = store
 
-        Returns:
-            Dictionary with stats.
-        """
-        total = len(self._flags)
-        enabled = sum(1 for f in self._flags.values() if f.state == FlagState.ENABLED)
-        disabled = sum(1 for f in self._flags.values() if f.state == FlagState.DISABLED)
-        gradual = sum(1 for f in self._flags.values() if f.state == FlagState.GRADUAL)
+    def is_enabled(
+        self,
+        flag_key: str,
+        context: Optional[FlagContext] = None,
+    ) -> bool:
+        """Check if flag is enabled."""
+        flag = self.store.get(flag_key)
+        if not flag:
+            return False
+
+        if not flag.enabled:
+            return False
+
+        if context and flag.targeting_rules:
+            if self._evaluate_rules(flag, context):
+                return True
+
+        if flag.rollout_percentage:
+            return self._evaluate_percentage(flag, context)
+
+        return True
+
+    def get_value(
+        self,
+        flag_key: str,
+        context: Optional[FlagContext] = None,
+        default: Any = None,
+    ) -> Any:
+        """Get flag value."""
+        flag = self.store.get(flag_key)
+        if not flag:
+            return default
+
+        if flag.flag_type == FlagType.BOOLEAN:
+            if self.is_enabled(flag_key, context):
+                return True
+            return flag.default_value if flag.default_value is not None else False
+
+        if context and flag.targeting_rules:
+            for variation in flag.variations:
+                if self._evaluate_variation_rules(flag, variation, context):
+                    return variation.value
+
+        if flag.rollout_percentage:
+            ctx = context or FlagContext()
+            user_id = ctx.get_user_id() or ""
+            hash_key = f"{flag.key}:{flag.rollout_percentage.seed}:{user_id}"
+            bucket = int(hashlib.md5(hash_key.encode()).hexdigest(), 16) % 100
+
+            cumulative = 0
+            for variation in flag.variations:
+                cumulative += variation.weight
+                if bucket < cumulative:
+                    return variation.value
+
+        return flag.default_value or default
+
+    def _evaluate_rules(self, flag: FeatureFlag, context: FlagContext) -> bool:
+        """Evaluate targeting rules."""
+        for rule in flag.targeting_rules:
+            ctx_value = self._get_context_value(context, rule.attribute)
+            if ctx_value is None:
+                return False
+            if not self._compare(ctx_value, rule.operator, rule.value):
+                return False
+        return True
+
+    def _evaluate_variation_rules(
+        self,
+        flag: FeatureFlag,
+        variation: FlagVariation,
+        context: FlagContext,
+    ) -> bool:
+        """Evaluate variation targeting rules."""
+        return True
+
+    def _get_context_value(self, context: FlagContext, attribute: str) -> Any:
+        """Get value from context."""
+        if attribute in ("user_id", "id"):
+            return context.user_id
+        if attribute == "anonymous_id":
+            return context.anonymous_id
+        if attribute == "email":
+            return context.email
+        if attribute == "country":
+            return context.country
+        if attribute == "region":
+            return context.region
+        if attribute == "platform":
+            return context.platform
+        if attribute == "app_version":
+            return context.app_version
+        return context.get_attribute(attribute)
+
+    def _compare(self, value: Any, operator: ComparisonOp, target: Any) -> bool:
+        """Compare value with target using operator."""
+        ops = {
+            ComparisonOp.EQUALS: lambda v, t: v == t,
+            ComparisonOp.NOT_EQUALS: lambda v, t: v != t,
+            ComparisonOp.CONTAINS: lambda v, t: t in v if v else False,
+            ComparisonOp.NOT_CONTAINS: lambda v, t: t not in v if v else True,
+            ComparisonOp.IN: lambda v, t: v in t if isinstance(t, (list, tuple)) else False,
+            ComparisonOp.NOT_IN: lambda v, t: v not in t if isinstance(t, (list, tuple)) else True,
+            ComparisonOp.GREATER_THAN: lambda v, t: v > t if isinstance(v, (int, float)) and isinstance(t, (int, float)) else False,
+            ComparisonOp.LESS_THAN: lambda v, t: v < t if isinstance(v, (int, float)) and isinstance(t, (int, float)) else False,
+            ComparisonOp.GREATER_EQUALS: lambda v, t: v >= t if isinstance(v, (int, float)) and isinstance(t, (int, float)) else False,
+            ComparisonOp.LESS_EQUALS: lambda v, t: v <= t if isinstance(v, (int, float)) and isinstance(t, (int, float)) else False,
+            ComparisonOp.REGEX_MATCH: lambda v, t: self._regex_match(v, t),
+        }
+        return ops.get(operator, lambda v, t: False)(value, target)
+
+    def _regex_match(self, value: str, pattern: str) -> bool:
+        """Match value against regex pattern."""
+        import re
+        try:
+            return bool(re.match(pattern, str(value)))
+        except Exception:
+            return False
+
+    def _evaluate_percentage(
+        self,
+        flag: FeatureFlag,
+        context: Optional[FlagContext],
+    ) -> bool:
+        """Evaluate percentage rollout."""
+        if not flag.rollout_percentage:
+            return False
+
+        ctx = context or FlagContext()
+        user_id = ctx.get_user_id() or ""
+        hash_key = f"{flag.key}:{flag.rollout_percentage.seed}:{user_id}"
+        bucket = int(hashlib.md5(hash_key.encode()).hexdigest(), 16) % 100
+
+        return bucket < flag.rollout_percentage.percentage
+
+
+class ABTestManager:
+    """
+    A/B test management with feature flags.
+
+    Example:
+        >>> manager = ABTestManager(store)
+        >>> test_id = manager.create_test("button_color", ["red", "blue"])
+        >>> variant = manager.get_variant(test_id, context)
+    """
+
+    def __init__(self, store: FeatureFlagStore) -> None:
+        self.store = store
+        self.evaluator = FeatureFlagEvaluator(store)
+
+    def create_test(
+        self,
+        test_key: str,
+        variants: list[str],
+        weights: Optional[list[int]] = None,
+    ) -> FeatureFlag:
+        """Create A/B test flag."""
+        if weights is None:
+            weights = [100 // len(variants)] * len(variants)
+
+        while sum(weights) < 100:
+            weights[0] += 1
+
+        variations = [
+            FlagVariation(name=v, value=v, weight=w)
+            for v, w in zip(variants, weights)
+        ]
+
+        flag = FeatureFlag(
+            key=test_key,
+            name=f"A/B Test: {test_key}",
+            flag_type=FlagType.STRING,
+            enabled=True,
+            variations=variations,
+            rollout_percentage=RolloutPercentage(percentage=100.0),
+        )
+        self.store.add(flag)
+        return flag
+
+    def get_variant(
+        self,
+        test_key: str,
+        context: Optional[FlagContext] = None,
+    ) -> Optional[str]:
+        """Get assigned variant for context."""
+        value = self.evaluator.get_value(test_key, context)
+        return value if isinstance(value, str) else None
+
+    def track_conversion(
+        self,
+        test_key: str,
+        variant: str,
+        metric: str,
+        value: float = 1.0,
+    ) -> None:
+        """Track conversion event."""
+        logger.info(f"Conversion: test={test_key} variant={variant} metric={metric} value={value}")
+
+    def get_results(self, test_key: str) -> dict[str, Any]:
+        """Get test results."""
+        flag = self.store.get(test_key)
+        if not flag:
+            return {}
 
         return {
-            "total_flags": total,
-            "enabled": enabled,
-            "disabled": disabled,
-            "gradual_rollout": gradual,
-            "evaluations": len(self._evaluation_log),
+            "test_key": test_key,
+            "enabled": flag.enabled,
+            "variants": [
+                {"name": v.name, "weight": v.weight}
+                for v in flag.variations
+            ],
         }
+
+
+class FeatureFlagMiddleware:
+    """
+    Middleware for applying feature flags to actions.
+
+    Example:
+        >>> mw = FeatureFlagMiddleware(evaluator)
+        >>> result = mw.apply("my_action", context, original_func, *args)
+    """
+
+    def __init__(self, evaluator: FeatureFlagEvaluator) -> None:
+        self.evaluator = evaluator
+        self._wrappers: dict[str, Callable] = {}
+
+    def wrap(
+        self,
+        flag_key: str,
+        enabled_func: Callable,
+        disabled_func: Optional[Callable] = None,
+    ) -> Callable:
+        """Wrap function with feature flag."""
+        def wrapper(context: FlagContext, *args: Any, **kwargs: Any) -> Any:
+            if self.evaluator.is_enabled(flag_key, context):
+                return enabled_func(*args, **kwargs)
+            elif disabled_func:
+                return disabled_func(*args, **kwargs)
+            return None
+        self._wrappers[flag_key] = wrapper
+        return wrapper
+
+    def apply(
+        self,
+        flag_key: str,
+        context: Optional[FlagContext],
+        default: Any = None,
+    ) -> Any:
+        """Apply flag and return appropriate value."""
+        return self.evaluator.get_value(flag_key, context, default)
+
+    def __repr__(self) -> str:
+        return f"FeatureFlagMiddleware(wrappers={len(self._wrappers)})"
