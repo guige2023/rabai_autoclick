@@ -1,252 +1,214 @@
 """
-Event Sourcing Action.
+Event sourcing action for immutable event storage.
 
-Provides event sourcing pattern implementation.
-Supports:
-- Event store
-- Event replay
-- Snapshot management
-- Projection building
+Provides event store, replay, and projection capabilities.
 """
 
-from typing import Dict, List, Optional, Any, Callable, Awaitable
-from dataclasses import dataclass, field
-from datetime import datetime
-import threading
-import logging
+from typing import Any, Callable, Dict, List, Optional
+import time
 import json
 import uuid
 
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class Event:
-    """Represents a domain event."""
-    event_id: str
-    aggregate_id: str
-    event_type: str
-    payload: Dict[str, Any]
-    timestamp: datetime
-    version: int
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "event_id": self.event_id,
-            "aggregate_id": self.aggregate_id,
-            "event_type": self.event_type,
-            "payload": self.payload,
-            "timestamp": self.timestamp.isoformat(),
-            "version": self.version,
-            "metadata": self.metadata
-        }
-
-
-@dataclass
-class Snapshot:
-    """Represents an aggregate snapshot."""
-    aggregate_id: str
-    version: int
-    state: Dict[str, Any]
-    timestamp: datetime
-
-
-class EventStore:
-    """Event store for persisting events."""
-    
-    def __init__(self):
-        self._events: Dict[str, List[Event]] = {}
-        self._snapshots: Dict[str, Snapshot] = {}
-        self._lock = threading.RLock()
-    
-    def append(self, event: Event) -> None:
-        """Append an event to the store."""
-        with self._lock:
-            if event.aggregate_id not in self._events:
-                self._events[event.aggregate_id] = []
-            self._events[event.aggregate_id].append(event)
-    
-    def get_events(
-        self,
-        aggregate_id: str,
-        from_version: int = 0
-    ) -> List[Event]:
-        """Get events for an aggregate."""
-        with self._lock:
-            events = self._events.get(aggregate_id, [])
-            return [e for e in events if e.version > from_version]
-    
-    def save_snapshot(self, snapshot: Snapshot) -> None:
-        """Save a snapshot."""
-        with self._lock:
-            self._snapshots[snapshot.aggregate_id] = snapshot
-    
-    def get_snapshot(self, aggregate_id: str) -> Optional[Snapshot]:
-        """Get the latest snapshot for an aggregate."""
-        return self._snapshots.get(aggregate_id)
-
 
 class EventSourcingAction:
-    """
-    Event Sourcing Action.
-    
-    Provides event sourcing with support for:
-    - Event storage and retrieval
-    - Aggregate reconstruction
-    - Snapshot management
-    - Projection building
-    """
-    
+    """Event sourcing for immutable event storage and replay."""
+
     def __init__(
         self,
-        snapshot_threshold: int = 100,
-        snapshot_interval: int = 10
-    ):
+        max_events: int = 100000,
+        snapshot_interval: int = 100,
+    ) -> None:
         """
-        Initialize the Event Sourcing Action.
-        
+        Initialize event sourcing.
+
         Args:
-            snapshot_threshold: Create snapshot every N events
-            snapshot_interval: Snapshot version interval
+            max_events: Maximum events to store
+            snapshot_interval: Events between snapshots
         """
-        self.event_store = EventStore()
-        self.snapshot_threshold = snapshot_threshold
+        self.max_events = max_events
         self.snapshot_interval = snapshot_interval
-        self._aggregates: Dict[str, Any] = {}
-        self._handlers: Dict[str, Callable[[Any, Event], None]] = {}
-    
-    def register_handler(
-        self,
-        event_type: str,
-        handler: Callable[[Any, Event], None]
-    ) -> None:
-        """Register an event handler."""
-        self._handlers[event_type] = handler
-    
-    def load_aggregate(
-        self,
-        aggregate_id: str,
-        initial_state: Any,
-        apply_event: Callable[[Any, Event], None]
-    ) -> Any:
-        """Load an aggregate by replaying events."""
-        # Try to get snapshot first
-        snapshot = self.event_store.get_snapshot(aggregate_id)
-        
-        if snapshot:
-            state = snapshot.state
-            from_version = snapshot.version
+
+        self._events: List[Dict[str, Any]] = []
+        self._snapshots: Dict[str, Dict[str, Any]] = {}
+        self._projections: Dict[str, Callable] = {}
+        self._event_handlers: Dict[str, List[Callable]] = {}
+
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
+        """
+        Execute event sourcing operation.
+
+        Args:
+            params: Dictionary containing:
+                - operation: 'append', 'replay', 'project', 'snapshot', 'handlers'
+                - aggregate_id: Aggregate identifier
+                - event_type: Type of event
+                - event_data: Event payload
+                - from_version: Starting version for replay
+
+        Returns:
+            Dictionary with operation result
+        """
+        operation = params.get("operation", "append")
+
+        if operation == "append":
+            return self._append_event(params)
+        elif operation == "replay":
+            return self._replay_events(params)
+        elif operation == "project":
+            return self._project_events(params)
+        elif operation == "snapshot":
+            return self._create_snapshot(params)
+        elif operation == "handlers":
+            return self._register_handlers(params)
         else:
-            state = initial_state
-            from_version = 0
-        
-        # Replay events
-        events = self.event_store.get_events(aggregate_id, from_version)
-        for event in events:
-            apply_event(state, event)
-        
-        # Create snapshot if needed
-        if len(events) >= self.snapshot_threshold:
-            self._create_snapshot(aggregate_id, state, len(events))
-        
-        self._aggregates[aggregate_id] = state
-        return state
-    
-    def _create_snapshot(
-        self,
-        aggregate_id: str,
-        state: Dict[str, Any],
-        version: int
-    ) -> None:
-        """Create a snapshot for an aggregate."""
-        snapshot = Snapshot(
-            aggregate_id=aggregate_id,
-            version=version,
-            state=copy.deepcopy(state),
-            timestamp=datetime.utcnow()
-        )
-        self.event_store.save_snapshot(snapshot)
-    
-    def publish(
-        self,
-        aggregate_id: str,
-        event_type: str,
-        payload: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> Event:
-        """Publish a new event."""
-        events = self.event_store.get_events(aggregate_id)
-        version = len(events)
-        
-        event = Event(
-            event_id=str(uuid.uuid4()),
-            aggregate_id=aggregate_id,
-            event_type=event_type,
-            payload=payload,
-            timestamp=datetime.utcnow(),
-            version=version + 1,
-            metadata=metadata or {}
-        )
-        
-        self.event_store.append(event)
-        return event
-    
-    def rebuild_projections(
-        self,
-        projection_handlers: Dict[str, Callable[[Any, Event], None]]
-    ) -> Dict[str, Any]:
-        """Rebuild all projections from events."""
-        projections: Dict[str, Any] = {}
-        
-        for aggregate_id, events in self.event_store._events.items():
-            for event in events:
-                for event_type, handler in projection_handlers.items():
-                    if event.event_type == event_type:
-                        if event_type not in projections:
-                            projections[event_type] = {}
-                        handler(projections[event_type], event)
-        
-        return projections
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get event sourcing statistics."""
-        total_events = sum(len(e) for e in self.event_store._events.values())
-        return {
-            "total_aggregates": len(self.event_store._events),
-            "total_events": total_events,
-            "total_snapshots": len(self.event_store._snapshots)
+            return {"success": False, "error": f"Unknown operation: {operation}"}
+
+    def _append_event(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Append new event to store."""
+        aggregate_id = params.get("aggregate_id", "")
+        event_type = params.get("event_type", "")
+        event_data = params.get("event_data", {})
+        metadata = params.get("metadata", {})
+
+        if not aggregate_id or not event_type:
+            return {"success": False, "error": "aggregate_id and event_type are required"}
+
+        event_id = str(uuid.uuid4())
+        version = len(self._events) + 1
+
+        event = {
+            "id": event_id,
+            "aggregate_id": aggregate_id,
+            "event_type": event_type,
+            "data": event_data,
+            "metadata": metadata,
+            "version": version,
+            "timestamp": time.time(),
         }
 
+        self._events.append(event)
 
-if __name__ == "__main__":
-    import copy
-    logging.basicConfig(level=logging.INFO)
-    
-    es = EventSourcingAction(snapshot_threshold=5)
-    
-    # Apply event handler
-    def apply_order_event(state: Dict, event: Event) -> None:
-        if event.event_type == "OrderCreated":
-            state["order_id"] = event.aggregate_id
-            state["status"] = "created"
-            state["items"] = event.payload.get("items", [])
-        elif event.event_type == "OrderShipped":
-            state["status"] = "shipped"
-        elif event.event_type == "OrderDelivered":
-            state["status"] = "delivered"
-    
-    # Publish events
-    events = [
-        ("order-1", "OrderCreated", {"items": [{"sku": "ITEM-1", "qty": 2}]}),
-        ("order-1", "OrderShipped", {}),
-        ("order-1", "OrderDelivered", {}),
-    ]
-    
-    for agg_id, event_type, payload in events:
-        es.publish(agg_id, event_type, payload)
-    
-    # Load and reconstruct
-    state = es.load_aggregate("order-1", {}, apply_order_event)
-    print(f"Order state: {state}")
-    print(f"Stats: {json.dumps(es.get_stats(), indent=2, default=str)}")
+        if len(self._events) > self.max_events:
+            self._events = self._events[-self.max_events:]
+
+        if event_type in self._event_handlers:
+            for handler in self._event_handlers[event_type]:
+                try:
+                    handler(event)
+                except Exception:
+                    pass
+
+        return {
+            "success": True,
+            "event_id": event_id,
+            "version": version,
+            "timestamp": event["timestamp"],
+        }
+
+    def _replay_events(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Replay events for an aggregate."""
+        aggregate_id = params.get("aggregate_id", "")
+        from_version = params.get("from_version", 1)
+        to_version = params.get("to_version")
+        event_types = params.get("event_types", [])
+
+        if not aggregate_id:
+            return {"success": False, "error": "aggregate_id is required"}
+
+        events = [
+            e for e in self._events
+            if e["aggregate_id"] == aggregate_id
+            and e["version"] >= from_version
+            and (not to_version or e["version"] <= to_version)
+            and (not event_types or e["event_type"] in event_types)
+        ]
+
+        return {
+            "success": True,
+            "aggregate_id": aggregate_id,
+            "events": events,
+            "event_count": len(events),
+            "from_version": from_version,
+            "to_version": events[-1]["version"] if events else None,
+        }
+
+    def _project_events(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Project events into read model."""
+        projection_name = params.get("projection_name", "")
+        aggregate_id = params.get("aggregate_id")
+        initial_state = params.get("initial_state", {})
+
+        if projection_name not in self._projections:
+            return {"success": False, "error": f"Projection '{projection_name}' not found"}
+
+        projection_fn = self._projections[projection_name]
+
+        events_query = self._events
+        if aggregate_id:
+            events_query = [e for e in events_query if e["aggregate_id"] == aggregate_id]
+
+        state = initial_state
+        for event in events_query:
+            try:
+                state = projection_fn(state, event)
+            except Exception as e:
+                return {"success": False, "error": f"Projection failed: {e}"}
+
+        return {
+            "success": True,
+            "projection": projection_name,
+            "state": state,
+            "events_processed": len(events_query),
+        }
+
+    def _create_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create snapshot for an aggregate."""
+        aggregate_id = params.get("aggregate_id", "")
+        state = params.get("state", {})
+
+        if not aggregate_id:
+            return {"success": False, "error": "aggregate_id is required"}
+
+        version = len([e for e in self._events if e["aggregate_id"] == aggregate_id])
+
+        self._snapshots[aggregate_id] = {
+            "aggregate_id": aggregate_id,
+            "state": state,
+            "version": version,
+            "created_at": time.time(),
+        }
+
+        return {
+            "success": True,
+            "aggregate_id": aggregate_id,
+            "snapshot_version": version,
+        }
+
+    def _register_handlers(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Register event handlers."""
+        event_type = params.get("event_type", "")
+        handler = params.get("handler")
+
+        if not event_type or not callable(handler):
+            return {"success": False, "error": "event_type and handler are required"}
+
+        if event_type not in self._event_handlers:
+            self._event_handlers[event_type] = []
+
+        self._event_handlers[event_type].append(handler)
+
+        return {"success": True, "event_type": event_type, "handler_count": len(self._event_handlers[event_type])}
+
+    def register_projection(self, name: str, projection_fn: Callable) -> None:
+        """Register a named projection function."""
+        self._projections[name] = projection_fn
+
+    def get_event_store_stats(self) -> Dict[str, Any]:
+        """Get event store statistics."""
+        return {
+            "total_events": len(self._events),
+            "max_events": self.max_events,
+            "snapshots": len(self._snapshots),
+            "projections": list(self._projections.keys()),
+            "event_types": list(self._event_handlers.keys()),
+        }
