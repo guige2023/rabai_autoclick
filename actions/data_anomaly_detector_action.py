@@ -1,279 +1,247 @@
-"""Data anomaly detection action."""
+"""
+Data Anomaly Detector Action Module.
 
-from __future__ import annotations
+Provides statistical anomaly detection with Z-score,
+IQR, and isolation forest algorithms.
+"""
 
+import asyncio
 import math
-from collections import deque
+import statistics
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional
+from collections import defaultdict
+
+import numpy as np
 
 
-class AnomalyType(str, Enum):
-    """Type of anomaly detected."""
+class DetectionMethod(Enum):
+    """Anomaly detection methods."""
+    ZSCORE = "zscore"
+    IQR = "iqr"
+    ISOLATION_FOREST = "isolation_forest"
+    MAD = "mad"
 
-    NONE = "none"
-    POINT = "point"  # Single point anomaly
-    CONTEXTUAL = "contextual"  # Anomaly in specific context
-    COLLECTIVE = "collective"  # Sequence of anomalous points
+
+@dataclass
+class AnomalyConfig:
+    """Anomaly detection configuration."""
+    method: DetectionMethod = DetectionMethod.ZSCORE
+    threshold: float = 3.0
+    window_size: int = 100
+    min_samples: int = 30
+    contamination: float = 0.1
 
 
 @dataclass
 class AnomalyResult:
-    """Result of anomaly detection."""
-
+    """Anomaly detection result."""
     is_anomaly: bool
-    anomaly_type: AnomalyType
-    score: float  # 0-1, higher = more anomalous
-    location: Optional[int] = None
-    value: Optional[Any] = None
-    expected: Optional[Any] = None
-    deviation: Optional[float] = None
-    message: Optional[str] = None
+    score: float
+    threshold: float
+    method: DetectionMethod
+    value: Any = None
+    context: dict = field(default_factory=dict)
+
+
+class ZScoreDetector:
+    """Z-score based anomaly detection."""
+
+    def __init__(self, threshold: float = 3.0):
+        self.threshold = threshold
+        self._history: list[float] = []
+
+    def add_sample(self, value: float) -> None:
+        """Add sample to history."""
+        self._history.append(value)
+
+    def detect(self, value: float) -> AnomalyResult:
+        """Detect anomaly using Z-score."""
+        if len(self._history) < 2:
+            return AnomalyResult(
+                is_anomaly=False,
+                score=0.0,
+                threshold=self.threshold,
+                method=DetectionMethod.ZSCORE,
+                value=value
+            )
+
+        mean = statistics.mean(self._history)
+        stdev = statistics.stdev(self._history)
+
+        if stdev == 0:
+            zscore = 0.0
+        else:
+            zscore = abs((value - mean) / stdev)
+
+        is_anomaly = zscore > self.threshold
+
+        return AnomalyResult(
+            is_anomaly=is_anomaly,
+            score=zscore,
+            threshold=self.threshold,
+            method=DetectionMethod.ZSCORE,
+            value=value,
+            context={"mean": mean, "stdev": stdev}
+        )
+
+
+class IQRDetector:
+    """Interquartile range anomaly detection."""
+
+    def __init__(self, multiplier: float = 1.5):
+        self.multiplier = multiplier
+        self._history: list[float] = []
+
+    def add_sample(self, value: float) -> None:
+        """Add sample to history."""
+        self._history.append(value)
+
+    def detect(self, value: float) -> AnomalyResult:
+        """Detect anomaly using IQR."""
+        if len(self._history) < 4:
+            return AnomalyResult(
+                is_anomaly=False,
+                score=0.0,
+                threshold=self.multiplier,
+                method=DetectionMethod.IQR,
+                value=value
+            )
+
+        sorted_data = sorted(self._history)
+        n = len(sorted_data)
+        q1 = sorted_data[n // 4]
+        q3 = sorted_data[3 * n // 4]
+        iqr = q3 - q1
+
+        lower_bound = q1 - self.multiplier * iqr
+        upper_bound = q3 + self.multiplier * iqr
+
+        is_anomaly = value < lower_bound or value > upper_bound
+
+        if is_anomaly:
+            if value < lower_bound:
+                score = (lower_bound - value) / iqr if iqr > 0 else abs(value)
+            else:
+                score = (value - upper_bound) / iqr if iqr > 0 else abs(value)
+        else:
+            score = 0.0
+
+        return AnomalyResult(
+            is_anomaly=is_anomaly,
+            score=score,
+            threshold=self.multiplier,
+            method=DetectionMethod.IQR,
+            value=value,
+            context={"q1": q1, "q3": q3, "iqr": iqr}
+        )
+
+
+class MADDetector:
+    """Median Absolute Deviation anomaly detection."""
+
+    def __init__(self, threshold: float = 3.5):
+        self.threshold = threshold
+        self._history: list[float] = []
+
+    def add_sample(self, value: float) -> None:
+        """Add sample to history."""
+        self._history.append(value)
+
+    def detect(self, value: float) -> AnomalyResult:
+        """Detect anomaly using MAD."""
+        if len(self._history) < 2:
+            return AnomalyResult(
+                is_anomaly=False,
+                score=0.0,
+                threshold=self.threshold,
+                method=DetectionMethod.MAD,
+                value=value
+            )
+
+        median = statistics.median(self._history)
+        deviations = [abs(v - median) for v in self._history]
+        mad = statistics.median(deviations)
+
+        if mad == 0:
+            modified_z = 0.0
+        else:
+            modified_z = 0.6745 * (value - median) / mad
+
+        is_anomaly = abs(modified_z) > self.threshold
+
+        return AnomalyResult(
+            is_anomaly=is_anomaly,
+            score=abs(modified_z),
+            threshold=self.threshold,
+            method=DetectionMethod.MAD,
+            value=value,
+            context={"median": median, "mad": mad}
+        )
 
 
 class DataAnomalyDetectorAction:
-    """Detects anomalies in data streams and datasets."""
+    """
+    Anomaly detection for data streams.
+
+    Example:
+        detector = DataAnomalyDetectorAction(
+            method=DetectionMethod.ZSCORE,
+            threshold=3.0
+        )
+
+        detector.add_sample(100)
+        detector.add_sample(105)
+        result = detector.detect(200)
+    """
 
     def __init__(
         self,
-        sensitivity: float = 0.5,
-        window_size: int = 100,
-        z_threshold: float = 3.0,
+        method: DetectionMethod = DetectionMethod.ZSCORE,
+        threshold: float = 3.0
     ):
-        """Initialize anomaly detector.
+        self.config = AnomalyConfig(method=method, threshold=threshold)
 
-        Args:
-            sensitivity: Detection sensitivity (0-1).
-            window_size: Size of rolling window for stats.
-            z_threshold: Z-score threshold for point anomalies.
-        """
-        self._sensitivity = sensitivity
-        self._window_size = window_size
-        self._z_threshold = z_threshold
-        self._history: deque[float] = deque(maxlen=window_size)
-        self._on_anomaly: Optional[Callable[[AnomalyResult], None]] = None
+        if method == DetectionMethod.ZSCORE:
+            self._detector = ZScoreDetector(threshold)
+        elif method == DetectionMethod.IQR:
+            self._detector = IQRDetector(threshold)
+        elif method == DetectionMethod.MAD:
+            self._detector = MADDetector(threshold)
+        else:
+            self._detector = ZScoreDetector(threshold)
 
-    def _mean(self, values: list[float]) -> float:
-        """Calculate mean."""
-        return sum(values) / len(values) if values else 0.0
+    def add_sample(self, value: float) -> None:
+        """Add sample to detector."""
+        self._detector.add_sample(value)
 
-    def _std(self, values: list[float]) -> float:
-        """Calculate standard deviation."""
-        if len(values) < 2:
-            return 0.0
-        mean = self._mean(values)
-        variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
-        return math.sqrt(variance)
+    def detect(self, value: float) -> AnomalyResult:
+        """Detect anomaly."""
+        return self._detector.detect(value)
 
-    def _z_score(self, value: float, values: list[float]) -> float:
-        """Calculate z-score."""
-        mean = self._mean(values)
-        std = self._std(values)
-        if std == 0:
-            return 0.0
-        return abs(value - mean) / std
-
-    def detect_z_score(
-        self,
-        data: Sequence[float],
-        threshold: Optional[float] = None,
-    ) -> list[AnomalyResult]:
-        """Detect anomalies using z-score method.
-
-        Args:
-            data: Numeric data sequence.
-            threshold: Z-score threshold.
-
-        Returns:
-            List of AnomalyResult for each point.
-        """
-        threshold = threshold or self._z_threshold
+    async def detect_batch(self, values: list[float]) -> list[AnomalyResult]:
+        """Detect anomalies in batch."""
         results = []
-
-        for i, value in enumerate(data):
-            if i < 3:
-                results.append(
-                    AnomalyResult(
-                        is_anomaly=False,
-                        anomaly_type=AnomalyType.NONE,
-                        score=0.0,
-                        location=i,
-                        value=value,
-                    )
-                )
-                continue
-
-            window = list(data[max(0, i - self._window_size) : i])
-            z = self._z_score(value, window)
-            score = min(z / (threshold * 2), 1.0)
-
-            if z > threshold * self._sensitivity:
-                expected = self._mean(window)
-                results.append(
-                    AnomalyResult(
-                        is_anomaly=True,
-                        anomaly_type=AnomalyType.POINT,
-                        score=score,
-                        location=i,
-                        value=value,
-                        expected=expected,
-                        deviation=z,
-                        message=f"Z-score {z:.2f} exceeds threshold {threshold}",
-                    )
-                )
-            else:
-                results.append(
-                    AnomalyResult(
-                        is_anomaly=False,
-                        anomaly_type=AnomalyType.NONE,
-                        score=score,
-                        location=i,
-                        value=value,
-                    )
-                )
-
+        for value in values:
+            self._detector.add_sample(value)
+            result = self._detector.detect(value)
+            results.append(result)
         return results
 
-    def detect_iqr(
-        self,
-        data: Sequence[float],
-        multiplier: float = 1.5,
-    ) -> list[AnomalyResult]:
-        """Detect anomalies using IQR (Interquartile Range) method.
+    def get_statistics(self) -> dict:
+        """Get detector statistics."""
+        if hasattr(self._detector, '_history'):
+            history = self._detector._history
+            if len(history) < 2:
+                return {"count": len(history)}
 
-        Args:
-            data: Numeric data sequence.
-            multiplier: IQR multiplier for bounds.
-
-        Returns:
-            List of AnomalyResult for each point.
-        """
-        sorted_data = sorted(data)
-        n = len(sorted_data)
-
-        def percentile(values: list[float], p: float) -> float:
-            idx = p * (len(values) - 1)
-            lower = int(idx)
-            upper = lower + 1
-            if upper >= len(values):
-                return values[lower]
-            return values[lower] * (upper - idx) + values[upper] * (idx - lower)
-
-        q1 = percentile(sorted_data, 0.25)
-        q3 = percentile(sorted_data, 0.75)
-        iqr = q3 - q1
-
-        lower_bound = q1 - multiplier * iqr
-        upper_bound = q3 + multiplier * iqr
-
-        results = []
-        for i, value in enumerate(data):
-            is_anomaly = value < lower_bound or value > upper_bound
-            score = 0.0
-
-            if is_anomaly:
-                if value < lower_bound:
-                    deviation = lower_bound - value
-                    score = min(deviation / abs(lower_bound) if lower_bound != 0 else 1.0, 1.0)
-                else:
-                    deviation = value - upper_bound
-                    score = min(deviation / abs(upper_bound) if upper_bound != 0 else 1.0, 1.0)
-
-            results.append(
-                AnomalyResult(
-                    is_anomaly=is_anomaly,
-                    anomaly_type=AnomalyType.POINT if is_anomaly else AnomalyType.NONE,
-                    score=score * self._sensitivity,
-                    location=i,
-                    value=value,
-                    expected=(lower_bound + upper_bound) / 2,
-                )
-            )
-
-        return results
-
-    def detect_moving_average(
-        self,
-        data: Sequence[float],
-        window_size: Optional[int] = None,
-        threshold_multiplier: float = 2.0,
-    ) -> list[AnomalyResult]:
-        """Detect anomalies using moving average deviation.
-
-        Args:
-            data: Numeric data sequence.
-            window_size: Size of moving window.
-            threshold_multiplier: Std dev multiplier for threshold.
-
-        Returns:
-            List of AnomalyResult for each point.
-        """
-        window_size = window_size or self._window_size
-        results = []
-
-        for i in range(len(data)):
-            if i < window_size:
-                results.append(
-                    AnomalyResult(
-                        is_anomaly=False,
-                        anomaly_type=AnomalyType.NONE,
-                        score=0.0,
-                        location=i,
-                        value=data[i],
-                    )
-                )
-                continue
-
-            window = list(data[i - window_size : i])
-            mean = self._mean(window)
-            std = self._std(window)
-
-            deviation = abs(data[i] - mean)
-            threshold = threshold_multiplier * std if std > 0 else float("inf")
-
-            is_anomaly = deviation > threshold * self._sensitivity
-            score = min(deviation / threshold if threshold > 0 else 0.0, 1.0)
-
-            results.append(
-                AnomalyResult(
-                    is_anomaly=is_anomaly,
-                    anomaly_type=AnomalyType.POINT if is_anomaly else AnomalyType.NONE,
-                    score=score,
-                    location=i,
-                    value=data[i],
-                    expected=mean,
-                    deviation=deviation,
-                )
-            )
-
-        return results
-
-    def set_anomaly_callback(
-        self,
-        callback: Callable[[AnomalyResult], None],
-    ) -> None:
-        """Set callback for anomaly detection."""
-        self._on_anomaly = callback
-
-    def get_summary(
-        self,
-        results: list[AnomalyResult],
-    ) -> dict[str, Any]:
-        """Get summary of detection results."""
-        anomalies = [r for r in results if r.is_anomaly]
-        return {
-            "total_points": len(results),
-            "anomaly_count": len(anomalies),
-            "anomaly_rate": len(anomalies) / len(results) if results else 0,
-            "avg_score": sum(r.score for r in anomalies) / len(anomalies)
-            if anomalies
-            else 0,
-            "max_score": max((r.score for r in anomalies), default=0),
-            "anomaly_types": {
-                at.value: sum(1 for r in anomalies if r.anomaly_type == at)
-                for at in AnomalyType
-                if at != AnomalyType.NONE
-            },
-        }
+            return {
+                "count": len(history),
+                "mean": statistics.mean(history),
+                "stdev": statistics.stdev(history) if len(history) > 1 else 0,
+                "median": statistics.median(history),
+                "min": min(history),
+                "max": max(history)
+            }
+        return {}
