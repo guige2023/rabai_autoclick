@@ -1,227 +1,317 @@
 """
-Drag trajectory utilities for computing smooth drag paths.
+Drag trajectory generation utilities for UI automation.
 
-Provides trajectory computation with path smoothing,
-waypoint interpolation, and physics-based movement.
+This module provides utilities for generating smooth, natural-looking
+drag trajectories with various path types and easing functions.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import List, Tuple, Callable, Optional
 
 
 @dataclass
-class Waypoint:
-    """A waypoint in a drag trajectory."""
+class Point:
+    """2D point with optional timestamp."""
     x: float
     y: float
-    arrival_time_ms: float = 0.0
+    timestamp: float = 0.0
 
 
 @dataclass
-class TrajectoryPoint:
-    """A point along the computed trajectory."""
-    x: float
-    y: float
-    timestamp_ms: float
-    velocity_x: float = 0.0
-    velocity_y: float = 0.0
+class TrajectoryConfig:
+    """
+    Configuration for trajectory generation.
+
+    Attributes:
+        num_points: Number of points in the trajectory.
+        duration: Total duration in seconds.
+        ease_func: Easing function to apply.
+        snap_to_grid: Optional grid size to snap points to.
+    """
+    num_points: int = 50
+    duration: float = 0.5
+    ease_func: Callable[[float], float] = field(default=lambda t: t)
+    snap_to_grid: Optional[float] = None
 
 
-class DragTrajectoryComputer:
-    """Computes smooth drag trajectories."""
+class TrajectoryGenerator:
+    """
+    Generates drag trajectories for automation.
 
-    def __init__(
+    Supports linear, curved, and custom path trajectories
+    with configurable easing.
+    """
+
+    def __init__(self) -> None:
+        self._config = TrajectoryConfig()
+
+    def set_config(self, config: TrajectoryConfig) -> TrajectoryGenerator:
+        """Update trajectory configuration."""
+        self._config = config
+        return self
+
+    def set_num_points(self, num: int) -> TrajectoryGenerator:
+        """Set number of trajectory points."""
+        self._config.num_points = max(2, num)
+        return self
+
+    def set_duration(self, duration: float) -> TrajectoryGenerator:
+        """Set trajectory duration in seconds."""
+        self._config.duration = max(0.01, duration)
+        return self
+
+    def set_easing(self, func: Callable[[float], float]) -> TrajectoryGenerator:
+        """Set easing function."""
+        self._config.ease_func = func
+        return self
+
+    def linear(
         self,
-        interpolation_mode: str = "linear",  # "linear", "cubic", "bezier"
-        velocity_profile: str = "constant",  # "constant", "ease_in", "ease_out", "ease_in_out"
-    ):
-        self.interpolation_mode = interpolation_mode
-        self.velocity_profile = velocity_profile
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+    ) -> List[Point]:
+        """Generate linear trajectory from (x1,y1) to (x2,y2)."""
+        points: List[Point] = []
+        step = 1.0 / (self._config.num_points - 1)
 
-    def compute_trajectory(
-        self,
-        start_x: float,
-        start_y: float,
-        end_x: float,
-        end_y: float,
-        duration_ms: float,
-        num_points: int = 50,
-    ) -> list[TrajectoryPoint]:
-        """Compute a smooth trajectory from start to end.
+        for i in range(self._config.num_points):
+            t = self._config.ease_func(i * step)
+            x = x1 + (x2 - x1) * t
+            y = y1 + (y2 - y1) * t
 
-        Args:
-            start_x, start_y: Starting position
-            end_x, end_y: Ending position
-            duration_ms: Total duration
-            num_points: Number of points in the trajectory
+            if self._config.snap_to_grid:
+                x = round(x / self._config.snap_to_grid) * self._config.snap_to_grid
+                y = round(y / self._config.snap_to_grid) * self._config.snap_to_grid
 
-        Returns:
-            List of TrajectoryPoints with positions and timestamps
-        """
-        trajectory = []
-        prev_x, prev_y, prev_t = start_x, start_y, 0.0
-
-        for i in range(num_points + 1):
-            t = i / num_points
-
-            # Apply velocity profile
-            t = self._apply_velocity_profile(t)
-
-            # Interpolate position
-            x = start_x + (end_x - start_x) * t
-            y = start_y + (end_y - start_y) * t
-
-            timestamp_ms = duration_ms * t
-
-            # Compute velocity
-            dt = timestamp_ms - prev_t
-            vx = (x - prev_x) / dt * 1000 if dt > 0 else 0.0
-            vy = (y - prev_y) / dt * 1000 if dt > 0 else 0.0
-
-            trajectory.append(TrajectoryPoint(
-                x=x, y=y,
-                timestamp_ms=timestamp_ms,
-                velocity_x=vx,
-                velocity_y=vy,
+            points.append(Point(
+                x=x,
+                y=y,
+                timestamp=i * self._config.duration / (self._config.num_points - 1),
             ))
 
-            prev_x, prev_y, prev_t = x, y, timestamp_ms
+        return points
 
-        return trajectory
-
-    def compute_curved_trajectory(
+    def curved(
         self,
-        start_x: float,
-        start_y: float,
-        end_x: float,
-        end_y: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
         control_x: float,
         control_y: float,
-        duration_ms: float,
-        num_points: int = 50,
-    ) -> list[TrajectoryPoint]:
-        """Compute a curved trajectory using quadratic bezier.
+    ) -> List[Point]:
+        """Generate quadratic Bezier curve trajectory."""
+        points: List[Point] = []
+        step = 1.0 / (self._config.num_points - 1)
 
-        Args:
-            control_x, control_y: Control point for the curve
-        """
-        trajectory = []
-        prev_x, prev_y, prev_t = start_x, start_y, 0.0
+        for i in range(self._config.num_points):
+            t = self._config.ease_func(i * step)
+            x, y = self._quadratic_bezier(x1, y1, control_x, control_y, x2, y2, t)
 
-        for i in range(num_points + 1):
-            t = i / num_points
-            t = self._apply_velocity_profile(t)
+            if self._config.snap_to_grid:
+                x = round(x / self._config.snap_to_grid) * self._config.snap_to_grid
+                y = round(y / self._config.snap_to_grid) * self._config.snap_to_grid
 
-            # Quadratic bezier
-            one_minus_t = 1 - t
-            x = one_minus_t ** 2 * start_x + 2 * one_minus_t * t * control_x + t ** 2 * end_x
-            y = one_minus_t ** 2 * start_y + 2 * one_minus_t * t * control_y + t ** 2 * end_y
-
-            timestamp_ms = duration_ms * t
-
-            dt = timestamp_ms - prev_t
-            vx = (x - prev_x) / dt * 1000 if dt > 0 else 0.0
-            vy = (y - prev_y) / dt * 1000 if dt > 0 else 0.0
-
-            trajectory.append(TrajectoryPoint(
-                x=x, y=y,
-                timestamp_ms=timestamp_ms,
-                velocity_x=vx,
-                velocity_y=vy,
+            points.append(Point(
+                x=x,
+                y=y,
+                timestamp=i * self._config.duration / (self._config.num_points - 1),
             ))
 
-            prev_x, prev_y, prev_t = x, y, timestamp_ms
+        return points
 
-        return trajectory
-
-    def compute_waypoint_trajectory(
+    def arc(
         self,
-        waypoints: list[Waypoint],
-        duration_ms: float,
-        num_points: int = 50,
-    ) -> list[TrajectoryPoint]:
-        """Compute trajectory through waypoints."""
-        if len(waypoints) < 2:
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        arc_height: float = 50.0,
+    ) -> List[Point]:
+        """Generate arc-shaped trajectory."""
+        points: List[Point] = []
+        step = 1.0 / (self._config.num_points - 1)
+
+        # Calculate control point for arc
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+
+        # Perpendicular direction
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx * dx + dy * dy)
+        if length == 0:
+            length = 1
+
+        control_x = mid_x - (dy / length) * arc_height
+        control_y = mid_y + (dx / length) * arc_height
+
+        return self.curved(x1, y1, x2, y2, control_x, control_y)
+
+    def smooth(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        smoothness: float = 0.5,
+    ) -> List[Point]:
+        """
+        Generate smooth trajectory with configurable smoothness.
+
+        smoothness: 0.0 = straight line, 1.0 = maximum curve.
+        """
+        # Calculate perpendicular offset for control point
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx * dx + dy * dy)
+
+        if length == 0:
+            return self.linear(x1, y1, x2, y2)
+
+        # Perpendicular direction
+        offset = length * smoothness * 0.25
+        control_x = (x1 + x2) / 2 - (dy / length) * offset
+        control_y = (y1 + y2) / 2 + (dx / length) * offset
+
+        return self.curved(x1, y1, x2, y2, control_x, control_y)
+
+    def polyline(
+        self,
+        points: List[Tuple[float, float]],
+    ) -> List[Point]:
+        """
+        Generate trajectory through multiple waypoints.
+
+        Interpolates smoothly between waypoints.
+        """
+        if len(points) < 2:
             return []
 
-        trajectory = []
-        total_distance = self._compute_total_distance(waypoints)
+        result: List[Point] = []
+        total_length = 0.0
+        segments: List[Tuple[float, float, float]] = []
 
-        prev_x, prev_y, prev_t = waypoints[0].x, waypoints[0].y, 0.0
+        # Calculate segment lengths
+        for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
+            dx = x2 - x1
+            dy = y2 - y1
+            length = math.sqrt(dx * dx + dy * dy)
+            segments.append((x1, y1, length))
+            total_length += length
 
-        for i in range(num_points + 1):
-            t = i / num_points
-            t = self._apply_velocity_profile(t)
+        if total_length == 0:
+            return []
 
-            x, y = self._position_at_t(waypoints, t, total_distance)
-            timestamp_ms = duration_ms * t
-
-            dt = timestamp_ms - prev_t
-            vx = (x - prev_x) / dt * 1000 if dt > 0 else 0.0
-            vy = (y - prev_y) / dt * 1000 if dt > 0 else 0.0
-
-            trajectory.append(TrajectoryPoint(
-                x=x, y=y,
-                timestamp_ms=timestamp_ms,
-                velocity_x=vx,
-                velocity_y=vy,
-            ))
-
-            prev_x, prev_y, prev_t = x, y, timestamp_ms
-
-        return trajectory
-
-    def _apply_velocity_profile(self, t: float) -> float:
-        """Apply velocity/easing profile to normalized time."""
-        if self.velocity_profile == "constant":
-            return t
-        elif self.velocity_profile == "ease_in":
-            return t * t
-        elif self.velocity_profile == "ease_out":
-            return 1 - (1 - t) ** 2
-        elif self.velocity_profile == "ease_in_out":
-            return 2 * t * t if t < 0.5 else 1 - (-2 * t + 2) ** 2 / 2
-        return t
-
-    def _compute_total_distance(self, waypoints: list[Waypoint]) -> float:
-        """Compute total distance through waypoints."""
-        total = 0.0
-        for i in range(1, len(waypoints)):
-            dx = waypoints[i].x - waypoints[i-1].x
-            dy = waypoints[i].y - waypoints[i-1].y
-            total += math.hypot(dx, dy)
-        return total
-
-    def _position_at_t(
-        self,
-        waypoints: list[Waypoint],
-        t: float,
-        total_distance: float,
-    ) -> tuple[float, float]:
-        """Get position at normalized time t."""
-        if total_distance == 0:
-            return waypoints[0].x, waypoints[0].y
-
-        target_dist = t * total_distance
+        # Generate points
+        current_segment = 0
         accumulated = 0.0
+        points_per_segment = max(1, self._config.num_points // len(segments))
 
-        for i in range(1, len(waypoints)):
-            dx = waypoints[i].x - waypoints[i-1].x
-            dy = waypoints[i].y - waypoints[i-1].y
-            segment_dist = math.hypot(dx, dy)
+        for i in range(self._config.num_points):
+            t = i / (self._config.num_points - 1)
+            distance = t * total_length
 
-            if accumulated + segment_dist >= target_dist:
-                segment_t = (target_dist - accumulated) / segment_dist
-                x = waypoints[i-1].x + dx * segment_t
-                y = waypoints[i-1].y + dy * segment_t
-                return x, y
+            # Find correct segment
+            seg_length = 0.0
+            for j, (x1, y1, length) in enumerate(segments):
+                if distance <= seg_length + length or j == len(segments) - 1:
+                    local_t = (distance - seg_length) / length if length > 0 else 0
+                    local_t = max(0, min(1, local_t))
+                    local_t = self._config.ease_func(local_t)
 
-            accumulated += segment_dist
+                    x2, y2 = points[j + 1]
+                    x = x1 + (x2 - x1) * local_t
+                    y = y1 + (y2 - y1) * local_t
 
-        return waypoints[-1].x, waypoints[-1].y
+                    if self._config.snap_to_grid:
+                        x = round(x / self._config.snap_to_grid) * self._config.snap_to_grid
+                        y = round(y / self._config.snap_to_grid) * self._config.snap_to_grid
+
+                    result.append(Point(
+                        x=x,
+                        y=y,
+                        timestamp=i * self._config.duration / (self._config.num_points - 1),
+                    ))
+                    break
+                seg_length += length
+
+        return result
+
+    @staticmethod
+    def _quadratic_bezier(
+        x1: float,
+        y1: float,
+        cx: float,
+        cy: float,
+        x2: float,
+        y2: float,
+        t: float,
+    ) -> Tuple[float, float]:
+        """Calculate point on quadratic Bezier curve."""
+        mt = 1 - t
+        x = mt * mt * x1 + 2 * mt * t * cx + t * t * x2
+        y = mt * mt * y1 + 2 * mt * t * cy + t * t * y2
+        return (x, y)
 
 
-__all__ = ["DragTrajectoryComputer", "TrajectoryPoint", "Waypoint"]
+# Pre-built easing functions
+def ease_linear(t: float) -> float:
+    """Linear easing."""
+    return t
+
+
+def ease_in_quad(t: float) -> float:
+    """Quadratic ease-in."""
+    return t * t
+
+
+def ease_out_quad(t: float) -> float:
+    """Quadratic ease-out."""
+    return t * (2 - t)
+
+
+def ease_in_out_quad(t: float) -> float:
+    """Quadratic ease-in-out."""
+    if t < 0.5:
+        return 2 * t * t
+    return -1 + (4 - 2 * t) * t
+
+
+def ease_in_cubic(t: float) -> float:
+    """Cubic ease-in."""
+    return t * t * t
+
+
+def ease_out_cubic(t: float) -> float:
+    """Cubic ease-out."""
+    return (t - 1) ** 3 + 1
+
+
+def ease_in_out_cubic(t: float) -> float:
+    """Cubic ease-in-out."""
+    if t < 0.5:
+        return 4 * t * t * t
+    return 1 - ((-2 * t + 2) ** 3) / 2
+
+
+def ease_in_sine(t: float) -> float:
+    """Sine ease-in."""
+    return 1 - math.cos(t * math.pi / 2)
+
+
+def ease_out_sine(t: float) -> float:
+    """Sine ease-out."""
+    return math.sin(t * math.pi / 2)
+
+
+def ease_in_out_sine(t: float) -> float:
+    """Sine ease-in-out."""
+    return -(math.cos(math.pi * t) - 1) / 2
