@@ -12,7 +12,7 @@ import pyautogui
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ..core.base_action import BaseAction, ActionResult
+from rabai_autoclick.core.base_action import BaseAction, ActionResult
 
 
 class MouseClickAction(BaseAction):

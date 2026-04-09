@@ -16,7 +16,7 @@ import sys
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ..core.base_action import BaseAction, ActionResult
+from rabai_autoclick.core.base_action import BaseAction, ActionResult
 
 
 # Modules and names blocked from import/attribute access

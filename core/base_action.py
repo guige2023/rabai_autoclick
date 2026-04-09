@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -40,10 +40,10 @@ class BaseAction(ABC):
     description: str = "动作基类"
     
     # Supported button values for mouse actions
-    VALID_BUTTONS: List[str] = field(default_factory=lambda: ['left', 'right', 'middle'])
+    VALID_BUTTONS: List[str] = ['left', 'right', 'middle']
     
     # Supported directions for scroll actions
-    VALID_DIRECTIONS: List[str] = field(default_factory=lambda: ['up', 'down'])
+    VALID_DIRECTIONS: List[str] = ['up', 'down']
     
     def __init__(self) -> None:
         self.params: Dict[str, Any] = {}

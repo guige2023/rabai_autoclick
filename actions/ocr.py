@@ -24,8 +24,8 @@ import pyautogui
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..core.base_action import BaseAction, ActionResult
-from ..utils.mouse_utils import macos_click
+from rabai_autoclick.core.base_action import BaseAction, ActionResult
+from rabai_autoclick.utils.mouse_utils import macos_click
 
 
 # Valid OCR preprocessing modes

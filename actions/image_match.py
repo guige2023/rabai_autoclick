@@ -12,8 +12,8 @@ import pyautogui
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ..core.base_action import BaseAction, ActionResult
-from ..utils.mouse_utils import macos_click
+from rabai_autoclick.core.base_action import BaseAction, ActionResult
+from rabai_autoclick.utils.mouse_utils import macos_click
 
 
 # Confidence range bounds

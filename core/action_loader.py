@@ -95,8 +95,9 @@ class ActionLoader:
                 if project_root not in sys.path:
                     sys.path.insert(0, project_root)
                 
-                # Import base classes needed
-                from core.base_action import BaseAction, ActionResult
+                # Import base classes from the same module that action_loader uses
+                # to ensure we get the SAME class objects (not duplicate class defs)
+                from rabai_autoclick.core.base_action import BaseAction, ActionResult
                 
                 # Read the action file
                 with open(file_path, 'r', encoding='utf-8') as f:

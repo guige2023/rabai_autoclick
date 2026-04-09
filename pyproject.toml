@@ -71,10 +71,7 @@ Documentation = "https://github.com/guige2023/rabai_autoclick#readme"
 Repository = "https://github.com/guige2023/rabai_autoclick"
 Issues = "https://github.com/guige2023/rabai_autoclick/issues"
 Changelog = "https://github.com/guige2023/rabai_autoclick/releases"
-
-[project.sos]
 # Share your work with the community
-# Submit to open-source platforms like Liberapay, Ko-fi, etc.
 
 [tool.coverage.run]
 source = ["."]

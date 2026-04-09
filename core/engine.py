@@ -41,7 +41,7 @@ WORKFLOW_SCHEMA: Dict[str, Any] = {
                 "type": "object",
                 "required": ["id", "type"],
                 "properties": {
-                    "id": {"type": "string"},
+                    "id": {"type": ["string", "integer"]},
                     "type": {"type": "string"},
                     "pre_delay": {"type": "number"},
                     "post_delay": {"type": "number"},

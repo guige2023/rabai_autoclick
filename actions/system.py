@@ -11,7 +11,7 @@ import io
 import base64
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ..core.base_action import BaseAction, ActionResult
+from rabai_autoclick.core.base_action import BaseAction, ActionResult
 
 
 # Valid alert types
