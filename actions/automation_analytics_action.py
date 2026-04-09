@@ -1,484 +1,357 @@
-"""Automation analytics and metrics action module for RabAI AutoClick.
+"""Automation analytics action module for RabAI AutoClick.
 
-Provides:
-- AutomationAnalyticsAction: Analytics and metrics for automation
-- AutomationBenchmarkAction: Benchmark automation performance
-- AutomationProfilerAction: Profile automation execution
-- AutomationHealthCheckAction: Health checks for automation systems
+Provides analytics and metrics operations:
+- MetricsCollectorAction: Collect automation metrics
+- MetricsAggregatorAction: Aggregate metrics data
+- MetricsExporterAction: Export metrics to external systems
+- MetricsAlertAction: Alert based on metrics thresholds
 """
-
-import time
-import json
-import hashlib
-import math
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
-from enum import Enum
 
 import sys
 import os
+import time
+import logging
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from collections import defaultdict
+import threading
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
-
-class HealthStatus(str, Enum):
-    """Health status levels."""
-    HEALTHY = "healthy"
-    DEGRADED = "degraded"
-    UNHEALTHY = "unhealthy"
-    UNKNOWN = "unknown"
+logger = logging.getLogger(__name__)
 
 
-class AutomationAnalyticsAction(BaseAction):
-    """Analytics and metrics for automation workflows."""
-    action_type = "automation_analytics"
-    display_name = "自动化分析"
-    description = "工作流分析与指标"
-
-    def __init__(self):
-        super().__init__()
-        self._analytics: Dict[str, List[Dict]] = {}
-        self._workflow_metrics: Dict[str, Dict] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "track")
-            workflow_id = params.get("workflow_id", "")
-
-            if operation == "track":
-                if not workflow_id:
-                    return ActionResult(success=False, message="workflow_id required")
-
-                if workflow_id not in self._analytics:
-                    self._analytics[workflow_id] = []
-                if workflow_id not in self._workflow_metrics:
-                    self._workflow_metrics[workflow_id] = {"runs": 0, "successes": 0, "failures": 0, "total_duration": 0}
-
-                run_data = {
-                    "timestamp": time.time(),
-                    "duration": params.get("duration", 0),
-                    "success": params.get("success", True),
-                    "steps_completed": params.get("steps_completed", 0),
-                    "steps_total": params.get("steps_total", 0),
-                    "records_processed": params.get("records_processed", 0),
-                    "error_count": params.get("error_count", 0),
-                    "resource_usage": params.get("resource_usage", {})
-                }
-
-                self._analytics[workflow_id].append(run_data)
-                if len(self._analytics[workflow_id]) > 10000:
-                    self._analytics[workflow_id] = self._analytics[workflow_id][-10000:]
-
-                metrics = self._workflow_metrics[workflow_id]
-                metrics["runs"] += 1
-                metrics["total_duration"] += run_data["duration"]
-                if run_data["success"]:
-                    metrics["successes"] += 1
-                else:
-                    metrics["failures"] += 1
-
-                return ActionResult(success=True, data={"tracked": run_data})
-
-            elif operation == "dashboard":
-                if workflow_id:
-                    if workflow_id not in self._workflow_metrics:
-                        return ActionResult(success=False, message=f"No data for '{workflow_id}'")
-
-                    metrics = self._workflow_metrics[workflow_id]
-                    history = self._analytics.get(workflow_id, [])
-                    recent = history[-100:] if len(history) > 100 else history
-
-                    if recent:
-                        avg_duration = sum(r["duration"] for r in recent) / len(recent)
-                        avg_records = sum(r.get("records_processed", 0) for r in recent) / len(recent)
-                        total_errors = sum(r.get("error_count", 0) for r in recent)
-                        success_rate = metrics["successes"] / metrics["runs"] if metrics["runs"] > 0 else 0
-                    else:
-                        avg_duration = avg_records = total_errors = success_rate = 0
-
-                    p50 = self._percentile([r["duration"] for r in recent], 50) if recent else 0
-                    p95 = self._percentile([r["duration"] for r in recent], 95) if recent else 0
-                    p99 = self._percentile([r["duration"] for r in recent], 99) if recent else 0
-
-                    return ActionResult(
-                        success=True,
-                        data={
-                            "workflow_id": workflow_id,
-                            "total_runs": metrics["runs"],
-                            "success_rate": round(success_rate, 4),
-                            "avg_duration_ms": round(avg_duration, 2),
-                            "avg_records": round(avg_records, 1),
-                            "total_errors": total_errors,
-                            "p50_ms": round(p50, 2),
-                            "p95_ms": round(p95, 2),
-                            "p99_ms": round(p99, 2)
-                        }
-                    )
-
-                all_dashboards = {}
-                for wid, mm in self._workflow_metrics.items():
-                    all_dashboards[wid] = {
-                        "runs": mm["runs"],
-                        "success_rate": round(mm["successes"] / mm["runs"], 4) if mm["runs"] > 0 else 0
-                    }
-                return ActionResult(success=True, data={"workflows": all_dashboards})
-
-            elif operation == "trends":
-                if workflow_id not in self._analytics:
-                    return ActionResult(success=False, message=f"No data for '{workflow_id}'")
-
-                history = self._analytics[workflow_id]
-                now = time.time()
-                buckets = params.get("buckets", 24)
-                interval = 3600 / buckets if buckets > 0 else 3600
-
-                trends = []
-                for i in range(buckets):
-                    start = now - (buckets - i) * interval
-                    end = start + interval
-                    bucket_runs = [r for r in history if start <= r["timestamp"] < end]
-                    if bucket_runs:
-                        trends.append({
-                            "bucket": i,
-                            "start_time": start,
-                            "runs": len(bucket_runs),
-                            "avg_duration": sum(r["duration"] for r in bucket_runs) / len(bucket_runs),
-                            "success_count": sum(1 for r in bucket_runs if r["success"])
-                        })
-                    else:
-                        trends.append({"bucket": i, "start_time": start, "runs": 0})
-
-                return ActionResult(success=True, data={"workflow_id": workflow_id, "trends": trends})
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Analytics error: {str(e)}")
-
-    def _percentile(self, values: List[float], percentile: int) -> float:
-        if not values:
-            return 0
-        sorted_values = sorted(values)
-        index = int(len(sorted_values) * percentile / 100)
-        return sorted_values[min(index, len(sorted_values) - 1)]
+@dataclass
+class MetricPoint:
+    """A single metric data point."""
+    name: str
+    value: float
+    timestamp: datetime = field(default_factory=datetime.now)
+    tags: Dict[str, str] = field(default_factory=dict)
+    unit: str = ""
 
 
-class AutomationBenchmarkAction(BaseAction):
-    """Benchmark automation performance."""
-    action_type = "automation_benchmark"
-    display_name = "自动化基准测试"
-    description = "性能基准测试"
+@dataclass
+class MetricSummary:
+    """Summary statistics for a metric."""
+    name: str
+    count: int
+    sum: float
+    min: float
+    max: float
+    avg: float
+    p50: float
+    p95: float
+    p99: float
 
-    def __init__(self):
-        super().__init__()
-        self._benchmarks: Dict[str, Dict] = {}
+
+class MetricsStore:
+    """In-memory metrics storage."""
+
+    def __init__(self, retention_minutes: int = 60) -> None:
+        self._metrics: Dict[str, List[MetricPoint]] = defaultdict(list)
+        self._lock = threading.Lock()
+        self._retention = timedelta(minutes=retention_minutes)
+
+    def record(self, metric: MetricPoint) -> None:
+        with self._lock:
+            self._metrics[metric.name].append(metric)
+            self._cleanup(metric.name)
+
+    def _cleanup(self, name: str) -> None:
+        cutoff = datetime.now() - self._retention
+        self._metrics[name] = [
+            m for m in self._metrics[name] if m.timestamp > cutoff
+        ]
+
+    def get(self, name: str, since: Optional[datetime] = None) -> List[MetricPoint]:
+        with self._lock:
+            metrics = self._metrics.get(name, [])
+            if since:
+                metrics = [m for m in metrics if m.timestamp >= since]
+            return metrics
+
+    def summarize(self, name: str, since: Optional[datetime] = None) -> Optional[MetricSummary]:
+        points = self.get(name, since)
+        if not points:
+            return None
+
+        values = sorted([p.value for p in points])
+        count = len(values)
+        total = sum(values)
+
+        def percentile(data: List[float], p: float) -> float:
+            if not data:
+                return 0.0
+            idx = int(len(data) * p)
+            idx = min(idx, len(data) - 1)
+            return data[idx]
+
+        return MetricSummary(
+            name=name,
+            count=count,
+            sum=total,
+            min=values[0],
+            max=values[-1],
+            avg=total / count,
+            p50=percentile(values, 0.50),
+            p95=percentile(values, 0.95),
+            p99=percentile(values, 0.99)
+        )
+
+    def list_metrics(self) -> List[str]:
+        with self._lock:
+            return list(self._metrics.keys())
+
+
+_store = MetricsStore()
+_alert_rules: Dict[str, Dict[str, Any]] = {}
+
+
+class MetricsCollectorAction(BaseAction):
+    """Collect automation metrics."""
+    action_type = "automation_metrics_collector"
+    display_name = "指标收集器"
+    description = "收集自动化执行的指标数据"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "run")
-            benchmark_name = params.get("benchmark_name", "")
+        metric_name = params.get("name", "")
+        value = params.get("value", 1.0)
+        tags = params.get("tags", {})
+        unit = params.get("unit", "")
 
-            if operation == "define":
-                if not benchmark_name:
-                    return ActionResult(success=False, message="benchmark_name required")
+        if not metric_name:
+            return ActionResult(success=False, message="name参数是必需的")
 
-                self._benchmarks[benchmark_name] = {
-                    "name": benchmark_name,
-                    "tests": params.get("tests", []),
-                    "created_at": time.time(),
-                    "last_run": None,
-                    "results": []
+        metric = MetricPoint(
+            name=metric_name,
+            value=float(value),
+            tags=tags,
+            unit=unit
+        )
+        _store.record(metric)
+
+        return ActionResult(
+            success=True,
+            message=f"指标 {metric_name}={value}{unit} 已记录",
+            data={"name": metric_name, "value": value, "timestamp": metric.timestamp.isoformat()}
+        )
+
+
+class MetricsAggregatorAction(BaseAction):
+    """Aggregate metrics data."""
+    action_type = "automation_metrics_aggregator"
+    display_name = "指标聚合器"
+    description = "聚合和分析指标数据"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        metric_name = params.get("name", "")
+        since_minutes = params.get("since_minutes", 60)
+        operation = params.get("operation", "summarize")
+
+        if not metric_name:
+            all_metrics = _store.list_metrics()
+            return ActionResult(
+                success=True,
+                message=f"共 {len(all_metrics)} 个指标",
+                data={"metrics": all_metrics}
+            )
+
+        since = datetime.now() - timedelta(minutes=since_minutes)
+
+        if operation == "summarize":
+            summary = _store.summarize(metric_name, since=since)
+            if not summary:
+                return ActionResult(success=False, message=f"指标 {metric_name} 无数据")
+
+            return ActionResult(
+                success=True,
+                message=f"指标 {metric_name} 汇总",
+                data={
+                    "name": summary.name,
+                    "count": summary.count,
+                    "sum": round(summary.sum, 4),
+                    "min": round(summary.min, 4),
+                    "max": round(summary.max, 4),
+                    "avg": round(summary.avg, 4),
+                    "p50": round(summary.p50, 4),
+                    "p95": round(summary.p95, 4),
+                    "p99": round(summary.p99, 4)
                 }
-                return ActionResult(success=True, data={"benchmark": benchmark_name}, message=f"Benchmark '{benchmark_name}' defined")
+            )
 
-            elif operation == "run":
-                if not benchmark_name:
-                    return ActionResult(success=False, message="benchmark_name required")
+        if operation == "get":
+            points = _store.get(metric_name, since=since)
+            return ActionResult(
+                success=True,
+                message=f"获取 {len(points)} 个数据点",
+                data={
+                    "points": [
+                        {"value": p.value, "timestamp": p.timestamp.isoformat(), "tags": p.tags}
+                        for p in points[-100:]
+                    ]
+                }
+            )
 
-                if benchmark_name not in self._benchmarks:
-                    return ActionResult(success=False, message=f"Benchmark '{benchmark_name}' not found")
+        return ActionResult(success=False, message=f"未知操作: {operation}")
 
-                bench = self._benchmarks[benchmark_name]
-                iterations = params.get("iterations", 10)
-                warmup = params.get("warmup", 2)
 
-                test_results = []
-                for test in bench["tests"]:
-                    test_name = test.get("name", "unnamed")
-                    test_func = test.get("func", "sleep")
-                    test_config = test.get("config", {})
+class MetricsExporterAction(BaseAction):
+    """Export metrics to external systems."""
+    action_type = "automation_metrics_exporter"
+    display_name = "指标导出器"
+    description = "将指标导出到外部系统"
 
-                    for _ in range(warmup):
-                        self._run_test(test_func, test_config)
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        format_type = params.get("format", "json")
+        metric_names = params.get("names", [])
+        since_minutes = params.get("since_minutes", 60)
+        since = datetime.now() - timedelta(minutes=since_minutes)
 
-                    durations = []
-                    for _ in range(iterations):
-                        start = time.time()
-                        self._run_test(test_func, test_config)
-                        durations.append(time.time() - start)
+        if not metric_names:
+            metric_names = _store.list_metrics()
 
-                    test_results.append({
-                        "name": test_name,
-                        "iterations": iterations,
-                        "min_ms": round(min(durations) * 1000, 3),
-                        "max_ms": round(max(durations) * 1000, 3),
-                        "avg_ms": round(sum(durations) / len(durations) * 1000, 3),
-                        "p50_ms": round(self._percentile(durations, 50) * 1000, 3),
-                        "p95_ms": round(self._percentile(durations, 95) * 1000, 3),
-                        "p99_ms": round(self._percentile(durations, 99) * 1000, 3)
+        export_data = {}
+        for name in metric_names:
+            summary = _store.summarize(name, since=since)
+            if summary:
+                export_data[name] = {
+                    "count": summary.count,
+                    "sum": round(summary.sum, 4),
+                    "min": round(summary.min, 4),
+                    "max": round(summary.max, 4),
+                    "avg": round(summary.avg, 4),
+                    "p95": round(summary.p95, 4)
+                }
+
+        if format_type == "json":
+            output = json.dumps(export_data, indent=2)
+            return ActionResult(
+                success=True,
+                message=f"导出 {len(export_data)} 个指标 (JSON)",
+                data={"format": "json", "data": export_data}
+            )
+
+        if format_type == "prometheus":
+            lines = []
+            for name, stats in export_data.items():
+                safe_name = name.replace(".", "_").replace(" ", "_")
+                lines.append(f"# TYPE {safe_name} gauge")
+                for key, val in stats.items():
+                    lines.append(f"{safe_name}_{key} {val}")
+            output = "\n".join(lines)
+            return ActionResult(
+                success=True,
+                message=f"导出 {len(export_data)} 个指标 (Prometheus)",
+                data={"format": "prometheus", "data": output}
+            )
+
+        if format_type == "csv":
+            lines = ["metric,count,sum,min,max,avg,p95"]
+            for name, stats in export_data.items():
+                lines.append(f"{name},{stats['count']},{stats['sum']},{stats['min']},{stats['max']},{stats['avg']},{stats['p95']}")
+            output = "\n".join(lines)
+            return ActionResult(
+                success=True,
+                message=f"导出 {len(export_data)} 个指标 (CSV)",
+                data={"format": "csv", "data": output}
+            )
+
+        return ActionResult(success=False, message=f"未知格式: {format_type}")
+
+
+class MetricsAlertAction(BaseAction):
+    """Alert based on metrics thresholds."""
+    action_type = "automation_metrics_alert"
+    display_name = "指标告警"
+    description = "基于指标阈值触发告警"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        operation = params.get("operation", "check")
+        rule_name = params.get("rule_name", "")
+        metric_name = params.get("metric_name", "")
+        threshold = params.get("threshold", 0.0)
+        comparison = params.get("comparison", "gt")
+        severity = params.get("severity", "warning")
+
+        global _alert_rules
+
+        if operation == "create":
+            if not rule_name or not metric_name:
+                return ActionResult(success=False, message="rule_name和metric_name是必需的")
+
+            _alert_rules[rule_name] = {
+                "metric_name": metric_name,
+                "threshold": threshold,
+                "comparison": comparison,
+                "severity": severity,
+                "enabled": True
+            }
+
+            return ActionResult(
+                success=True,
+                message=f"告警规则 {rule_name} 已创建",
+                data={"rule_name": rule_name}
+            )
+
+        if operation == "list":
+            return ActionResult(
+                success=True,
+                message=f"共 {len(_alert_rules)} 条告警规则",
+                data={"rules": list(_alert_rules.items())}
+            )
+
+        if operation == "check":
+            triggered = []
+            for name, rule in _alert_rules.items():
+                if not rule.get("enabled", True):
+                    continue
+                summary = _store.summarize(rule["metric_name"])
+                if not summary:
+                    continue
+
+                value = summary.avg
+                thresh = rule["threshold"]
+                comp = rule["comparison"]
+
+                fired = False
+                if comp == "gt" and value > thresh:
+                    fired = True
+                elif comp == "gte" and value >= thresh:
+                    fired = True
+                elif comp == "lt" and value < thresh:
+                    fired = True
+                elif comp == "lte" and value <= thresh:
+                    fired = True
+                elif comp == "eq" and value == thresh:
+                    fired = True
+
+                if fired:
+                    triggered.append({
+                        "rule": name,
+                        "metric": rule["metric_name"],
+                        "value": round(value, 4),
+                        "threshold": thresh,
+                        "comparison": comp,
+                        "severity": rule["severity"]
                     })
 
-                bench["last_run"] = time.time()
-                bench["results"] = test_results
+            return ActionResult(
+                success=True,
+                message=f"检查完成，{len(triggered)} 个告警触发",
+                data={"triggered": triggered, "count": len(triggered)}
+            )
 
-                return ActionResult(
-                    success=True,
-                    data={"benchmark": benchmark_name, "results": test_results},
-                    message=f"Benchmark '{benchmark_name}' completed: {len(test_results)} tests"
-                )
+        if operation == "delete":
+            if rule_name in _alert_rules:
+                del _alert_rules[rule_name]
+                return ActionResult(success=True, message=f"规则 {rule_name} 已删除")
+            return ActionResult(success=False, message=f"规则 {rule_name} 不存在")
 
-            elif operation == "compare":
-                benchmarks = params.get("benchmarks", [])
-                comparison = {}
-                for bname in benchmarks:
-                    if bname in self._benchmarks and self._benchmarks[bname]["results"]:
-                        comparison[bname] = self._benchmarks[bname]["results"]
-                return ActionResult(success=True, data={"comparison": comparison})
-
-            elif operation == "list":
-                return ActionResult(
-                    success=True,
-                    data={"benchmarks": [{"name": k, "last_run": v["last_run"]} for k, v in self._benchmarks.items()]}
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Benchmark error: {str(e)}")
-
-    def _run_test(self, test_func: str, config: Dict) -> None:
-        if test_func == "sleep":
-            time.sleep(config.get("duration", 0.001))
-        elif test_func == "compute":
-            _ = sum(i * i for i in range(config.get("iterations", 1000)))
-        elif test_func == "json_serialize":
-            data = config.get("data", {})
-            _ = json.dumps(data)
-
-    def _percentile(self, values: List[float], percentile: int) -> float:
-        if not values:
-            return 0
-        sorted_values = sorted(values)
-        index = int(len(sorted_values) * percentile / 100)
-        return sorted_values[min(index, len(sorted_values) - 1)]
+        return ActionResult(success=False, message=f"未知操作: {operation}")
 
 
-class AutomationProfilerAction(BaseAction):
-    """Profile automation execution."""
-    action_type = "automation_profiler"
-    display_name = "自动化性能分析"
-    description = "执行性能分析"
-
-    def __init__(self):
-        super().__init__()
-        self._profiles: Dict[str, Dict] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "profile")
-            profile_name = params.get("profile_name", "")
-
-            if operation == "start":
-                if not profile_name:
-                    return ActionResult(success=False, message="profile_name required")
-
-                self._profiles[profile_name] = {
-                    "name": profile_name,
-                    "started_at": time.time(),
-                    "events": [],
-                    "memory_snapshots": [],
-                    "cpu_snapshots": [],
-                    "status": "running"
-                }
-                return ActionResult(success=True, message=f"Profiler '{profile_name}' started")
-
-            elif operation == "record_event":
-                if profile_name not in self._profiles:
-                    return ActionResult(success=False, message=f"Profiler '{profile_name}' not found")
-
-                self._profiles[profile_name]["events"].append({
-                    "timestamp": time.time(),
-                    "event_type": params.get("event_type", "marker"),
-                    "name": params.get("event_name", ""),
-                    "metadata": params.get("metadata", {})
-                })
-                return ActionResult(success=True, message=f"Event recorded: {params.get('event_name', '')}")
-
-            elif operation == "stop":
-                if profile_name not in self._profiles:
-                    return ActionResult(success=False, message=f"Profiler '{profile_name}' not found")
-
-                profile = self._profiles[profile_name]
-                profile["status"] = "completed"
-                profile["ended_at"] = time.time()
-                profile["total_duration"] = profile["ended_at"] - profile["started_at"]
-
-                events_by_type = {}
-                for event in profile["events"]:
-                    etype = event["event_type"]
-                    if etype not in events_by_type:
-                        events_by_type[etype] = []
-                    events_by_type[etype].append(event)
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "profile": profile_name,
-                        "duration_ms": round(profile["total_duration"] * 1000, 2),
-                        "total_events": len(profile["events"]),
-                        "events_by_type": {k: len(v) for k, v in events_by_type.items()}
-                    }
-                )
-
-            elif operation == "analyze":
-                if profile_name not in self._profiles:
-                    return ActionResult(success=False, message=f"Profiler '{profile_name}' not found")
-
-                profile = self._profiles[profile_name]
-                events = profile["events"]
-
-                if not events:
-                    return ActionResult(success=True, data={"profile": profile_name, "events": []})
-
-                marker_events = [e for e in events if e["event_type"] == "marker"]
-                gaps = []
-                if marker_events:
-                    for i in range(1, len(marker_events)):
-                        gap = marker_events[i]["timestamp"] - marker_events[i-1]["timestamp"]
-                        gaps.append({"from": marker_events[i-1]["name"], "to": marker_events[i]["name"], "gap_ms": round(gap * 1000, 2)})
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "profile": profile_name,
-                        "event_count": len(events),
-                        "largest_gaps": sorted(gaps, key=lambda g: g["gap_ms"], reverse=True)[:5]
-                    }
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Profiler error: {str(e)}")
-
-
-class AutomationHealthCheckAction(BaseAction):
-    """Health checks for automation systems."""
-    action_type = "automation_health_check"
-    display_name = "自动化健康检查"
-    description = "系统健康检查"
-
-    def __init__(self):
-        super().__init__()
-        self._health_records: Dict[str, Dict] = {}
-        self._check_configs: Dict[str, Dict] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "check")
-            component = params.get("component", "")
-
-            if operation == "register":
-                if not component:
-                    return ActionResult(success=False, message="component required")
-
-                self._check_configs[component] = {
-                    "component": component,
-                    "check_interval": params.get("check_interval", 60),
-                    "timeout": params.get("timeout", 5),
-                    "threshold": params.get("threshold", 0.8),
-                    "enabled": params.get("enabled", True),
-                    "created_at": time.time()
-                }
-                return ActionResult(success=True, message=f"Health check registered for '{component}'")
-
-            elif operation == "check":
-                if not component:
-                    return ActionResult(success=False, message="component required")
-
-                if component not in self._check_configs:
-                    return ActionResult(success=False, message=f"No health check for '{component}'")
-
-                check_config = self._check_configs[component]
-                start = time.time()
-                passed = params.get("passed", True)
-                details = params.get("details", {})
-                response_time = time.time() - start
-
-                health_status = HealthStatus.HEALTHY if passed else HealthStatus.UNHEALTHY
-
-                record = {
-                    "component": component,
-                    "timestamp": time.time(),
-                    "status": health_status.value,
-                    "response_time_ms": round(response_time * 1000, 2),
-                    "details": details,
-                    "passed": passed
-                }
-                self._health_records[component] = record
-
-                return ActionResult(
-                    success=True,
-                    data={"component": component, "status": health_status.value, "response_time_ms": record["response_time_ms"]},
-                    message=f"Health check for '{component}': {health_status.value}"
-                )
-
-            elif operation == "status":
-                overall_status = HealthStatus.HEALTHY
-                component_statuses = {}
-
-                for comp, config in self._check_configs.items():
-                    if comp in self._health_records:
-                        record = self._health_records[comp]
-                        component_statuses[comp] = record["status"]
-                        if record["status"] == HealthStatus.UNHEALTHY.value:
-                            overall_status = HealthStatus.DEGRADED
-                    else:
-                        component_statuses[comp] = HealthStatus.UNKNOWN.value
-
-                healthy_count = sum(1 for s in component_statuses.values() if s == HealthStatus.HEALTHY.value)
-                total_count = len(component_statuses)
-                health_ratio = healthy_count / total_count if total_count > 0 else 0
-
-                if health_ratio < 0.5:
-                    overall_status = HealthStatus.UNHEALTHY
-                elif health_ratio < 1.0:
-                    overall_status = HealthStatus.DEGRADED
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "overall_status": overall_status.value,
-                        "components": component_statuses,
-                        "healthy_count": healthy_count,
-                        "total_count": total_count,
-                        "uptime_ratio": round(health_ratio, 4)
-                    }
-                )
-
-            elif operation == "history":
-                return ActionResult(
-                    success=True,
-                    data={"records": list(self._health_records.values())}
-                )
-
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Health check error: {str(e)}")
+import json

@@ -1,344 +1,357 @@
 """Data pipeline action module for RabAI AutoClick.
 
 Provides data pipeline operations:
-- DataPipelineBuilderAction: Build multi-stage data pipelines
-- DataPipelineExecutorAction: Execute data pipeline
-- DataPipelineMonitorAction: Monitor pipeline execution
-- DataPipelineCheckpointAction: Checkpoint pipeline state
+- PipelineBuilderAction: Build data processing pipelines
+- PipelineExecutorAction: Execute data pipelines
+- PipelineMonitorAction: Monitor pipeline execution
+- PipelineCheckpointAction: Checkpoint and recovery for pipelines
 """
-
-import time
-from typing import Any, Dict, List, Optional, Callable
-from datetime import datetime
-from enum import Enum
 
 import sys
 import os
+import time
+import logging
+from typing import Any, Dict, List, Optional, Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
+logger = logging.getLogger(__name__)
 
-class PipelineState(Enum):
-    """Pipeline states."""
-    CREATED = "created"
+
+class PipelineStatus(Enum):
+    """Pipeline execution status."""
+    PENDING = "pending"
     RUNNING = "running"
-    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    PAUSED = "paused"
 
 
-class StageType(Enum):
-    """Pipeline stage types."""
-    EXTRACT = "extract"
-    TRANSFORM = "transform"
-    LOAD = "load"
-    FILTER = "filter"
-    AGGREGATE = "aggregate"
-    VALIDATE = "validate"
-    CUSTOM = "custom"
+class StageStatus(Enum):
+    """Individual stage status."""
+    WAITING = "waiting"
+    PROCESSING = "processing"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
-class DataPipelineBuilderAction(BaseAction):
-    """Build multi-stage data pipelines."""
+@dataclass
+class PipelineStage:
+    """A single stage in a data pipeline."""
+    name: str
+    processor: Callable[[Any], Any]
+    condition: Optional[Callable[[Any], bool]] = None
+    retry_count: int = 0
+    timeout: float = 300.0
+    status: StageStatus = StageStatus.WAITING
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class Pipeline:
+    """Data processing pipeline."""
+    pipeline_id: str
+    name: str
+    stages: List[PipelineStage] = field(default_factory=list)
+    status: PipelineStatus = PipelineStatus.PENDING
+    created_at: datetime = field(default_factory=datetime.now)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    total_processed: int = 0
+    total_failed: int = 0
+
+
+class PipelineRegistry:
+    """Registry for managing pipelines."""
+
+    def __init__(self) -> None:
+        self._pipelines: Dict[str, Pipeline] = {}
+
+    def create(self, pipeline_id: str, name: str) -> Pipeline:
+        pipeline = Pipeline(pipeline_id=pipeline_id, name=name)
+        self._pipelines[pipeline_id] = pipeline
+        return pipeline
+
+    def get(self, pipeline_id: str) -> Optional[Pipeline]:
+        return self._pipelines.get(pipeline_id)
+
+    def update(self, pipeline: Pipeline) -> None:
+        self._pipelines[pipeline.pipeline_id] = pipeline
+
+    def list_all(self) -> List[Pipeline]:
+        return list(self._pipelines.values())
+
+    def delete(self, pipeline_id: str) -> bool:
+        if pipeline_id in self._pipelines:
+            del self._pipelines[pipeline_id]
+            return True
+        return False
+
+
+_registry = PipelineRegistry()
+
+
+class PipelineBuilderAction(BaseAction):
+    """Build a data processing pipeline."""
     action_type = "data_pipeline_builder"
-    display_name = "数据管道构建器"
-    description = "构建多阶段数据处理管道"
+    display_name = "构建数据管道"
+    description = "构建数据处理管道的阶段和配置"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            stages = params.get("stages", [])
-            pipeline_name = params.get("name", "unnamed_pipeline")
-            description = params.get("description", "")
-            max_parallel = params.get("max_parallel", 1)
+        pipeline_id = params.get("pipeline_id", "")
+        name = params.get("name", "")
+        stages_config = params.get("stages", [])
 
-            if not stages:
-                return ActionResult(success=False, message="stages list is required")
+        if not pipeline_id or not name:
+            return ActionResult(success=False, message="pipeline_id和name是必需的")
 
-            validated_stages = []
-            for i, stage in enumerate(stages):
-                stage_type = stage.get("type", "custom")
-                stage_name = stage.get("name", f"stage_{i}")
+        pipeline = _registry.create(pipeline_id, name)
 
-                if stage_type not in [e.value for e in StageType]:
-                    return ActionResult(success=False, message=f"Invalid stage type: {stage_type}")
+        for i, stage_config in enumerate(stages_config):
+            stage_name = stage_config.get("name", f"stage_{i}")
+            retry = stage_config.get("retry_count", 0)
+            timeout = stage_config.get("timeout", 300.0)
 
-                validated_stage = {
-                    "name": stage_name,
-                    "type": stage_type,
-                    "handler": stage.get("handler"),
-                    "config": stage.get("config", {}),
-                    "dependencies": stage.get("dependencies", []),
-                    "retry_on_failure": stage.get("retry_on_failure", False),
-                    "max_retries": stage.get("max_retries", 3),
-                    "timeout": stage.get("timeout", 60),
-                }
-                validated_stages.append(validated_stage)
+            stage = PipelineStage(
+                name=stage_name,
+                processor=self._dummy_processor,
+                retry_count=retry,
+                timeout=timeout
+            )
+            pipeline.stages.append(stage)
 
-            pipeline = {
-                "name": pipeline_name,
-                "description": description,
-                "stages": validated_stages,
-                "max_parallel": max_parallel,
-                "created_at": datetime.now().isoformat(),
-                "state": PipelineState.CREATED.value,
+        return ActionResult(
+            success=True,
+            message=f"管道 {name} 已构建，包含 {len(pipeline.stages)} 个阶段",
+            data={
+                "pipeline_id": pipeline_id,
+                "stage_count": len(pipeline.stages)
             }
+        )
+
+    def _dummy_processor(self, data: Any) -> Any:
+        return data
+
+
+class PipelineExecutorAction(BaseAction):
+    """Execute a data pipeline."""
+    action_type = "data_pipeline_executor"
+    display_name = "执行数据管道"
+    description = "执行已构建的数据处理管道"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        pipeline_id = params.get("pipeline_id", "")
+        input_data = params.get("input_data")
+        stop_on_error = params.get("stop_on_error", True)
+
+        pipeline = _registry.get(pipeline_id)
+        if not pipeline:
+            return ActionResult(success=False, message=f"管道 {pipeline_id} 不存在")
+
+        if not pipeline.stages:
+            return ActionResult(success=False, message="管道没有阶段")
+
+        pipeline.status = PipelineStatus.RUNNING
+        pipeline.started_at = datetime.now()
+        _registry.update(pipeline)
+
+        current_data = input_data
+        results = []
+
+        for stage in pipeline.stages:
+            stage.status = StageStatus.PROCESSING
+            stage.start_time = datetime.now()
+
+            try:
+                start = time.time()
+                output = stage.processor(current_data)
+                elapsed = time.time() - start
+
+                stage.status = StageStatus.DONE
+                stage.end_time = datetime.now()
+                current_data = output
+                pipeline.total_processed += 1
+
+                results.append({
+                    "stage": stage.name,
+                    "status": "success",
+                    "elapsed_ms": round(elapsed * 1000, 2),
+                    "output_type": type(output).__name__
+                })
+
+            except Exception as e:
+                stage.status = StageStatus.FAILED
+                stage.error = str(e)
+                stage.end_time = datetime.now()
+                pipeline.total_failed += 1
+
+                results.append({
+                    "stage": stage.name,
+                    "status": "failed",
+                    "error": str(e)
+                })
+
+                if stop_on_error:
+                    pipeline.status = PipelineStatus.FAILED
+                    _registry.update(pipeline)
+                    return ActionResult(
+                        success=False,
+                        message=f"管道在阶段 {stage.name} 失败: {e}",
+                        data={"pipeline_id": pipeline_id, "results": results}
+                    )
+
+        pipeline.status = PipelineStatus.COMPLETED
+        pipeline.completed_at = datetime.now()
+        _registry.update(pipeline)
+
+        return ActionResult(
+            success=True,
+            message=f"管道执行完成，处理 {pipeline.total_processed} 条数据",
+            data={
+                "pipeline_id": pipeline_id,
+                "results": results,
+                "total_processed": pipeline.total_processed,
+                "total_failed": pipeline.total_failed
+            }
+        )
+
+
+class PipelineMonitorAction(BaseAction):
+    """Monitor pipeline execution status."""
+    action_type = "data_pipeline_monitor"
+    display_name = "监控数据管道"
+    description = "监控数据管道的执行状态和性能"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        pipeline_id = params.get("pipeline_id", "")
+
+        if pipeline_id:
+            pipeline = _registry.get(pipeline_id)
+            if not pipeline:
+                return ActionResult(success=False, message=f"管道 {pipeline_id} 不存在")
+
+            stages_data = []
+            for s in pipeline.stages:
+                duration = 0.0
+                if s.start_time and s.end_time:
+                    duration = (s.end_time - s.start_time).total_seconds()
+                stages_data.append({
+                    "name": s.name,
+                    "status": s.status.value,
+                    "duration_seconds": round(duration, 4),
+                    "error": s.error
+                })
 
             return ActionResult(
                 success=True,
-                message=f"Built pipeline '{pipeline_name}' with {len(validated_stages)} stages",
-                data={"pipeline": pipeline, "stage_count": len(validated_stages)}
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pipeline builder error: {e}")
-
-
-class DataPipelineExecutorAction(BaseAction):
-    """Execute a data pipeline."""
-    action_type = "data_pipeline_executor"
-    display_name = "数据管道执行器"
-    description = "执行数据处理管道"
-
-    def __init__(self):
-        super().__init__()
-        self._pipeline_state = PipelineState.CREATED
-        self._stage_results: Dict[str, Any] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            pipeline = params.get("pipeline", {})
-            input_data = params.get("input_data")
-            stop_on_failure = params.get("stop_on_failure", True)
-            log_level = params.get("log_level", "info")
-
-            if not pipeline:
-                return ActionResult(success=False, message="pipeline is required")
-
-            stages = pipeline.get("stages", [])
-            if not stages:
-                return ActionResult(success=False, message="Pipeline has no stages")
-
-            self._pipeline_state = PipelineState.RUNNING
-            current_data = input_data
-            stage_outputs = {}
-
-            for i, stage in enumerate(stages):
-                stage_name = stage.get("name", f"stage_{i}")
-                stage_type = stage.get("type", "custom")
-                handler = stage.get("handler")
-                config = stage.get("config", {})
-                timeout = stage.get("timeout", 60)
-                max_retries = stage.get("max_retries", 3)
-
-                start_time = time.time()
-                attempt = 0
-                stage_success = False
-
-                while attempt <= max_retries and not stage_success:
-                    try:
-                        stage_start = time.time()
-                        if callable(handler):
-                            result = handler(data=current_data, config=config, context=context)
-                        else:
-                            result = self._default_stage_handler(stage_type, current_data, config)
-
-                        stage_success = True
-                        stage_duration = time.time() - stage_start
-
-                        self._stage_results[stage_name] = {
-                            "success": True,
-                            "duration": stage_duration,
-                            "attempt": attempt + 1,
-                            "output": result,
-                        }
-                        stage_outputs[stage_name] = result
-                        current_data = result.get("data", current_data)
-
-                    except Exception as e:
-                        attempt += 1
-                        if attempt > max_retries:
-                            stage_duration = time.time() - stage_start
-                            self._stage_results[stage_name] = {
-                                "success": False,
-                                "duration": stage_duration,
-                                "attempt": attempt,
-                                "error": str(e),
-                            }
-                            if stop_on_failure:
-                                self._pipeline_state = PipelineState.FAILED
-                                return ActionResult(
-                                    success=False,
-                                    message=f"Pipeline failed at stage '{stage_name}': {e}",
-                                    data={"failed_stage": stage_name, "stage_results": self._stage_results, "completed_stages": i}
-                                )
-
-                if not stage_success and not stop_on_failure:
-                    continue
-
-            all_success = all(r.get("success", False) for r in self._stage_results.values())
-            self._pipeline_state = PipelineState.COMPLETED if all_success else PipelineState.FAILED
-
-            return ActionResult(
-                success=all_success,
-                message=f"Pipeline {self._pipeline_state.value}: {len(stages)} stages, {sum(1 for r in self._stage_results.values() if r.get('success'))} succeeded",
-                data={"pipeline_state": self._pipeline_state.value, "stage_results": self._stage_results, "final_data": current_data}
-            )
-        except Exception as e:
-            self._pipeline_state = PipelineState.FAILED
-            return ActionResult(success=False, message=f"Pipeline executor error: {e}")
-
-    def _default_stage_handler(self, stage_type: str, data: Any, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Default handler for built-in stage types."""
-        if stage_type == StageType.FILTER.value:
-            filter_key = config.get("key")
-            filter_value = config.get("value")
-            filtered = [d for d in data if isinstance(d, dict) and d.get(filter_key) == filter_value]
-            return {"data": filtered}
-        elif stage_type == StageType.TRANSFORM.value:
-            transform_fn = config.get("fn", lambda x: x)
-            transformed = [transform_fn(d) for d in data]
-            return {"data": transformed}
-        elif stage_type == StageType.AGGREGATE.value:
-            agg_key = config.get("key")
-            agg_result = {}
-            for d in data:
-                if isinstance(d, dict) and agg_key in d:
-                    k = d[agg_key]
-                    if k not in agg_result:
-                        agg_result[k] = []
-                    agg_result[k].append(d)
-            return {"data": agg_result}
-        elif stage_type == StageType.VALIDATE.value:
-            schema = config.get("schema", {})
-            errors = []
-            for d in data:
-                if isinstance(d, dict):
-                    for k, v_type in schema.items():
-                        if k not in d:
-                            errors.append(f"Missing key: {k}")
-                        elif not isinstance(d[k], v_type):
-                            errors.append(f"Type error for {k}")
-            return {"data": data, "errors": errors}
-        else:
-            return {"data": data}
-
-
-class DataPipelineMonitorAction(BaseAction):
-    """Monitor data pipeline execution."""
-    action_type = "data_pipeline_monitor"
-    display_name = "数据管道监控器"
-    description = "监控数据管道执行状态"
-
-    def __init__(self):
-        super().__init__()
-        self._metrics: Dict[str, List[Dict[str, Any]]] = {}
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            pipeline_name = params.get("pipeline_name")
-            operation = params.get("operation", "status")
-            record_metrics = params.get("record_metrics", True)
-
-            if operation == "record":
-                if not pipeline_name:
-                    return ActionResult(success=False, message="pipeline_name required")
-                metric = {
-                    "timestamp": datetime.now().isoformat(),
-                    "stage": params.get("stage"),
-                    "duration": params.get("duration", 0),
-                    "success": params.get("success", True),
-                    "throughput": params.get("throughput", 0),
+                message=f"管道 {pipeline.name} 状态: {pipeline.status.value}",
+                data={
+                    "pipeline_id": pipeline_id,
+                    "name": pipeline.name,
+                    "status": pipeline.status.value,
+                    "created_at": pipeline.created_at.isoformat(),
+                    "started_at": pipeline.started_at.isoformat() if pipeline.started_at else None,
+                    "completed_at": pipeline.completed_at.isoformat() if pipeline.completed_at else None,
+                    "total_processed": pipeline.total_processed,
+                    "total_failed": pipeline.total_failed,
+                    "stages": stages_data
                 }
-                if pipeline_name not in self._metrics:
-                    self._metrics[pipeline_name] = []
-                self._metrics[pipeline_name].append(metric)
-                return ActionResult(success=True, message="Metric recorded", data={"metric": metric})
+            )
 
-            elif operation == "status":
-                if not pipeline_name:
-                    return ActionResult(success=True, message="All pipelines", data={"pipelines": list(self._metrics.keys())})
-                if pipeline_name not in self._metrics:
-                    return ActionResult(success=False, message=f"Pipeline {pipeline_name} not found")
-                metrics = self._metrics[pipeline_name]
-                return ActionResult(success=True, message=f"Retrieved {len(metrics)} metrics", data={"metrics": metrics, "count": len(metrics)})
+        pipelines = _registry.list_all()
+        summary = [
+            {
+                "pipeline_id": p.pipeline_id,
+                "name": p.name,
+                "status": p.status.value,
+                "stage_count": len(p.stages),
+                "total_processed": p.total_processed,
+                "total_failed": p.total_failed
+            }
+            for p in pipelines
+        ]
 
-            elif operation == "stats":
-                if not pipeline_name or pipeline_name not in self._metrics:
-                    return ActionResult(success=False, message="Pipeline not found")
-                metrics = self._metrics[pipeline_name]
-                durations = [m["duration"] for m in metrics if m.get("duration")]
-                successes = sum(1 for m in metrics if m.get("success"))
-                return ActionResult(success=True, message="Stats retrieved", data={
-                    "total_stages": len(metrics),
-                    "successful": successes,
-                    "failed": len(metrics) - successes,
-                    "avg_duration": sum(durations) / len(durations) if durations else 0,
-                    "max_duration": max(durations) if durations else 0,
-                })
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pipeline monitor error: {e}")
+        return ActionResult(
+            success=True,
+            message=f"共 {len(summary)} 个管道",
+            data={"pipelines": summary}
+        )
 
 
-class DataPipelineCheckpointAction(BaseAction):
-    """Checkpoint data pipeline state."""
+class PipelineCheckpointAction(BaseAction):
+    """Checkpoint and recovery for pipelines."""
     action_type = "data_pipeline_checkpoint"
     display_name = "数据管道检查点"
-    description = "检查点保存和恢复管道状态"
-
-    def __init__(self):
-        super().__init__()
-        self._checkpoints: Dict[str, Dict[str, Any]] = {}
+    description = "保存和恢复数据管道的检查点状态"
 
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "save")
-            pipeline_name = params.get("pipeline_name")
-            checkpoint_id = params.get("checkpoint_id")
-            state_data = params.get("state_data", {})
-            stage_index = params.get("stage_index", 0)
-            max_checkpoints = params.get("max_checkpoints", 10)
+        pipeline_id = params.get("pipeline_id", "")
+        operation = params.get("operation", "save")
 
-            if operation == "save":
-                if not pipeline_name:
-                    return ActionResult(success=False, message="pipeline_name required")
+        pipeline = _registry.get(pipeline_id)
+        if not pipeline:
+            return ActionResult(success=False, message=f"管道 {pipeline_id} 不存在")
 
-                cp_id = checkpoint_id or f"cp_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
-                self._checkpoints[cp_id] = {
-                    "pipeline_name": pipeline_name,
-                    "stage_index": stage_index,
-                    "state_data": state_data,
-                    "created_at": datetime.now().isoformat(),
+        checkpoint_data = {
+            "pipeline_id": pipeline.pipeline_id,
+            "name": pipeline.name,
+            "status": pipeline.status.value,
+            "stages": [
+                {
+                    "name": s.name,
+                    "status": s.status.value,
+                    "error": s.error
                 }
+                for s in pipeline.stages
+            ],
+            "total_processed": pipeline.total_processed,
+            "total_failed": pipeline.total_failed,
+            "timestamp": datetime.now().isoformat()
+        }
 
-                pipeline_cps = [k for k, v in self._checkpoints.items() if v["pipeline_name"] == pipeline_name]
-                if len(pipeline_cps) > max_checkpoints:
-                    oldest = min(pipeline_cps, key=lambda k: self._checkpoints[k]["created_at"])
-                    del self._checkpoints[oldest]
+        if operation == "save":
+            try:
+                checkpoint_file = f"/tmp/pipeline_checkpoint_{pipeline_id}.json"
+                import json
+                with open(checkpoint_file, "w") as f:
+                    json.dump(checkpoint_data, f, indent=2, default=str)
+                return ActionResult(
+                    success=True,
+                    message=f"检查点已保存到 {checkpoint_file}",
+                    data={"checkpoint_file": checkpoint_file, "data": checkpoint_data}
+                )
+            except Exception as e:
+                return ActionResult(success=False, message=f"保存检查点失败: {e}")
 
-                return ActionResult(success=True, message=f"Checkpoint {cp_id} saved", data={"checkpoint_id": cp_id, "total_checkpoints": len(self._checkpoints)})
+        if operation == "restore":
+            try:
+                checkpoint_file = f"/tmp/pipeline_checkpoint_{pipeline_id}.json"
+                import json
+                with open(checkpoint_file, "r") as f:
+                    saved = json.load(f)
 
-            elif operation == "restore":
-                if not checkpoint_id or checkpoint_id not in self._checkpoints:
-                    return ActionResult(success=False, message=f"Checkpoint {checkpoint_id} not found")
-                cp = self._checkpoints[checkpoint_id]
-                return ActionResult(success=True, message=f"Restored checkpoint {checkpoint_id}", data={"state_data": cp["state_data"], "stage_index": cp["stage_index"], "created_at": cp["created_at"]})
+                pipeline.status = PipelineStatus(saved.get("status", "pending"))
+                pipeline.total_processed = saved.get("total_processed", 0)
+                pipeline.total_failed = saved.get("total_failed", 0)
 
-            elif operation == "list":
-                if pipeline_name:
-                    cps = {k: v for k, v in self._checkpoints.items() if v["pipeline_name"] == pipeline_name}
-                else:
-                    cps = self._checkpoints
-                return ActionResult(success=True, message=f"{len(cps)} checkpoints", data={"checkpoints": cps})
+                _registry.update(pipeline)
+                return ActionResult(
+                    success=True,
+                    message="检查点已恢复",
+                    data={"restored": saved}
+                )
+            except FileNotFoundError:
+                return ActionResult(success=False, message="检查点文件不存在")
+            except Exception as e:
+                return ActionResult(success=False, message=f"恢复检查点失败: {e}")
 
-            elif operation == "delete":
-                if checkpoint_id and checkpoint_id in self._checkpoints:
-                    del self._checkpoints[checkpoint_id]
-                    return ActionResult(success=True, message=f"Checkpoint {checkpoint_id} deleted")
-
-            return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pipeline checkpoint error: {e}")
+        return ActionResult(success=False, message=f"未知操作: {operation}")

@@ -1,529 +1,339 @@
+"""Data quality action module for RabAI AutoClick.
+
+Provides data quality operations:
+- QualityCheckerAction: Check data quality rules
+- QualityProfilerAction: Profile data quality statistics
+- QualityCleanerAction: Clean and fix data quality issues
+- QualityReporterAction: Generate data quality reports
 """
-Data Quality Action Module.
 
-Provides data quality checking and validation including completeness,
-consistency, validity checks, and anomaly detection for data pipelines.
-
-Author: RabAI Team
-"""
-
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import sys
+import os
+import logging
+from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from enum import Enum
-import re
-from collections import Counter
 from datetime import datetime
+from collections import Counter
 
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
-class QualityDimension(Enum):
-    """Data quality dimensions."""
-    COMPLETENESS = "completeness"
-    CONSISTENCY = "consistency"
-    VALIDITY = "validity"
-    UNIQUENESS = "uniqueness"
-    TIMELINESS = "timeliness"
-    ACCURACY = "accuracy"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
+class QualityIssue:
+    """A data quality issue."""
+    row: int
+    column: str
+    issue_type: str
+    message: str
+    severity: str = "warning"
+
+
+@dataclass
+class QualityReport:
+    """Data quality report."""
+    total_rows: int
+    total_columns: int
+    issues: List[QualityIssue]
+    completeness: float
+    accuracy: float
+    consistency: float
+    timeliness: float
+
+
 class QualityRule:
-    """Represents a data quality rule."""
-    name: str
-    dimension: QualityDimension
-    check_fn: Callable[[List[Dict]], Dict[str, Any]]
-    description: str = ""
-    severity: str = "error"  # error, warning, info
+    """A data quality validation rule."""
+
+    def __init__(self, name: str, check_fn: Callable[[Any], tuple[bool, str]]) -> None:
+        self.name = name
+        self.check_fn = check_fn
+
+    def apply(self, value: Any) -> tuple[bool, str]:
+        return self.check_fn(value)
 
 
-@dataclass
-class QualityResult:
-    """Result of a quality check."""
-    rule_name: str
-    passed: bool
-    dimension: QualityDimension
-    passed_count: int
-    failed_count: int
-    total_count: int
-    details: Dict[str, Any] = field(default_factory=dict)
-    errors: List[str] = field(default_factory=list)
+class DataProfiler:
+    """Profiles data to generate statistics."""
 
+    def profile_column(self, values: List[Any]) -> Dict[str, Any]:
+        non_null = [v for v in values if v is not None and v != ""]
+        null_count = len(values) - len(non_null)
 
-@dataclass
-class DataQualityReport:
-    """Complete data quality report."""
-    dataset_name: str
-    total_records: int
-    checked_at: datetime
-    results: List[QualityResult]
-    overall_score: float
-    dimensions: Dict[str, float]
-    issues: List[Dict[str, Any]]
-
-
-class CompletenessChecker:
-    """
-    Checks data completeness - presence of required values.
-    
-    Example:
-        checker = CompletenessChecker()
-        checker.add_required_field("user_id")
-        checker.add_required_field("email")
-        
-        result = checker.check(data_records)
-    """
-    
-    def __init__(self):
-        self.required_fields: Set[str] = set()
-        self.nullable_fields: Set[str] = set()
-    
-    def add_required_field(self, field: str) -> "CompletenessChecker":
-        """Add a required field."""
-        self.required_fields.add(field)
-        return self
-    
-    def add_nullable_field(self, field: str) -> "CompletenessChecker":
-        """Add a nullable field (not required)."""
-        self.nullable_fields.add(field)
-        return self
-    
-    def check(self, data: List[Dict]) -> QualityResult:
-        """Check completeness of data."""
-        total = len(data)
-        failed_checks = []
-        field_stats = {}
-        
-        for field in self.required_fields:
-            null_count = sum(1 for row in data if row.get(field) is None)
-            empty_count = sum(1 for row in data if row.get(field) in ("", []))
-            
-            failed = null_count + empty_count
-            field_stats[field] = {
-                "null_count": null_count,
-                "empty_count": empty_count,
-                "completeness": 1.0 - (failed / max(1, total))
-            }
-            
-            if failed > 0:
-                failed_checks.append(f"Field '{field}' has {failed} incomplete values")
-        
-        passed = total - len(set(f for f in failed_checks for _ in range(1)))
-        
-        return QualityResult(
-            rule_name="completeness_check",
-            passed=len(failed_checks) == 0,
-            dimension=QualityDimension.COMPLETENESS,
-            passed_count=total,
-            failed_count=len(failed_checks),
-            total_count=total,
-            details={"field_stats": field_stats},
-            errors=failed_checks
-        )
-
-
-class ConsistencyChecker:
-    """
-    Checks data consistency across records.
-    
-    Example:
-        checker = ConsistencyChecker()
-        checker.add_rule("status", ["pending", "processing", "completed"])
-        
-        result = checker.check(data_records)
-    """
-    
-    def __init__(self):
-        self.field_values: Dict[str, Set[Any]] = {}
-        self.patterns: Dict[str, str] = {}
-    
-    def add_allowed_values(self, field: str, values: List[Any]) -> "ConsistencyChecker":
-        """Set allowed values for a field."""
-        self.field_values[field] = set(values)
-        return self
-    
-    def add_pattern(self, field: str, pattern: str) -> "ConsistencyChecker":
-        """Add regex pattern for field validation."""
-        self.patterns[field] = pattern
-        return self
-    
-    def check(self, data: List[Dict]) -> QualityResult:
-        """Check consistency of data."""
-        total = len(data)
-        errors = []
-        field_violations = {}
-        
-        for field, allowed in self.field_values.items():
-            violations = []
-            for i, row in enumerate(data):
-                value = row.get(field)
-                if value is not None and value not in allowed:
-                    violations.append(i)
-            
-            if violations:
-                field_violations[field] = {
-                    "violation_count": len(violations),
-                    "allowed_values": list(allowed),
-                    "sample_violations": violations[:5]
-                }
-                errors.append(f"Field '{field}' has {len(violations)} invalid values")
-        
-        for field, pattern in self.patterns.items():
-            regex = re.compile(pattern)
-            violations = []
-            for i, row in enumerate(data):
-                value = row.get(field)
-                if value is not None and not regex.match(str(value)):
-                    violations.append(i)
-            
-            if violations:
-                field_violations[field] = {
-                    "violation_count": len(violations),
-                    "pattern": pattern,
-                    "sample_violations": violations[:5]
-                }
-                errors.append(f"Field '{field}' has {len(violations)} values not matching pattern")
-        
-        return QualityResult(
-            rule_name="consistency_check",
-            passed=len(errors) == 0,
-            dimension=QualityDimension.CONSISTENCY,
-            passed_count=total - len(errors),
-            failed_count=len(errors),
-            total_count=total,
-            details={"field_violations": field_violations},
-            errors=errors
-        )
-
-
-class UniquenessChecker:
-    """
-    Checks data uniqueness constraints.
-    
-    Example:
-        checker = UniquenessChecker()
-        checker.add_unique_field("user_id")
-        checker.add_composite_key(["email", "tenant_id"])
-        
-        result = checker.check(data_records)
-    """
-    
-    def __init__(self):
-        self.unique_fields: Set[str] = set()
-        self.composite_keys: List[List[str]] = []
-    
-    def add_unique_field(self, field: str) -> "UniquenessChecker":
-        """Add a unique field constraint."""
-        self.unique_fields.add(field)
-        return self
-    
-    def add_composite_key(self, fields: List[str]) -> "UniquenessChecker":
-        """Add a composite key for uniqueness."""
-        self.composite_keys.append(fields)
-        return self
-    
-    def check(self, data: List[Dict]) -> QualityResult:
-        """Check uniqueness constraints."""
-        total = len(data)
-        errors = []
-        duplicate_info = {}
-        
-        # Check single fields
-        for field in self.unique_fields:
-            values = [row.get(field) for row in data]
-            duplicates = self._find_duplicates(values)
-            
-            if duplicates:
-                duplicate_info[field] = {
-                    "duplicate_count": len(duplicates),
-                    "duplicate_values": list(duplicates)[:10]
-                }
-                errors.append(f"Field '{field}' has {len(duplicates)} duplicate values")
-        
-        # Check composite keys
-        for i, key_fields in enumerate(self.composite_keys):
-            key_values = [tuple(row.get(f) for f in key_fields) for row in data]
-            duplicates = self._find_duplicates(key_values)
-            
-            if duplicates:
-                duplicate_info[f"composite_{i}"] = {
-                    "fields": key_fields,
-                    "duplicate_count": len(duplicates)
-                }
-                errors.append(f"Composite key {key_fields} has {len(duplicates)} duplicates")
-        
-        return QualityResult(
-            rule_name="uniqueness_check",
-            passed=len(errors) == 0,
-            dimension=QualityDimension.UNIQUENESS,
-            passed_count=total - len(errors),
-            failed_count=len(errors),
-            total_count=total,
-            details={"duplicate_info": duplicate_info},
-            errors=errors
-        )
-    
-    def _find_duplicates(self, values: List[Any]) -> Set[Any]:
-        """Find duplicate values."""
-        seen: Set[Any] = set()
-        duplicates: Set[Any] = set()
-        
-        for v in values:
-            if v in seen:
-                duplicates.add(v)
-            seen.add(v)
-        
-        return duplicates
-
-
-class ValidityChecker:
-    """
-    Checks data validity with type and format validation.
-    
-    Example:
-        checker = ValidityChecker()
-        checker.add_type_check("age", int, min_value=0, max_value=150)
-        checker.add_format_check("email", r"^[^@]+@[^@]+$")
-        
-        result = checker.check(data_records)
-    """
-    
-    def __init__(self):
-        self.type_checks: List[Tuple[str, type, Dict]] = []
-        self.format_checks: Dict[str, str] = {}
-    
-    def add_type_check(
-        self,
-        field: str,
-        expected_type: type,
-        **constraints
-    ) -> "ValidityChecker":
-        """Add type-based validation."""
-        self.type_checks.append((field, expected_type, constraints))
-        return self
-    
-    def add_format_check(self, field: str, pattern: str) -> "ValidityChecker":
-        """Add regex format validation."""
-        self.format_checks[field] = pattern
-        return self
-    
-    def check(self, data: List[Dict]) -> QualityResult:
-        """Check data validity."""
-        total = len(data)
-        errors = []
-        violation_details = {}
-        
-        for field, expected_type, constraints in self.type_checks:
-            violations = []
-            for i, row in enumerate(data):
-                value = row.get(field)
-                
-                if value is None:
-                    continue
-                
-                # Type check
-                if not isinstance(value, expected_type):
-                    violations.append(i)
-                    continue
-                
-                # Constraint checks
-                if "min_value" in constraints and value < constraints["min_value"]:
-                    violations.append(i)
-                if "max_value" in constraints and value > constraints["max_value"]:
-                    violations.append(i)
-                if "min_length" in constraints and len(str(value)) < constraints["min_length"]:
-                    violations.append(i)
-                if "max_length" in constraints and len(str(value)) > constraints["max_length"]:
-                    violations.append(i)
-            
-            if violations:
-                violation_details[field] = {
-                    "expected_type": expected_type.__name__,
-                    "violation_count": len(violations),
-                    "sample_indices": violations[:5]
-                }
-                errors.append(f"Field '{field}' has {len(violations)} type/constraint violations")
-        
-        for field, pattern in self.format_checks.items():
-            regex = re.compile(pattern)
-            violations = []
-            for i, row in enumerate(data):
-                value = row.get(field)
-                if value is not None and not regex.match(str(value)):
-                    violations.append(i)
-            
-            if violations:
-                violation_details[f"{field}_format"] = {
-                    "pattern": pattern,
-                    "violation_count": len(violations),
-                    "sample_indices": violations[:5]
-                }
-                errors.append(f"Field '{field}' has {len(violations)} format violations")
-        
-        return QualityResult(
-            rule_name="validity_check",
-            passed=len(errors) == 0,
-            dimension=QualityDimension.VALIDITY,
-            passed_count=total - len(errors),
-            failed_count=len(errors),
-            total_count=total,
-            details={"violation_details": violation_details},
-            errors=errors
-        )
-
-
-class DataQualityChecker:
-    """
-    Main data quality checking interface.
-    
-    Example:
-        checker = DataQualityChecker()
-        checker.add_rule(CompletenessChecker().add_required_field("id"))
-        checker.add_rule(UniquenessChecker().add_unique_field("id"))
-        
-        report = checker.check_quality(data_records)
-    """
-    
-    def __init__(self, dataset_name: str = "dataset"):
-        self.dataset_name = dataset_name
-        self.checkers: Dict[QualityDimension, Any] = {}
-        self.custom_rules: List[QualityRule] = []
-    
-    def add_checker(
-        self,
-        dimension: QualityDimension,
-        checker: Any
-    ) -> "DataQualityChecker":
-        """Add a dimension checker."""
-        self.checkers[dimension] = checker
-        return self
-    
-    def add_custom_rule(self, rule: QualityRule) -> "DataQualityChecker":
-        """Add a custom quality rule."""
-        self.custom_rules.append(rule)
-        return self
-    
-    def check_quality(self, data: List[Dict]) -> DataQualityReport:
-        """Run all quality checks."""
-        results = []
-        dimension_scores: Dict[str, List[float]] = defaultdict(list)
-        all_issues = []
-        
-        # Run dimension checkers
-        for dimension, checker in self.checkers.items():
-            result = checker.check(data)
-            results.append(result)
-            
-            score = result.passed_count / max(1, result.total_count)
-            dimension_scores[dimension.value].append(score)
-            
-            if not result.passed:
-                all_issues.append({
-                    "dimension": dimension.value,
-                    "rule": result.rule_name,
-                    "errors": result.errors,
-                    "severity": "error"
-                })
-        
-        # Run custom rules
-        for rule in self.custom_rules:
-            result = rule.check_fn(data)
-            result.rule_name = rule.name
-            result.dimension = rule.dimension
-            results.append(result)
-            
-            score = result.passed_count / max(1, result.total_count)
-            dimension_scores[rule.dimension.value].append(score)
-            
-            if not result.passed:
-                all_issues.append({
-                    "dimension": rule.dimension.value,
-                    "rule": rule.name,
-                    "errors": result.errors,
-                    "severity": rule.severity
-                })
-        
-        # Calculate overall scores
-        dimension_avg = {
-            dim: sum(scores) / len(scores) if scores else 0
-            for dim, scores in dimension_scores.items()
+        stats: Dict[str, Any] = {
+            "total_count": len(values),
+            "null_count": null_count,
+            "null_percentage": round(null_count / len(values) * 100, 2) if values else 0,
+            "unique_count": len(set(str(v) for v in non_null)),
+            "filled_count": len(non_null)
         }
-        
-        overall = sum(dimension_avg.values()) / len(dimension_avg) if dimension_avg else 0
-        
-        return DataQualityReport(
-            dataset_name=self.dataset_name,
-            total_records=len(data),
-            checked_at=datetime.now(),
-            results=results,
-            overall_score=overall,
-            dimensions=dimension_avg,
-            issues=all_issues
-        )
 
+        numeric = [v for v in non_null if isinstance(v, (int, float))]
+        if numeric:
+            stats["min"] = min(numeric)
+            stats["max"] = max(numeric)
+            stats["avg"] = sum(numeric) / len(numeric)
 
-class BaseAction:
-    """Base class for all actions."""
-    
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Any:
-        raise NotImplementedError
+        str_values = [v for v in non_null if isinstance(v, str)]
+        if str_values:
+            lengths = [len(v) for v in str_values]
+            stats["min_length"] = min(lengths)
+            stats["max_length"] = max(lengths)
+            stats["avg_length"] = sum(lengths) / len(lengths)
+            stats["top_values"] = Counter(str_values).most_common(5)
 
+        return stats
 
-class DataQualityAction(BaseAction):
-    """
-    Data quality checking action for data pipelines.
-    
-    Parameters:
-        data: List of records to check
-        dataset_name: Name of the dataset
-        checks: List of check types to perform
-    
-    Example:
-        action = DataQualityAction()
-        result = action.execute({}, {
-            "data": [{"id": 1, "email": "a@b.com"}],
-            "dataset_name": "users",
-            "checks": ["completeness", "uniqueness"]
-        })
-    """
-    
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute data quality checks."""
-        data = params.get("data", [])
-        dataset_name = params.get("dataset_name", "dataset")
-        checks = params.get("checks", ["completeness", "uniqueness", "validity"])
-        
-        checker = DataQualityChecker(dataset_name=dataset_name)
-        
-        if "completeness" in checks:
-            completeness = CompletenessChecker()
-            if "required_fields" in params:
-                for field in params["required_fields"]:
-                    completeness.add_required_field(field)
-            checker.add_checker(QualityDimension.COMPLETENESS, completeness)
-        
-        if "uniqueness" in checks:
-            uniqueness = UniquenessChecker()
-            if "unique_fields" in params:
-                for field in params["unique_fields"]:
-                    uniqueness.add_unique_field(field)
-            checker.add_checker(QualityDimension.UNIQUENESS, uniqueness)
-        
-        if "validity" in checks:
-            validity = ValidityChecker()
-            checker.add_checker(QualityDimension.VALIDITY, validity)
-        
-        if "consistency" in checks:
-            consistency = ConsistencyChecker()
-            checker.add_checker(QualityDimension.CONSISTENCY, consistency)
-        
-        report = checker.check_quality(data)
-        
+    def profile_dataset(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not data:
+            return {}
+
+        columns = list(data[0].keys())
+        column_profiles = {}
+
+        for col in columns:
+            values = [row.get(col) for row in data]
+            column_profiles[col] = self.profile_column(values)
+
         return {
-            "success": True,
-            "dataset_name": dataset_name,
-            "total_records": report.total_records,
-            "overall_score": report.overall_score,
-            "dimensions": report.dimensions,
-            "issue_count": len(report.issues),
-            "issues": report.issues[:10],  # Top 10 issues
-            "checked_at": report.checked_at.isoformat()
+            "row_count": len(data),
+            "column_count": len(columns),
+            "columns": column_profiles
         }
+
+
+class DataCleaner:
+    """Cleans data quality issues."""
+
+    def remove_nulls(self, data: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        if columns:
+            return [row for row in data if all(row.get(c) is not None and row.get(c) != "" for c in columns)]
+        return [row for row in data if all(row.get(c) is not None and row.get(c) != "" for c in row.keys())]
+
+    def remove_duplicates(self, data: List[Dict[str, Any]], key_columns: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        if key_columns:
+            seen = set()
+            result = []
+            for row in data:
+                key = tuple(row.get(c) for c in key_columns)
+                if key not in seen:
+                    seen.add(key)
+                    result.append(row)
+            return result
+        else:
+            return list({str(row): row for row in data}.values())
+
+    def fill_nulls(self, data: List[Dict[str, Any]], column: str, fill_value: Any, strategy: str = "fixed") -> List[Dict[str, Any]]:
+        if strategy == "fixed":
+            for row in data:
+                if row.get(column) is None or row.get(column) == "":
+                    row[column] = fill_value
+        elif strategy == "forward":
+            last_value: Any = fill_value
+            for row in data:
+                if row.get(column) is None or row.get(column) == "":
+                    row[column] = last_value
+                else:
+                    last_value = row[column]
+        return data
+
+    def trim_strings(self, data: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        for row in data:
+            for key, value in row.items():
+                if columns and key not in columns:
+                    continue
+                if isinstance(value, str):
+                    row[key] = value.strip()
+        return data
+
+
+_profiler = DataProfiler()
+_cleaner = DataCleaner()
+_rules: Dict[str, QualityRule] = {}
+
+
+class QualityCheckerAction(BaseAction):
+    """Check data against quality rules."""
+    action_type = "data_quality_checker"
+    display_name = "数据质量检查"
+    description = "根据质量规则检查数据"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", [])
+        rule_name = params.get("rule_name", "")
+        column = params.get("column", "")
+
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data必须是列表")
+
+        if rule_name:
+            rule = _rules.get(rule_name)
+            if not rule:
+                return ActionResult(success=False, message=f"规则 {rule_name} 不存在")
+
+            issues = []
+            for i, row in enumerate(data):
+                value = row.get(column) if column else row
+                passed, msg = rule.apply(value)
+                if not passed:
+                    issues.append(QualityIssue(
+                        row=i,
+                        column=column or "row",
+                        issue_type=rule_name,
+                        message=msg
+                    ))
+
+            return ActionResult(
+                success=len(issues) == 0,
+                message=f"检查完成，{len(issues)} 个问题",
+                data={"issues": [{"row": i.row, "column": i.column, "message": i.message} for i in issues]}
+            )
+
+        default_checks = ["null_check", "duplicate_check"]
+        issues = []
+
+        seen_rows = set()
+        for i, row in enumerate(data):
+            row_str = str(sorted(row.items()))
+            if row_str in seen_rows:
+                issues.append(QualityIssue(row=i, column="*", issue_type="duplicate", message="Duplicate row"))
+            seen_rows.add(row_str)
+
+            for col, value in row.items():
+                if value is None or value == "":
+                    issues.append(QualityIssue(row=i, column=col, issue_type="null", message=f"Null value in {col}"))
+
+        return ActionResult(
+            success=len(issues) == 0,
+            message=f"质量检查完成，{len(issues)} 个问题",
+            data={"issues": [{"row": i.row, "column": i.column, "message": i.message} for i in issues[:100]]}
+        )
+
+
+class QualityProfilerAction(BaseAction):
+    """Profile data quality statistics."""
+    action_type = "data_quality_profiler"
+    display_name = "数据质量分析"
+    description = "分析数据的质量统计信息"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", [])
+
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data必须是列表")
+
+        if not data:
+            return ActionResult(success=False, message="data为空")
+
+        profile = _profiler.profile_dataset(data)
+
+        return ActionResult(
+            success=True,
+            message=f"数据分析完成，{profile['row_count']} 行 {profile['column_count']} 列",
+            data=profile
+        )
+
+
+class QualityCleanerAction(BaseAction):
+    """Clean and fix data quality issues."""
+    action_type = "data_quality_cleaner"
+    display_name = "数据质量清洗"
+    description = "清洗和修复数据质量问题"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", [])
+        operation = params.get("operation", "trim")
+
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data必须是列表")
+
+        original_count = len(data)
+
+        if operation == "remove_nulls":
+            columns = params.get("columns")
+            data = _cleaner.remove_nulls(data, columns)
+        elif operation == "remove_duplicates":
+            key_columns = params.get("key_columns")
+            data = _cleaner.remove_duplicates(data, key_columns)
+        elif operation == "fill_nulls":
+            column = params.get("column", "")
+            fill_value = params.get("fill_value", "")
+            strategy = params.get("strategy", "fixed")
+            data = _cleaner.fill_nulls(data, column, fill_value, strategy)
+        elif operation == "trim":
+            columns = params.get("columns")
+            data = _cleaner.trim_strings(data, columns)
+        else:
+            return ActionResult(success=False, message=f"未知操作: {operation}")
+
+        removed = original_count - len(data)
+
+        return ActionResult(
+            success=True,
+            message=f"清洗完成，移除 {removed} 行",
+            data={"original_count": original_count, "cleaned_count": len(data), "removed": removed}
+        )
+
+
+class QualityReporterAction(BaseAction):
+    """Generate data quality reports."""
+    action_type = "data_quality_reporter"
+    display_name = "数据质量报告"
+    description = "生成数据质量报告"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", [])
+        format_type = params.get("format", "summary")
+
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data必须是列表")
+
+        profile = _profiler.profile_dataset(data)
+
+        total_cells = profile["row_count"] * profile["column_count"]
+        null_cells = sum(p.get("null_count", 0) for p in profile["columns"].values())
+        completeness = round((total_cells - null_cells) / total_cells * 100, 2) if total_cells > 0 else 0
+
+        issues = []
+        seen_rows = set()
+        dup_count = 0
+        for i, row in enumerate(data):
+            row_str = str(sorted(row.items()))
+            if row_str in seen_rows:
+                dup_count += 1
+                issues.append({"type": "duplicate", "count": 1})
+            seen_rows.add(row_str)
+
+        report = {
+            "timestamp": datetime.now().isoformat(),
+            "total_rows": profile["row_count"],
+            "total_columns": profile["column_count"],
+            "total_cells": total_cells,
+            "null_cells": null_cells,
+            "completeness": completeness,
+            "duplicate_rows": dup_count,
+            "column_profiles": profile["columns"]
+        }
+
+        if format_type == "summary":
+            return ActionResult(
+                success=True,
+                message=f"质量报告: 完整度 {completeness}%",
+                data={
+                    "completeness": completeness,
+                    "total_rows": profile["row_count"],
+                    "total_columns": profile["column_count"],
+                    "duplicate_rows": dup_count
+                }
+            )
+
+        if format_type == "full":
+            return ActionResult(
+                success=True,
+                message="完整质量报告已生成",
+                data=report
+            )
+
+        return ActionResult(success=False, message=f"未知格式: {format_type}")

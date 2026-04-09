@@ -1,324 +1,337 @@
-"""Data Transformer Action Module.
+"""Data transformer action module for RabAI AutoClick.
 
-Provides data transformation with mapping, conversion, reshape,
-and schema evolution capabilities.
+Provides data transformation operations:
+- DataMapperAction: Map and transform data fields
+- DataAggregatorAction: Aggregate data from multiple sources
+- DataSplitterAction: Split data into partitions
+- DataMergerAction: Merge multiple data sources
 """
-from __future__ import annotations
 
-import json
+import sys
+import os
+import logging
+from typing import Any, Dict, List, Optional, Callable, Union
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, TypeVar, Union
-from enum import Enum
+from datetime import datetime
 
-T = TypeVar("T")
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
-
-class TransformType(Enum):
-    """Data transformation type."""
-    MAP = "map"
-    FLATMAP = "flatmap"
-    RESHAPE = "reshape"
-    ENRICH = "enrich"
-    PIVOT = "pivot"
-    UNPIVOT = "unpivot"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class FieldMapping:
-    """Field mapping definition."""
+    """A single field mapping definition."""
     source_field: str
     target_field: str
-    transformer: Optional[Callable[[Any], Any]] = None
+    transform: Optional[Callable[[Any], Any]] = None
     default: Any = None
-    required: bool = False
 
 
-@dataclass
-class TransformConfig:
-    """Transformation configuration."""
-    mappings: List[FieldMapping]
-    drop_fields: Optional[List[str]] = None
-    rename_fields: Optional[Dict[str, str]] = None
-    computed_fields: Optional[Dict[str, Callable]] = None
-    filter_nulls: bool = False
+class DataMapper:
+    """Maps and transforms data fields based on mapping rules."""
+
+    def __init__(self, mappings: List[FieldMapping]) -> None:
+        self.mappings = mappings
+
+    def map(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for mapping in self.mappings:
+            value = data.get(mapping.source_field, mapping.default)
+            if mapping.transform and value is not None:
+                try:
+                    value = mapping.transform(value)
+                except Exception as e:
+                    logger.warning(f"Transform failed for {mapping.source_field}: {e}")
+                    value = mapping.default or value
+            result[mapping.target_field] = value
+        return result
+
+    def map_batch(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [self.map(record) for record in records]
 
 
-class DataTransformerAction:
-    """Data transformer with mapping and reshaping.
-
-    Example:
-        transformer = DataTransformerAction()
-
-        config = TransformConfig(
-            mappings=[
-                FieldMapping("id", "record_id"),
-                FieldMapping("name", "full_name"),
-                FieldMapping("price", "cost", transformer=lambda x: x * 1.1),
-            ],
-            drop_fields=["internal_id", "temp_field"],
-            computed_fields={
-                "total": lambda r: r.get("price", 0) * r.get("quantity", 1)
-            }
-        )
-
-        result = transformer.transform(data, config)
-    """
+class DataAggregator:
+    """Aggregates data using various strategies."""
 
     def __init__(self) -> None:
-        self._custom_transformers: Dict[str, Callable] = {}
-
-    def register_transformer(
-        self,
-        name: str,
-        func: Callable[[Any], Any],
-    ) -> None:
-        """Register a named transformer function."""
-        self._custom_transformers[name] = func
-
-    def transform(
-        self,
-        data: Union[Dict, List[Dict]],
-        config: TransformConfig,
-    ) -> Union[Dict, List[Dict]]:
-        """Transform data according to configuration.
-
-        Args:
-            data: Single record or list of records
-            config: Transformation configuration
-
-        Returns:
-            Transformed data
-        """
-        if isinstance(data, list):
-            return [self._transform_record(record, config) for record in data]
-        return self._transform_record(data, config)
-
-    def _transform_record(
-        self,
-        record: Dict[str, Any],
-        config: TransformConfig,
-    ) -> Dict[str, Any]:
-        """Transform single record."""
-        result: Dict[str, Any] = {}
-
-        for mapping in config.mappings:
-            value = record.get(mapping.source_field, mapping.default)
-
-            if value is None and mapping.required:
-                continue
-
-            if mapping.transformer:
-                value = mapping.transformer(value)
-
-            result[mapping.target_field] = value
-
-        if config.drop_fields:
-            for field_name in config.drop_fields:
-                result.pop(field_name, None)
-
-        if config.rename_fields:
-            for old_name, new_name in config.rename_fields.items():
-                if old_name in result:
-                    result[new_name] = result.pop(old_name)
-
-        if config.computed_fields:
-            for field_name, func in config.computed_fields.items():
-                result[field_name] = func(record)
-
-        if config.filter_nulls:
-            result = {k: v for k, v in result.items() if v is not None}
-
-        return result
-
-    def reshape(
-        self,
-        data: List[Dict[str, Any]],
-        index_field: str,
-        value_field: str,
-    ) -> Dict[str, Any]:
-        """Reshape data from list to dict keyed by index.
-
-        Args:
-            data: List of records
-            index_field: Field to use as key
-            value_field: Field to use as value
-
-        Returns:
-            Dict keyed by index_field
-        """
-        return {
-            record[index_field]: record[value_field]
-            for record in data
-            if index_field in record and value_field in record
+        self.strategies = {
+            "sum": lambda values: sum(v for v in values if v is not None),
+            "avg": lambda values: sum(v for v in values if v is not None) / len([v for v in values if v is not None]) if any(v is not None for v in values) else 0,
+            "min": lambda values: min((v for v in values if v is not None), default=None),
+            "max": lambda values: max((v for v in values if v is not None), default=None),
+            "count": lambda values: len([v for v in values if v is not None]),
+            "first": lambda values: next((v for v in values if v is not None), None),
+            "last": lambda values: next((v for v in reversed(values) if v is not None), None),
+            "concat": lambda values: ",".join(str(v) for v in values if v is not None),
         }
 
-    def enrich(
-        self,
-        primary: List[Dict[str, Any]],
-        lookup: Dict[str, Any],
-        key_field: str,
-        lookup_fields: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
-        """Enrich data with lookup values.
-
-        Args:
-            primary: Primary data records
-            lookup: Lookup dictionary
-            key_field: Field to join on
-            lookup_fields: Specific fields to add (None = all)
-
-        Returns:
-            Enriched records
-        """
-        results = []
-
-        for record in primary:
-            key = record.get(key_field)
-            if key is None:
-                results.append(record)
-                continue
-
-            enriched = dict(record)
-
-            if key in lookup:
-                lookup_data = lookup[key]
-                if lookup_fields:
-                    for field_name in lookup_fields:
-                        enriched[field_name] = lookup_data.get(field_name)
-                else:
-                    for field_name, value in lookup_data.items():
-                        enriched[field_name] = value
-
-            results.append(enriched)
-
-        return results
-
-    def pivot_transform(
+    def aggregate(
         self,
         data: List[Dict[str, Any]],
-        row_fields: List[str],
-        col_field: str,
-        val_field: str,
+        group_by: str,
+        field_name: str,
+        strategy: str = "sum"
     ) -> List[Dict[str, Any]]:
-        """Pivot data from long to wide format.
-
-        Args:
-            data: Long format data
-            row_fields: Fields to keep as rows
-            col_field: Field to use as column names
-            val_field: Field to use as values
-
-        Returns:
-            Wide format data
-        """
-        pivoted: Dict[tuple, Dict[str, Any]] = {}
-
+        groups: Dict[Any, List[Any]] = {}
         for record in data:
-            row_key = tuple(record.get(f) for f in row_fields)
-            col_name = record.get(col_field)
-            value = record.get(val_field)
+            key = record.get(group_by)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(record.get(field_name))
 
-            if row_key not in pivoted:
-                pivoted[row_key] = {f: record.get(f) for f in row_fields}
+        if strategy not in self.strategies:
+            raise ValueError(f"Unknown strategy: {strategy}")
 
-            if col_name is not None:
-                pivoted[row_key][col_name] = value
+        strategy_func = self.strategies[strategy]
+        result = []
+        for key, values in groups.items():
+            aggregated = strategy_func(values)
+            result.append({group_by: key, field_name: aggregated, "_count": len(values)})
 
-        return list(pivoted.values())
+        return result
 
-    def unpivot_transform(
+
+class DataSplitter:
+    """Splits data into partitions."""
+
+    def split_by_size(self, data: List[Any], chunk_size: int) -> List[List[Any]]:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        return [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+    def split_by_count(self, data: List[Any], num_partitions: int) -> List[List[Any]]:
+        if num_partitions <= 0:
+            raise ValueError("num_partitions must be positive")
+        chunk_size = max(1, len(data) // num_partitions)
+        return self.split_by_size(data, chunk_size)
+
+    def split_by_key(self, data: List[Dict[str, Any]], key: str) -> Dict[Any, List[Dict[str, Any]]]:
+        result: Dict[Any, List[Dict[str, Any]]] = {}
+        for record in data:
+            partition_key = record.get(key)
+            if partition_key not in result:
+                result[partition_key] = []
+            result[partition_key].append(record)
+        return result
+
+    def split_by_range(
         self,
-        data: List[Dict[str, Any]],
-        id_fields: List[str],
-        value_names: List[str],
-        value_name_field: str = "name",
-        value_field: str = "value",
+        data: List[Union[int, float]],
+        num_ranges: int
+    ) -> List[List[Union[int, float]]]:
+        if not data:
+            return []
+        min_val = min(data)
+        max_val = max(data)
+        if min_val == max_val:
+            return [data]
+        range_size = (max_val - min_val) / num_ranges
+        ranges: List[List[Union[int, float]]] = [[] for _ in range(num_partitions := num_ranges)]
+        for value in data:
+            idx = min(int((value - min_val) / range_size), num_ranges - 1)
+            ranges[idx].append(value)
+        return ranges
+
+
+class DataMerger:
+    """Merges multiple data sources."""
+
+    def merge_inner(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        left_key: str,
+        right_key: str
     ) -> List[Dict[str, Any]]:
-        """Unpivot data from wide to long format.
+        right_index = {r[right_key]: r for r in right}
+        result = []
+        for l in left:
+            r = right_index.get(l.get(left_key))
+            if r:
+                merged = {**l, **r}
+                result.append(merged)
+        return result
 
-        Args:
-            data: Wide format data
-            id_fields: Fields to keep as identifiers
-            value_names: Names of the value columns
-            value_name_field: Name of the field for value names
-            value_field: Name of the field for values
-
-        Returns:
-            Long format data
-        """
-        results = []
-
-        for record in data:
-            base = {f: record.get(f) for f in id_fields}
-
-            for val_name in value_names:
-                if val_name in record:
-                    result = dict(base)
-                    result[value_name_field] = val_name
-                    result[value_field] = record[val_name]
-                    results.append(result)
-
-        return results
-
-    def flatten(
+    def merge_left(
         self,
-        data: Dict[str, Any],
-        separator: str = ".",
-        prefix: str = "",
-    ) -> Dict[str, Any]:
-        """Flatten nested dict to dot-notation keys.
-
-        Args:
-            data: Nested dict
-            separator: Key separator
-            prefix: Key prefix
-
-        Returns:
-            Flattened dict
-        """
-        result: Dict[str, Any] = {}
-
-        for key, value in data.items():
-            new_key = f"{prefix}{separator}{key}" if prefix else key
-
-            if isinstance(value, dict):
-                result.update(self.flatten(value, separator, new_key))
-            elif isinstance(value, list):
-                for i, item in enumerate(value):
-                    if isinstance(item, dict):
-                        result.update(self.flatten(item, separator, f"{new_key}[{i}]"))
-                    else:
-                        result[f"{new_key}[{i}]"] = item
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        left_key: str,
+        right_key: str
+    ) -> List[Dict[str, Any]]:
+        right_index = {r[right_key]: r for r in right}
+        result = []
+        for l in left:
+            r = right_index.get(l.get(left_key))
+            merged = {**l}
+            if r:
+                for k, v in r.items():
+                    if k != right_key:
+                        merged[k] = v
             else:
-                result[new_key] = value
-
+                merged["_merged"] = None
+            result.append(merged)
         return result
 
-    def unflatten(
-        self,
-        data: Dict[str, Any],
-        separator: str = ".",
-    ) -> Dict[str, Any]:
-        """Unflatten dot-notation keys to nested dict.
-
-        Args:
-            data: Flattened dict
-            separator: Key separator
-
-        Returns:
-            Nested dict
-        """
-        result: Dict[str, Any] = {}
-
-        for flat_key, value in data.items():
-            keys = flat_key.split(separator)
-            current = result
-
-            for key in keys[:-1]:
-                if key not in current:
-                    current[key] = {}
-                current = current[key]
-
-            current[keys[-1]] = value
-
+    def merge_concat(self, *datasets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        for dataset in datasets:
+            result.extend(dataset)
         return result
+
+
+class DataMapperAction(BaseAction):
+    """Map and transform data fields."""
+    action_type = "data_mapper"
+    display_name = "数据字段映射"
+    description = "根据映射规则转换数据字段"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", [])
+        mappings_config = params.get("mappings", [])
+
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data必须是列表")
+
+        mappings = []
+        for m in mappings_config:
+            mapping = FieldMapping(
+                source_field=m.get("source_field", ""),
+                target_field=m.get("target_field", ""),
+                default=m.get("default")
+            )
+            mappings.append(mapping)
+
+        mapper = DataMapper(mappings)
+        result = mapper.map_batch(data)
+
+        return ActionResult(
+            success=True,
+            message=f"映射完成，{len(result)} 条记录",
+            data={"records": result, "count": len(result)}
+        )
+
+
+class DataAggregatorAction(BaseAction):
+    """Aggregate data from multiple sources."""
+    action_type = "data_aggregator"
+    display_name = "数据聚合"
+    description = "使用各种策略聚合数据"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", [])
+        group_by = params.get("group_by", "")
+        field_name = params.get("field_name", "")
+        strategy = params.get("strategy", "sum")
+
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data必须是列表")
+
+        if not group_by or not field_name:
+            return ActionResult(success=False, message="group_by和field_name是必需的")
+
+        valid, msg = self.validate_in(
+            strategy,
+            ["sum", "avg", "min", "max", "count", "first", "last", "concat"],
+            "strategy"
+        )
+        if not valid:
+            return ActionResult(success=False, message=msg)
+
+        aggregator = DataAggregator()
+        try:
+            result = aggregator.aggregate(data, group_by, field_name, strategy)
+            return ActionResult(
+                success=True,
+                message=f"聚合完成，{len(result)} 个分组",
+                data={"groups": result, "count": len(result)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"聚合失败: {e}")
+
+
+class DataSplitterAction(BaseAction):
+    """Split data into partitions."""
+    action_type = "data_splitter"
+    display_name = "数据分割"
+    description = "将数据分割为多个分区"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", [])
+        split_type = params.get("split_type", "size")
+        key = params.get("key", "")
+        chunk_size = params.get("chunk_size", 10)
+        num_partitions = params.get("num_partitions", 3)
+
+        if not isinstance(data, list):
+            return ActionResult(success=False, message="data必须是列表")
+
+        splitter = DataSplitter()
+
+        try:
+            if split_type == "size":
+                result = splitter.split_by_size(data, chunk_size)
+            elif split_type == "count":
+                result = splitter.split_by_count(data, num_partitions)
+            elif split_type == "key":
+                if not key:
+                    return ActionResult(success=False, message="split_type为key时key参数是必需的")
+                result_dict = splitter.split_by_key(data, key)
+                result = [{"key": k, "records": v} for k, v in result_dict.items()]
+            else:
+                return ActionResult(success=False, message=f"未知split_type: {split_type}")
+
+            return ActionResult(
+                success=True,
+                message=f"分割完成，{len(result)} 个分区",
+                data={"partitions": result, "count": len(result)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"分割失败: {e}")
+
+
+class DataMergerAction(BaseAction):
+    """Merge multiple data sources."""
+    action_type = "data_merger"
+    display_name = "数据合并"
+    description = "合并多个数据源"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        left = params.get("left", [])
+        right = params.get("right", [])
+        merge_type = params.get("merge_type", "concat")
+        left_key = params.get("left_key", "")
+        right_key = params.get("right_key", "")
+
+        if not isinstance(left, list) or not isinstance(right, list):
+            return ActionResult(success=False, message="left和right必须是列表")
+
+        merger = DataMerger()
+
+        if merge_type == "concat":
+            result = merger.merge_concat(left, right)
+            return ActionResult(
+                success=True,
+                message=f"合并完成，{len(result)} 条记录",
+                data={"records": result, "count": len(result)}
+            )
+
+        if merge_type in ("inner", "left"):
+            if not left_key or not right_key:
+                return ActionResult(success=False, message="inner和left合并需要left_key和right_key")
+
+            if merge_type == "inner":
+                result = merger.merge_inner(left, right, left_key, right_key)
+            else:
+                result = merger.merge_left(left, right, left_key, right_key)
+
+            return ActionResult(
+                success=True,
+                message=f"{merge_type}合并完成，{len(result)} 条记录",
+                data={"records": result, "count": len(result)}
+            )
+
+        return ActionResult(success=False, message=f"未知merge_type: {merge_type}")

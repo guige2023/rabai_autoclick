@@ -1,324 +1,351 @@
 """Automation guardrails action module for RabAI AutoClick.
 
-Provides guardrails and safety checks for automation:
-- AutomationGuardrails: Safety guardrails for workflows
-- GuardRule: Individual guard rule
-- SafetyMonitor: Monitor and enforce safety constraints
+Provides safety guard operations:
+- GuardrailCheckAction: Pre-execution safety checks
+- GuardrailMonitorAction: Runtime safety monitoring
+- GuardrailBypassAction: Temporarily bypass guardrails
+- GuardrailAuditAction: Audit guardrail violations
 """
-
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-import time
-import threading
-import logging
-from dataclasses import dataclass, field
-from enum import Enum
-from collections import defaultdict
 
 import sys
 import os
+import time
+import logging
+from typing import Any, Dict, List, Optional, Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
+logger = logging.getLogger(__name__)
 
-class GuardType(Enum):
-    """Guard types."""
-    RATE = "rate"
-    QUOTA = "quota"
-    TIMEOUT = "timeout"
-    CONDITION = "condition"
-    APPROVAL = "approval"
-    SLI = "sli"
+
+class ViolationSeverity(Enum):
+    """Severity level for guardrail violations."""
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
 
 
 @dataclass
-class GuardRule:
-    """Guard rule definition."""
+class GuardrailRule:
+    """A safety guardrail rule."""
     rule_id: str
     name: str
-    guard_type: GuardType
-    threshold: float
-    window: float = 60.0
+    check_fn: Callable[[Dict[str, Any]], tuple[bool, str]]
+    severity: ViolationSeverity = ViolationSeverity.WARNING
     enabled: bool = True
-    action: str = "block"
-    scope: str = "global"
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    bypass_tokens: List[str] = field(default_factory=list)
 
 
 @dataclass
-class GuardResult:
-    """Result of guard evaluation."""
-    passed: bool
+class Violation:
+    """A guardrail violation record."""
     rule_id: str
     rule_name: str
-    action: str
-    message: Optional[str] = None
+    message: str
+    severity: ViolationSeverity
+    timestamp: datetime = field(default_factory=datetime.now)
+    context: Dict[str, Any] = field(default_factory=dict)
+    bypassed: bool = False
 
 
-class RateGuard:
-    """Rate-based guard."""
-    
-    def __init__(self, rule: GuardRule):
-        self.rule = rule
-        self._counts: Dict[str, int] = defaultdict(int)
-        self._timestamps: Dict[str, List[float]] = defaultdict(list)
-        self._lock = threading.RLock()
-    
-    def check(self, scope: str) -> GuardResult:
-        """Check if rate limit is exceeded."""
-        with self._lock:
-            now = time.time()
-            cutoff = now - self.rule.window
-            
-            self._timestamps[scope] = [t for t in self._timestamps[scope] if t > cutoff]
-            
-            if len(self._timestamps[scope]) >= self.rule.threshold:
-                return GuardResult(
-                    passed=False,
-                    rule_id=self.rule.rule_id,
-                    rule_name=self.rule.name,
-                    action=self.rule.action,
-                    message=f"Rate limit exceeded: {len(self._timestamps[scope])} >= {self.rule.threshold}"
-                )
-            
-            self._timestamps[scope].append(now)
-            return GuardResult(passed=True, rule_id=self.rule.rule_id, rule_name=self.rule.name, action="allow")
-    
-    def reset(self, scope: Optional[str] = None):
-        """Reset rate counters."""
-        with self._lock:
-            if scope:
-                self._timestamps.pop(scope, None)
-            else:
-                self._timestamps.clear()
+class GuardrailRegistry:
+    """Registry for guardrail rules and violations."""
 
+    def __init__(self) -> None:
+        self._rules: Dict[str, GuardrailRule] = {}
+        self._violations: List[Violation] = []
+        self._bypass_until: Optional[datetime] = None
+        self._bypass_token: Optional[str] = None
 
-class QuotaGuard:
-    """Quota-based guard."""
-    
-    def __init__(self, rule: GuardRule):
-        self.rule = rule
-        self._quotas: Dict[str, float] = defaultdict(float)
-        self._lock = threading.RLock()
-    
-    def check(self, scope: str, amount: float = 1.0) -> GuardResult:
-        """Check if quota allows operation."""
-        with self._lock:
-            current = self._quotas.get(scope, 0.0)
-            
-            if current + amount > self.rule.threshold:
-                return GuardResult(
-                    passed=False,
-                    rule_id=self.rule.rule_id,
-                    rule_name=self.rule.name,
-                    action=self.rule.action,
-                    message=f"Quota exceeded: {current} + {amount} > {self.rule.threshold}"
-                )
-            
-            self._quotas[scope] = current + amount
-            return GuardResult(passed=True, rule_id=self.rule.rule_id, rule_name=self.rule.name, action="allow")
-    
-    def reset(self, scope: Optional[str] = None):
-        """Reset quota."""
-        with self._lock:
-            if scope:
-                self._quotas.pop(scope, None)
-            else:
-                self._quotas.clear()
+    def add_rule(self, rule: GuardrailRule) -> None:
+        self._rules[rule.rule_id] = rule
 
+    def remove_rule(self, rule_id: str) -> bool:
+        if rule_id in self._rules:
+            del self._rules[rule_id]
+            return True
+        return False
 
-class AutomationGuardrails:
-    """Guardrails enforcement for automation workflows."""
-    
-    def __init__(self, name: str):
-        self.name = name
-        self._rules: Dict[str, GuardRule] = {}
-        self._guards: Dict[str, Any] = {}
-        self._approvals: Dict[str, bool] = {}
-        self._lock = threading.RLock()
-        self._stats = {"total_checks": 0, "passed_checks": 0, "blocked_checks": 0, "total_violations": 0}
-    
-    def add_rule(self, rule: GuardRule):
-        """Add guard rule."""
-        with self._lock:
-            self._rules[rule.rule_id] = rule
-            
-            if rule.guard_type == GuardType.RATE:
-                self._guards[rule.rule_id] = RateGuard(rule)
-            elif rule.guard_type == GuardType.QUOTA:
-                self._guards[rule.rule_id] = QuotaGuard(rule)
-    
-    def remove_rule(self, rule_id: str):
-        """Remove guard rule."""
-        with self._lock:
-            self._rules.pop(rule_id, None)
-            self._guards.pop(rule_id, None)
-    
-    def check(self, scope: str = "global", amount: float = 1.0) -> Tuple[bool, List[GuardResult]]:
-        """Check all guards for scope."""
-        with self._lock:
-            self._stats["total_checks"] += 1
-        
-        results = []
-        
-        with self._lock:
-            rules = list(self._rules.values())
-        
-        for rule in rules:
+    def get_rule(self, rule_id: str) -> Optional[GuardrailRule]:
+        return self._rules.get(rule_id)
+
+    def list_rules(self) -> List[GuardrailRule]:
+        return list(self._rules.values())
+
+    def check(self, context: Dict[str, Any]) -> List[Violation]:
+        violations = []
+        for rule in self._rules.values():
             if not rule.enabled:
                 continue
-            
-            if rule.scope != "global" and rule.scope != scope:
-                continue
-            
-            if rule.guard_type == GuardType.RATE:
-                guard = self._guards.get(rule.rule_id)
-                if guard:
-                    result = guard.check(scope)
-                    results.append(result)
-            
-            elif rule.guard_type == GuardType.QUOTA:
-                guard = self._guards.get(rule.rule_id)
-                if guard:
-                    result = guard.check(scope, amount)
-                    results.append(result)
-            
-            elif rule.guard_type == GuardType.APPROVAL:
-                approved = self._approvals.get(f"{scope}:{rule.rule_id}", False)
-                if not approved:
-                    results.append(GuardResult(
-                        passed=False,
+            try:
+                passed, message = rule.check_fn(context)
+                if not passed:
+                    violation = Violation(
                         rule_id=rule.rule_id,
                         rule_name=rule.name,
-                        action=rule.action,
-                        message="Approval required"
-                    ))
-            
-            elif rule.guard_type == GuardType.CONDITION:
-                if "condition_fn" in rule.metadata:
-                    try:
-                        cond_fn = rule.metadata["condition_fn"]
-                        if not cond_fn():
-                            results.append(GuardResult(
-                                passed=False,
-                                rule_id=rule.rule_id,
-                                rule_name=rule.name,
-                                action=rule.action,
-                                message="Condition not met"
-                            ))
-                    except Exception as e:
-                        results.append(GuardResult(
-                            passed=False,
-                            rule_id=rule.rule_id,
-                            rule_name=rule.name,
-                            action=rule.action,
-                            message=f"Condition error: {str(e)}"
-                        ))
-        
-        with self._lock:
-            blocked = any(not r.passed and r.action == "block" for r in results)
-            if blocked:
-                self._stats["blocked_checks"] += 1
-                self._stats["total_violations"] += 1
-            else:
-                self._stats["passed_checks"] += 1
-        
-        return not blocked, results
-    
-    def approve(self, scope: str, rule_id: str):
-        """Approve a guard for scope."""
-        with self._lock:
-            self._approvals[f"{scope}:{rule_id}"] = True
-    
-    def revoke_approval(self, scope: str, rule_id: str):
-        """Revoke approval."""
-        with self._lock:
-            self._approvals.pop(f"{scope}:{rule_id}", None)
-    
-    def reset(self, rule_id: Optional[str] = None, scope: Optional[str] = None):
-        """Reset guard state."""
-        with self._lock:
-            if rule_id and rule_id in self._guards:
-                self._guards[rule_id].reset(scope)
-            elif scope:
-                for guard in self._guards.values():
-                    guard.reset(scope)
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get guardrails statistics."""
-        with self._lock:
-            return {
-                "name": self.name,
-                "rule_count": len(self._rules),
-                **{k: v for k, v in self._stats.items()},
-            }
+                        message=message,
+                        severity=rule.severity,
+                        context=context
+                    )
+                    if self._is_bypassed(rule):
+                        violation.bypassed = True
+                    violations.append(violation)
+                    self._violations.append(violation)
+            except Exception as e:
+                logger.error(f"Rule {rule.rule_id} check failed: {e}")
+        return violations
+
+    def _is_bypassed(self, rule: GuardrailRule) -> bool:
+        if self._bypass_until and datetime.now() < self._bypass_until:
+            if self._bypass_token in rule.bypass_tokens:
+                return True
+        return False
+
+    def set_bypass(self, token: str, duration_seconds: int = 300) -> bool:
+        self._bypass_until = datetime.now() + timedelta(seconds=duration_seconds)
+        self._bypass_token = token
+        return True
+
+    def clear_bypass(self) -> None:
+        self._bypass_until = None
+        self._bypass_token = None
+
+    def get_violations(
+        self,
+        since: Optional[datetime] = None,
+        severity: Optional[ViolationSeverity] = None
+    ) -> List[Violation]:
+        violations = self._violations
+        if since:
+            violations = [v for v in violations if v.timestamp >= since]
+        if severity:
+            violations = [v for v in violations if v.severity == severity]
+        return violations
 
 
-class AutomationGuardrailsAction(BaseAction):
-    """Automation guardrails action."""
-    action_type = "automation_guardrails"
-    display_name = "自动化护栏"
-    description = "自动化安全护栏控制"
-    
-    def __init__(self):
-        super().__init__()
-        self._guardrails: Dict[str, AutomationGuardrails] = {}
-        self._lock = threading.Lock()
-    
-    def _get_guardrails(self, name: str) -> AutomationGuardrails:
-        """Get or create guardrails."""
-        with self._lock:
-            if name not in self._guardrails:
-                self._guardrails[name] = AutomationGuardrails(name)
-            return self._guardrails[name]
-    
+_registry = GuardrailRegistry()
+
+
+def _always_pass(context: Dict[str, Any]) -> tuple[bool, str]:
+    return True, ""
+
+
+def _check_not_empty(key: str, context: Dict[str, Any]) -> tuple[bool, str]:
+    value = context.get(key)
+    if value is None or value == "":
+        return False, f"{key} cannot be empty"
+    return True, ""
+
+
+def _check_positive(key: str, context: Dict[str, Any]) -> tuple[bool, str]:
+    value = context.get(key)
+    if value is not None and isinstance(value, (int, float)) and value <= 0:
+        return False, f"{key} must be positive"
+    return True, ""
+
+
+def _check_in_range(key: str, min_val: float, max_val: float, context: Dict[str, Any]) -> tuple[bool, str]:
+    value = context.get(key)
+    if value is not None and isinstance(value, (int, float)):
+        if not (min_val <= value <= max_val):
+            return False, f"{key} must be between {min_val} and {max_val}"
+    return True, ""
+
+
+class GuardrailCheckAction(BaseAction):
+    """Pre-execution safety checks using guardrails."""
+    action_type = "automation_guardrail_check"
+    display_name = "安全规则检查"
+    description = "执行预定义的安全规则检查"
+
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute guardrails operation."""
-        try:
-            name = params.get("name", "default")
-            command = params.get("command", "check")
-            
-            guardrails = self._get_guardrails(name)
-            
-            if command == "add_rule":
-                rule = GuardRule(
-                    rule_id=params.get("rule_id"),
-                    name=params.get("rule_name"),
-                    guard_type=GuardType[params.get("guard_type", "rate").upper()],
-                    threshold=params.get("threshold", 10.0),
-                    window=params.get("window", 60.0),
-                    action=params.get("action", "block"),
-                    scope=params.get("scope", "global"),
-                )
-                guardrails.add_rule(rule)
-                return ActionResult(success=True, message=f"Rule {rule.rule_id} added")
-            
-            elif command == "check":
-                scope = params.get("scope", "global")
-                amount = params.get("amount", 1.0)
-                passed, results = guardrails.check(scope, amount)
-                blocked = [r for r in results if not r.passed]
+        rule_id = params.get("rule_id", "")
+        rule_name = params.get("rule_name", "")
+        check_type = params.get("check_type", "always_pass")
+        check_context = params.get("context", {})
+        severity = params.get("severity", "warning")
+
+        if rule_id and not rule_name:
+            existing = _registry.get_rule(rule_id)
+            if existing:
+                violations = _registry.check(check_context)
+                critical = [v for v in violations if v.severity in (ViolationSeverity.ERROR, ViolationSeverity.CRITICAL) and not v.bypassed]
                 return ActionResult(
-                    success=passed,
-                    message="Check passed" if passed else f"Blocked by {len(blocked)} guard(s)",
-                    data={"passed": passed, "results": [{"rule": r.rule_name, "passed": r.passed, "message": r.message} for r in results]}
+                    success=len(critical) == 0,
+                    message=f"检查完成，{len(critical)} 个严重违规",
+                    data={"violations": [{"rule": v.rule_name, "message": v.message, "severity": v.severity.value} for v in violations]}
                 )
-            
-            elif command == "approve":
-                scope = params.get("scope", "global")
-                rule_id = params.get("rule_id")
-                guardrails.approve(scope, rule_id)
-                return ActionResult(success=True)
-            
-            elif command == "reset":
-                guardrails.reset()
-                return ActionResult(success=True)
-            
-            elif command == "stats":
-                stats = guardrails.get_stats()
-                return ActionResult(success=True, data={"stats": stats})
-            
-            return ActionResult(success=False, message=f"Unknown command: {command}")
-            
-        except Exception as e:
-            return ActionResult(success=False, message=f"AutomationGuardrailsAction error: {str(e)}")
+
+        if not rule_id or not rule_name:
+            return ActionResult(success=False, message="rule_id和rule_name是必需的")
+
+        check_fn_map = {
+            "always_pass": _always_pass,
+            "not_empty": lambda ctx: _check_not_empty(check_context.get("check_key", ""), ctx),
+            "positive": lambda ctx: _check_positive(check_context.get("check_key", ""), ctx),
+            "in_range": lambda ctx: _check_in_range(check_context.get("check_key", ""), check_context.get("min_val", 0), check_context.get("max_val", 100), ctx),
+        }
+
+        check_fn = check_fn_map.get(check_type, _always_pass)
+        severity_enum = ViolationSeverity(severity)
+
+        rule = GuardrailRule(
+            rule_id=rule_id,
+            name=rule_name,
+            check_fn=check_fn,
+            severity=severity_enum
+        )
+        _registry.add_rule(rule)
+
+        return ActionResult(
+            success=True,
+            message=f"规则 {rule_name} 已注册",
+            data={"rule_id": rule_id, "severity": severity_enum.value}
+        )
+
+
+class GuardrailMonitorAction(BaseAction):
+    """Runtime safety monitoring."""
+    action_type = "automation_guardrail_monitor"
+    display_name = "安全规则监控"
+    description = "监控运行时安全规则状态"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        operation = params.get("operation", "status")
+        check_context = params.get("context", {})
+
+        if operation == "status":
+            rules = _registry.list_rules()
+            enabled = [r for r in rules if r.enabled]
+            disabled = [r for r in rules if not r.enabled]
+
+            return ActionResult(
+                success=True,
+                message=f"共 {len(rules)} 条规则，{len(enabled)} 启用，{len(disabled)} 禁用",
+                data={
+                    "total": len(rules),
+                    "enabled": len(enabled),
+                    "disabled": len(disabled),
+                    "rules": [{"id": r.rule_id, "name": r.name, "enabled": r.enabled, "severity": r.severity.value} for r in rules]
+                }
+            )
+
+        if operation == "check":
+            violations = _registry.check(check_context)
+            bypassed = [v for v in violations if v.bypassed]
+            active = [v for v in violations if not v.bypassed]
+            critical = [v for v in active if v.severity in (ViolationSeverity.ERROR, ViolationSeverity.CRITICAL)]
+
+            return ActionResult(
+                success=len(critical) == 0,
+                message=f"检查完成: {len(violations)} 违规, {len(bypassed)} 绕过, {len(critical)} 严重",
+                data={
+                    "total_violations": len(violations),
+                    "bypassed": len(bypassed),
+                    "critical": len(critical),
+                    "can_proceed": len(critical) == 0
+                }
+            )
+
+        if operation == "enable":
+            rule_id = params.get("rule_id", "")
+            rule = _registry.get_rule(rule_id)
+            if not rule:
+                return ActionResult(success=False, message=f"规则 {rule_id} 不存在")
+            rule.enabled = True
+            return ActionResult(success=True, message=f"规则 {rule_id} 已启用")
+
+        if operation == "disable":
+            rule_id = params.get("rule_id", "")
+            rule = _registry.get_rule(rule_id)
+            if not rule:
+                return ActionResult(success=False, message=f"规则 {rule_id} 不存在")
+            rule.enabled = False
+            return ActionResult(success=True, message=f"规则 {rule_id} 已禁用")
+
+        return ActionResult(success=False, message=f"未知操作: {operation}")
+
+
+class GuardrailBypassAction(BaseAction):
+    """Temporarily bypass guardrails."""
+    action_type = "automation_guardrail_bypass"
+    display_name = "安全规则临时绕过"
+    description = "临时绕过安全规则检查"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        operation = params.get("operation", "enable")
+        token = params.get("token", "")
+        duration = params.get("duration_seconds", 300)
+
+        if operation == "enable":
+            if not token:
+                return ActionResult(success=False, message="token是必需的")
+            if duration <= 0 or duration > 3600:
+                return ActionResult(success=False, message="duration必须在1-3600秒之间")
+
+            _registry.set_bypass(token, duration)
+            bypass_until = datetime.now() + timedelta(seconds=duration)
+            return ActionResult(
+                success=True,
+                message=f"绕过已启用，有效期至 {bypass_until.strftime('%H:%M:%S')}",
+                data={"until": bypass_until.isoformat()}
+            )
+
+        if operation == "disable":
+            _registry.clear_bypass()
+            return ActionResult(success=True, message="绕过已禁用")
+
+        return ActionResult(success=False, message=f"未知操作: {operation}")
+
+
+class GuardrailAuditAction(BaseAction):
+    """Audit guardrail violations."""
+    action_type = "automation_guardrail_audit"
+    display_name = "安全规则审计"
+    description = "审计安全规则违规记录"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        since_minutes = params.get("since_minutes", 60)
+        severity_filter = params.get("severity")
+        include_bypassed = params.get("include_bypassed", True)
+
+        since = datetime.now() - timedelta(minutes=since_minutes)
+        severity = ViolationSeverity(severity_filter) if severity_filter else None
+        violations = _registry.get_violations(since=since, severity=severity)
+
+        if not include_bypassed:
+            violations = [v for v in violations if not v.bypassed]
+
+        total = len(violations)
+        by_severity = {
+            "critical": len([v for v in violations if v.severity == ViolationSeverity.CRITICAL]),
+            "error": len([v for v in violations if v.severity == ViolationSeverity.ERROR]),
+            "warning": len([v for v in violations if v.severity == ViolationSeverity.WARNING]),
+            "info": len([v for v in violations if v.severity == ViolationSeverity.INFO]),
+        }
+
+        return ActionResult(
+            success=True,
+            message=f"审计完成: {total} 条违规记录",
+            data={
+                "total": total,
+                "by_severity": by_severity,
+                "violations": [
+                    {
+                        "rule_id": v.rule_id,
+                        "rule_name": v.rule_name,
+                        "message": v.message,
+                        "severity": v.severity.value,
+                        "timestamp": v.timestamp.isoformat(),
+                        "bypassed": v.bypassed
+                    }
+                    for v in violations[-50:]
+                ]
+            }
+        )

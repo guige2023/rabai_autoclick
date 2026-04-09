@@ -1,405 +1,367 @@
 """Data encoding action module for RabAI AutoClick.
 
-Provides data encoding operations:
-- OneHotEncoderAction: One-hot encoding
-- LabelEncoderAction: Label encoding
-- OrdinalEncoderAction: Ordinal encoding
-- TargetEncoderAction: Target encoding
-- CountEncoderAction: Count/frequency encoding
+Provides data encoding/decoding operations:
+- EncoderAction: Encode data in various formats
+- DecoderAction: Decode data from various formats
+- CodecRegistryAction: Manage encoding codecs
+- CharsetConverterAction: Convert between character encodings
 """
-
-from typing import Any, Dict, List, Optional, Set
-from collections import defaultdict, Counter
 
 import sys
 import os
+import base64
+import json
+import logging
+import urllib.parse
+from typing import Any, Dict, List, Optional, Callable
+from dataclasses import dataclass
+import zlib
+import gzip
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
 from core.base_action import BaseAction, ActionResult
 
+logger = logging.getLogger(__name__)
 
-class OneHotEncoderAction(BaseAction):
-    """One-hot encoding for categorical data."""
-    action_type = "onehot_encoder"
-    display_name = "独热编码"
-    description = "对分类数据进行独热编码"
-    
-    def __init__(self):
-        super().__init__()
-        self._categories: Dict[str, Set] = {}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+class Encoder:
+    """Encoding operations."""
+
+    @staticmethod
+    def base64_encode(data: bytes) -> str:
+        return base64.b64encode(data).decode("ascii")
+
+    @staticmethod
+    def base64url_encode(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def hex_encode(data: bytes) -> str:
+        return data.hex()
+
+    @staticmethod
+    def gzip_encode(data: bytes, compression_level: int = 9) -> bytes:
+        return gzip.compress(data, level=compression_level)
+
+    @staticmethod
+    def zlib_encode(data: bytes, compression_level: int = 9) -> bytes:
+        return zlib.compress(data, level=compression_level)
+
+    @staticmethod
+    def json_encode(data: Any) -> str:
+        return json.dumps(data, ensure_ascii=False)
+
+    @staticmethod
+    def url_encode(data: str) -> str:
+        return urllib.parse.quote_plus(data)
+
+
+class Decoder:
+    """Decoding operations."""
+
+    @staticmethod
+    def base64_decode(data: str) -> bytes:
+        padding = 4 - len(data) % 4
+        if padding != 4:
+            data += "=" * padding
+        return base64.b64decode(data)
+
+    @staticmethod
+    def base64url_decode(data: str) -> bytes:
+        padding = 4 - len(data) % 4
+        if padding != 4:
+            data += "=" * padding
+        return base64.urlsafe_b64decode(data)
+
+    @staticmethod
+    def hex_decode(data: str) -> bytes:
+        return bytes.fromhex(data)
+
+    @staticmethod
+    def gzip_decode(data: bytes) -> bytes:
+        return gzip.decompress(data)
+
+    @staticmethod
+    def zlib_decode(data: bytes) -> bytes:
+        return zlib.decompress(data)
+
+    @staticmethod
+    def json_decode(data: str) -> Any:
+        return json.loads(data)
+
+    @staticmethod
+    def url_decode(data: str) -> str:
+        return urllib.parse.unquote_plus(data)
+
+
+class CharsetConverter:
+    """Character encoding conversion."""
+
+    def __init__(self) -> None:
+        self._encodings = ["utf-8", "gbk", "gb2312", "gb18030", "big5", "shift_jis", "euc_kr", "iso-8859-1", "ascii"]
+
+    def convert(self, data: str, from_encoding: str, to_encoding: str) -> str:
         try:
-            data = params.get("data", [])
-            field = params.get("field")
-            drop_first = params.get("drop_first", False)
-            
-            if not data:
-                return ActionResult(success=False, message="No data provided")
-            
-            if not field:
-                return ActionResult(success=False, message="field is required")
-            
-            encoded, categories = self._encode(data, field, drop_first)
-            
-            return ActionResult(
-                success=True,
-                message="One-hot encoding complete",
-                data={
-                    "original_count": len(data),
-                    "categories": categories,
-                    "drop_first": drop_first,
-                    "encoded_data": encoded[:100]
-                }
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _encode(self, data: List[Dict], field: str, drop_first: bool) -> Tuple[List[Dict], List[str]]:
-        categories = set()
-        for item in data:
-            if isinstance(item, dict) and field in item:
-                categories.add(str(item[field]))
-        
-        categories = sorted(list(categories))
-        
-        if drop_first and categories:
-            categories = categories[1:]
-        
-        for item in data:
-            if isinstance(item, dict):
-                item_value = str(item.get(field, ""))
-                for cat in categories:
-                    item[f"{field}_{cat}"] = 1 if item_value == cat else 0
-        
-        return data, categories
-
-
-class LabelEncoderAction(BaseAction):
-    """Label encoding for categorical data."""
-    action_type = "label_encoder"
-    display_name = "标签编码"
-    description = "对分类数据进行标签编码"
-    
-    def __init__(self):
-        super().__init__()
-        self._mappings: Dict[str, Dict[str, int]] = {}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field")
-            mapping = params.get("mapping")
-            
-            if not data:
-                return ActionResult(success=False, message="No data provided")
-            
-            if not field:
-                return ActionResult(success=False, message="field is required")
-            
-            encoded, label_mapping = self._encode(data, field, mapping)
-            
-            return ActionResult(
-                success=True,
-                message="Label encoding complete",
-                data={
-                    "original_count": len(data),
-                    "label_mapping": label_mapping,
-                    "encoded_data": [{"index": i, field: v} for i, v in enumerate(encoded)]
-                }
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _encode(self, data: List[Dict], field: str, mapping: Optional[Dict[str, int]]) -> Tuple[List[int], Dict[str, int]]:
-        categories = set()
-        for item in data:
-            if isinstance(item, dict) and field in item:
-                categories.add(str(item[field]))
-        
-        if mapping is None:
-            sorted_cats = sorted(list(categories))
-            mapping = {cat: i for i, cat in enumerate(sorted_cats)}
-        
-        self._mappings[field] = mapping
-        
-        encoded = []
-        for item in data:
-            if isinstance(item, dict) and field in item:
-                value = str(item[field])
-                encoded_value = mapping.get(value, -1)
-                item[field] = encoded_value
-                encoded.append(encoded_value)
+            if from_encoding.lower() in ("utf-8", "utf8"):
+                byte_data = data.encode(to_encoding)
             else:
-                encoded.append(-1)
-        
-        return encoded, mapping
+                byte_data = data.encode(from_encoding)
+                if to_encoding.lower() in ("utf-8", "utf8"):
+                    return byte_data.decode("utf-8")
+                return byte_data.decode(to_encoding)
+            return byte_data.decode(to_encoding)
+        except Exception as e:
+            raise ValueError(f"Conversion from {from_encoding} to {to_encoding} failed: {e}")
 
-
-class OrdinalEncoderAction(BaseAction):
-    """Ordinal encoding with custom ordering."""
-    action_type = "ordinal_encoder"
-    display_name = "有序编码"
-    description = "对分类数据进行有序编码"
-    
-    def __init__(self):
-        super().__init__()
-        self._orderings: Dict[str, List[str]] = {}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+    def detect(self, data: bytes) -> str:
         try:
-            data = params.get("data", [])
-            field = params.get("field")
-            order = params.get("order", [])
-            
-            if not data:
-                return ActionResult(success=False, message="No data provided")
-            
-            if not field:
-                return ActionResult(success=False, message="field is required")
-            
-            if not order:
-                return ActionResult(success=False, message="order is required for ordinal encoding")
-            
-            encoded = self._encode(data, field, order)
-            
+            data.decode("utf-8")
+            return "utf-8"
+        except UnicodeDecodeError:
+            pass
+        try:
+            data.decode("gbk")
+            return "gbk"
+        except UnicodeDecodeError:
+            pass
+        return "iso-8859-1"
+
+
+@dataclass
+class Codec:
+    """A codec definition."""
+    name: str
+    encode_fn: Callable[[bytes], bytes]
+    decode_fn: Callable[[bytes], bytes]
+    description: str = ""
+
+
+class CodecRegistry:
+    """Registry for encoding codecs."""
+
+    def __init__(self) -> None:
+        self._codecs: Dict[str, Codec] = {}
+        self._register_defaults()
+
+    def _register_defaults(self) -> None:
+        self.register(Codec(
+            name="base64",
+            encode_fn=lambda d: Encoder.base64_encode(d).encode(),
+            decode_fn=lambda d: Decoder.base64_decode(d.decode()),
+            description="Base64 encoding"
+        ))
+        self.register(Codec(
+            name="hex",
+            encode_fn=lambda d: Encoder.hex_encode(d).encode(),
+            decode_fn=lambda d: Decoder.hex_decode(d.decode()),
+            description="Hexadecimal encoding"
+        ))
+        self.register(Codec(
+            name="gzip",
+            encode_fn=lambda d: Encoder.gzip_encode(d),
+            decode_fn=lambda d: Decoder.gzip_decode(d),
+            description="GZIP compression"
+        ))
+        self.register(Codec(
+            name="zlib",
+            encode_fn=lambda d: Encoder.zlib_encode(d),
+            decode_fn=lambda d: Decoder.zlib_decode(d),
+            description="Zlib compression"
+        ))
+
+    def register(self, codec: Codec) -> None:
+        self._codecs[codec.name] = codec
+
+    def unregister(self, name: str) -> bool:
+        if name in self._codecs:
+            del self._codecs[name]
+            return True
+        return False
+
+    def get(self, name: str) -> Optional[Codec]:
+        return self._codecs.get(name)
+
+    def list_all(self) -> List[Codec]:
+        return list(self._codecs.values())
+
+
+_registry = CodecRegistry()
+
+
+class EncoderAction(BaseAction):
+    """Encode data in various formats."""
+    action_type = "data_encoder"
+    display_name = "数据编码"
+    description = "将数据编码为指定格式"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", "")
+        format_type = params.get("format", "base64")
+        input_type = params.get("input_type", "string")
+
+        if input_type == "string":
+            data_bytes = data.encode("utf-8")
+        elif input_type == "hex":
+            data_bytes = bytes.fromhex(data)
+        else:
+            data_bytes = data
+
+        if format_type == "base64":
+            result = Encoder.base64_encode(data_bytes)
+        elif format_type == "base64url":
+            result = Encoder.base64url_encode(data_bytes)
+        elif format_type == "hex":
+            result = Encoder.hex_encode(data_bytes)
+        elif format_type == "gzip":
+            compressed = Encoder.gzip_encode(data_bytes)
+            result = base64.b64encode(compressed).decode()
+        elif format_type == "zlib":
+            compressed = Encoder.zlib_encode(data_bytes)
+            result = base64.b64encode(compressed).decode()
+        elif format_type == "json":
+            try:
+                json_data = json.loads(data) if isinstance(data, str) else data
+                result = json.dumps(json_data, ensure_ascii=False)
+            except json.JSONDecodeError:
+                return ActionResult(success=False, message="JSON编码失败：无效的JSON数据")
+            data_bytes = result.encode("utf-8")
+            return ActionResult(success=True, message="JSON编码完成", data={"result": result})
+        elif format_type == "url":
+            result = Encoder.url_encode(data if isinstance(data, str) else data.decode("utf-8"))
+        else:
+            return ActionResult(success=False, message=f"未知格式: {format_type}")
+
+        return ActionResult(
+            success=True,
+            message=f"编码为 {format_type} 完成",
+            data={"format": format_type, "result": result, "original_size": len(data_bytes), "encoded_size": len(result)}
+        )
+
+
+class DecoderAction(BaseAction):
+    """Decode data from various formats."""
+    action_type = "data_decoder"
+    display_name = "数据解码"
+    description = "将数据从指定格式解码"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        data = params.get("data", "")
+        format_type = params.get("format", "base64")
+        output_type = params.get("output_type", "string")
+
+        if format_type == "base64":
+            decoded = Decoder.base64_decode(data)
+        elif format_type == "base64url":
+            decoded = Decoder.base64url_decode(data)
+        elif format_type == "hex":
+            decoded = Decoder.hex_decode(data)
+        elif format_type == "gzip":
+            compressed = base64.b64decode(data)
+            decoded = Decoder.gzip_decode(compressed)
+        elif format_type == "zlib":
+            compressed = base64.b64decode(data)
+            decoded = Decoder.zlib_decode(compressed)
+        elif format_type == "json":
+            try:
+                parsed = Decoder.json_decode(data)
+                return ActionResult(
+                    success=True,
+                    message="JSON解码完成",
+                    data={"result": parsed, "type": type(parsed).__name__}
+                )
+            except json.JSONDecodeError as e:
+                return ActionResult(success=False, message=f"JSON解码失败: {e}")
+        elif format_type == "url":
+            decoded = Decoder.url_decode(data).encode("utf-8")
+        else:
+            return ActionResult(success=False, message=f"未知格式: {format_type}")
+
+        if output_type == "string":
+            result = decoded.decode("utf-8")
+        elif output_type == "bytes":
+            result = decoded
+        elif output_type == "hex":
+            result = decoded.hex()
+        else:
+            result = decoded.decode("utf-8")
+
+        return ActionResult(
+            success=True,
+            message=f"从 {format_type} 解码完成",
+            data={"result": result, "format": format_type, "decoded_size": len(decoded)}
+        )
+
+
+class CodecRegistryAction(BaseAction):
+    """Manage encoding codecs."""
+    action_type = "data_codec_registry"
+    display_name = "编解码器注册表"
+    description = "管理数据编解码器"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        operation = params.get("operation", "list")
+        codec_name = params.get("codec_name", "")
+
+        if operation == "list":
+            codecs = _registry.list_all()
             return ActionResult(
                 success=True,
-                message="Ordinal encoding complete",
-                data={
-                    "original_count": len(data),
-                    "order": order,
-                    "encoded_data": [{"index": i, field: v} for i, v in enumerate(encoded)]
-                }
+                message=f"共 {len(codecs)} 个编解码器",
+                data={"codecs": [{"name": c.name, "description": c.description} for c in codecs]}
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _encode(self, data: List[Dict], field: str, order: List[str]) -> List[int]:
-        self._orderings[field] = order
-        order_map = {val: i for i, val in enumerate(order)}
-        
-        encoded = []
-        for item in data:
-            if isinstance(item, dict) and field in item:
-                value = str(item[field])
-                encoded_value = order_map.get(value, -1)
-                item[field] = encoded_value
-                encoded.append(encoded_value)
-            else:
-                encoded.append(-1)
-        
-        return encoded
 
-
-class TargetEncoderAction(BaseAction):
-    """Target encoding for categorical data."""
-    action_type = "target_encoder"
-    display_name = "目标编码"
-    description = "对分类数据进行目标编码"
-    
-    def __init__(self):
-        super().__init__()
-        self._encodings: Dict[str, Dict[str, float]] = {}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field")
-            target_field = params.get("target_field")
-            smoothing = params.get("smoothing", 1.0)
-            
-            if not data:
-                return ActionResult(success=False, message="No data provided")
-            
-            if not field or not target_field:
-                return ActionResult(success=False, message="field and target_field are required")
-            
-            encoded, encodings = self._encode(data, field, target_field, smoothing)
-            
+        if operation == "get":
+            codec = _registry.get(codec_name)
+            if not codec:
+                return ActionResult(success=False, message=f"编解码器 {codec_name} 不存在")
             return ActionResult(
                 success=True,
-                message="Target encoding complete",
-                data={
-                    "original_count": len(data),
-                    "field": field,
-                    "target_field": target_field,
-                    "smoothing": smoothing,
-                    "encodings": encodings,
-                    "encoded_data": [{"index": i, field: v} for i, v in enumerate(encoded)]
-                }
+                message=f"编解码器: {codec_name}",
+                data={"name": codec.name, "description": codec.description}
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _encode(self, data: List[Dict], field: str, target_field: str, 
-                smoothing: float) -> Tuple[List[float], Dict[str, float]]:
-        category_values: Dict[str, List[float]] = defaultdict(list)
-        
-        for item in data:
-            if isinstance(item, dict) and field in item and target_field in item:
-                cat = str(item[field])
-                target = item[target_field]
-                if isinstance(target, (int, float)):
-                    category_values[cat].append(target)
-        
-        global_mean = 0
-        all_values = []
-        for values in category_values.values():
-            all_values.extend(values)
-        
-        if all_values:
-            global_mean = sum(all_values) / len(all_values)
-        
-        encodings = {}
-        total_count = len(all_values)
-        
-        for cat, values in category_values.items():
-            count = len(values)
-            mean = sum(values) / count if count > 0 else global_mean
-            
-            smooth_weight = count / (count + smoothing)
-            encodings[cat] = smooth_weight * mean + (1 - smooth_weight) * global_mean
-        
-        self._encodings[field] = encodings
-        
-        encoded = []
-        for item in data:
-            if isinstance(item, dict) and field in item:
-                cat = str(item[field])
-                encoded_value = encodings.get(cat, global_mean)
-                item[field] = encoded_value
-                encoded.append(encoded_value)
-            else:
-                encoded.append(global_mean)
-        
-        return encoded, encodings
+
+        if operation == "unregister":
+            if _registry.unregister(codec_name):
+                return ActionResult(success=True, message=f"编解码器 {codec_name} 已注销")
+            return ActionResult(success=False, message=f"编解码器 {codec_name} 不存在")
+
+        return ActionResult(success=False, message=f"未知操作: {operation}")
 
 
-class CountEncoderAction(BaseAction):
-    """Count/frequency encoding for categorical data."""
-    action_type = "count_encoder"
-    display_name = "计数编码"
-    description = "对分类数据进行计数/频率编码"
-    
-    def __init__(self):
-        super().__init__()
-        self._counts: Dict[str, Dict[str, int]] = {}
-    
+class CharsetConverterAction(BaseAction):
+    """Convert between character encodings."""
+    action_type = "data_charset_converter"
+    display_name = "字符编码转换"
+    description = "在不同的字符编码之间转换"
+
     def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field")
-            normalize = params.get("normalize", False)
-            
-            if not data:
-                return ActionResult(success=False, message="No data provided")
-            
-            if not field:
-                return ActionResult(success=False, message="field is required")
-            
-            encoded, counts = self._encode(data, field, normalize)
-            
+        data = params.get("data", "")
+        from_encoding = params.get("from_encoding", "utf-8")
+        to_encoding = params.get("to_encoding", "utf-8")
+        operation = params.get("operation", "convert")
+
+        converter = CharsetConverter()
+
+        if operation == "convert":
+            try:
+                result = converter.convert(data, from_encoding, to_encoding)
+                return ActionResult(
+                    success=True,
+                    message=f"从 {from_encoding} 转换到 {to_encoding} 完成",
+                    data={"result": result, "from": from_encoding, "to": to_encoding}
+                )
+            except Exception as e:
+                return ActionResult(success=False, message=f"编码转换失败: {e}")
+
+        if operation == "detect":
+            if isinstance(data, str):
+                data = data.encode(from_encoding)
+            detected = converter.detect(data)
             return ActionResult(
                 success=True,
-                message="Count encoding complete",
-                data={
-                    "original_count": len(data),
-                    "field": field,
-                    "normalize": normalize,
-                    "counts": counts,
-                    "encoded_data": [{"index": i, field: v} for i, v in enumerate(encoded)]
-                }
+                message=f"检测到编码: {detected}",
+                data={"detected": detected}
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _encode(self, data: List[Dict], field: str, normalize: bool) -> Tuple[List[float], Dict[str, int]]:
-        counter: Counter = Counter()
-        
-        for item in data:
-            if isinstance(item, dict) and field in item:
-                counter[str(item[field])] += 1
-        
-        counts = dict(counter)
-        total = sum(counts.values())
-        
-        self._counts[field] = counts
-        
-        encoded = []
-        for item in data:
-            if isinstance(item, dict) and field in item:
-                cat = str(item[field])
-                count = counts.get(cat, 0)
-                if normalize and total > 0:
-                    item[field] = count / total
-                else:
-                    item[field] = count
-                encoded.append(item[field])
-            else:
-                encoded.append(0 if not normalize else 0.0)
-        
-        return encoded, counts
 
-
-class HashEncoderAction(BaseAction):
-    """Hash encoding for categorical data."""
-    action_type = "hash_encoder"
-    display_name = "哈希编码"
-    description = "对分类数据进行哈希编码"
-    
-    def __init__(self):
-        super().__init__()
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field")
-            n_components = params.get("n_components", 8)
-            
-            if not data:
-                return ActionResult(success=False, message="No data provided")
-            
-            if not field:
-                return ActionResult(success=False, message="field is required")
-            
-            encoded = self._encode(data, field, n_components)
-            
-            return ActionResult(
-                success=True,
-                message="Hash encoding complete",
-                data={
-                    "original_count": len(data),
-                    "field": field,
-                    "n_components": n_components,
-                    "encoded_data": [{"index": i, f"{field}_hash_{j}": v for j, v in enumerate(h)}] 
-                                   for i, h in enumerate(encoded)
-                }
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _encode(self, data: List[Dict], field: str, n_components: int) -> List[List[int]]:
-        import hashlib
-        
-        encoded = []
-        
-        for item in data:
-            if isinstance(item, dict) and field in item:
-                value = str(item[field])
-                hash_val = int(hashlib.md5(value.encode()).hexdigest(), 16)
-                
-                hash_features = []
-                for i in range(n_components):
-                    bit_pos = (hash_val >> i) & 1
-                    hash_features.append(bit_pos)
-                
-                encoded.append(hash_features)
-            else:
-                encoded.append([0] * n_components)
-        
-        return encoded
-
-
-from typing import Tuple
+        return ActionResult(success=False, message=f"未知操作: {operation}")

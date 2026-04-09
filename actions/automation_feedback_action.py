@@ -1,498 +1,361 @@
-"""
-Automation Feedback Action Module.
+"""Automation feedback action module for RabAI AutoClick.
 
-Provides feedback collection, processing, and analysis
-for continuous improvement of automation workflows.
+Provides feedback loop operations:
+- FeedbackCollectorAction: Collect execution feedback
+- FeedbackAnalyzerAction: Analyze feedback patterns
+- FeedbackLoopAction: Implement feedback control loops
+- AdaptiveTunerAction: Adaptively tune parameters based on feedback
 """
 
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import sys
+import os
+import time
+import logging
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
-import asyncio
-import json
-import logging
-import uuid
-from collections import defaultdict, Counter
+from collections import deque
+import threading
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 logger = logging.getLogger(__name__)
 
 
-class FeedbackType(Enum):
-    """Types of feedback."""
-    SUCCESS = "success"
-    FAILURE = "failure"
-    WARNING = "warning"
-    IMPROVEMENT = "improvement"
-    METRIC = "metric"
-    CUSTOM = "custom"
-
-
-class FeedbackSeverity(Enum):
-    """Severity of feedback."""
-    INFO = "info"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
 @dataclass
-class FeedbackItem:
-    """Single feedback item."""
-    feedback_id: str
-    feedback_type: FeedbackType
-    source: str
-    content: str
-    severity: FeedbackSeverity = FeedbackSeverity.INFO
+class FeedbackPoint:
+    """A single feedback data point."""
+    metric_name: str
+    value: float
+    expected: Optional[float] = None
+    deviation: float = 0.0
     timestamp: datetime = field(default_factory=datetime.now)
-    context: Dict[str, Any] = field(default_factory=dict)
-    tags: Set[str] = field(default_factory=set)
-    parent_id: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    tags: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
-class FeedbackSummary:
-    """Summary of feedback analysis."""
-    total_feedback: int
-    by_type: Dict[str, int]
-    by_severity: Dict[str, int]
-    by_source: Dict[str, int]
-    trend: str
-    top_issues: List[Tuple[str, int]]
-    recommendations: List[str]
+class FeedbackLoopState:
+    """State of a feedback control loop."""
+    loop_id: str
+    current_value: float = 0.0
+    target_value: float = 0.0
+    kp: float = 1.0
+    ki: float = 0.0
+    kd: float = 0.0
+    integral: float = 0.0
+    last_error: float = 0.0
+    last_update: datetime = field(default_factory=datetime.now)
+    is_active: bool = False
 
 
-@dataclass
-class ImprovementAction:
-    """Action to improve based on feedback."""
-    action_id: str
-    description: str
-    priority: int
-    target_component: str
-    expected_impact: str
-    status: str = "pending"
-    created_at: datetime = field(default_factory=datetime.now)
-    completed_at: Optional[datetime] = None
+class FeedbackStore:
+    """Store for feedback data points."""
 
+    def __init__(self, max_points: int = 1000) -> None:
+        self._points: deque = deque(maxlen=max_points)
+        self._lock = threading.Lock()
 
-class FeedbackCollector:
-    """Collects feedback from various sources."""
+    def record(self, point: FeedbackPoint) -> None:
+        with self._lock:
+            self._points.append(point)
 
-    def __init__(self):
-        self.feedback_items: Dict[str, FeedbackItem] = {}
-        self._handlers: Dict[FeedbackType, List[Callable]] = defaultdict(list)
-        self._filters: List[Callable] = []
+    def get_recent(self, metric_name: str, since_minutes: int = 60) -> List[FeedbackPoint]:
+        with self._lock:
+            cutoff = datetime.now() - timedelta(minutes=since_minutes)
+            return [p for p in self._points if p.metric_name == metric_name and p.timestamp >= cutoff]
 
-    def add_feedback(
-        self,
-        feedback_type: FeedbackType,
-        source: str,
-        content: str,
-        severity: FeedbackSeverity = FeedbackSeverity.INFO,
-        context: Optional[Dict[str, Any]] = None,
-        tags: Optional[Set[str]] = None,
-        parent_id: Optional[str] = None
-    ) -> FeedbackItem:
-        """Add new feedback item."""
-        feedback_id = str(uuid.uuid4())
+    def get_stats(self, metric_name: str, since_minutes: int = 60) -> Dict[str, float]:
+        points = self.get_recent(metric_name, since_minutes)
+        if not points:
+            return {}
 
-        feedback = FeedbackItem(
-            feedback_id=feedback_id,
-            feedback_type=feedback_type,
-            source=source,
-            content=content,
-            severity=severity,
-            context=context or {},
-            tags=tags or set(),
-            parent_id=parent_id
-        )
-
-        for feedback_filter in self._filters:
-            if not feedback_filter(feedback):
-                logger.debug(f"Feedback filtered out: {feedback_id}")
-                return feedback
-
-        self.feedback_items[feedback_id] = feedback
-
-        for handler in self._handlers.get(feedback_type, []):
-            try:
-                handler(feedback)
-            except Exception as e:
-                logger.error(f"Feedback handler error: {e}")
-
-        return feedback
-
-    def add_handler(self, feedback_type: FeedbackType, handler: Callable):
-        """Add handler for feedback type."""
-        self._handlers[feedback_type].append(handler)
-
-    def add_filter(self, feedback_filter: Callable):
-        """Add filter for feedback items."""
-        self._filters.append(feedback_filter)
-
-    def get_feedback(
-        self,
-        feedback_id: str
-    ) -> Optional[FeedbackItem]:
-        """Get feedback by ID."""
-        return self.feedback_items.get(feedback_id)
-
-    def get_feedback_list(
-        self,
-        feedback_type: Optional[FeedbackType] = None,
-        source: Optional[str] = None,
-        severity: Optional[FeedbackSeverity] = None,
-        since: Optional[datetime] = None,
-        limit: int = 100
-    ) -> List[FeedbackItem]:
-        """Get filtered list of feedback."""
-        items = self.feedback_items.values()
-
-        if feedback_type:
-            items = [i for i in items if i.feedback_type == feedback_type]
-        if source:
-            items = [i for i in items if i.source == source]
-        if severity:
-            items = [i for i in items if i.severity == severity]
-        if since:
-            items = [i for i in items if i.timestamp >= since]
-
-        items = sorted(items, key=lambda i: i.timestamp, reverse=True)
-        return items[:limit]
-
-    def get_related_feedback(
-        self,
-        feedback_id: str
-    ) -> List[FeedbackItem]:
-        """Get feedback related to a parent."""
-        feedback = self.feedback_items.get(feedback_id)
-        if not feedback:
-            return []
-
-        return [
-            item for item in self.feedback_items.values()
-            if item.parent_id == feedback_id
-        ]
-
-    def delete_feedback(self, feedback_id: str) -> bool:
-        """Delete feedback item."""
-        if feedback_id in self.feedback_items:
-            del self.feedback_items[feedback_id]
-            return True
-        return False
-
-
-class FeedbackAnalyzer:
-    """Analyzes feedback for patterns and insights."""
-
-    def __init__(self, collector: FeedbackCollector):
-        self.collector = collector
-        self._anomaly_threshold: float = 2.0
-
-    def analyze(
-        self,
-        since: Optional[datetime] = None,
-        until: Optional[datetime] = None
-    ) -> FeedbackSummary:
-        """Analyze feedback and generate summary."""
-        items = self.collector.get_feedback_list(limit=10000)
-
-        if since:
-            items = [i for i in items if i.timestamp >= since]
-        if until:
-            items = [i for i in items if i.timestamp <= until]
-
-        by_type = Counter(i.feedback_type.value for i in items)
-        by_severity = Counter(i.severity.value for i in items)
-        by_source = Counter(i.source for i in items)
-
-        top_issues = self._identify_top_issues(items)
-
-        trend = self._calculate_trend(items)
-
-        recommendations = self._generate_recommendations(items)
-
-        return FeedbackSummary(
-            total_feedback=len(items),
-            by_type=dict(by_type),
-            by_severity=dict(by_severity),
-            by_source=dict(by_source),
-            trend=trend,
-            top_issues=top_issues,
-            recommendations=recommendations
-        )
-
-    def _identify_top_issues(
-        self,
-        items: List[FeedbackItem]
-    ) -> List[Tuple[str, int]]:
-        """Identify most common issues."""
-        issues = [
-            item.content for item in items
-            if item.feedback_type == FeedbackType.FAILURE
-        ]
-
-        counter = Counter(issues)
-        return counter.most_common(5)
-
-    def _calculate_trend(
-        self,
-        items: List[FeedbackItem]
-    ) -> str:
-        """Calculate feedback trend."""
-        if not items:
-            return "no_data"
-
-        now = datetime.now()
-        recent = [i for i in items if i.timestamp >= now - timedelta(hours=1)]
-        older = [i for i in items if now - timedelta(hours=2) <= i.timestamp < now - timedelta(hours=1)]
-
-        if not older:
-            return "insufficient_data"
-
-        recent_failure_rate = sum(
-            1 for i in recent if i.feedback_type == FeedbackType.FAILURE
-        ) / max(len(recent), 1)
-
-        older_failure_rate = sum(
-            1 for i in older if i.feedback_type == FeedbackType.FAILURE
-        ) / max(len(older), 1)
-
-        if recent_failure_rate > older_failure_rate * 1.2:
-            return "deteriorating"
-        elif recent_failure_rate < older_failure_rate * 0.8:
-            return "improving"
-        return "stable"
-
-    def _generate_recommendations(
-        self,
-        items: List[FeedbackItem]
-    ) -> List[str]:
-        """Generate improvement recommendations."""
-        recommendations = []
-
-        failures = [i for i in items if i.feedback_type == FeedbackType.FAILURE]
-        if len(failures) > 10:
-            recommendations.append("High failure rate detected - consider adding more robust error handling")
-
-        warnings = [i for i in items if i.feedback_type == FeedbackType.WARNING]
-        if len(warnings) > 5:
-            recommendations.append("Multiple warnings observed - review warning thresholds")
-
-        by_source = Counter(i.source for i in items)
-        high_source = max(by_source.items(), key=lambda x: x[1], default=(None, 0))
-        if high_source[1] > len(items) * 0.5:
-            recommendations.append(f"Source '{high_source[0]}' generates most feedback - investigate")
-
-        return recommendations
-
-    def detect_anomalies(
-        self,
-        metric_name: str
-    ) -> List[FeedbackItem]:
-        """Detect anomalous feedback patterns."""
-        metric_items = [
-            item for item in self.collector.get_feedback_list()
-            if item.feedback_type == FeedbackType.METRIC
-            and item.context.get("metric_name") == metric_name
-        ]
-
-        if len(metric_items) < 3:
-            return []
-
-        values = [item.context.get("value", 0) for item in metric_items]
-        mean = sum(values) / len(values)
-        variance = sum((v - mean) ** 2 for v in values) / len(values)
-        std = variance ** 0.5
-
-        anomalies = []
-        for item in metric_items:
-            value = item.context.get("value", 0)
-            if abs(value - mean) > self._anomaly_threshold * std:
-                anomalies.append(item)
-
-        return anomalies
-
-
-class ImprovementTracker:
-    """Tracks improvement actions based on feedback."""
-
-    def __init__(self):
-        self.actions: Dict[str, ImprovementAction] = {}
-
-    def create_action(
-        self,
-        description: str,
-        priority: int,
-        target_component: str,
-        expected_impact: str
-    ) -> ImprovementAction:
-        """Create new improvement action."""
-        action_id = str(uuid.uuid4())
-
-        action = ImprovementAction(
-            action_id=action_id,
-            description=description,
-            priority=priority,
-            target_component=target_component,
-            expected_impact=expected_impact
-        )
-
-        self.actions[action_id] = action
-        return action
-
-    def complete_action(self, action_id: str):
-        """Mark action as completed."""
-        if action_id in self.actions:
-            self.actions[action_id].status = "completed"
-            self.actions[action_id].completed_at = datetime.now()
-
-    def get_pending_actions(
-        self,
-        target_component: Optional[str] = None
-    ) -> List[ImprovementAction]:
-        """Get pending improvement actions."""
-        actions = [
-            a for a in self.actions.values()
-            if a.status == "pending"
-        ]
-
-        if target_component:
-            actions = [
-                a for a in actions
-                if a.target_component == target_component
-            ]
-
-        return sorted(actions, key=lambda a: a.priority, reverse=True)
-
-    def get_action_stats(self) -> Dict[str, int]:
-        """Get action statistics."""
+        values = [p.value for p in points]
         return {
-            "total": len(self.actions),
-            "pending": sum(1 for a in self.actions.values() if a.status == "pending"),
-            "completed": sum(1 for a in self.actions.values() if a.status == "completed")
+            "count": len(values),
+            "min": min(values),
+            "max": max(values),
+            "avg": sum(values) / len(values),
+            "deviation_avg": sum(abs(p.deviation) for p in points) / len(points)
         }
 
 
-class FeedbackLoop:
-    """Complete feedback loop orchestrator."""
+class PIDController:
+    """PID feedback controller."""
 
-    def __init__(self):
-        self.collector = FeedbackCollector()
-        self.analyzer = FeedbackAnalyzer(self.collector)
-        self.improvement_tracker = ImprovementTracker()
-        self._automation_handlers: Dict[str, Callable] = {}
+    def __init__(self, kp: float = 1.0, ki: float = 0.0, kd: float = 0.0) -> None:
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = time.time()
 
-    def register_automation_handler(
-        self,
-        component: str,
-        handler: Callable
-    ):
-        """Register handler for automated improvements."""
-        self._automation_handlers[component] = handler
+    def compute(self, current: float, target: float) -> float:
+        now = time.time()
+        dt = now - self.last_time
+        error = target - current
 
-    def collect_success(
-        self,
-        source: str,
-        context: Optional[Dict[str, Any]] = None
-    ):
-        """Collect success feedback."""
-        self.collector.add_feedback(
-            feedback_type=FeedbackType.SUCCESS,
-            source=source,
-            content="Operation completed successfully",
-            severity=FeedbackSeverity.INFO,
-            context=context
+        self.integral += error * dt
+        derivative = (error - self.last_error) / dt if dt > 0 else 0.0
+
+        output = self.kp * error + self.ki * self.integral + self.kd * derivative
+
+        self.last_error = error
+        self.last_time = now
+
+        return output
+
+    def reset(self) -> None:
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = time.time()
+
+
+_store = FeedbackStore()
+_loops: Dict[str, FeedbackLoopState] = {}
+
+
+class FeedbackCollectorAction(BaseAction):
+    """Collect execution feedback."""
+    action_type = "automation_feedback_collector"
+    display_name = "反馈收集器"
+    description = "收集自动化执行的反馈数据"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        metric_name = params.get("metric_name", "")
+        value = params.get("value", 0.0)
+        expected = params.get("expected")
+        tags = params.get("tags", {})
+
+        if not metric_name:
+            return ActionResult(success=False, message="metric_name是必需的")
+
+        deviation = 0.0
+        if expected is not None:
+            deviation = value - expected
+
+        point = FeedbackPoint(
+            metric_name=metric_name,
+            value=value,
+            expected=expected,
+            deviation=deviation,
+            tags=tags
+        )
+        _store.record(point)
+
+        return ActionResult(
+            success=True,
+            message=f"反馈已记录: {metric_name}={value} (偏差={deviation:.4f})",
+            data={"metric_name": metric_name, "value": value, "deviation": deviation}
         )
 
-    def collect_failure(
-        self,
-        source: str,
-        error: str,
-        context: Optional[Dict[str, Any]] = None
-    ):
-        """Collect failure feedback."""
-        self.collector.add_feedback(
-            feedback_type=FeedbackType.FAILURE,
-            source=source,
-            content=error,
-            severity=FeedbackSeverity.HIGH,
-            context=context
-        )
 
-    def analyze_and_improve(self) -> List[ImprovementAction]:
-        """Analyze feedback and create improvement actions."""
-        summary = self.analyzer.analyze()
+class FeedbackAnalyzerAction(BaseAction):
+    """Analyze feedback patterns."""
+    action_type = "automation_feedback_analyzer"
+    display_name = "反馈分析器"
+    description = "分析反馈数据中的模式"
 
-        new_actions = []
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        metric_name = params.get("metric_name", "")
+        since_minutes = params.get("since_minutes", 60)
+        analysis_type = params.get("analysis_type", "stats")
 
-        for issue, count in summary.top_issues[:3]:
-            if count >= 3:
-                action = self.improvement_tracker.create_action(
-                    description=f"Address recurring issue: {issue[:50]}",
-                    priority=count,
-                    target_component="system",
-                    expected_impact="Reduce failure rate"
-                )
-                new_actions.append(action)
+        if not metric_name:
+            return ActionResult(success=False, message="metric_name是必需的")
 
-        for recommendation in summary.recommendations:
-            action = self.improvement_tracker.create_action(
-                description=recommendation,
-                priority=5,
-                target_component="general",
-                expected_impact="Improve system health"
+        if analysis_type == "stats":
+            stats = _store.get_stats(metric_name, since_minutes)
+            if not stats:
+                return ActionResult(success=False, message=f"指标 {metric_name} 无数据")
+            return ActionResult(
+                success=True,
+                message=f"分析完成: {metric_name}",
+                data=stats
             )
-            new_actions.append(action)
 
-        return new_actions
+        if analysis_type == "trend":
+            points = _store.get_recent(metric_name, since_minutes)
+            if len(points) < 2:
+                return ActionResult(success=False, message="数据点不足")
 
-    def get_dashboard(self) -> Dict[str, Any]:
-        """Get feedback dashboard data."""
-        summary = self.analyzer.analyze()
-        pending = self.improvement_tracker.get_pending_actions()
+            values = [p.value for p in points]
+            n = len(values)
+            indices = list(range(n))
+            sum_xy = sum(i * v for i, v in enumerate(values))
+            sum_x = sum(indices)
+            sum_y = sum(values)
+            sum_x2 = sum(i * i for i in indices)
 
-        return {
-            "summary": {
-                "total_feedback": summary.total_feedback,
-                "trend": summary.trend,
-                "top_issues": summary.top_issues
-            },
-            "improvements": {
-                "pending_count": len(pending),
-                "stats": self.improvement_tracker.get_action_stats()
-            },
-            "recent_feedback": [
-                {
-                    "id": f.feedback_id,
-                    "type": f.feedback_type.value,
-                    "content": f.content[:100],
-                    "timestamp": f.timestamp.isoformat()
+            slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x) if (n * sum_x2 - sum_x * sum_x) != 0 else 0
+
+            trend = "increasing" if slope > 0.01 else "decreasing" if slope < -0.01 else "stable"
+
+            return ActionResult(
+                success=True,
+                message=f"趋势分析: {trend}",
+                data={"trend": trend, "slope": round(slope, 6), "samples": n}
+            )
+
+        if analysis_type == "anomalies":
+            points = _store.get_recent(metric_name, since_minutes)
+            if not points:
+                return ActionResult(success=False, message=f"指标 {metric_name} 无数据")
+
+            values = [p.value for p in points]
+            mean = sum(values) / len(values)
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            std_dev = variance ** 0.5
+
+            threshold = params.get("threshold", 2.0)
+            anomalies = []
+            for p in points:
+                z_score = abs(p.value - mean) / std_dev if std_dev > 0 else 0
+                if z_score > threshold:
+                    anomalies.append({
+                        "timestamp": p.timestamp.isoformat(),
+                        "value": p.value,
+                        "z_score": round(z_score, 4)
+                    })
+
+            return ActionResult(
+                success=True,
+                message=f"发现 {len(anomalies)} 个异常点",
+                data={"anomalies": anomalies, "count": len(anomalies), "threshold": threshold}
+            )
+
+        return ActionResult(success=False, message=f"未知分析类型: {analysis_type}")
+
+
+class FeedbackLoopAction(BaseAction):
+    """Implement feedback control loops."""
+    action_type = "automation_feedback_loop"
+    display_name = "反馈控制循环"
+    description = "实现反馈控制循环"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        operation = params.get("operation", "create")
+        loop_id = params.get("loop_id", "")
+        kp = params.get("kp", 1.0)
+        ki = params.get("ki", 0.0)
+        kd = params.get("kd", 0.0)
+        target = params.get("target_value", 0.0)
+
+        global _loops
+
+        if operation == "create":
+            if not loop_id:
+                return ActionResult(success=False, message="loop_id是必需的")
+
+            _loops[loop_id] = FeedbackLoopState(
+                loop_id=loop_id,
+                target_value=target,
+                kp=kp,
+                ki=ki,
+                kd=kd,
+                is_active=True
+            )
+            return ActionResult(
+                success=True,
+                message=f"反馈循环 {loop_id} 已创建",
+                data={"loop_id": loop_id, "kp": kp, "ki": ki, "kd": kd}
+            )
+
+        if operation == "control":
+            if not loop_id or loop_id not in _loops:
+                return ActionResult(success=False, message=f"循环 {loop_id} 不存在")
+
+            current = params.get("current_value", 0.0)
+            loop = _loops[loop_id]
+            loop.current_value = current
+
+            if loop.ki > 0 or loop.kd > 0:
+                pid = PIDController(kp=loop.kp, ki=loop.ki, kd=loop.kd)
+                output = pid.compute(current, loop.target_value)
+            else:
+                error = loop.target_value - current
+                output = loop.kp * error
+
+            return ActionResult(
+                success=True,
+                message=f"控制输出: {output:.4f}",
+                data={"output": round(output, 4), "current": current, "target": loop.target_value, "error": round(loop.target_value - current, 4)}
+            )
+
+        if operation == "status":
+            if not loop_id or loop_id not in _loops:
+                return ActionResult(success=False, message=f"循环 {loop_id} 不存在")
+
+            loop = _loops[loop_id]
+            return ActionResult(
+                success=True,
+                message=f"循环 {loop_id}: active={loop.is_active}",
+                data={
+                    "loop_id": loop.loop_id,
+                    "current": loop.current_value,
+                    "target": loop.target_value,
+                    "kp": loop.kp,
+                    "ki": loop.ki,
+                    "kd": loop.kd,
+                    "is_active": loop.is_active
                 }
-                for f in self.collector.get_feedback_list(limit=10)
-            ]
-        }
+            )
+
+        if operation == "stop":
+            if loop_id in _loops:
+                _loops[loop_id].is_active = False
+                return ActionResult(success=True, message=f"循环 {loop_id} 已停止")
+            return ActionResult(success=False, message=f"循环 {loop_id} 不存在")
+
+        return ActionResult(success=False, message=f"未知操作: {operation}")
 
 
-async def main():
-    """Demonstrate feedback system."""
-    feedback_loop = FeedbackLoop()
+class AdaptiveTunerAction(BaseAction):
+    """Adaptively tune parameters based on feedback."""
+    action_type = "automation_adaptive_tuner"
+    display_name = "自适应调优器"
+    description = "根据反馈自适应调整参数"
 
-    feedback_loop.collect_success("api_gateway", {"endpoint": "/users"})
-    feedback_loop.collect_failure("api_gateway", "Connection timeout", {"endpoint": "/orders"})
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        metric_name = params.get("metric_name", "")
+        target = params.get("target", 100.0)
+        tolerance = params.get("tolerance", 0.05)
+        since_minutes = params.get("since_minutes", 30)
 
-    summary = feedback_loop.analyzer.analyze()
-    print(f"Total feedback: {summary.total_feedback}")
-    print(f"Trend: {summary.trend}")
+        if not metric_name:
+            return ActionResult(success=False, message="metric_name是必需的")
 
-    actions = feedback_loop.analyze_and_improve()
-    print(f"Improvement actions: {len(actions)}")
+        stats = _store.get_stats(metric_name, since_minutes)
+        if not stats:
+            return ActionResult(success=False, message=f"指标 {metric_name} 无数据")
 
-    dashboard = feedback_loop.get_dashboard()
-    print(f"Dashboard: {dashboard}")
+        current_avg = stats.get("avg", 0)
+        deviation = abs(current_avg - target) / target if target != 0 else 0
 
+        if deviation <= tolerance:
+            return ActionResult(
+                success=True,
+                message=f"指标在容差范围内: {deviation*100:.2f}% 偏差",
+                data={
+                    "status": "optimal",
+                    "current": current_avg,
+                    "target": target,
+                    "deviation": round(deviation * 100, 2)
+                }
+            )
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        adjustment = (target - current_avg) * 0.1
+
+        return ActionResult(
+            success=True,
+            message=f"建议调整: {adjustment:.4f}",
+            data={
+                "status": "needs_adjustment",
+                "current": round(current_avg, 4),
+                "target": target,
+                "deviation": round(deviation * 100, 2),
+                "suggested_adjustment": round(adjustment, 4)
+            }
+        )
