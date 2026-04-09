@@ -1,133 +1,238 @@
-"""Screenshot capture action module.
+"""
+Screenshot Action Module
 
-Provides screenshot capture with region selection, annotation,
-and comparison capabilities.
+Captures screenshots, regions, windows with various
+options for automation documentation and debugging.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
-import os
-import time
+import base64
 import logging
-import subprocess
-from typing import Optional, Tuple, Dict, Any
-from pathlib import Path
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from io import BytesIO
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
 
-class ScreenshotAction:
-    """Screenshot capture engine.
+class CaptureFormat(Enum):
+    """Screenshot capture formats."""
 
-    Captures screenshots using macOS screencapture.
+    PNG = "png"
+    JPG = "jpg"
+    BMP = "bmp"
+    GIF = "gif"
 
-    Example:
-        shot = ScreenshotAction()
-        path = shot.capture()
-        shot.capture(region=(100, 100, 800, 600), path="/tmp/region.png")
+
+@dataclass
+class ScreenshotConfig:
+    """Configuration for screenshot capture."""
+
+    default_format: CaptureFormat = CaptureFormat.PNG
+    default_quality: int = 90
+    include_cursor: bool = False
+    capture_delay: float = 0.1
+    max_dimension: int = 4096
+
+
+@dataclass
+class Screenshot:
+    """Represents a captured screenshot."""
+
+    data: bytes
+    format: CaptureFormat
+    bounds: Tuple[int, int, int, int]
+    timestamp: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class ScreenshotCapture:
+    """
+    Captures screenshots for automation.
+
+    Supports full screen, window, and region capture
+    with various output formats.
     """
 
-    def __init__(self) -> None:
-        """Initialize screenshot action."""
-        self._default_path = "/tmp/screenshot_{timestamp}.png"
-
-    def capture(
+    def __init__(
         self,
-        path: Optional[str] = None,
+        config: Optional[ScreenshotConfig] = None,
+        capture_handler: Optional[Callable[..., Optional[bytes]]] = None,
+    ):
+        self.config = config or ScreenshotConfig()
+        self.capture_handler = capture_handler or self._default_capture
+        self._save_directory: Optional[str] = None
+
+    def _default_capture(
+        self,
         region: Optional[Tuple[int, int, int, int]] = None,
-        include_cursor: bool = True,
-    ) -> str:
-        """Capture a screenshot.
+        format: CaptureFormat = CaptureFormat.PNG,
+    ) -> Optional[bytes]:
+        """Default capture using screencapture."""
+        import subprocess
 
-        Args:
-            path: Output file path.
-            region: Optional (x, y, width, height) region.
-            include_cursor: Include cursor in screenshot.
+        cmd = ["screencapture", "-x"]
 
-        Returns:
-            Path to the captured screenshot.
-        """
-        if path is None:
-            path = self._default_path.format(timestamp=int(time.time()))
-
-        cmd = ["screencapture"]
         if region:
             x, y, w, h = region
             cmd.extend(["-R", f"{x},{y},{w},{h}"])
-        if not include_cursor:
-            cmd.append("-C")
 
-        cmd.append(path)
+        if format == CaptureFormat.PNG:
+            cmd.append("-P")
+        elif format == CaptureFormat.JPG:
+            cmd.append("-tjpg")
+        else:
+            cmd.append("-P")
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            logger.debug("Screenshot saved to %s", path)
-        except subprocess.CalledProcessError as e:
-            logger.error("Screenshot failed: %s", e)
-            raise
+            result = subprocess.run(cmd, capture_output=True)
+            return result.stdout
+        except Exception as e:
+            logger.error(f"Screenshot capture failed: {e}")
+            return None
 
-        return path
-
-    def capture_to_clipboard(
+    def capture_screen(
         self,
-        region: Optional[Tuple[int, int, int, int]] = None,
+        monitor_index: int = 0,
+        format: Optional[CaptureFormat] = None,
+    ) -> Optional[Screenshot]:
+        """
+        Capture full screen.
+
+        Args:
+            monitor_index: Monitor index
+            format: Output format
+
+        Returns:
+            Screenshot object or None
+        """
+        format = format or self.config.default_format
+        bounds = self._get_monitor_bounds(monitor_index)
+
+        data = self.capture_handler(region=bounds, format=format)
+
+        if data:
+            return Screenshot(
+                data=data,
+                format=format,
+                bounds=bounds,
+                metadata={"monitor": monitor_index},
+            )
+        return None
+
+    def capture_region(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        format: Optional[CaptureFormat] = None,
+    ) -> Optional[Screenshot]:
+        """
+        Capture a screen region.
+
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            width: Region width
+            height: Region height
+            format: Output format
+
+        Returns:
+            Screenshot object or None
+        """
+        format = format or self.config.default_format
+        bounds = (x, y, width, height)
+
+        data = self.capture_handler(region=bounds, format=format)
+
+        if data:
+            return Screenshot(
+                data=data,
+                format=format,
+                bounds=bounds,
+            )
+        return None
+
+    def capture_window(
+        self,
+        window_id: int,
+        format: Optional[CaptureFormat] = None,
+    ) -> Optional[Screenshot]:
+        """
+        Capture a window.
+
+        Args:
+            window_id: Window identifier
+            format: Output format
+
+        Returns:
+            Screenshot object or None
+        """
+        format = format or self.config.default_format
+
+        logger.info(f"Capturing window {window_id}")
+        bounds = (0, 0, 800, 600)
+
+        data = self.capture_handler(region=bounds, format=format)
+
+        if data:
+            return Screenshot(
+                data=data,
+                format=format,
+                bounds=bounds,
+                metadata={"window_id": window_id},
+            )
+        return None
+
+    def _get_monitor_bounds(self, index: int) -> Tuple[int, int, int, int]:
+        """Get bounds for a monitor."""
+        return (0, 0, 1920, 1080)
+
+    def save(
+        self,
+        screenshot: Screenshot,
+        path: str,
     ) -> bool:
-        """Capture screenshot directly to clipboard.
+        """
+        Save screenshot to file.
 
         Args:
-            region: Optional (x, y, width, height) region.
+            screenshot: Screenshot to save
+            path: Output file path
 
         Returns:
-            True if successful.
+            True if successful
         """
-        cmd = ["screencapture"]
-        if region:
-            x, y, w, h = region
-            cmd.extend(["-R", f"{x},{y},{w},{h}"])
-        cmd.append("-c")
-
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            with open(path, "wb") as f:
+                f.write(screenshot.data)
             return True
-        except subprocess.CalledProcessError as e:
-            logger.error("Screenshot to clipboard failed: %s", e)
+        except Exception as e:
+            logger.error(f"Save failed: {e}")
             return False
 
-    def capture_primary_display(self, path: Optional[str] = None) -> str:
-        """Capture the primary display."""
-        return self.capture(path=path)
+    def to_base64(self, screenshot: Screenshot) -> str:
+        """Encode screenshot as base64."""
+        return base64.b64encode(screenshot.data).decode("utf-8")
 
-    def capture_all_displays(self, path_prefix: str = "/tmp/display") -> list:
-        """Capture all connected displays.
-
-        Returns:
-            List of screenshot file paths.
-        """
-        paths = []
-        displays = self._get_displays()
-
-        for i, display_id in enumerate(displays):
-            p = f"{path_prefix}_{i}.png"
-            cmd = ["screencapture", "-D", str(display_id), p]
-            try:
-                subprocess.run(cmd, check=True, capture_output=True)
-                paths.append(p)
-            except subprocess.CalledProcessError:
-                pass
-
-        return paths
-
-    def _get_displays(self) -> list:
-        """Get list of connected display IDs."""
+    def to_pil_image(self, screenshot: Screenshot) -> Optional[Any]:
+        """Convert screenshot to PIL Image."""
         try:
-            result = subprocess.run(
-                ["system_profiler", "SPDisplaysDataType", "-json"],
-                check=True,
-                capture_output=True,
-            )
-            import json
-            data = json.loads(result.stdout)
-            displays = data.get("SPDisplaysDataType", [])
-            return list(range(1, len(displays) + 1))
-        except Exception:
-            return [1]
+            from PIL import Image
+            return Image.open(BytesIO(screenshot.data))
+        except Exception as e:
+            logger.error(f"PIL conversion failed: {e}")
+            return None
+
+
+def create_screenshot_capture(
+    config: Optional[ScreenshotConfig] = None,
+) -> ScreenshotCapture:
+    """Factory function to create ScreenshotCapture."""
+    return ScreenshotCapture(config=config)

@@ -1,225 +1,234 @@
-"""Clipboard action module for RabAI AutoClick.
+"""
+Clipboard Action Module
 
-Provides clipboard operations for reading, writing,
-and transforming clipboard content.
+Manages system clipboard operations for automation workflows,
+including text, files, images, and custom format data.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
-import sys
-import os
-import subprocess
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+import logging
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 
-class ClipboardReadAction(BaseAction):
-    """Read content from system clipboard.
-    
-    Supports plain text reading with encoding handling.
+class ClipboardFormat(Enum):
+    """Clipboard data formats."""
+
+    TEXT = "text"
+    HTML = "html"
+    RTF = "rtf"
+    IMAGE = "image"
+    FILES = "files"
+    CUSTOM = "custom"
+
+
+@dataclass
+class ClipboardContent:
+    """Represents clipboard content."""
+
+    format: ClipboardFormat
+    data: Any
+    timestamp: float = field(default_factory=time.time)
+    source: Optional[str] = None
+
+
+@dataclass
+class ClipboardConfig:
+    """Configuration for clipboard operations."""
+
+    max_history: int = 20
+    auto_convert: bool = True
+    preserve_formatting: bool = True
+    enable_monitoring: bool = False
+
+
+class ClipboardManager:
     """
-    action_type = "clipboard_read"
-    display_name = "读取剪贴板"
-    description = "读取系统剪贴板内容"
+    Manages system clipboard for automation.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Read clipboard.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: encoding, strip, save_to_var.
-        
-        Returns:
-            ActionResult with clipboard content.
-        """
-        encoding = params.get('encoding', 'utf-8')
-        strip = params.get('strip', False)
-        save_to_var = params.get('save_to_var', None)
+    Supports reading, writing, format conversion,
+    and clipboard history tracking.
+    """
 
-        try:
-            # Use pbpaste on macOS
-            result = subprocess.run(
-                ['pbpaste'],
-                capture_output=True,
-                text=True,
-                encoding=encoding,
-                errors='replace'
-            )
+    def __init__(
+        self,
+        config: Optional[ClipboardConfig] = None,
+        clipboard_handler: Optional[Callable[[str, Any], Any]] = None,
+    ):
+        self.config = config or ClipboardConfig()
+        self.clipboard_handler = clipboard_handler or self._default_handler
+        self._history: List[ClipboardContent] = []
 
-            if result.returncode != 0:
-                return ActionResult(
-                    success=False,
-                    message=f"Failed to read clipboard: {result.stderr}"
+    def _default_handler(self, action: str, data: Any = None) -> Any:
+        """Default clipboard handler using platform tools."""
+        import subprocess
+
+        if action == "read":
+            try:
+                result = subprocess.run(
+                    ["pbpaste"],
+                    capture_output=True,
+                    text=True,
                 )
-
-            content = result.stdout
-            if strip:
-                content = content.strip()
-
-            result_data = {
-                'content': content,
-                'length': len(content),
-                'lines': content.count('\n') + 1 if content else 0
-            }
-
-            if save_to_var:
-                context.variables[save_to_var] = result_data
-
-            return ActionResult(
-                success=True,
-                message=f"剪贴板读取成功: {len(content)} 字符",
-                data=result_data
-            )
-
-        except FileNotFoundError:
-            return ActionResult(
-                success=False,
-                message="pbpaste not found (requires macOS)"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"剪贴板读取失败: {str(e)}"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return []
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'encoding': 'utf-8',
-            'strip': False,
-            'save_to_var': None
-        }
-
-
-class ClipboardWriteAction(BaseAction):
-    """Write content to system clipboard.
-    
-    Supports plain text with encoding handling.
-    """
-    action_type = "clipboard_write"
-    display_name = "写入剪贴板"
-    description = "写入内容到系统剪贴板"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Write to clipboard.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: content, append, save_to_var.
-        
-        Returns:
-            ActionResult with write result.
-        """
-        content = params.get('content', '')
-        append = params.get('append', False)
-        save_to_var = params.get('save_to_var', None)
-
-        if not content and not append:
-            return ActionResult(success=False, message="Content is empty")
-
-        try:
-            # Read existing if appending
-            if append:
-                try:
-                    read_result = subprocess.run(
-                        ['pbpaste'],
-                        capture_output=True,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace'
-                    )
-                    if read_result.returncode == 0:
-                        content = read_result.stdout + content
-                except Exception:
-                    pass
-
-            # Write using pbcopy on macOS
-            result = subprocess.run(
-                ['pbcopy'],
-                input=content,
-                capture_output=True,
-                text=True,
-                encoding='utf-8'
-            )
-
-            if result.returncode != 0:
-                return ActionResult(
-                    success=False,
-                    message=f"Failed to write clipboard: {result.stderr}"
+                return result.stdout
+            except Exception:
+                return None
+        elif action == "write":
+            try:
+                subprocess.run(
+                    ["pbcopy"],
+                    input=data,
+                    text=True,
                 )
+                return True
+            except Exception:
+                return False
+        return None
 
-            result_data = {
-                'written': True,
-                'length': len(content),
-                'appended': append
-            }
+    def copy_text(self, text: str) -> bool:
+        """
+        Copy text to clipboard.
 
-            if save_to_var:
-                context.variables[save_to_var] = result_data
+        Args:
+            text: Text to copy
 
-            return ActionResult(
-                success=True,
-                message=f"剪贴板写入成功: {len(content)} 字符",
-                data=result_data
+        Returns:
+            True if successful
+        """
+        result = self.clipboard_handler("write", text)
+
+        if result:
+            content = ClipboardContent(
+                format=ClipboardFormat.TEXT,
+                data=text,
+                source="copy_text",
+            )
+            self._add_to_history(content)
+
+        return bool(result)
+
+    def paste_text(self) -> Optional[str]:
+        """
+        Get text from clipboard.
+
+        Returns:
+            Clipboard text or None
+        """
+        text = self.clipboard_handler("read")
+        return text
+
+    def copy_image(self, image_data: Any, format: str = "png") -> bool:
+        """
+        Copy image to clipboard.
+
+        Args:
+            image_data: Image data
+            format: Image format
+
+        Returns:
+            True if successful
+        """
+        content = ClipboardContent(
+            format=ClipboardFormat.IMAGE,
+            data=image_data,
+            source="copy_image",
+        )
+        self._add_to_history(content)
+
+        if self.clipboard_handler("write_image"):
+            return True
+
+        logger.warning("Image copy not fully implemented")
+        return False
+
+    def paste_image(self) -> Optional[Any]:
+        """Get image from clipboard."""
+        return self.clipboard_handler("read_image")
+
+    def copy_files(self, file_paths: List[str]) -> bool:
+        """
+        Copy files to clipboard.
+
+        Args:
+            file_paths: List of file paths
+
+        Returns:
+            True if successful
+        """
+        content = ClipboardContent(
+            format=ClipboardFormat.FILES,
+            data=file_paths,
+            source="copy_files",
+        )
+        self._add_to_history(content)
+        return self.clipboard_handler("write_files", file_paths)
+
+    def paste_files(self) -> List[str]:
+        """Get file paths from clipboard."""
+        return self.clipboard_handler("read_files") or []
+
+    def get_current_content(self) -> Optional[ClipboardContent]:
+        """Get current clipboard content."""
+        text = self.paste_text()
+        if text:
+            return ClipboardContent(
+                format=ClipboardFormat.TEXT,
+                data=text,
             )
 
-        except FileNotFoundError:
-            return ActionResult(
-                success=False,
-                message="pbcopy not found (requires macOS)"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"剪贴板写入失败: {str(e)}"
+        image = self.paste_image()
+        if image:
+            return ClipboardContent(
+                format=ClipboardFormat.IMAGE,
+                data=image,
             )
 
-    def get_required_params(self) -> List[str]:
-        return ['content']
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            'append': False,
-            'save_to_var': None
-        }
-
-
-class ClipboardClearAction(BaseAction):
-    """Clear system clipboard.
-    """
-    action_type = "clipboard_clear"
-    display_name = "清空剪贴板"
-    description = "清空系统剪贴板内容"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Clear clipboard."""
-        try:
-            # Write empty string
-            subprocess.run(
-                ['pbcopy'],
-                input='',
-                capture_output=True,
-                text=True
-            )
-            return ActionResult(
-                success=True,
-                message="剪贴板已清空"
-            )
-        except FileNotFoundError:
-            return ActionResult(
-                success=False,
-                message="pbcopy not found (requires macOS)"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"清空失败: {str(e)}"
+        files = self.paste_files()
+        if files:
+            return ClipboardContent(
+                format=ClipboardFormat.FILES,
+                data=files,
             )
 
-    def get_required_params(self) -> List[str]:
-        return []
+        return None
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {}
+    def _add_to_history(self, content: ClipboardContent) -> None:
+        """Add content to history."""
+        self._history.append(content)
+
+        if len(self._history) > self.config.max_history:
+            self._history = self._history[-self.config.max_history:]
+
+    def get_history(self, limit: int = 10) -> List[ClipboardContent]:
+        """Get clipboard history."""
+        return self._history[-limit:]
+
+    def clear_history(self) -> None:
+        """Clear clipboard history."""
+        self._history.clear()
+
+    def clear(self) -> bool:
+        """Clear the clipboard."""
+        return bool(self.clipboard_handler("clear"))
+
+    def is_supported_format(self, format: ClipboardFormat) -> bool:
+        """Check if a format is supported."""
+        handlers = ["read", "write"]
+        for handler in handlers:
+            if hasattr(self.clipboard_handler, f"{handler}_{format.value}"):
+                return True
+        return False
+
+
+def create_clipboard_manager(
+    config: Optional[ClipboardConfig] = None,
+) -> ClipboardManager:
+    """Factory function to create ClipboardManager."""
+    return ClipboardManager(config=config)
