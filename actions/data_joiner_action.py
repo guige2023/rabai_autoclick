@@ -1,20 +1,27 @@
-"""Data Joiner Action Module.
+"""Data joining and relational operations.
 
-Provides SQL-style joins (inner, left, right, full, cross)
-for data records with key matching and conflict resolution.
+This module provides join operations:
+- Inner, left, right, full joins
+- Lookup operations
+- Union and intersection
+- Key-based merging
+
+Example:
+    >>> from actions.data_joiner_action import join, merge
+    >>> result = join(orders, customers, on="customer_id", how="left")
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import logging
+from typing import Any, Optional, Callable
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 
-class JoinType(Enum):
-    """Join type."""
+class JoinType:
+    """Join type constants."""
     INNER = "inner"
     LEFT = "left"
     RIGHT = "right"
@@ -22,260 +29,297 @@ class JoinType(Enum):
     CROSS = "cross"
 
 
-@dataclass
-class JoinConfig:
-    """Join configuration."""
-    join_type: JoinType
-    left_key: Union[str, Callable]
-    right_key: Union[str, Callable]
-    left_fields: Optional[List[str]] = None
-    right_fields: Optional[List[str]] = None
-    field_mapping: Optional[Dict[str, str]] = None
-    conflict_resolver: Optional[Callable[[Any, Any], Any]] = None
+def join(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    on: Optional[str] = None,
+    left_on: Optional[str] = None,
+    right_on: Optional[str] = None,
+    how: str = JoinType.INNER,
+    suffix_left: str = "_x",
+    suffix_right: str = "_y",
+) -> list[dict[str, Any]]:
+    """Join two collections.
 
+    Args:
+        left: Left collection.
+        right: Right collection.
+        on: Field to join on (same name in both).
+        left_on: Field in left collection.
+        right_on: Field in right collection.
+        how: Join type (inner, left, right, full, cross).
+        suffix_left: Suffix for conflicting left fields.
+        suffix_right: Suffix for conflicting right fields.
 
-class DataJoinerAction:
-    """Data joiner with multiple join strategies.
-
-    Example:
-        joiner = DataJoinerAction()
-
-        result = joiner.join(
-            left_data=[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}],
-            right_data=[{"user_id": 1, "email": "alice@example.com"}, {"user_id": 3, "email": "charlie@example.com"}],
-            config=JoinConfig(
-                join_type=JoinType.LEFT,
-                left_key="id",
-                right_key="user_id",
-                field_mapping={"id": "id", "name": "name", "email": "email"}
-            )
-        )
+    Returns:
+        Joined collection.
     """
+    left_key = left_on or on
+    right_key = right_on or on
+    if how == JoinType.CROSS:
+        return _cross_join(left, right)
+    if not left_key or not right_key:
+        raise ValueError("Must specify join key(s)")
+    if how == JoinType.INNER:
+        return _inner_join(left, right, left_key, right_key, suffix_left, suffix_right)
+    elif how == JoinType.LEFT:
+        return _left_join(left, right, left_key, right_key, suffix_left, suffix_right)
+    elif how == JoinType.RIGHT:
+        return _right_join(left, right, left_key, right_key, suffix_left, suffix_right)
+    elif how == JoinType.FULL:
+        return _full_join(left, right, left_key, right_key, suffix_left, suffix_right)
+    return []
 
-    def __init__(self) -> None:
-        self._index_cache: Dict[str, Dict] = {}
 
-    def join(
-        self,
-        left_data: List[Dict[str, Any]],
-        right_data: List[Dict[str, Any]],
-        config: JoinConfig,
-    ) -> List[Dict[str, Any]]:
-        """Join two datasets.
+def _inner_join(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    left_key: str,
+    right_key: str,
+    suffix_left: str,
+    suffix_right: str,
+) -> list[dict[str, Any]]:
+    """Inner join implementation."""
+    right_index = defaultdict(list)
+    for item in right:
+        right_index[item.get(right_key)].append(item)
+    result = []
+    for l_item in left:
+        for r_item in right_index.get(l_item.get(left_key), []):
+            result.append(_merge_items(l_item, r_item, suffix_left, suffix_right))
+    return result
 
-        Args:
-            left_data: Left dataset
-            right_data: Right dataset
-            config: Join configuration
 
-        Returns:
-            Joined records
-        """
-        if config.join_type == JoinType.CROSS:
-            return self._cross_join(left_data, right_data, config)
-
-        right_index = self._build_index(right_data, config.right_key)
-
-        if config.join_type == JoinType.INNER:
-            return self._inner_join(left_data, right_index, config)
-        elif config.join_type == JoinType.LEFT:
-            return self._left_join(left_data, right_index, config)
-        elif config.join_type == JoinType.RIGHT:
-            return self._right_join(left_data, right_index, right_data, config)
-        elif config.join_type == JoinType.FULL:
-            return self._full_join(left_data, right_index, right_data, config)
-
-        return []
-
-    def _build_index(
-        self,
-        data: List[Dict[str, Any]],
-        key: Union[str, Callable],
-    ) -> Dict[Any, List[Dict[str, Any]]]:
-        """Build lookup index for right dataset."""
-        index: Dict[Any, List[Dict[str, Any]]] = {}
-
-        for record in data:
-            key_value = self._extract_key(record, key)
-            if key_value not in index:
-                index[key_value] = []
-            index[key_value].append(record)
-
-        return index
-
-    def _extract_key(
-        self,
-        record: Dict[str, Any],
-        key: Union[str, Callable],
-    ) -> Any:
-        """Extract key value from record."""
-        if callable(key):
-            return key(record)
-        return record.get(key)
-
-    def _inner_join(
-        self,
-        left_data: List[Dict[str, Any]],
-        right_index: Dict,
-        config: JoinConfig,
-    ) -> List[Dict[str, Any]]:
-        """Perform inner join."""
-        results: List[Dict[str, Any]] = []
-
-        for left_record in left_data:
-            key_value = self._extract_key(left_record, config.left_key)
-            right_matches = right_index.get(key_value, [])
-
-            for right_record in right_matches:
-                joined = self._merge_records(
-                    left_record, right_record, config
-                )
-                results.append(joined)
-
-        return results
-
-    def _left_join(
-        self,
-        left_data: List[Dict[str, Any]],
-        right_index: Dict,
-        config: JoinConfig,
-    ) -> List[Dict[str, Any]]:
-        """Perform left join."""
-        results: List[Dict[str, Any]] = []
-
-        for left_record in left_data:
-            key_value = self._extract_key(left_record, config.left_key)
-            right_matches = right_index.get(key_value, [])
-
-            if right_matches:
-                for right_record in right_matches:
-                    joined = self._merge_records(left_record, right_record, config)
-                    results.append(joined)
-            else:
-                results.append(self._pad_right_record(left_record, config))
-
-        return results
-
-    def _right_join(
-        self,
-        left_data: List[Dict[str, Any]],
-        right_index: Dict,
-        right_data: List[Dict[str, Any]],
-        config: JoinConfig,
-    ) -> List[Dict[str, Any]]:
-        """Perform right join."""
-        results: List[Dict[str, Any]] = []
-        left_index = self._build_index(left_data, config.left_key)
-        used_left_keys: set = set()
-
-        for right_record in right_data:
-            key_value = self._extract_key(right_record, config.right_key)
-            left_matches = left_index.get(key_value, [])
-
-            if left_matches:
-                for left_record in left_matches:
-                    joined = self._merge_records(left_record, right_record, config)
-                    results.append(joined)
-                    used_left_keys.add(key_value)
-            else:
-                results.append(self._pad_left_record(right_record, config))
-
-        return results
-
-    def _full_join(
-        self,
-        left_data: List[Dict[str, Any]],
-        right_index: Dict,
-        right_data: List[Dict[str, Any]],
-        config: JoinConfig,
-    ) -> List[Dict[str, Any]]:
-        """Perform full outer join."""
-        left_index = self._build_index(left_data, config.left_key)
-        results: List[Dict[str, Any]] = []
-        matched_right_keys: set = set()
-
-        for left_record in left_data:
-            key_value = self._extract_key(left_record, config.left_key)
-            right_matches = right_index.get(key_value, [])
-
-            if right_matches:
-                for right_record in right_matches:
-                    joined = self._merge_records(left_record, right_record, config)
-                    results.append(joined)
-                    matched_right_keys.add(key_value)
-            else:
-                results.append(self._pad_right_record(left_record, config))
-
-        for right_record in right_data:
-            key_value = self._extract_key(right_record, config.right_key)
-            if key_value not in matched_right_keys:
-                results.append(self._pad_left_record(right_record, config))
-
-        return results
-
-    def _cross_join(
-        self,
-        left_data: List[Dict[str, Any]],
-        right_data: List[Dict[str, Any]],
-        config: JoinConfig,
-    ) -> List[Dict[str, Any]]:
-        """Perform cross join."""
-        results: List[Dict[str, Any]] = []
-
-        for left_record in left_data:
-            for right_record in right_data:
-                joined = self._merge_records(left_record, right_record, config)
-                results.append(joined)
-
-        return results
-
-    def _merge_records(
-        self,
-        left_record: Dict[str, Any],
-        right_record: Dict[str, Any],
-        config: JoinConfig,
-    ) -> Dict[str, Any]:
-        """Merge two records according to config."""
-        result: Dict[str, Any] = {}
-
-        if config.field_mapping:
-            for left_field, right_field in config.field_mapping.items():
-                if left_field in left_record:
-                    result[left_field] = left_record[left_field]
-                if right_field in right_record:
-                    result[right_field] = right_record[right_field]
+def _left_join(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    left_key: str,
+    right_key: str,
+    suffix_left: str,
+    suffix_right: str,
+) -> list[dict[str, Any]]:
+    """Left join implementation."""
+    right_index = defaultdict(list)
+    for item in right:
+        right_index[item.get(right_key)].append(item)
+    result = []
+    for l_item in left:
+        matches = right_index.get(l_item.get(left_key), [])
+        if matches:
+            for r_item in matches:
+                result.append(_merge_items(l_item, r_item, suffix_left, suffix_right))
         else:
-            result.update(left_record)
-            for key, value in right_record.items():
-                if key not in result:
-                    result[key] = value
-                elif config.conflict_resolver:
-                    result[key] = config.conflict_resolver(result[key], value)
+            result.append(l_item.copy())
+    return result
 
+
+def _right_join(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    left_key: str,
+    right_key: str,
+    suffix_left: str,
+    suffix_right: str,
+) -> list[dict[str, Any]]:
+    """Right join implementation."""
+    left_index = defaultdict(list)
+    for item in left:
+        left_index[item.get(left_key)].append(item)
+    result = []
+    for r_item in right:
+        matches = left_index.get(r_item.get(right_key), [])
+        if matches:
+            for l_item in matches:
+                result.append(_merge_items(l_item, r_item, suffix_left, suffix_right))
+        else:
+            result.append(r_item.copy())
+    return result
+
+
+def _full_join(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    left_key: str,
+    right_key: str,
+    suffix_left: str,
+    suffix_right: str,
+) -> list[dict[str, Any]]:
+    """Full outer join implementation."""
+    right_index = defaultdict(list)
+    for item in right:
+        right_index[item.get(right_key)].append(item)
+    left_index = defaultdict(list)
+    for item in left:
+        left_index[item.get(left_key)].append(item)
+    result = []
+    all_keys = set(k for k in left_index) | set(k for k in right_index)
+    for key in all_keys:
+        l_items = left_index.get(key, [None])
+        r_items = right_index.get(key, [None])
+        for l_item in l_items:
+            for r_item in r_items:
+                if l_item and r_item:
+                    result.append(_merge_items(l_item, r_item, suffix_left, suffix_right))
+                elif l_item:
+                    result.append(l_item.copy())
+                elif r_item:
+                    result.append(r_item.copy())
+    return result
+
+
+def _cross_join(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Cross join (Cartesian product)."""
+    result = []
+    for l_item in left:
+        for r_item in right:
+            merged = l_item.copy()
+            merged.update(r_item)
+            result.append(merged)
+    return result
+
+
+def _merge_items(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    suffix_left: str,
+    suffix_right: str,
+) -> dict[str, Any]:
+    """Merge two items with suffix handling for conflicts."""
+    result = {}
+    all_keys = set(left.keys()) | set(right.keys())
+    for key in all_keys:
+        if key in left and key in right:
+            if left[key] == right[key]:
+                result[key] = left[key]
+            else:
+                result[key + suffix_left] = left[key]
+                result[key + suffix_right] = right[key]
+        elif key in left:
+            result[key] = left[key]
+        else:
+            result[key] = right[key]
+    return result
+
+
+def lookup(
+    data: list[dict[str, Any]],
+    key_field: str,
+    lookup_key: Any,
+) -> Optional[dict[str, Any]]:
+    """Lookup a single item by key.
+
+    Args:
+        data: Collection to search.
+        key_field: Field to match on.
+        lookup_key: Value to find.
+
+    Returns:
+        Matched item or None.
+    """
+    for item in data:
+        if item.get(key_field) == lookup_key:
+            return item
+    return None
+
+
+def merge_dicts(
+    dicts: list[dict[str, Any]],
+    key_field: str,
+    merge_strategy: str = "first",
+) -> list[dict[str, Any]]:
+    """Merge dicts with the same key value.
+
+    Args:
+        dicts: List of dicts to merge.
+        key_field: Field to use as key.
+        merge_strategy: How to handle duplicates (first, last, combine).
+
+    Returns:
+        Merged list with unique keys.
+    """
+    index: dict[Any, dict[str, Any]] = {}
+    for d in dicts:
+        key = d.get(key_field)
+        if key not in index:
+            index[key] = d.copy()
+        else:
+            if merge_strategy == "last":
+                index[key].update(d)
+            elif merge_strategy == "combine":
+                for k, v in d.items():
+                    if k != key_field:
+                        if k in index[key]:
+                            if isinstance(index[key][k], list):
+                                index[key][k] = index[key][k] + [v]
+                            else:
+                                index[key][k] = [index[key][k], v]
+                        else:
+                            index[key][k] = v
+    return list(index.values())
+
+
+def union_all(*collections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Union of multiple collections (with duplicates).
+
+    Args:
+        *collections: Collections to union.
+
+    Returns:
+        Combined collection.
+    """
+    result = []
+    for coll in collections:
+        result.extend(coll)
+    return result
+
+
+def intersect_all(
+    *collections: list[dict[str, Any]],
+    key_field: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Intersection of multiple collections.
+
+    Args:
+        *collections: Collections to intersect.
+        key_field: Optional field key for comparison.
+
+    Returns:
+        Items common to all collections.
+    """
+    if not collections:
+        return []
+    if key_field:
+        keysets = [set(d.get(key_field) for d in coll) for coll in collections]
+        common_keys = set.intersection(*keysets) if keysets else set()
+        return [d for d in collections[0] if d.get(key_field) in common_keys]
+    else:
+        result = collections[0]
+        for coll in collections[1:]:
+            result = [item for item in result if item in coll]
         return result
 
-    def _pad_right_record(
-        self,
-        left_record: Dict[str, Any],
-        config: JoinConfig,
-    ) -> Dict[str, Any]:
-        """Pad left record with None for right side."""
-        result = dict(left_record)
-        if config.right_fields:
-            for field_name in config.right_fields:
-                if field_name not in result:
-                    result[field_name] = None
-        return result
 
-    def _pad_left_record(
-        self,
-        right_record: Dict[str, Any],
-        config: JoinConfig,
-    ) -> Dict[str, Any]:
-        """Pad right record with None for left side."""
-        result: Dict[str, Any] = {}
-        if config.left_fields:
-            for field_name in config.left_fields:
-                result[field_name] = None
-        result.update(right_record)
-        return result
+def except_items(
+    minuend: list[dict[str, Any]],
+    subtrahend: list[dict[str, Any]],
+    key_field: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Return items in minuend not in subtrahend.
+
+    Args:
+        minuend: Base collection.
+        subtrahend: Collection to subtract.
+        key_field: Optional field key for comparison.
+
+    Returns:
+        Items in minuend minus subtrahend.
+    """
+    if key_field:
+        sub_keys = set(d.get(key_field) for d in subtrahend)
+        return [d for d in minuend if d.get(key_field) not in sub_keys]
+    else:
+        sub_set = set(id(d) for d in subtrahend)
+        return [d for d in minuend if id(d) not in sub_set]
