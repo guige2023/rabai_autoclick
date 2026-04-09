@@ -1,187 +1,141 @@
+"""API Request Coalescing Action.
+
+Coalesces concurrent duplicate API requests into a single request,
+reducing redundant calls and improving efficiency.
 """
-API Request Coalescing Action Module.
-
-Batches multiple concurrent requests for the same resource
-into a single upstream request to reduce load.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import logging
-import time
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from datetime import datetime, timedelta
+from collections import defaultdict
+import asyncio
+import threading
+import time
 
-logger = logging.getLogger(__name__)
 
-
-@dataclass
-class CoalescingKey:
-    """Key used for request coalescing."""
-
-    endpoint: str
-    params_hash: str
-
-    def __hash__(self) -> int:
-        return hash((self.endpoint, self.params_hash))
+T = TypeVar("T")
 
 
 @dataclass
 class PendingRequest:
-    """Represents a pending coalesced request."""
+    key: str
+    future: "asyncio.Future[T]"
+    created_at: datetime
+    callback: Optional[Callable[[], T]] = None
+    waiters: int = 1
 
-    future: asyncio.Future
-    created_at: float = field(default_factory=time.time)
-    result: Optional[Any] = None
+
+@dataclass
+class CoalescingStats:
+    total_requests: int = 0
+    coalesced_requests: int = 0
+    active_requests: int = 0
+    cache_hits: int = 0
+
+    def hit_rate(self) -> float:
+        if self.total_requests == 0:
+            return 0.0
+        return self.coalesced_requests / self.total_requests
 
 
 class APIRequestCoalescingAction:
-    """
-    Coalesces duplicate concurrent requests.
+    """Coalesces duplicate concurrent API requests."""
 
-    When multiple identical requests arrive within a short window,
-    they are batched into a single upstream request.
-
-    Example:
-        coalescer = APIRequestCoalescingAction()
-        results = await asyncio.gather(
-            coalescer.request("GET", "/api/data"),
-            coalescer.request("GET", "/api/data"),
-        )
-    """
-
-    def __init__(
-        self,
-        window_ms: float = 50.0,
-        max_batch_size: int = 100,
-        ttl_seconds: float = 300.0,
-    ) -> None:
-        """
-        Initialize request coalescer.
-
-        Args:
-            window_ms: Time window to coalesce requests (ms).
-            max_batch_size: Maximum requests to batch together.
-            ttl_seconds: TTL for cache entries.
-        """
-        self.window_ms = window_ms
-        self.max_batch_size = max_batch_size
+    def __init__(self, ttl_seconds: float = 5.0) -> None:
         self.ttl_seconds = ttl_seconds
-        self._pending: dict[CoalescingKey, PendingRequest] = {}
-        self._cache: dict[CoalescingKey, tuple[Any, float]] = {}
-        self._lock = asyncio.Lock()
-        self._stats = {
-            "coalesced": 0,
-            "direct": 0,
-            "cache_hits": 0,
-        }
+        self._pending: Dict[str, PendingRequest] = {}
+        self._lock = threading.RLock()
+        self._stats = CoalescingStats()
+        self._cache: Dict[str, Any] = {}
+        self._cache_timestamps: Dict[str, datetime] = {}
 
-    async def request(
-        self,
-        method: str,
-        endpoint: str,
-        params: Optional[dict[str, Any]] = None,
-        executor: Optional[Callable] = None,
-    ) -> Any:
-        """
-        Make a coalesced request.
-
-        Args:
-            method: HTTP method.
-            endpoint: API endpoint.
-            params: Query/body parameters.
-            executor: Function to execute actual request.
-
-        Returns:
-            Response data.
-        """
-        params_str = self._hash_params(params)
-        key = CoalescingKey(endpoint=endpoint, params_hash=params_str)
-
-        cached = self._get_cached(key)
-        if cached is not None:
-            self._stats["cache_hits"] += 1
-            return cached
-
-        async with self._lock:
-            if key in self._pending:
-                self._stats["coalesced"] += 1
-                future = self._pending[key].future
-            else:
-                self._stats["direct"] += 1
-                future = asyncio.Future()
-                self._pending[key] = PendingRequest(future=future)
-
-        if not future.done():
-            if executor:
-                try:
-                    result = await asyncio.wait_for(
-                        executor(method, endpoint, params),
-                        timeout=30.0,
-                    )
-                    future.set_result(result)
-                except Exception as e:
-                    future.set_exception(e)
-                finally:
-                    await self._complete_request(key, future)
-        else:
-            await self._complete_request(key, future)
-
-        return await future
-
-    def _hash_params(self, params: Optional[dict[str, Any]]) -> str:
-        """Create a hash string from parameters."""
-        if not params:
-            return ""
+    def _make_key(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> str:
         import json
-        return json.dumps(params, sort_keys=True, default=str)
+        param_str = json.dumps(params, sort_keys=True) if params else ""
+        return f"{endpoint}:{param_str}"
 
-    def _get_cached(self, key: CoalescingKey) -> Optional[Any]:
-        """Get cached result if still valid."""
-        if key in self._cache:
-            result, timestamp = self._cache[key]
-            if time.time() - timestamp < self.ttl_seconds:
-                return result
-            del self._cache[key]
-        return None
+    def _evict_expired(self) -> None:
+        now = datetime.now()
+        expired = [
+            k for k, ts in self._cache_timestamps.items()
+            if (now - ts).total_seconds() > self.ttl_seconds
+        ]
+        for k in expired:
+            self._cache.pop(k, None)
+            self._cache_timestamps.pop(k, None)
 
-    async def _complete_request(self, key: CoalescingKey, future: asyncio.Future) -> None:
-        """Complete pending request and cleanup."""
-        await asyncio.sleep(self.window_ms / 1000.0)
+    async def request_async(
+        self,
+        endpoint: str,
+        fetch_fn: Callable[[], T],
+        params: Optional[Dict[str, Any]] = None,
+        cache: bool = True,
+    ) -> T:
+        key = self._make_key(endpoint, params)
+        self._evict_expired()
+        if cache and key in self._cache:
+            self._stats.cache_hits += 1
+            return self._cache[key]
+        with self._lock:
+            if key in self._pending:
+                self._stats.total_requests += 1
+                self._stats.coalesced_requests += 1
+                self._pending[key].waiters += 1
+                try:
+                    return await asyncio.shield(self._pending[key].future)
+                finally:
+                    self._pending[key].waiters -= 1
+                    if self._pending[key].waiters == 0:
+                        self._pending.pop(key, None)
+        self._stats.total_requests += 1
+        self._stats.active_requests += 1
+        loop = asyncio.get_event_loop()
+        future: "asyncio.Future[T]" = loop.create_future()
+        with self._lock:
+            self._pending[key] = PendingRequest(
+                key=key,
+                future=future,
+                created_at=datetime.now(),
+                callback=None,
+                waiters=1,
+            )
+        try:
+            result = await fetch_fn()
+            if cache:
+                self._cache[key] = result
+                self._cache_timestamps[key] = datetime.now()
+            future.set_result(result)
+        except Exception as e:
+            future.set_exception(e)
+            raise
+        finally:
+            self._stats.active_requests -= 1
+            with self._lock:
+                self._pending.pop(key, None)
+        return result
 
-        async with self._lock:
-            if key in self._pending and self._pending[key].future is future:
-                del self._pending[key]
+    def request_sync(
+        self,
+        endpoint: str,
+        fetch_fn: Callable[[], T],
+        params: Optional[Dict[str, Any]] = None,
+        cache: bool = True,
+    ) -> T:
+        """Synchronous wrapper."""
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(
+            self.request_async(endpoint, fetch_fn, params, cache)
+        )
 
-        if not future.cancelled() and not future.exception():
-            self._cache[key] = (future.result(), time.time())
-
-    async def invalidate(self, endpoint: str) -> int:
-        """
-        Invalidate all cached entries for an endpoint.
-
-        Args:
-            endpoint: API endpoint to invalidate.
-
-        Returns:
-            Number of entries invalidated.
-        """
-        async with self._lock:
-            to_remove = [k for k in self._cache if k.endpoint == endpoint]
-            for key in to_remove:
-                del self._cache[key]
-        return len(to_remove)
-
-    def get_stats(self) -> dict[str, Any]:
-        """Get coalescing statistics."""
+    def get_stats(self) -> Dict[str, Any]:
         return {
-            **self._stats,
-            "pending_requests": len(self._pending),
-            "cached_entries": len(self._cache),
+            "total_requests": self._stats.total_requests,
+            "coalesced_requests": self._stats.coalesced_requests,
+            "active_requests": self._stats.active_requests,
+            "cache_hits": self._stats.cache_hits,
+            "coalescing_hit_rate": round(self._stats.hit_rate(), 4),
+            "pending_count": len(self._pending),
         }
-
-    def clear_cache(self) -> None:
-        """Clear all cached entries."""
-        self._cache.clear()
-        logger.info("Coalescing cache cleared")

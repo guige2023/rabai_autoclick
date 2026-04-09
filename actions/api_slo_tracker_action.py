@@ -1,273 +1,120 @@
 """API SLO Tracker Action.
 
-Tracks Service Level Objectives (SLOs) for API endpoints including
-availability, latency, error budget, and alerting thresholds.
+Tracks Service Level Objectives (SLOs) for APIs: availability,
+latency, error rate targets with burn rate alerts.
 """
-from __future__ import annotations
-
-import time
-from collections import deque
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
-from typing import Any, Dict, List, Optional
-
-
-class SLOStatus(Enum):
-    """SLO health status."""
-    HEALTHY = "healthy"
-    AT_RISK = "at_risk"
-    BREACHED = "breached"
-    UNKNOWN = "unknown"
+from collections import deque
+import math
 
 
 @dataclass
-class SLOTarget:
-    """SLO target specification."""
+class SLOConfig:
     name: str
     availability_target: float = 0.995
-    latency_p50_target_ms: float = 100.0
-    latency_p95_target_ms: float = 500.0
-    latency_p99_target_ms: float = 1000.0
-    error_budget_percent: float = 1.0
+    latency_target_ms: float = 200.0
+    latency_percentile: int = 95
+    error_rate_threshold: float = 0.01
     window_days: int = 30
 
 
 @dataclass
-class SLOsnapshot:
-    """Current SLO snapshot."""
-    sli_name: str
-    total_requests: int = 0
-    successful_requests: int = 0
-    failed_requests: int = 0
-    error_rate: float = 0.0
-    availability: float = 0.0
-    latency_p50_ms: float = 0.0
-    latency_p95_ms: float = 0.0
-    latency_p99_ms: float = 0.0
-    error_budget_remaining: float = 0.0
-    error_budget_used: float = 0.0
-    status: SLOStatus = SLOStatus.UNKNOWN
-    timestamp: float = field(default_factory=time.time)
-
-
-@dataclass
-class ErrorBudgetAlert:
-    """Error budget alert threshold."""
-    name: str
-    threshold_percent: float
-    triggered: bool = False
-    last_triggered: Optional[float] = None
+class SLOStatus:
+    sli_current: float
+    sli_target: float
+    budget_remaining: float
+    budget_consumed: float
+    events_in_window: int
+    errors_in_window: int
+    is_healthy: bool
+    burn_rate: float
+    days_until_budget_exhausted: Optional[float] = None
 
 
 class APISLOTrackerAction:
-    """Tracks and reports SLO compliance for API endpoints."""
+    """Tracks SLOs and alerts on budget burn rate."""
 
     def __init__(self) -> None:
-        self._targets: Dict[str, SLOTarget] = {}
-        self._snapshots: Dict[str, deque] = {}
-        self._current_window: Dict[str, Dict[str, Any]] = {}
-        self._alerts: List[ErrorBudgetAlert] = []
-        self._max_window_size = 1000
+        self._slos: Dict[str, SLOConfig] = {}
+        self._events: Dict[str, deque] = {}
+        self._error_budget: Dict[str, float] = {}
 
-    def register_slo(
+    def register_slo(self, config: SLOConfig) -> None:
+        self._slos[config.name] = config
+        self._events[config.name] = deque(maxlen=10000)
+        total_requests = 1_000_000  # Assuming baseline
+        allowed_errors = total_requests * (1 - config.availability_target)
+        self._error_budget[config.name] = allowed_errors
+
+    def record(
         self,
-        endpoint: str,
-        availability_target: float = 0.995,
-        latency_p50_target_ms: float = 100.0,
-        latency_p95_target_ms: float = 500.0,
-        latency_p99_target_ms: float = 1000.0,
-        error_budget_percent: float = 1.0,
-        window_days: int = 30,
-    ) -> SLOTarget:
-        """Register an SLO target for an endpoint."""
-        target = SLOTarget(
-            name=endpoint,
-            availability_target=availability_target,
-            latency_p50_target_ms=latency_p50_target_ms,
-            latency_p95_target_ms=latency_p95_target_ms,
-            latency_p99_target_ms=latency_p99_target_ms,
-            error_budget_percent=error_budget_percent,
-            window_days=window_days,
-        )
-        self._targets[endpoint] = target
-        self._snapshots[endpoint] = deque(maxlen=self._max_window_size)
-        self._init_window(endpoint)
-        return target
-
-    def _init_window(self, endpoint: str) -> None:
-        """Initialize a tracking window for an endpoint."""
-        self._current_window[endpoint] = {
-            "requests": 0,
-            "errors": 0,
-            "latencies": [],
-            "window_start": time.time(),
-        }
-
-    def record_request(
-        self,
-        endpoint: str,
+        slo_name: str,
+        latency_ms: float,
         success: bool,
-        latency_ms: float,
-        timestamp: Optional[float] = None,
+        status_code: int = 200,
+        timestamp: Optional[datetime] = None,
     ) -> None:
-        """Record a request outcome for SLO tracking."""
-        if endpoint not in self._current_window:
-            self._init_window(endpoint)
+        if slo_name not in self._slos:
+            return
+        ts = timestamp or datetime.now()
+        self._events[slo_name].append({
+            "timestamp": ts,
+            "latency_ms": latency_ms,
+            "success": success,
+            "status_code": status_code,
+        })
 
-        window = self._current_window[endpoint]
-        window["requests"] += 1
-        if not success:
-            window["errors"] += 1
-        window["latencies"].append(latency_ms)
+    def _get_window(self, slo_name: str, window_days: int) -> List[Dict]:
+        config = self._slos[slo_name]
+        cutoff = datetime.now() - timedelta(days=window_days)
+        return [e for e in self._events.get(slo_name, []) if e["timestamp"] > cutoff]
 
-    def record_success(
-        self,
-        endpoint: str,
-        latency_ms: float,
-    ) -> None:
-        """Record a successful request."""
-        self.record_request(endpoint, success=True, latency_ms=latency_ms)
+    def _compute_sli(self, slo_name: str, window_days: int) -> Tuple[float, int, int]:
+        events = self._get_window(slo_name, window_days)
+        if not events:
+            return 1.0, 0, 0
+        config = self._slos[slo_name]
+        good = sum(1 for e in events
+                   if e["success"] and e["latency_ms"] <= config.latency_target_ms)
+        total = len(events)
+        return good / total if total > 0 else 1.0, good, total - good
 
-    def record_error(
-        self,
-        endpoint: str,
-        latency_ms: float = 0.0,
-    ) -> None:
-        """Record a failed request."""
-        self.record_request(endpoint, success=False, latency_ms=latency_ms)
-
-    def get_snapshot(self, endpoint: str) -> Optional[SLOsnapshot]:
-        """Get current SLO snapshot for an endpoint."""
-        if endpoint not in self._targets:
+    def get_status(self, slo_name: str) -> Optional[SLOStatus]:
+        if slo_name not in self._slos:
             return None
-
-        target = self._targets[endpoint]
-        window = self._current_window.get(endpoint)
-
-        if not window or window["requests"] == 0:
-            return SLOsnapshot(sli_name=endpoint)
-
-        requests = window["requests"]
-        errors = window["errors"]
-        latencies = sorted(window["latencies"])
-
-        error_rate = errors / requests
-        availability = 1.0 - error_rate
-
-        error_budget_total = requests * target.error_budget_percent
-        error_budget_used = errors
-        error_budget_remaining = max(0, error_budget_total - error_budget_used)
-
-        p50_idx = int(len(latencies) * 0.50)
-        p95_idx = int(len(latencies) * 0.95)
-        p99_idx = int(len(latencies) * 0.99)
-
-        status = self._determine_status(availability, target)
-
-        return SLOsnapshot(
-            sli_name=endpoint,
-            total_requests=requests,
-            successful_requests=requests - errors,
-            failed_requests=errors,
-            error_rate=error_rate,
-            availability=availability,
-            latency_p50_ms=latencies[p50_idx] if latencies else 0,
-            latency_p95_ms=latencies[p95_idx] if latencies else 0,
-            latency_p99_ms=latencies[p99_idx] if latencies else 0,
-            error_budget_remaining=error_budget_remaining,
-            error_budget_used=error_budget_used,
-            status=status,
+        config = self._slos[slo_name]
+        sli, good, bad = self._compute_sli(slo_name, config.window_days)
+        total_budget = self._error_budget.get(slo_name, 1.0)
+        budget_consumed = bad
+        budget_remaining = max(0.0, total_budget - budget_consumed)
+        # Burn rate: how fast we're consuming budget vs time
+        window_hours = config.window_days * 24
+        elapsed_hours = window_hours  # simplified
+        burn_rate = budget_consumed / total_budget if total_budget > 0 else 0.0
+        days_remaining = None
+        if burn_rate > 0:
+            days_remaining = (budget_remaining / (budget_consumed / elapsed_hours * 24)) if budget_consumed > 0 else config.window_days
+        return SLOStatus(
+            sli_current=sli,
+            sli_target=config.availability_target,
+            budget_remaining=budget_remaining,
+            budget_consumed=budget_consumed,
+            events_in_window=good + bad,
+            errors_in_window=bad,
+            is_healthy=sli >= config.availability_target,
+            burn_rate=burn_rate,
+            days_until_budget_exhausted=days_remaining,
         )
 
-    def _determine_status(
-        self,
-        availability: float,
-        target: SLOTarget,
-    ) -> SLOStatus:
-        """Determine SLO health status."""
-        if availability >= target.availability_target:
-            return SLOStatus.HEALTHY
-        elif availability >= target.availability_target * 0.95:
-            return SLOStatus.AT_RISK
-        else:
-            return SLOStatus.BREACHED
-
-    def get_all_snapshots(self) -> Dict[str, SLOsnapshot]:
-        """Get SLO snapshots for all registered endpoints."""
+    def all_statuses(self) -> Dict[str, Dict[str, Any]]:
         return {
-            endpoint: snapshot
-            for endpoint in self._targets
-            if (snapshot := self.get_snapshot(endpoint)) is not None
+            name: {
+                "status": self.get_status(name).__dict__ if self.get_status(name) else {},
+                "config": {"availability_target": c.availability_target,
+                           "latency_target_ms": c.latency_target_ms,
+                           "window_days": c.window_days},
+            }
+            for name, c in self._slos.items()
         }
-
-    def reset_window(self, endpoint: str) -> None:
-        """Reset the tracking window for an endpoint."""
-        if endpoint in self._current_window:
-            snapshot = self.get_snapshot(endpoint)
-            if snapshot:
-                self._snapshots[endpoint].append(snapshot)
-            self._init_window(endpoint)
-
-    def add_alert(self, name: str, threshold_percent: float) -> None:
-        """Add an error budget alert."""
-        self._alerts.append(ErrorBudgetAlert(name=name, threshold_percent=threshold_percent))
-
-    def check_alerts(self, endpoint: str) -> List[ErrorBudgetAlert]:
-        """Check if any alerts should trigger."""
-        snapshot = self.get_snapshot(endpoint)
-        if not snapshot:
-            return []
-
-        triggered = []
-        total_budget = snapshot.total_requests * 0.01
-        if total_budget == 0:
-            return []
-
-        used_percent = (snapshot.error_budget_used / total_budget) * 100
-
-        for alert in self._alerts:
-            if used_percent >= alert.threshold_percent and not alert.triggered:
-                alert.triggered = True
-                alert.last_triggered = time.time()
-                triggered.append(alert)
-
-        return triggered
-
-    def get_compliance_report(self) -> Dict[str, Any]:
-        """Generate a compliance report for all SLOs."""
-        snapshots = self.get_all_snapshots()
-        healthy = sum(1 for s in snapshots.values() if s.status == SLOStatus.HEALTHY)
-        at_risk = sum(1 for s in snapshots.values() if s.status == SLOStatus.AT_RISK)
-        breached = sum(1 for s in snapshots.values() if s.status == SLOStatus.BREACHED)
-
-        return {
-            "generated_at": datetime.now().isoformat(),
-            "total_slos": len(snapshots),
-            "healthy": healthy,
-            "at_risk": at_risk,
-            "breached": breached,
-            "endpoints": {
-                endpoint: {
-                    "status": s.status.value,
-                    "availability": f"{s.availability * 100:.3f}%",
-                    "error_rate": f"{s.error_rate * 100:.3f}%",
-                    "p95_latency_ms": s.latency_p95_ms,
-                    "error_budget_remaining": s.error_budget_remaining,
-                }
-                for endpoint, s in snapshots.items()
-            },
-        }
-
-    def clear(self, endpoint: Optional[str] = None) -> None:
-        """Clear tracking data."""
-        if endpoint:
-            if endpoint in self._current_window:
-                self._init_window(endpoint)
-            if endpoint in self._snapshots:
-                self._snapshots[endpoint].clear()
-        else:
-            for ep in self._current_window:
-                self._init_window(ep)
-            for ep in self._snapshots:
-                self._snapshots[ep].clear()
