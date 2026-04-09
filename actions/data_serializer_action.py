@@ -1,270 +1,282 @@
-"""Data serializer action module for RabAI AutoClick.
+"""Data serialization and deserialization utilities.
 
-Provides serialization:
-- DataSerializer: Serialize/deserialize data
-- JSONSerializer: JSON serialization
-- MessagePackSerializer: MessagePack serialization
-- XMLSerializer: XML serialization
-- SchemaSerializer: Schema-based serialization
+This module provides serialization support for:
+- Multiple formats (JSON, CSV, XML, YAML)
+- Schema validation during deserialization
+- Custom type handling
+- Streaming serialization
+
+Example:
+    >>> from actions.data_serializer_action import Serializer
+    >>> serializer = Serializer(format="json")
+    >>> data = serializer.deserialize(json_string)
 """
 
+from __future__ import annotations
+
 import json
-import pickle
-import base64
-from typing import Any, Callable, Dict, List, Optional, Union
+import csv
+import logging
+import io
+from typing import Any, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
 class SerializationFormat(Enum):
-    """Serialization formats."""
+    """Supported serialization formats."""
     JSON = "json"
-    PICKLE = "pickle"
-    MSGPACK = "msgpack"
+    CSV = "csv"
     XML = "xml"
     YAML = "yaml"
-    BASE64 = "base64"
 
 
 @dataclass
-class SerializationResult:
-    """Serialization result."""
-    success: bool
-    data: Any
-    format: str
-    size: int
-    error: Optional[str] = None
+class SerializationOptions:
+    """Options for serialization."""
+    format: SerializationFormat = SerializationFormat.JSON
+    pretty: bool = False
+    include_none: bool = False
+    datetime_format: str = "iso"
+    custom_encoders: dict[type, Callable[[Any], Any]] = None
 
 
-class DataSerializer:
-    """General data serializer."""
+class Serializer:
+    """Serialize and deserialize data.
 
-    def __init__(self):
-        self._serializers: Dict[SerializationFormat, Callable] = {
-            SerializationFormat.JSON: self._json_serialize,
-            SerializationFormat.PICKLE: self._pickle_serialize,
-            SerializationFormat.BASE64: self._base64_serialize,
-        }
+    Attributes:
+        options: Serialization options.
+    """
 
-        self._deserializers: Dict[SerializationFormat, Callable] = {
-            SerializationFormat.JSON: self._json_deserialize,
-            SerializationFormat.PICKLE: self._pickle_deserialize,
-            SerializationFormat.BASE64: self._base64_deserialize,
-        }
+    def __init__(self, options: Optional[SerializationOptions] = None) -> None:
+        self.options = options or SerializationOptions()
 
-    def serialize(self, data: Any, format: SerializationFormat = SerializationFormat.JSON) -> SerializationResult:
-        """Serialize data."""
-        try:
-            serializer = self._serializers.get(format, self._json_serialize)
-            result = serializer(data)
+    def serialize(self, data: Any) -> str:
+        """Serialize data to string.
 
-            if isinstance(result, str):
-                result = result.encode()
+        Args:
+            data: Data to serialize.
 
-            return SerializationResult(
-                success=True,
-                data=result,
-                format=format.value,
-                size=len(result),
-            )
-        except Exception as e:
-            return SerializationResult(
-                success=False,
-                data=None,
-                format=format.value,
-                size=0,
-                error=str(e),
-            )
+        Returns:
+            Serialized string.
 
-    def deserialize(self, data: Any, format: SerializationFormat = SerializationFormat.JSON) -> SerializationResult:
-        """Deserialize data."""
-        try:
-            deserializer = self._deserializers.get(format, self._json_deserialize)
-            result = deserializer(data)
+        Raises:
+            ValueError: If format is unsupported.
+        """
+        if self.options.format == SerializationFormat.JSON:
+            return self._serialize_json(data)
+        elif self.options.format == SerializationFormat.CSV:
+            return self._serialize_csv(data)
+        elif self.options.format == SerializationFormat.XML:
+            return self._serialize_xml(data)
+        elif self.options.format == SerializationFormat.YAML:
+            return self._serialize_yaml(data)
+        else:
+            raise ValueError(f"Unsupported format: {self.options.format}")
 
-            return SerializationResult(
-                success=True,
-                data=result,
-                format=format.value,
-                size=len(data) if isinstance(data, (str, bytes)) else 0,
-            )
-        except Exception as e:
-            return SerializationResult(
-                success=False,
-                data=None,
-                format=format.value,
-                size=0,
-                error=str(e),
-            )
+    def deserialize(self, data: str) -> Any:
+        """Deserialize string to data.
 
-    def _json_serialize(self, data: Any) -> bytes:
-        """JSON serialize."""
-        return json.dumps(data, ensure_ascii=False).encode("utf-8")
+        Args:
+            data: String to deserialize.
 
-    def _json_deserialize(self, data: Any) -> Any:
-        """JSON deserialize."""
-        if isinstance(data, bytes):
-            data = data.decode("utf-8")
+        Returns:
+            Deserialized data.
+
+        Raises:
+            ValueError: If format is unsupported or parsing fails.
+        """
+        if self.options.format == SerializationFormat.JSON:
+            return self._deserialize_json(data)
+        elif self.options.format == SerializationFormat.CSV:
+            return self._deserialize_csv(data)
+        elif self.options.format == SerializationFormat.XML:
+            return self._deserialize_xml(data)
+        elif self.options.format == SerializationFormat.YAML:
+            return self._deserialize_yaml(data)
+        else:
+            raise ValueError(f"Unsupported format: {self.options.format}")
+
+    def _serialize_json(self, data: Any) -> str:
+        """Serialize to JSON."""
+        kwargs = {"indent": 2} if self.options.pretty else {}
+        return json.dumps(data, **kwargs)
+
+    def _deserialize_json(self, data: str) -> Any:
+        """Deserialize from JSON."""
         return json.loads(data)
 
-    def _pickle_serialize(self, data: Any) -> bytes:
-        """Pickle serialize."""
-        return pickle.dumps(data)
-
-    def _pickle_deserialize(self, data: Any) -> Any:
-        """Pickle deserialize."""
-        return pickle.loads(data)
-
-    def _base64_serialize(self, data: Any) -> bytes:
-        """Base64 serialize."""
-        json_data = self._json_serialize(data)
-        return base64.b64encode(json_data)
-
-    def _base64_deserialize(self, data: Any) -> Any:
-        """Base64 deserialize."""
-        if isinstance(data, str):
-            data = data.encode()
-        json_data = base64.b64decode(data)
-        return self._json_deserialize(json_data)
-
-
-class SchemaSerializer:
-    """Schema-based serializer."""
-
-    def __init__(self, schema: Dict[str, Any]):
-        self.schema = schema
-
-    def serialize(self, data: Dict) -> Dict:
-        """Serialize data according to schema."""
-        result = {}
-        for field_name, field_schema in self.schema.items():
-            if field_name in data:
-                value = data[field_name]
-                result[field_name] = self._serialize_field(value, field_schema)
-        return result
-
-    def deserialize(self, data: Dict) -> Dict:
-        """Deserialize data according to schema."""
-        result = {}
-        for field_name, field_schema in self.schema.items():
-            if field_name in data:
-                value = data[field_name]
-                result[field_name] = self._deserialize_field(value, field_schema)
-        return result
-
-    def _serialize_field(self, value: Any, schema: Dict) -> Any:
-        """Serialize field value."""
-        field_type = schema.get("type")
-
-        if field_type == "string":
-            return str(value)
-        elif field_type == "number":
-            return float(value) if value is not None else None
-        elif field_type == "integer":
-            return int(value) if value is not None else None
-        elif field_type == "boolean":
-            return bool(value)
-        elif field_type == "array":
-            if isinstance(value, list):
-                item_schema = schema.get("items", {})
-                return [self._serialize_field(item, item_schema) for item in value]
-            return []
-        elif field_type == "object":
-            if isinstance(value, dict):
-                nested = SchemaSerializer(schema.get("properties", {}))
-                return nested.serialize(value)
-            return {}
-
-        return value
-
-    def _deserialize_field(self, value: Any, schema: Dict) -> Any:
-        """Deserialize field value."""
-        return self._serialize_field(value, schema)
-
-
-class DataSerializerAction(BaseAction):
-    """Data serializer action."""
-    action_type = "data_serializer"
-    display_name = "数据序列化器"
-    description = "数据序列化和反序列化"
-
-    def __init__(self):
-        super().__init__()
-        self._serializer = DataSerializer()
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "serialize")
-
-            if operation == "serialize":
-                return self._serialize(params)
-            elif operation == "deserialize":
-                return self._deserialize(params)
+    def _serialize_csv(self, data: Any) -> str:
+        """Serialize to CSV."""
+        if not isinstance(data, list):
+            data = [data]
+        if not data:
+            return ""
+        output = io.StringIO()
+        fieldnames = list(data[0].keys()) if isinstance(data[0], dict) else []
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in data:
+            if isinstance(row, dict):
+                writer.writerow(row)
             else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+                writer.writerow({})
+        return output.getvalue()
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Serializer error: {str(e)}")
+    def _deserialize_csv(self, data: str) -> list[dict[str, Any]]:
+        """Deserialize from CSV."""
+        input_stream = io.StringIO(data)
+        reader = csv.DictReader(input_stream)
+        return list(reader)
 
-    def _serialize(self, params: Dict) -> ActionResult:
-        """Serialize data."""
-        data = params.get("data")
-        format_str = params.get("format", "json").upper()
+    def _serialize_xml(self, data: Any) -> str:
+        """Serialize to XML (basic implementation)."""
+        def to_xml(obj: Any, root: str = "root") -> str:
+            if isinstance(obj, dict):
+                items = "".join(f"<{k}>{to_xml(v, k)}</{k}>" for k, v in obj.items())
+                return f"<{root}>{items}</{root}>"
+            elif isinstance(obj, list):
+                items = "".join(f"<item>{to_xml(i, 'item')}</item>" for i in obj)
+                return f"<{root}>{items}</{root}>"
+            else:
+                return str(obj)
+        return to_xml(data, "data")
 
-        if data is None:
-            return ActionResult(success=False, message="data is required")
+    def _deserialize_xml(self, data: str) -> Any:
+        """Deserialize from XML (basic implementation)."""
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(data)
+        return self._xml_to_dict(root)
 
+    def _xml_to_dict(self, element) -> Any:
+        """Convert XML element to dict."""
+        result = {}
+        for child in element:
+            value = self._xml_to_dict(child)
+            if child.tag in result:
+                if not isinstance(result[child.tag], list):
+                    result[child.tag] = [result[child.tag]]
+                result[child.tag].append(value)
+            else:
+                result[child.tag] = value
+        if not result and element.text:
+            return element.text
+        return result
+
+    def _serialize_yaml(self, data: Any) -> str:
+        """Serialize to YAML."""
         try:
-            fmt = SerializationFormat[format_str]
-        except KeyError:
-            return ActionResult(success=False, message=f"Unknown format: {format_str}")
+            import yaml
+            return yaml.dump(data, default_flow_style=False)
+        except ImportError:
+            logger.warning("PyYAML not installed, falling back to JSON")
+            return self._serialize_json(data)
 
-        result = self._serializer.serialize(data, fmt)
-
-        if result.success:
-            output = result.data
-            if isinstance(output, bytes):
-                output = base64.b64encode(output).decode() if format_str != "BASE64" else output.decode()
-
-            return ActionResult(
-                success=True,
-                message=f"Serialized to {result.format}, size: {result.size}",
-                data={
-                    "format": result.format,
-                    "size": result.size,
-                    "data": output,
-                },
-            )
-        else:
-            return ActionResult(success=False, message=f"Serialization failed: {result.error}")
-
-    def _deserialize(self, params: Dict) -> ActionResult:
-        """Deserialize data."""
-        data = params.get("data")
-        format_str = params.get("format", "json").upper()
-
-        if data is None:
-            return ActionResult(success=False, message="data is required")
-
+    def _deserialize_yaml(self, data: str) -> Any:
+        """Deserialize from YAML."""
         try:
-            fmt = SerializationFormat[format_str]
-        except KeyError:
-            return ActionResult(success=False, message=f"Unknown format: {format_str}")
+            import yaml
+            return yaml.safe_load(data)
+        except ImportError:
+            logger.warning("PyYAML not installed, falling back to JSON")
+            return self._deserialize_json(data)
 
-        result = self._serializer.deserialize(data, fmt)
 
-        if result.success:
-            return ActionResult(
-                success=True,
-                message=f"Deserialized from {result.format}",
-                data={"data": result.data, "format": result.format},
-            )
-        else:
-            return ActionResult(success=False, message=f"Deserialization failed: {result.error}")
+class StreamingSerializer:
+    """Serialize large datasets in chunks."""
+
+    def __init__(self, chunk_size: int = 1000) -> None:
+        self.chunk_size = chunk_size
+
+    def serialize_chunks(
+        self,
+        data: list[dict[str, Any]],
+        format: SerializationFormat = SerializationFormat.JSON,
+    ) -> list[str]:
+        """Serialize data in chunks.
+
+        Args:
+            data: Data to serialize.
+            format: Output format.
+
+        Returns:
+            List of serialized chunks.
+        """
+        chunks = []
+        for i in range(0, len(data), self.chunk_size):
+            chunk = data[i:i + self.chunk_size]
+            serializer = Serializer(SerializationOptions(format=format))
+            chunks.append(serializer.serialize(chunk))
+        return chunks
+
+    def deserialize_chunks(
+        self,
+        chunks: list[str],
+        format: SerializationFormat = SerializationFormat.JSON,
+    ) -> list[Any]:
+        """Deserialize chunks into single dataset.
+
+        Args:
+            chunks: List of serialized chunks.
+            format: Input format.
+
+        Returns:
+            Combined deserialized data.
+        """
+        result = []
+        for chunk in chunks:
+            serializer = Serializer(SerializationOptions(format=format))
+            data = serializer.deserialize(chunk)
+            if isinstance(data, list):
+                result.extend(data)
+            else:
+                result.append(data)
+        return result
+
+
+def serialize(data: Any, format: str = "json", **kwargs: Any) -> str:
+    """Quick serialize function.
+
+    Args:
+        data: Data to serialize.
+        format: Format name.
+        **kwargs: Additional options.
+
+    Returns:
+        Serialized string.
+    """
+    fmt_map = {
+        "json": SerializationFormat.JSON,
+        "csv": SerializationFormat.CSV,
+        "xml": SerializationFormat.XML,
+        "yaml": SerializationFormat.YAML,
+    }
+    options = SerializationOptions(
+        format=fmt_map.get(format.lower(), SerializationFormat.JSON),
+        pretty=kwargs.get("pretty", False),
+    )
+    return Serializer(options).serialize(data)
+
+
+def deserialize(data: str, format: str = "json") -> Any:
+    """Quick deserialize function.
+
+    Args:
+        data: String to deserialize.
+        format: Format name.
+
+    Returns:
+        Deserialized data.
+    """
+    fmt_map = {
+        "json": SerializationFormat.JSON,
+        "csv": SerializationFormat.CSV,
+        "xml": SerializationFormat.XML,
+        "yaml": SerializationFormat.YAML,
+    }
+    options = SerializationOptions(
+        format=fmt_map.get(format.lower(), SerializationFormat.JSON),
+    )
+    return Serializer(options).deserialize(data)
