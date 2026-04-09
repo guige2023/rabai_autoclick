@@ -1,193 +1,194 @@
 """
-Circuit Breaker Action Module.
+Circuit breaker action for fault tolerance and degradation handling.
 
-Implements circuit breaker pattern for fault tolerance.
+Provides failure tracking with half-open state for recovery attempts.
 """
 
-from __future__ import annotations
-
-import asyncio
+from typing import Any, Optional
 import time
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Coroutine, Dict, Optional, TypeVar, Generic
-
-
-class CircuitState(Enum):
-    """Circuit breaker states."""
-    CLOSED = auto()
-    OPEN = auto()
-    HALF_OPEN = auto()
-
-
-@dataclass
-class CircuitConfig:
-    """Circuit breaker configuration."""
-    failure_threshold: int = 5
-    success_threshold: int = 2
-    timeout_seconds: float = 30.0
-    half_open_max_calls: int = 3
-
-
-@dataclass
-class CircuitStats:
-    """Circuit breaker statistics."""
-    total_calls: int = 0
-    successful_calls: int = 0
-    failed_calls: int = 0
-    rejected_calls: int = 0
-    state_changes: int = 0
-    last_failure_time: Optional[float] = None
-    last_success_time: Optional[float] = None
-
-
-T = TypeVar("T")
+import threading
 
 
 class CircuitBreakerAction:
-    """
-    Circuit breaker for preventing cascade failures.
+    """Circuit breaker for fault tolerance."""
 
-    States:
-    - CLOSED: Normal operation, calls pass through
-    - OPEN: Failures exceeded threshold, calls rejected
-    - HALF_OPEN: Testing if service recovered
-    """
+    STATES = ("closed", "open", "half_open")
 
     def __init__(
         self,
-        name: str,
-        config: Optional[CircuitConfig] = None,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 60.0,
+        success_threshold: int = 3,
+        half_open_max_calls: int = 3,
     ) -> None:
-        self.name = name
-        self.config = config or CircuitConfig()
-        self._state = CircuitState.CLOSED
+        """
+        Initialize circuit breaker.
+
+        Args:
+            failure_threshold: Failures before opening circuit
+            recovery_timeout: Seconds before attempting recovery
+            success_threshold: Successes in half-open to close
+            half_open_max_calls: Max calls in half-open state
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.success_threshold = success_threshold
+        self.half_open_max_calls = half_open_max_calls
+
+        self._state = "closed"
         self._failure_count = 0
         self._success_count = 0
         self._last_failure_time: Optional[float] = None
         self._half_open_calls = 0
-        self._stats = CircuitStats()
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()
 
-    async def call(
-        self,
-        func: Callable[..., Coroutine[Any, Any, T]],
-        *args: Any,
-        **kwargs: Any,
-    ) -> T:
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         """
-        Execute a call through the circuit breaker.
+        Execute circuit breaker operation.
 
         Args:
-            func: Async function to call
-            *args: Positional arguments
-            **kwargs: Keyword arguments
+            params: Dictionary containing:
+                - operation: 'call', 'status', 'reset', 'force_open'
+                - service: Service name
+                - action: Action to execute (for call)
 
         Returns:
-            Result from func
-
-        Raises:
-            CircuitBreakerOpen: If circuit is open
+            Dictionary with operation result
         """
-        await self._lock
+        operation = params.get("operation", "call")
 
-        if self._state == CircuitState.OPEN:
-            if self._should_attempt_reset():
-                self._state = CircuitState.HALF_OPEN
-                self._half_open_calls = 0
-                self._stats.state_changes += 1
-            else:
-                self._stats.rejected_calls += 1
-                raise CircuitBreakerOpen(f"Circuit {self.name} is OPEN")
+        if operation == "call":
+            return self._execute_call(params)
+        elif operation == "status":
+            return self._get_status(params)
+        elif operation == "reset":
+            return self._reset(params)
+        elif operation == "force_open":
+            return self._force_open(params)
+        else:
+            return {"success": False, "error": f"Unknown operation: {operation}"}
 
-        if self._state == CircuitState.HALF_OPEN:
-            if self._half_open_calls >= self.config.half_open_max_calls:
-                self._stats.rejected_calls += 1
-                raise CircuitBreakerOpen(
-                    f"Circuit {self.name} is HALF_OPEN, max calls reached"
-                )
-            self._half_open_calls += 1
+    def _execute_call(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Execute call through circuit breaker."""
+        service = params.get("service", "default")
+        action = params.get("action")
+        fallback = params.get("fallback")
 
-        self._lock.release()
+        with self._lock:
+            if self._state == "open":
+                if self._should_attempt_recovery():
+                    self._to_half_open()
+                else:
+                    return {
+                        "success": False,
+                        "error": "Circuit is open",
+                        "state": self._state,
+                        "service": service,
+                        "fallback_used": fallback is not None,
+                    }
 
-        self._stats.total_calls += 1
+            if self._state == "half_open":
+                if self._half_open_calls >= self.half_open_max_calls:
+                    return {
+                        "success": False,
+                        "error": "Half-open call limit reached",
+                        "state": self._state,
+                        "service": service,
+                    }
+                self._half_open_calls += 1
 
         try:
-            result = await func(*args, **kwargs)
-            await self._on_success()
-            return result
+            result = self._execute_action(action, params)
+            self._on_success()
+            return {
+                "success": True,
+                "result": result,
+                "state": self._state,
+                "service": service,
+            }
         except Exception as e:
-            await self._on_failure()
-            raise e
+            self._on_failure()
+            fallback_result = self._execute_fallback(fallback, params)
+            return {
+                "success": False,
+                "error": str(e),
+                "fallback_used": fallback_result is not None,
+                "fallback_result": fallback_result,
+                "state": self._state,
+                "service": service,
+            }
 
-    async def _on_success(self) -> None:
+    def _execute_action(self, action: Any, params: dict[str, Any]) -> Any:
+        """Execute the actual action."""
+        if callable(action):
+            return action(params)
+        return {"message": "Action executed", "params": params}
+
+    def _execute_fallback(self, fallback: Any, params: dict[str, Any]) -> Any:
+        """Execute fallback if provided."""
+        if callable(fallback):
+            return fallback(params)
+        return None
+
+    def _should_attempt_recovery(self) -> bool:
+        """Check if enough time has passed for recovery attempt."""
+        if self._last_failure_time is None:
+            return True
+        return time.time() - self._last_failure_time >= self.recovery_timeout
+
+    def _to_half_open(self) -> None:
+        """Transition to half-open state."""
+        self._state = "half_open"
+        self._half_open_calls = 0
+        self._success_count = 0
+
+    def _on_success(self) -> None:
         """Handle successful call."""
-        async with self._lock:
-            self._stats.successful_calls += 1
-            self._stats.last_success_time = time.time()
-
-            if self._state == CircuitState.HALF_OPEN:
+        with self._lock:
+            if self._state == "half_open":
                 self._success_count += 1
-                if self._success_count >= self.config.success_threshold:
-                    self._state = CircuitState.CLOSED
+                if self._success_count >= self.success_threshold:
+                    self._state = "closed"
                     self._failure_count = 0
-                    self._success_count = 0
-                    self._stats.state_changes += 1
-            elif self._state == CircuitState.CLOSED:
-                self._failure_count = max(0, self._failure_count - 1)
+            self._failure_count = 0
 
-    async def _on_failure(self) -> None:
+    def _on_failure(self) -> None:
         """Handle failed call."""
-        async with self._lock:
-            self._stats.failed_calls += 1
-            self._stats.last_failure_time = time.time()
+        with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.time()
 
-            if self._state == CircuitState.HALF_OPEN:
-                self._state = CircuitState.OPEN
-                self._stats.state_changes += 1
-            elif self._failure_count >= self.config.failure_threshold:
-                self._state = CircuitState.OPEN
-                self._stats.state_changes += 1
+            if self._state == "half_open":
+                self._state = "open"
+            elif self._failure_count >= self.failure_threshold:
+                self._state = "open"
 
-    def _should_attempt_reset(self) -> bool:
-        """Check if enough time has passed to attempt reset."""
-        if self._last_failure_time is None:
-            return True
-        return time.time() - self._last_failure_time >= self.config.timeout_seconds
+    def _get_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Get circuit breaker status."""
+        with self._lock:
+            return {
+                "success": True,
+                "state": self._state,
+                "failure_count": self._failure_count,
+                "success_count": self._success_count,
+                "last_failure_time": self._last_failure_time,
+                "recovery_timeout": self.recovery_timeout,
+                "failure_threshold": self.failure_threshold,
+            }
 
-    @property
-    def state(self) -> CircuitState:
-        """Get current circuit state."""
-        return self._state
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get circuit breaker statistics."""
-        return {
-            "name": self.name,
-            "state": self._state.name,
-            "failure_count": self._failure_count,
-            "success_count": self._success_count,
-            "total_calls": self._stats.total_calls,
-            "successful_calls": self._stats.successful_calls,
-            "failed_calls": self._stats.failed_calls,
-            "rejected_calls": self._stats.rejected_calls,
-            "state_changes": self._stats.state_changes,
-            "last_failure_time": self._stats.last_failure_time,
-            "last_success_time": self._stats.last_success_time,
-        }
-
-    async def reset(self) -> None:
-        """Manually reset the circuit breaker."""
-        async with self._lock:
-            self._state = CircuitState.CLOSED
+    def _reset(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Reset circuit breaker to closed state."""
+        with self._lock:
+            self._state = "closed"
             self._failure_count = 0
             self._success_count = 0
+            self._last_failure_time = None
             self._half_open_calls = 0
-            self._stats.state_changes += 1
+        return {"success": True, "state": self._state}
 
-
-class CircuitBreakerOpen(Exception):
-    """Exception raised when circuit is open."""
-    pass
+    def _force_open(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Force circuit breaker to open state."""
+        with self._lock:
+            self._state = "open"
+            self._last_failure_time = time.time()
+        return {"success": True, "state": self._state}
