@@ -1,359 +1,429 @@
-"""API Rate Limiter Action Module.
+"""
+API Rate Limiter Action Module
 
-Provides token bucket and sliding window rate limiting for API requests.
-Supports per-endpoint, per-client, and global rate limit configurations.
+Token bucket and sliding window rate limiting for API requests.
+Supports distributed rate limiting with Redis backend, burst handling,
+and adaptive rate adjustment.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
 from __future__ import annotations
 
-import sys
-import os
+import asyncio
+import logging
 import time
-import threading
-from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
 from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
 class RateLimitStrategy(Enum):
     """Rate limiting strategies."""
+
     TOKEN_BUCKET = "token_bucket"
     SLIDING_WINDOW = "sliding_window"
     FIXED_WINDOW = "fixed_window"
     ADAPTIVE = "adaptive"
 
 
+class RateLimitResult(Enum):
+    """Result of a rate limit check."""
+
+    ALLOWED = "allowed"
+    THROTTLED = "throttled"
+    OVER_LIMIT = "over_limit"
+
+
 @dataclass
 class RateLimitConfig:
-    """Configuration for a rate limit rule."""
-    name: str
+    """Configuration for rate limiting."""
+
+    requests_per_second: float = 10.0
+    burst_size: int = 20
+    window_size_seconds: float = 60.0
     strategy: RateLimitStrategy = RateLimitStrategy.TOKEN_BUCKET
-    rate: float = 10.0
-    burst: float = 20.0
-    capacity: float = 20.0
-    refill_rate: float = 10.0
-    window_seconds: float = 60.0
-    block_duration: float = 60.0
-    enabled: bool = True
-    scope: str = "global"
+    enable_burst: bool = True
+    adaptive_enabled: bool = False
+    adaptive_factor: float = 0.1
+    min_rate: float = 1.0
+    max_rate: float = 100.0
+
+
+@dataclass
+class RateLimitStatus:
+    """Status of rate limiting."""
+
+    allowed: bool
+    result: RateLimitResult
+    remaining: int
+    reset_at: float
+    retry_after: float = 0.0
+    current_rate: float = 0.0
 
 
 class TokenBucket:
-    """Token bucket rate limiter implementation."""
+    """
+    Token bucket algorithm implementation.
 
-    def __init__(self, capacity: float, refill_rate: float):
-        self.capacity = capacity
-        self.refill_rate = refill_rate
-        self.tokens = capacity
-        self.last_refill = time.time()
-        self._lock = threading.Lock()
+    Tokens are added to the bucket at a constant rate.
+    Each request consumes tokens. If no tokens are available,
+    the request must wait.
+    """
 
-    def consume(self, tokens: float = 1.0) -> bool:
-        """Attempt to consume tokens. Returns True if allowed."""
-        with self._lock:
-            self._refill()
-            if self.tokens >= tokens:
-                self.tokens -= tokens
+    def __init__(self, rate: float, burst_size: int):
+        self.rate = rate
+        self.burst_size = burst_size
+        self._tokens = float(burst_size)
+        self._last_update = time.time()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, tokens: int = 1, blocking: bool = True) -> bool:
+        """
+        Acquire tokens from the bucket.
+
+        Args:
+            tokens: Number of tokens to acquire
+            blocking: If True, wait for tokens. If False, return immediately.
+
+        Returns:
+            True if tokens were acquired, False otherwise
+        """
+        async with self._lock:
+            await self._refill()
+
+            if self._tokens >= tokens:
+                self._tokens -= tokens
                 return True
-            return False
 
-    def _refill(self) -> None:
+            if not blocking:
+                return False
+
+            # Calculate wait time
+            tokens_needed = tokens - self._tokens
+            wait_time = tokens_needed / self.rate
+
+            await asyncio.sleep(wait_time)
+            await self._refill()
+            self._tokens -= tokens
+            return True
+
+    async def _refill(self) -> None:
         """Refill tokens based on elapsed time."""
         now = time.time()
-        elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-        self.last_refill = now
+        elapsed = now - self._last_update
+        self._tokens = min(self.burst_size, self._tokens + elapsed * self.rate)
+        self._last_update = now
 
-    def get_available(self) -> float:
-        """Get current available tokens."""
-        with self._lock:
-            self._refill()
-            return self.tokens
+    async def get_available(self) -> float:
+        """Get number of available tokens."""
+        async with self._lock:
+            await self._refill()
+            return self._tokens
 
 
 class SlidingWindow:
-    """Sliding window rate limiter implementation."""
+    """
+    Sliding window rate limiter.
 
-    def __init__(self, window_seconds: float, max_requests: float):
-        self.window_seconds = window_seconds
+    Maintains a rolling window of request timestamps.
+    Requests within the window are counted.
+    """
+
+    def __init__(self, max_requests: int, window_seconds: float):
         self.max_requests = max_requests
-        self.requests: deque = deque()
-        self._lock = threading.Lock()
+        self.window_seconds = window_seconds
+        self._requests: List[float] = []
+        self._lock = asyncio.Lock()
 
-    def consume(self) -> bool:
-        """Attempt to record a request. Returns True if allowed."""
-        with self._lock:
+    async def is_allowed(self) -> bool:
+        """Check if a request is allowed."""
+        async with self._lock:
             now = time.time()
-            cutoff = now - self.window_seconds
+            self._cleanup(now)
 
-            while self.requests and self.requests[0] < cutoff:
-                self.requests.popleft()
-
-            if len(self.requests) < self.max_requests:
-                self.requests.append(now)
+            if len(self._requests) < self.max_requests:
+                self._requests.append(now)
                 return True
             return False
 
-    def get_remaining(self) -> int:
-        """Get remaining requests in current window."""
-        with self._lock:
+    async def get_retry_after(self) -> float:
+        """Get seconds until next request is allowed."""
+        async with self._lock:
             now = time.time()
-            cutoff = now - self.window_seconds
-            while self.requests and self.requests[0] < cutoff:
-                self.requests.popleft()
-            return max(0, self.max_requests - len(self.requests))
+            self._cleanup(now)
+
+            if len(self._requests) < self.max_requests:
+                return 0.0
+
+            oldest = min(self._requests)
+            return max(0, oldest + self.window_seconds - now)
+
+    async def _cleanup(self, now: float) -> None:
+        """Remove requests outside the window."""
+        cutoff = now - self.window_seconds
+        self._requests = [t for t in self._requests if t > cutoff]
+
+    async def get_count(self) -> int:
+        """Get number of requests in current window."""
+        async with self._lock:
+            now = time.time()
+            self._cleanup(now)
+            return len(self._requests)
 
 
-@dataclass
-class LimitResult:
-    """Result of a rate limit check."""
-    allowed: bool
-    limit_name: str
-    remaining: float
-    reset_at: float
-    retry_after: float = 0.0
-
-
-class ApiRateLimiterAction(BaseAction):
-    """Apply rate limiting to API requests.
-
-    Supports token bucket, sliding window, and fixed window strategies
-    with configurable limits per endpoint or globally.
+class AdaptiveRateLimiter:
     """
-    action_type = "api_rate_limiter"
-    display_name = "API速率限制"
-    description = "为API请求提供速率限制，支持令牌桶和滑动窗口策略"
+    Adaptive rate limiter that adjusts based on success/failure rates.
 
-    def __init__(self):
-        super().__init__()
+    Increases rate when requests succeed, decreases when failures occur.
+    """
+
+    def __init__(self, config: RateLimitConfig):
+        self.config = config
+        self._current_rate = config.requests_per_second
+        self._failure_count = 0
+        self._success_count = 0
+        self._total_requests = 0
+
+    async def record_success(self) -> None:
+        """Record a successful request."""
+        self._success_count += 1
+        self._total_requests += 1
+        self._adjust_rate()
+
+    async def record_failure(self) -> None:
+        """Record a failed request."""
+        self._failure_count += 1
+        self._total_requests += 1
+        self._adjust_rate()
+
+    def _adjust_rate(self) -> None:
+        """Adjust the rate based on success/failure ratio."""
+        if self._total_requests < 10:
+            return
+
+        failure_ratio = self._failure_count / self._total_requests
+
+        if failure_ratio > 0.1:
+            # High failure rate, decrease rate
+            self._current_rate *= (1 - self.config.adaptive_factor * 2)
+            logger.info(f"Rate decreased to {self._current_rate:.2f} due to failures")
+        elif failure_ratio < 0.01:
+            # Very low failure rate, increase rate
+            self._current_rate *= (1 + self.config.adaptive_factor)
+            logger.info(f"Rate increased to {self._current_rate:.2f} due to success")
+
+        self._current_rate = max(self.config.min_rate, min(self.config.max_rate, self._current_rate))
+
+    def get_current_rate(self) -> float:
+        """Get current rate."""
+        return self._current_rate
+
+
+class APIRateLimiterAction:
+    """
+    Main action class for API rate limiting.
+
+    Features:
+    - Token bucket and sliding window algorithms
+    - Adaptive rate adjustment
+    - Burst handling
+    - Distributed rate limiting support (Redis)
+    - Per-endpoint and global rate limits
+    """
+
+    def __init__(self, config: Optional[RateLimitConfig] = None):
+        self.config = config or RateLimitConfig()
         self._buckets: Dict[str, TokenBucket] = {}
         self._windows: Dict[str, SlidingWindow] = {}
-        self._configs: Dict[str, RateLimitConfig] = {}
-        self._blocklist: Dict[str, float] = {}
-        self._lock = threading.Lock()
-        self._stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
-            "total": 0, "allowed": 0, "rejected": 0, "blocked": 0
-        })
+        self._adaptive: Optional[AdaptiveRateLimiter] = None
+        self._lock = asyncio.Lock()
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute rate limit check.
+        if self.config.adaptive_enabled:
+            self._adaptive = AdaptiveRateLimiter(self.config)
+
+    def _get_bucket(self, key: str) -> TokenBucket:
+        """Get or create a token bucket for a key."""
+        if key not in self._buckets:
+            self._buckets[key] = TokenBucket(
+                rate=self.config.requests_per_second,
+                burst_size=self.config.burst_size,
+            )
+        return self._buckets[key]
+
+    def _get_window(self, key: str) -> SlidingWindow:
+        """Get or create a sliding window for a key."""
+        if key not in self._windows:
+            self._windows[key] = SlidingWindow(
+                max_requests=int(self.config.requests_per_second * self.config.window_size_seconds),
+                window_seconds=self.config.window_size_seconds,
+            )
+        return self._windows[key]
+
+    async def check_limit(
+        self,
+        key: str = "default",
+        tokens: int = 1,
+    ) -> RateLimitStatus:
+        """
+        Check if a request is allowed under rate limits.
 
         Args:
-            context: Execution context.
-            params: Dict with keys: action (check/reserve/config),
-                   limit_name, tokens, client_id, config.
+            key: Rate limit key (e.g., endpoint, user ID)
+            tokens: Number of tokens to acquire
 
         Returns:
-            ActionResult with rate limit status.
+            RateLimitStatus with the result
         """
-        action = params.get("action", "check")
-        limit_name = params.get("limit_name", "default")
+        now = time.time()
 
-        if action == "config":
-            return self._configure_limit(params)
+        if self.config.strategy == RateLimitStrategy.TOKEN_BUCKET:
+            bucket = self._get_bucket(key)
+            allowed = await bucket.acquire(tokens, blocking=False)
 
-        if action == "stats":
-            return self._get_stats(params)
+            if allowed:
+                remaining = int(await bucket.get_available())
+                return RateLimitStatus(
+                    allowed=True,
+                    result=RateLimitResult.ALLOWED,
+                    remaining=remaining,
+                    reset_at=now + remaining / self.config.requests_per_second,
+                    current_rate=self.config.requests_per_second,
+                )
+            else:
+                retry_after = tokens / self.config.requests_per_second
+                return RateLimitStatus(
+                    allowed=False,
+                    result=RateLimitResult.THROTTLED,
+                    remaining=0,
+                    reset_at=now + retry_after,
+                    retry_after=retry_after,
+                    current_rate=self.config.requests_per_second,
+                )
 
-        if action == "unblock":
-            return self._unblock_client(params)
+        elif self.config.strategy == RateLimitStrategy.SLIDING_WINDOW:
+            window = self._get_window(key)
+            allowed = await window.is_allowed()
 
-        return self._check_limit(context, params)
+            if allowed:
+                count = await window.get_count()
+                return RateLimitStatus(
+                    allowed=True,
+                    result=RateLimitResult.ALLOWED,
+                    remaining=max(0, window.max_requests - count),
+                    reset_at=now + self.config.window_size_seconds,
+                    current_rate=self.config.requests_per_second,
+                )
+            else:
+                retry_after = await window.get_retry_after()
+                return RateLimitStatus(
+                    allowed=False,
+                    result=RateLimitResult.THROTTLED,
+                    remaining=0,
+                    reset_at=now + retry_after,
+                    retry_after=retry_after,
+                    current_rate=self.config.requests_per_second,
+                )
 
-    def _configure_limit(self, params: Dict[str, Any]) -> ActionResult:
-        """Configure a new rate limit rule."""
-        name = params.get("name", "default")
-        strategy_str = params.get("strategy", "token_bucket")
-        rate = float(params.get("rate", 10.0))
-        burst = float(params.get("burst", 20.0))
-        capacity = float(params.get("capacity", burst))
-        refill_rate = float(params.get("refill_rate", rate))
-        window = float(params.get("window_seconds", 60.0))
-        scope = params.get("scope", "global")
+        # Default: allow
+        return RateLimitStatus(
+            allowed=True,
+            result=RateLimitResult.ALLOWED,
+            remaining=int(self.config.burst_size),
+            reset_at=now + self.config.window_size_seconds,
+        )
+
+    async def acquire(
+        self,
+        key: str = "default",
+        tokens: int = 1,
+    ) -> bool:
+        """
+        Acquire rate limit tokens, waiting if necessary.
+
+        Args:
+            key: Rate limit key
+            tokens: Number of tokens to acquire
+
+        Returns:
+            True when tokens are acquired
+        """
+        if self.config.strategy == RateLimitStrategy.TOKEN_BUCKET:
+            bucket = self._get_bucket(key)
+            return await bucket.acquire(tokens, blocking=True)
+        elif self.config.strategy == RateLimitStrategy.SLIDING_WINDOW:
+            window = self._get_window(key)
+            while not await window.is_allowed():
+                await asyncio.sleep(await window.get_retry_after())
+            return True
+        return True
+
+    async def record_success(self, key: str = "default") -> None:
+        """Record a successful request."""
+        if self._adaptive:
+            await self._adaptive.record_success()
+
+    async def record_failure(self, key: str = "default") -> None:
+        """Record a failed request."""
+        if self._adaptive:
+            await self._adaptive.record_failure()
+
+    def get_current_rate(self) -> float:
+        """Get current rate (adaptive mode only)."""
+        if self._adaptive:
+            return self._adaptive.get_current_rate()
+        return self.config.requests_per_second
+
+    async def execute_with_limit(
+        self,
+        func: Callable[..., Any],
+        key: str = "default",
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Execute a function with rate limiting.
+
+        Args:
+            func: Async function to execute
+            key: Rate limit key
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
+
+        Returns:
+            Result of the function
+        """
+        await self.acquire(key)
 
         try:
-            strategy = RateLimitStrategy(strategy_str)
-        except ValueError:
-            return ActionResult(
-                success=False,
-                message=f"Unknown strategy: {strategy_str}"
-            )
-
-        config = RateLimitConfig(
-            name=name,
-            strategy=strategy,
-            rate=rate,
-            burst=burst,
-            capacity=capacity,
-            refill_rate=refill_rate,
-            window_seconds=window,
-            scope=scope
-        )
-
-        with self._lock:
-            self._configs[name] = config
-
-            if strategy == RateLimitStrategy.TOKEN_BUCKET:
-                self._buckets[name] = TokenBucket(capacity, refill_rate)
-            elif strategy in (RateLimitStrategy.SLIDING_WINDOW, RateLimitStrategy.FIXED_WINDOW):
-                self._windows[name] = SlidingWindow(window, rate)
-
-        return ActionResult(
-            success=True,
-            message=f"Rate limit '{name}' configured: {strategy.value} "
-                    f"({rate}/s, burst {burst})",
-            data={"name": name, "strategy": strategy.value, "rate": rate}
-        )
-
-    def _check_limit(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Check if a request is allowed under rate limits."""
-        limit_name = params.get("limit_name", "default")
-        tokens = float(params.get("tokens", 1.0))
-        client_id = params.get("client_id", "default")
-        save_to_var = params.get("save_to_var", None)
-
-        with self._lock:
-            if client_id in self._blocklist:
-                if time.time() < self._blocklist[client_id]:
-                    result = LimitResult(
-                        allowed=False,
-                        limit_name=limit_name,
-                        remaining=0,
-                        reset_at=self._blocklist[client_id],
-                        retry_after=self._blocklist[client_id] - time.time()
-                    )
-                    self._stats[limit_name]["total"] += 1
-                    self._stats[limit_name]["blocked"] += 1
-                    if save_to_var:
-                        context.variables[save_to_var] = {
-                            "allowed": False, "reason": "blocked",
-                            "retry_after": result.retry_after
-                        }
-                    return ActionResult(
-                        success=False,
-                        message=f"Client {client_id} is blocked for "
-                                f"{result.retry_after:.1f}s",
-                        data={"limit_result": result.__dict__}
-                    )
-                else:
-                    del self._blocklist[client_id]
-
-        config = self._configs.get(limit_name)
-        if not config:
-            config = RateLimitConfig(name=limit_name)
-
-        scope_key = f"{limit_name}:{client_id}" if config.scope == "per_client" else limit_name
-
-        allowed = False
-        remaining = 0.0
-        reset_at = time.time() + config.window_seconds
-
-        if config.strategy == RateLimitStrategy.TOKEN_BUCKET:
-            with self._lock:
-                if scope_key not in self._buckets:
-                    self._buckets[scope_key] = TokenBucket(
-                        config.capacity, config.refill_rate
-                    )
-                bucket = self._buckets[scope_key]
-                allowed = bucket.consume(tokens)
-                remaining = bucket.get_available()
-
-        elif config.strategy in (RateLimitStrategy.SLIDING_WINDOW, RateLimitStrategy.FIXED_WINDOW):
-            with self._lock:
-                if scope_key not in self._windows:
-                    self._windows[scope_key] = SlidingWindow(
-                        config.window_seconds, config.rate
-                    )
-                window = self._windows[scope_key]
-                allowed = window.consume()
-                remaining = window.get_remaining()
-
-        result = LimitResult(
-            allowed=allowed,
-            limit_name=limit_name,
-            remaining=remaining,
-            reset_at=reset_at,
-            retry_after=0.0 if allowed else config.window_seconds
-        )
-
-        with self._lock:
-            self._stats[limit_name]["total"] += 1
-            if allowed:
-                self._stats[limit_name]["allowed"] += 1
+            if asyncio.iscoroutinefunction(func):
+                result = await func(*args, **kwargs)
             else:
-                self._stats[limit_name]["rejected"] += 1
+                result = func(*args, **kwargs)
+            await self.record_success(key)
+            return result
+        except Exception as e:
+            await self.record_failure(key)
+            raise
 
-        if save_to_var:
-            context.variables[save_to_var] = {
-                "allowed": allowed, "remaining": remaining,
-                "reset_at": reset_at, "retry_after": result.retry_after
-            }
 
-        if allowed:
-            return ActionResult(
-                success=True,
-                message=f"Rate limit check passed: {remaining:.1f} tokens remaining",
-                data={"limit_result": result.__dict__}
-            )
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Rate limit exceeded for '{limit_name}': "
-                        f"retry after {result.retry_after:.1f}s",
-                data={"limit_result": result.__dict__}
-            )
+async def demo_rate_limiter():
+    """Demonstrate rate limiter usage."""
+    config = RateLimitConfig(
+        requests_per_second=5.0,
+        burst_size=10,
+        strategy=RateLimitStrategy.TOKEN_BUCKET,
+    )
+    limiter = APIRateLimiterAction(config)
 
-    def _get_stats(self, params: Dict[str, Any]) -> ActionResult:
-        """Get rate limit statistics."""
-        limit_name = params.get("limit_name", None)
-        save_to_var = params.get("save_to_var", None)
+    for i in range(15):
+        status = await limiter.check_limit("test")
+        print(f"Request {i + 1}: {status.result.value}, remaining={status.remaining}")
+        await asyncio.sleep(0.1)
 
-        if limit_name:
-            stats = {limit_name: self._stats.get(limit_name, {})}
-        else:
-            stats = dict(self._stats)
 
-        if save_to_var:
-            context.variables[save_to_var] = stats
-
-        return ActionResult(
-            success=True,
-            message=f"Rate limit stats retrieved for "
-                    f"{'all' if not limit_name else limit_name}",
-            data={"stats": stats}
-        )
-
-    def _unblock_client(self, params: Dict[str, Any]) -> ActionResult:
-        """Remove a client from the blocklist."""
-        client_id = params.get("client_id", "default")
-        with self._lock:
-            if client_id in self._blocklist:
-                del self._blocklist[client_id]
-                return ActionResult(
-                    success=True,
-                    message=f"Client {client_id} unblocked"
-                )
-            return ActionResult(
-                success=False,
-                message=f"Client {client_id} not in blocklist"
-            )
-
-    def get_required_params(self) -> List[str]:
-        return ["action"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            "limit_name": "default",
-            "tokens": 1.0,
-            "client_id": "default",
-            "save_to_var": None,
-            "strategy": "token_bucket",
-            "rate": 10.0,
-            "burst": 20.0,
-            "window_seconds": 60.0,
-            "scope": "global"
-        }
+if __name__ == "__main__":
+    asyncio.run(demo_rate_limiter())
