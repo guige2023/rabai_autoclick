@@ -1,193 +1,298 @@
-"""Lock utilities for RabAI AutoClick.
+"""Lock and synchronization primitives.
 
-Provides:
-- Reentrant lock wrapper
-- Read-write lock
-- Semaphore helpers
-- Deadlock prevention utilities
+Provides advanced locking mechanisms including
+read-write locks, semaphores, and conditional locks.
 """
-
-from __future__ import annotations
 
 import threading
 import time
-from typing import (
-    Callable,
-    Optional,
-    TypeVar,
-)
-
-
-T = TypeVar("T")
+from contextlib import contextmanager
+from typing import Any, Callable, Optional
 
 
 class ReadWriteLock:
-    """A lock that allows multiple readers or a single writer."""
+    """Read-write lock allowing multiple readers or one writer.
+
+    Example:
+        rwlock = ReadWriteLock()
+        with rwlock.read_lock():
+            data = shared_resource.read()
+        with rwlock.write_lock():
+            shared_resource.write(new_data)
+    """
 
     def __init__(self) -> None:
+        self._read_ready = threading.Condition(threading.Lock())
         self._readers = 0
         self._writers_waiting = 0
         self._writer_active = False
-        self._lock = threading.Lock()
-        self._readers_ok = threading.Condition(self._lock)
-        self._writers_ok = threading.Condition(self._lock)
 
-    def acquire_read(self) -> None:
-        """Acquire a read lock."""
-        with self._lock:
+    @contextmanager
+    def read_lock(self) -> Any:
+        """Acquire read lock."""
+        with self._read_ready:
             while self._writer_active or self._writers_waiting > 0:
-                self._readers_ok.wait()
+                self._read_ready.wait()
             self._readers += 1
+        try:
+            yield
+        finally:
+            with self._read_ready:
+                self._readers -= 1
+                if self._readers == 0:
+                    self._read_ready.notify_all()
 
-    def release_read(self) -> None:
-        """Release a read lock."""
-        with self._lock:
-            self._readers -= 1
-            if self._readers == 0:
-                self._writers_ok.notify()
-
-    def acquire_write(self) -> None:
-        """Acquire a write lock."""
-        with self._lock:
+    @contextmanager
+    def write_lock(self) -> Any:
+        """Acquire write lock."""
+        with self._read_ready:
             self._writers_waiting += 1
             while self._readers > 0 or self._writer_active:
-                self._writers_ok.wait()
+                self._read_ready.wait()
             self._writers_waiting -= 1
             self._writer_active = True
-
-    def release_write(self) -> None:
-        """Release a write lock."""
-        with self._lock:
-            self._writer_active = False
-            self._readers_ok.notify_all()
-            self._writers_ok.notify()
-
-    def reader(self) -> Callable[[Callable[..., T]], Callable[..., T]]:
-        """Decorator for read-critical sections."""
-        def decorator(func: Callable[..., T]) -> Callable[..., T]:
-            def wrapper(*args: Any, **kwargs: Any) -> T:
-                self.acquire_read()
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    self.release_read()
-            return wrapper
-        return decorator
-
-    def writer(self) -> Callable[[Callable[..., T]], Callable[..., T]]:
-        """Decorator for write-critical sections."""
-        def decorator(func: Callable[..., T]) -> Callable[..., T]:
-            def wrapper(*args: Any, **kwargs: Any) -> T:
-                self.acquire_write()
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    self.release_write()
-            return wrapper
-        return decorator
+        try:
+            yield
+        finally:
+            with self._read_ready:
+                self._writer_active = False
+                self._read_ready.notify_all()
 
 
-class TimedLock:
-    """A lock that can be acquired with a timeout."""
+class Semaphore:
+    """Counting semaphore for resource limiting.
 
-    def __init__(self, timeout: float = 10.0) -> None:
+    Example:
+        sem = Semaphore(max_value=3)
+        with sem:
+            process_resource()
+    """
+
+    def __init__(self, max_value: int = 1) -> None:
+        self._max_value = max_value
+        self._value = max_value
         self._lock = threading.Lock()
-        self._timeout = timeout
+        self._condition = threading.Condition(self._lock)
 
-    def acquire(self, timeout: Optional[float] = None) -> bool:
-        """Try to acquire the lock within timeout.
+    @contextmanager
+    def acquire(self, count: int = 1) -> Any:
+        """Acquire semaphore count."""
+        with self._condition:
+            while self._value < count:
+                self._condition.wait()
+            self._value -= count
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._value += count
+                self._condition.notify(count)
 
-        Args:
-            timeout: Seconds to wait. None uses default.
+    def release(self, count: int = 1) -> None:
+        """Release semaphore count."""
+        with self._condition:
+            self._value = min(self._max_value, self._value + count)
+            self._condition.notify(count)
 
-        Returns:
-            True if acquired, False if timed out.
-        """
-        return self._lock.acquire(timeout=timeout or self._timeout)
-
-    def release(self) -> None:
-        """Release the lock."""
-        self._lock.release()
-
-    def __enter__(self) -> None:
+    def __enter__(self) -> "Semaphore":
         self.acquire()
+        return self
 
     def __exit__(self, *args: Any) -> None:
         self.release()
 
 
-class CounterLock:
-    """A lock that tracks acquisition count (for reentrant-like behavior)."""
+class BoundedSemaphore(Semaphore):
+    """Semaphore that bounds resource count."""
+
+    def __init__(self, max_value: int = 1) -> None:
+        super().__init__(max_value)
+
+    def release(self, count: int = 1) -> None:
+        """Release but don't exceed initial max."""
+        with self._condition:
+            self._value = min(self._max_value, self._value + count)
+            self._condition.notify(count)
+
+
+class ConditionVariable:
+    """Condition variable for thread signaling.
+
+    Example:
+        cond = ConditionVariable()
+        def waiter():
+            with cond.wait_for(lambda: data_ready):
+                use(data)
+        def setter():
+            data_ready = True
+            cond.notify()
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._count = 0
-        self._owner: Optional[int] = None
+        self._condition = threading.Condition(self._lock)
+        self._signaled = False
 
-    def acquire(self) -> bool:
-        """Acquire the lock (reentrant on same thread)."""
-        me = threading.get_ident()
-        with self._lock:
-            if self._owner == me:
-                self._count += 1
-                return True
-            while self._owner is not None:
-                self._lock.wait()
-            self._owner = me
-            self._count = 1
-            return True
-
-    def release(self) -> None:
-        """Release the lock."""
-        with self._lock:
-            if self._owner != threading.get_ident():
-                raise RuntimeError("Not the lock owner")
-            self._count -= 1
-            if self._count == 0:
-                self._owner = None
-                self._lock.notify_all()
-
-    def __enter__(self) -> None:
-        self.acquire()
-
-    def __exit__(self, *args: Any) -> None:
-        self.release()
-
-
-class SemaphorePool:
-    """A pool of resources managed by a semaphore."""
-
-    def __init__(self, size: int) -> None:
-        if size <= 0:
-            raise ValueError("Pool size must be positive")
-        self._semaphore = threading.Semaphore(size)
-        self._size = size
-
-    def acquire(self, timeout: Optional[float] = None) -> bool:
-        """Acquire a resource from the pool.
+    @contextmanager
+    def wait_for(
+        self,
+        predicate: Callable[[], bool],
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Wait until predicate returns True.
 
         Args:
-            timeout: Seconds to wait. None means infinite.
+            predicate: Function returning bool.
+            timeout: Max seconds to wait.
 
         Returns:
-            True if acquired.
+            Context manager.
         """
-        return self._semaphore.acquire(timeout=timeout)
+        end_time = time.time() + timeout if timeout else None
 
-    def release(self) -> None:
-        """Release a resource back to the pool."""
-        self._semaphore.release()
+        with self._condition:
+            while not predicate():
+                if end_time:
+                    remaining = end_time - time.time()
+                    if remaining <= 0:
+                        break
+                    self._condition.wait(remaining)
+                else:
+                    self._condition.wait()
 
-    def __enter__(self) -> None:
-        self.acquire()
+        yield
 
-    def __exit__(self, *args: Any) -> None:
-        self.release()
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Wait for notify.
+
+        Args:
+            timeout: Max seconds to wait.
+
+        Returns:
+            True if notified, False if timed out.
+        """
+        with self._condition:
+            signaled = self._signaled
+            if not signaled:
+                self._condition.wait(timeout)
+            self._signaled = False
+            return self._signaled
+
+    def notify(self) -> None:
+        """Notify one waiting thread."""
+        with self._condition:
+            self._signaled = True
+            self._condition.notify()
+
+    def notify_all(self) -> None:
+        """Notify all waiting threads."""
+        with self._condition:
+            self._signaled = True
+            self._condition.notify_all()
 
 
-__all__ = [
-    "ReadWriteLock",
-    "TimedLock",
-    "CounterLock",
-    "SemaphorePool",
-]
+class ThreadPool:
+    """Simple thread pool for concurrent execution.
+
+    Example:
+        pool = ThreadPool(max_workers=4)
+        pool.submit(task, arg1, arg2)
+        pool.shutdown()
+    """
+
+    def __init__(self, max_workers: int = 4) -> None:
+        self.max_workers = max_workers
+        self._work: list = []
+        self._workers: list = []
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._shutdown = False
+
+        for _ in range(max_workers):
+            t = threading.Thread(target=self._worker, daemon=True)
+            t.start()
+            self._workers.append(t)
+
+    def _worker(self) -> None:
+        """Worker thread main loop."""
+        while True:
+            with self._lock:
+                while not self._work and not self._shutdown:
+                    self._condition.wait()
+                if self._shutdown and not self._work:
+                    return
+                if self._work:
+                    func, args, kwargs = self._work.pop(0)
+                else:
+                    continue
+
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                pass
+
+    def submit(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Submit task to pool.
+
+        Args:
+            func: Function to execute.
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
+        """
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("Pool is shutdown")
+            self._work.append((func, args, kwargs))
+            self._condition.notify()
+
+    def shutdown(self, wait: bool = True) -> None:
+        """Shutdown pool.
+
+        Args:
+            wait: Wait for workers to finish.
+        """
+        with self._lock:
+            self._shutdown = True
+            self._condition.notify_all()
+
+        if wait:
+            for t in self._workers:
+                t.join(timeout=5.0)
+
+
+@contextmanager
+def lock(lock_obj: threading.Lock) -> Any:
+    """Context manager for lock.
+
+    Example:
+        lock_obj = threading.Lock()
+        with lock(lock_obj):
+            do_work()
+    """
+    lock_obj.acquire()
+    try:
+        yield
+    finally:
+        lock_obj.release()
+
+
+def synchronized(func: Callable) -> Callable:
+    """Decorator to synchronize method with instance lock.
+
+    Example:
+        class Counter:
+            @synchronized
+            def increment(self):
+                self.count += 1
+    """
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if not hasattr(self, "_sync_lock"):
+            self._sync_lock = threading.Lock()
+        with self._sync_lock:
+            return func(self, *args, **kwargs)
+    return wrapper
