@@ -1,240 +1,324 @@
-"""Automation Observer action module for RabAI AutoClick.
+"""
+Automation Observer Action Module.
 
-Observer pattern for monitoring automation execution,
-subscribing to events, and reactive automation.
+Provides observer pattern implementation for automation workflows
+with support for event filtering, priority subscription,
+and async notification delivery.
+
+Author: RabAi Team
 """
 
+from __future__ import annotations
+
+import asyncio
 import time
-import sys
-import os
-from typing import Any, Dict, List, Optional, Callable
-from collections import defaultdict
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Callable, Optional
 
 
-class AutomationObserverAction(BaseAction):
-    """Observer pattern for automation events.
+class EventFilter:
+    """Event filter for subscription."""
 
-    Subscribe to events, react to state changes,
-    and implement reactive automation flows.
-    """
-    action_type = "automation_observer"
-    display_name = "自动化观察者"
-    description = "自动化事件的观察者模式"
-
-    def execute(
+    def __init__(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Manage observers.
+        event_types: Optional[list[str]] = None,
+        source: Optional[str] = None,
+        predicate: Optional[Callable[[dict], bool]] = None,
+    ):
+        self.event_types = set(event_types) if event_types else set()
+        self.source = source
+        self.predicate = predicate
 
-        Args:
-            context: Execution context.
-            params: Dict with keys: action (subscribe/unsubscribe/notify),
-                   event_type, observer, event_data.
-
-        Returns:
-            ActionResult with observer result.
-        """
-        start_time = time.time()
-        try:
-            action = params.get('action', 'notify')
-            event_type = params.get('event_type', '')
-            observer = params.get('observer')
-            event_data = params.get('event_data', {})
-
-            if not hasattr(context, '_automation_observers'):
-                context._automation_observers = defaultdict(list)
-            observers = context._automation_observers
-
-            if action == 'subscribe':
-                if not observer or not event_type:
-                    return ActionResult(
-                        success=False,
-                        message="observer and event_type are required",
-                        duration=time.time() - start_time,
-                    )
-                observers[event_type].append(observer)
-                return ActionResult(
-                    success=True,
-                    message=f"Subscribed observer to {event_type}",
-                    data={'event_type': event_type, 'subscriber_count': len(observers[event_type])},
-                    duration=time.time() - start_time,
-                )
-
-            elif action == 'unsubscribe':
-                if event_type in observers and observer in observers[event_type]:
-                    observers[event_type].remove(observer)
-                return ActionResult(
-                    success=True,
-                    message=f"Unsubscribed from {event_type}",
-                    data={'subscriber_count': len(observers.get(event_type, []))},
-                    duration=time.time() - start_time,
-                )
-
-            elif action == 'notify':
-                if not event_type:
-                    return ActionResult(
-                        success=False,
-                        message="event_type is required",
-                        duration=time.time() - start_time,
-                    )
-
-                notified = []
-                errors = []
-                for obs in observers.get(event_type, []):
-                    try:
-                        if callable(obs):
-                            result = obs(event_data, context)
-                            notified.append({'observer': 'callable', 'result': result})
-                        elif hasattr(context, 'execute_action'):
-                            result = context.execute_action(obs, event_data)
-                            notified.append({'observer': obs, 'result': result})
-                    except Exception as e:
-                        errors.append({'observer': str(obs), 'error': str(e)})
-
-                # Also notify wildcard subscribers
-                for obs in observers.get('*', []):
-                    try:
-                        if callable(obs):
-                            obs({'event_type': event_type, 'data': event_data}, context)
-                            notified.append({'observer': 'wildcard', 'result': True})
-                    except Exception as e:
-                        errors.append({'observer': 'wildcard', 'error': str(e)})
-
-                return ActionResult(
-                    success=len(errors) == 0,
-                    message=f"Notified {len(notified)} observers for {event_type}",
-                    data={
-                        'event_type': event_type,
-                        'notified_count': len(notified),
-                        'errors_count': len(errors),
-                        'notified': notified,
-                        'errors': errors,
-                    },
-                    duration=time.time() - start_time,
-                )
-
-            elif action == 'list':
-                return ActionResult(
-                    success=True,
-                    message=f"Registered {len(observers)} event types",
-                    data={'events': {k: len(v) for k, v in observers.items()}},
-                    duration=time.time() - start_time,
-                )
-
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown action: {action}",
-                    duration=time.time() - start_time,
-                )
-
-        except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Observer error: {str(e)}",
-                duration=duration,
-            )
+    def matches(self, event: dict[str, Any]) -> bool:
+        """Check if event matches filter."""
+        if self.event_types and event.get("type") not in self.event_types:
+            return False
+        if self.source and event.get("source") != self.source:
+            return False
+        if self.predicate and not self.predicate(event):
+            return False
+        return True
 
 
-class ReactiveAutomationAction(BaseAction):
-    """Reactive automation with dependency tracking.
+@dataclass
+class ObserverSubscription:
+    """Observer subscription details."""
+    subscription_id: str
+    observer_id: str
+    filter: EventFilter
+    callback: Callable
+    priority: int = 0
+    async_handler: bool = True
+    created_at: datetime = field(default_factory=datetime.now)
 
-    Automatically triggers actions when dependencies
-    change, implementing dataflow automation.
-    """
-    action_type = "reactive_automation"
-    display_name = "响应式自动化"
-    description = "带依赖追踪的响应式自动化"
 
-    def execute(
+@dataclass
+class AutomationEvent:
+    """Automation event structure."""
+    event_id: str
+    type: str
+    source: str
+    payload: dict[str, Any]
+    timestamp: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class ObserverSubject:
+    """Subject that emits events to observers."""
+
+    def __init__(self, subject_id: str = ""):
+        self.subject_id = subject_id
+        self._subscriptions: dict[str, ObserverSubscription] = {}
+        self._history: list[AutomationEvent] = []
+        self._max_history: int = 1000
+
+    def subscribe(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """React to data changes.
+        observer_id: str,
+        callback: Callable,
+        event_types: Optional[list[str]] = None,
+        source: Optional[str] = None,
+        predicate: Optional[Callable[[dict], bool]] = None,
+        priority: int = 0,
+    ) -> str:
+        """Subscribe to events."""
+        subscription_id = str(uuid.uuid4())
+        filter_obj = EventFilter(event_types, source, predicate)
+        subscription = ObserverSubscription(
+            subscription_id=subscription_id,
+            observer_id=observer_id,
+            filter=filter_obj,
+            callback=callback,
+            priority=priority,
+        )
+        self._subscriptions[subscription_id] = subscription
+        return subscription_id
 
-        Args:
-            context: Execution context.
-            params: Dict with keys: data_key, old_value, new_value,
-                   reactions, check_fn.
+    def unsubscribe(self, subscription_id: str) -> bool:
+        """Unsubscribe from events."""
+        if subscription_id in self._subscriptions:
+            del self._subscriptions[subscription_id]
+            return True
+        return False
 
-        Returns:
-            ActionResult with reaction results.
-        """
-        start_time = time.time()
+    def unsubscribe_all(self, observer_id: str) -> int:
+        """Unsubscribe all for an observer."""
+        to_remove = [
+            sid for sid, sub in self._subscriptions.items()
+            if sub.observer_id == observer_id
+        ]
+        for sid in to_remove:
+            del self._subscriptions[sid]
+        return len(to_remove)
+
+    async def emit(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        source: str = "",
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> list[Any]:
+        """Emit event to all matching subscribers."""
+        event = AutomationEvent(
+            event_id=str(uuid.uuid4()),
+            type=event_type,
+            source=source,
+            payload=payload,
+            metadata=metadata or {},
+        )
+        self._history.append(event)
+        if len(self._history) > self._max_history:
+            self._history = self._history[-self._max_history:]
+
+        results = []
+        matching = [
+            sub for sub in self._subscriptions.values()
+            if sub.filter.matches({
+                "type": event_type,
+                "source": source,
+                **payload,
+            })
+        ]
+        matching.sort(key=lambda s: s.priority, reverse=True)
+
+        for sub in matching:
+            result = sub.callback(event)
+            if sub.async_handler and asyncio.iscoroutine(result):
+                result = await result
+            results.append(result)
+        return results
+
+    def get_history(
+        self,
+        event_type: Optional[str] = None,
+        since: Optional[float] = None,
+        limit: int = 100,
+    ) -> list[AutomationEvent]:
+        """Get event history."""
+        events = self._history
+        if event_type:
+            events = [e for e in events if e.type == event_type]
+        if since:
+            events = [e for e in events if e.timestamp >= since]
+        return events[-limit:]
+
+
+class EventBus(ObserverSubject):
+    """Global event bus for application-wide events."""
+
+    _instance: Optional["EventBus"] = None
+
+    @classmethod
+    def get_instance(cls) -> "EventBus":
+        """Get singleton instance."""
+        if cls._instance is None:
+            cls._instance = EventBus()
+        return cls._instance
+
+    def __init__(self):
+        super().__init__("global")
+        self._channels: dict[str, ObserverSubject] = {}
+
+    def get_channel(self, channel: str) -> ObserverSubject:
+        """Get or create a channel."""
+        if channel not in self._channels:
+            self._channels[channel] = ObserverSubject(subject_id=channel)
+        return self._channels[channel]
+
+
+class ObserverRegistry:
+    """Registry for managing observer lifecycle."""
+
+    def __init__(self):
+        self._observers: dict[str, dict[str, Any]] = {}
+
+    def register(
+        self,
+        observer_id: str,
+        name: str,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Register an observer."""
+        self._observers[observer_id] = {
+            "name": name,
+            "metadata": metadata or {},
+            "registered_at": datetime.now(timezone.utc),
+            "subscriptions": [],
+        }
+
+    def unregister(self, observer_id: str) -> bool:
+        """Unregister an observer."""
+        if observer_id in self._observers:
+            del self._observers[observer_id]
+            return True
+        return False
+
+    def track_subscription(
+        self,
+        observer_id: str,
+        subscription_id: str,
+    ) -> None:
+        """Track subscription for an observer."""
+        if observer_id in self._observers:
+            self._observers[observer_id]["subscriptions"].append(subscription_id)
+
+    def get_observers(self) -> list[dict[str, Any]]:
+        """Get all registered observers."""
+        return list(self._observers.values())
+
+
+class AsyncEventProcessor:
+    """Async event processor with batching and backpressure."""
+
+    def __init__(
+        self,
+        batch_size: int = 10,
+        flush_interval: float = 1.0,
+        max_queue_size: int = 1000,
+    ):
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self.max_queue_size = max_queue_size
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+
+    async def enqueue(self, event: AutomationEvent) -> bool:
+        """Add event to processing queue."""
         try:
-            data_key = params.get('data_key', '')
-            old_value = params.get('old_value')
-            new_value = params.get('new_value')
-            reactions = params.get('reactions', [])
-            check_fn = params.get('check_fn')
+            self._queue.put_nowait(event)
+            return True
+        except asyncio.QueueFull:
+            return False
 
-            if not data_key:
-                return ActionResult(
-                    success=False,
-                    message="data_key is required",
-                    duration=time.time() - start_time,
-                )
+    async def start(self, handler: Callable[[list[AutomationEvent]], Any]) -> None:
+        """Start processing events."""
+        self._running = True
+        self._task = asyncio.create_task(self._process_loop(handler))
 
-            # Check if condition is met
-            should_react = False
-            if callable(check_fn):
-                try:
-                    should_react = check_fn(old_value, new_value, context)
-                except Exception:
-                    should_react = False
-            elif new_value != old_value:
-                should_react = True
+    async def stop(self) -> None:
+        """Stop processing."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
-            if not should_react:
-                return ActionResult(
-                    success=True,
-                    message="No reaction triggered",
-                    data={'key': data_key, 'changed': new_value != old_value, 'reacted': False},
-                    duration=time.time() - start_time,
-                )
+    async def _process_loop(self, handler: Callable) -> None:
+        """Main processing loop."""
+        while self._running:
+            batch = []
+            try:
+                while len(batch) < self.batch_size:
+                    try:
+                        event = await asyncio.wait_for(
+                            self._queue.get(),
+                            timeout=self.flush_interval,
+                        )
+                        batch.append(event)
+                    except asyncio.TimeoutError:
+                        break
+            except asyncio.CancelledError:
+                break
 
-            # Execute reactions
-            results = []
-            for reaction in reactions:
-                reaction_name = reaction.get('name', 'reaction')
-                action = reaction.get('action')
-                action_params = reaction.get('params', {})
+            if batch:
+                result = handler(batch)
+                if asyncio.iscoroutine(result):
+                    await result
 
-                try:
-                    if callable(action):
-                        result = action({'key': data_key, 'old': old_value, 'new': new_value}, context)
-                        results.append({'name': reaction_name, 'success': True, 'result': result})
-                    elif hasattr(context, 'execute_action'):
-                        result = context.execute_action(action, action_params)
-                        results.append({'name': reaction_name, 'success': result.success if isinstance(result, ActionResult) else False})
-                except Exception as e:
-                    results.append({'name': reaction_name, 'success': False, 'error': str(e)})
 
-            success_count = sum(1 for r in results if r.get('success'))
+def create_observer_subject(subject_id: str = "") -> ObserverSubject:
+    """Create a new observer subject."""
+    return ObserverSubject(subject_id)
 
-            duration = time.time() - start_time
-            return ActionResult(
-                success=success_count == len(results),
-                message=f"Reacted to {data_key} change: {success_count}/{len(results)} succeeded",
-                data={
-                    'key': data_key,
-                    'reacted': True,
-                    'reactions': results,
-                },
-                duration=duration,
-            )
 
-        except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Reactive automation error: {str(e)}",
-                duration=duration,
-            )
+async def demo():
+    """Demo observer pattern."""
+    bus = EventBus.get_instance()
+
+    results = []
+
+    def handler1(event: AutomationEvent):
+        results.append(f"handler1: {event.type}")
+        return f"handled: {event.type}"
+
+    def handler2(event: AutomationEvent):
+        results.append(f"handler2: {event.type}")
+
+    bus.subscribe("obs1", handler1, event_types=["click", "submit"])
+    bus.subscribe("obs2", handler2, event_types=["click"])
+
+    await bus.emit("click", {"x": 100, "y": 200})
+    await bus.emit("submit", {"form": "data"})
+    await bus.emit("hover", {"x": 50})  # Should be ignored
+
+    print(f"Results: {results}")
+
+
+if __name__ == "__main__":
+    asyncio.run(demo())
