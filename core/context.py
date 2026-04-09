@@ -7,7 +7,8 @@ variables, and history tracking.
 import re
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+from functools import lru_cache
 
 
 class ContextManager:
@@ -24,8 +25,10 @@ class ContextManager:
             max_history: Maximum number of history entries to retain.
         """
         self._variables: Dict[str, Any] = {}
-        self._history: List[str] = []
+        self._history: List[Dict[str, Any]] = []
         self._max_history: int = max_history
+        self._expression_cache: Dict[str, Any] = {}
+        self._snapshot_stack: List[Dict[str, Any]] = []
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get a variable value.
@@ -46,8 +49,16 @@ class ContextManager:
             key: Variable name.
             value: Value to set.
         """
+        old_value = self._variables.get(key)
         self._variables[key] = value
-        self._add_history(f"SET {key} = {repr(value)[:100]}")
+        # Clear cache when variables change
+        self._expression_cache.clear()
+        self._add_history({
+            "action": "set",
+            "key": key,
+            "old_value": old_value,
+            "new_value": value,
+        })
     
     def delete(self, key: str) -> bool:
         """Delete a variable.
@@ -59,15 +70,28 @@ class ContextManager:
             True if deleted, False if not found.
         """
         if key in self._variables:
+            old_value = self._variables[key]
             del self._variables[key]
-            self._add_history(f"DELETE {key}")
+            # Clear cache when variables change
+            self._expression_cache.clear()
+            self._add_history({
+                "action": "delete",
+                "key": key,
+                "old_value": old_value,
+            })
             return True
         return False
     
     def clear(self) -> None:
         """Clear all variables."""
+        old_vars = self._variables.copy()
         self._variables.clear()
-        self._add_history("CLEAR ALL")
+        # Clear cache when variables change
+        self._expression_cache.clear()
+        self._add_history({
+            "action": "clear",
+            "old_variables": old_vars,
+        })
     
     def get_all(self) -> Dict[str, Any]:
         """Get a copy of all variables.
@@ -97,13 +121,15 @@ class ContextManager:
         Returns:
             Value with variables resolved.
         """
-        if isinstance(value, str):
-            return self._resolve_string(value)
-        elif isinstance(value, dict):
-            return {k: self.resolve_value(v) for k, v in value.items()}
-        elif isinstance(value, list):
-            return [self.resolve_value(item) for item in value]
-        return value
+        # Optimization: skip regex check for non-string types
+        if not isinstance(value, str):
+            if isinstance(value, dict):
+                return {k: self.resolve_value(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                return [self.resolve_value(item) for item in value]
+            return value
+        
+        return self._resolve_string(value)
     
     def _resolve_string(self, text: str) -> Any:
         """Resolve {{variable}} references in a string.
@@ -139,7 +165,9 @@ class ContextManager:
         Supports:
         - Direct variable references: variable_name
         - Dot notation: obj.attr or dict.key
+        - Bracket notation: obj['key'] or obj["key"]
         - Basic math and functions: int(), float(), len(), etc.
+        - Expression caching for performance.
         
         Args:
             expr: Expression string to evaluate.
@@ -149,9 +177,27 @@ class ContextManager:
         """
         expr = expr.strip()
         
+        # Check cache first
+        if expr in self._expression_cache:
+            return self._expression_cache[expr]
+        
         # Direct variable lookup
         if expr in self._variables:
-            return self._variables[expr]
+            result = self._variables[expr]
+            self._expression_cache[expr] = result
+            return result
+        
+        # Bracket notation for dict access (e.g., obj['key'] or obj["key"])
+        bracket_match = re.match(r"^([^.[]+)\[(['\"])(.+?)\2\]$", expr)
+        if bracket_match:
+            var_name = bracket_match.group(1)
+            quote = bracket_match.group(2)
+            key = bracket_match.group(3)
+            obj = self._variables.get(var_name)
+            if obj is not None and isinstance(obj, dict) and key in obj:
+                result = obj[key]
+                self._expression_cache[expr] = result
+                return result
         
         # Dot notation for nested access
         if '.' in expr:
@@ -163,10 +209,15 @@ class ContextManager:
                 elif hasattr(obj, part):
                     obj = getattr(obj, part)
                 else:
-                    return expr
-            return obj if obj is not None else expr
+                    result = expr
+                    self._expression_cache[expr] = result
+                    return result
+            if obj is not None:
+                result = obj
+                self._expression_cache[expr] = result
+                return result
         
-        # Safe expression evaluation
+        # Safe expression evaluation with expanded builtins
         try:
             allowed_names: Dict[str, Any] = {
                 'context': self._variables,
@@ -179,20 +230,39 @@ class ContextManager:
                 'max': max,
                 'sum': sum,
                 'round': round,
+                'bool': bool,
+                'list': list,
+                'dict': dict,
+                'tuple': tuple,
+                'range': range,
+                'enumerate': enumerate,
+                'zip': zip,
+                'sorted': sorted,
+                'any': any,
+                'all': all,
+                'isinstance': isinstance,
+                'type': type,
             }
             allowed_names.update(self._variables)
             result = eval(expr, {"__builtins__": {}}, allowed_names)
+            self._expression_cache[expr] = result
             return result
-        except Exception:
+        except Exception as e:
             # Fallback: try to parse as int/float if eval failed
             try:
                 # Handle expressions like "123" that eval failed on
-                return int(expr)
+                result = int(expr)
+                self._expression_cache[expr] = result
+                return result
             except ValueError:
                 try:
-                    return float(expr)
+                    result = float(expr)
+                    self._expression_cache[expr] = result
+                    return result
                 except ValueError:
-                    return expr
+                    result = expr
+                    self._expression_cache[expr] = result
+                    return result
     
     def safe_exec(
         self, 
@@ -235,6 +305,10 @@ class ContextManager:
             'sorted': sorted,
             'reversed': reversed,
             'print': lambda *args: None,
+            'any': any,
+            'all': all,
+            'isinstance': isinstance,
+            'type': type,
         }
         
         local_vars: Dict[str, Any] = {'context': self._variables}
@@ -248,27 +322,56 @@ class ContextManager:
             
             return local_vars.get('return_value', None)
         except Exception as e:
-            self._add_history(f"EXEC ERROR: {str(e)}")
+            self._add_history({
+                "action": "exec_error",
+                "code": code,
+                "error": str(e),
+            })
             raise
     
-    def _add_history(self, action: str) -> None:
+    def _add_history(self, entry: Dict[str, Any]) -> None:
         """Add an action to the history log.
         
         Args:
-            action: Description of the action.
+            entry: Dictionary with action details including timestamp.
         """
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self._history.append(f"[{timestamp}] {action}")
+        timestamp = datetime.now().isoformat()
+        entry["timestamp"] = timestamp
+        self._history.append(entry)
         if len(self._history) > self._max_history:
             self._history = self._history[-self._max_history:]
     
-    def get_history(self) -> List[str]:
+    def get_history(self) -> List[Dict[str, Any]]:
         """Get a copy of the action history.
         
         Returns:
-            List of history entries.
+            List of history entries with timestamps.
         """
         return self._history.copy()
+    
+    def snapshot(self) -> None:
+        """Take a snapshot of the current context state.
+        
+        Useful for trying expressions without permanently modifying context.
+        Snapshots can be nested and restored in reverse order.
+        """
+        self._snapshot_stack.append({
+            "variables": self._variables.copy(),
+            "cache": self._expression_cache.copy(),
+        })
+    
+    def restore(self) -> bool:
+        """Restore the context to the last snapshot.
+        
+        Returns:
+            True if restored successfully, False if no snapshot exists.
+        """
+        if not self._snapshot_stack:
+            return False
+        snapshot = self._snapshot_stack.pop()
+        self._variables = snapshot["variables"]
+        self._expression_cache = snapshot["cache"]
+        return True
     
     def to_json(self) -> str:
         """Export variables as JSON string.

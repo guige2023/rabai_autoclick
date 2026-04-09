@@ -1,7 +1,7 @@
 """Flow engine module for RabAI AutoClick.
 
 Provides the FlowEngine class for executing automation workflows,
-including support for pausing, resuming, and step callbacks.
+including support for pausing, resuming, step retries, timeouts, and callbacks.
 """
 
 import json
@@ -9,6 +9,8 @@ import time
 import threading
 import logging
 from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from datetime import datetime
 
 try:
     import jsonschema
@@ -22,6 +24,21 @@ from .base_action import ActionResult
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StepMetric:
+    """Metrics for a single step execution."""
+    step_index: int
+    step_id: Any
+    step_type: str
+    start_time: datetime = field(default_factory=datetime.now)
+    end_time: Optional[datetime] = None
+    duration: float = 0.0
+    success: bool = False
+    error_message: Optional[str] = None
+    retry_count: int = 0
+    timeout: Optional[float] = None
 
 
 # Workflow JSON Schema for validation
@@ -87,6 +104,15 @@ class FlowEngine:
         self._on_step_end: Optional[Callable[[Dict, ActionResult], None]] = None
         self._on_workflow_end: Optional[Callable[[bool], None]] = None
         self._on_error: Optional[Callable[[Dict, str], None]] = None
+
+        # New: Step callback (step_index, step_data, result)
+        self._on_step_callback: Optional[Callable[[int, Dict, ActionResult], None]] = None
+
+        # New: Execution metrics
+        self._metrics: List[StepMetric] = []
+
+        # New: Pause state preservation
+        self._pause_time_remaining: Optional[float] = None
     
     def _validate_workflow(self, workflow: Dict[str, Any]) -> bool:
         """Validate a workflow dictionary against the schema.
@@ -151,6 +177,10 @@ class FlowEngine:
             if not self._validate_workflow(workflow):
                 return False
 
+            # Validate step IDs are unique and next_step_ids reference valid steps
+            if not self._validate_step_references(workflow):
+                return False
+
             self._workflow = workflow
             if 'variables' in self._workflow:
                 self.context.set_all(self._workflow['variables'])
@@ -158,6 +188,37 @@ class FlowEngine:
         except Exception as e:
             logger.error(f"加载工作流失败: {e}")
             return False
+
+    def _validate_step_references(self, workflow: Dict[str, Any]) -> bool:
+        """Validate step IDs are unique and next_step_ids reference valid steps.
+
+        Args:
+            workflow: Workflow dictionary to validate.
+
+        Returns:
+            True if valid, False otherwise.
+        """
+        steps = workflow.get('steps', [])
+        if not steps:
+            return True
+
+        # Check for unique step IDs
+        step_ids = [step.get('id') for step in steps]
+        if len(step_ids) != len(set(step_ids)):
+            logger.error("工作流步骤ID不唯一")
+            return False
+
+        # Build set of valid step IDs
+        valid_ids = set(step_ids)
+
+        # Check all next_step_ids reference valid steps
+        for step in steps:
+            next_id = step.get('next')
+            if next_id is not None and next_id not in valid_ids:
+                logger.error(f"步骤 {step.get('id')} 的 next ID '{next_id}' 引用了不存在的步骤")
+                return False
+
+        return True
     
     def save_workflow(self, workflow_path: str) -> bool:
         """Save the current workflow to a JSON file.
@@ -190,7 +251,10 @@ class FlowEngine:
             self._stop_requested = False
             self._is_paused = False
             self._current_step_index = 0
-        
+
+        # Reset metrics for new run
+        self._metrics = []
+
         steps: List[Dict[str, Any]] = self._workflow.get('steps', [])
         
         if not steps:
@@ -222,7 +286,10 @@ class FlowEngine:
                 if self._stop_requested:
                     break
 
-            result = self._execute_step(current_step)
+            result = self._execute_step(current_step, self._current_step_index)
+
+            # Increment step index after execution
+            self._current_step_index += 1
 
             if not result.success:
                 if self._on_error:
@@ -273,47 +340,200 @@ class FlowEngine:
         thread.start()
         return thread
     
-    def _execute_step(self, step: Dict[str, Any]) -> ActionResult:
-        """Execute a single workflow step.
+    def _execute_step(
+        self,
+        step: Dict[str, Any],
+        step_index: int
+    ) -> ActionResult:
+        """Execute a single workflow step with retry, timeout, and metrics.
         
         Args:
             step: Step dictionary with type and parameters.
+            step_index: Index of the step being executed.
             
         Returns:
             ActionResult from the executed action.
         """
         step_type: str = step.get('type', '')
-        start_time: float = time.time()
-        
+        timeout: Optional[float] = step.get('timeout')
+        retry_count: int = step.get('retry_count', 0)
+
+        # Initialize metrics
+        metric = StepMetric(
+            step_index=step_index,
+            step_id=step.get('id'),
+            step_type=step_type,
+            timeout=timeout
+        )
+
+        if self._on_step_callback:
+            self._on_step_callback(step_index, step, None)  # Before callback
+
         if self._on_step_start:
             self._on_step_start(step)
-        
+
         # Pre-delay
         pre_delay: float = step.get('pre_delay', 0)
         if pre_delay > 0:
             time.sleep(pre_delay)
-        
+
         # Get action class
         action_class = self.action_loader.get_action(step_type)
-        
+
         if not action_class:
-            return ActionResult(
+            result = ActionResult(
                 success=False,
                 message=f"未找到动作类型: {step_type}"
             )
-        
+            metric.success = result.success
+            metric.end_time = datetime.now()
+            metric.duration = (metric.end_time - metric.start_time).total_seconds()
+            metric.error_message = result.message
+            self._metrics.append(metric)
+            if self._on_step_end:
+                self._on_step_end(step, result)
+            if self._on_step_callback:
+                self._on_step_callback(step_index, step, result)  # After callback
+            return result
+
+        # Execute with retry and timeout
+        attempt = 0
+        backoff = 0.5
+        last_result = None
+
+        while attempt <= retry_count:
+            metric.retry_count = attempt
+
+            # Execute action with timeout if specified
+            if timeout is not None and timeout > 0:
+                result = self._execute_with_timeout(
+                    action_class, step, timeout, step_index
+                )
+            else:
+                result = self._execute_action(action_class, step, step_index)
+
+            if result.success:
+                last_result = result
+                break
+
+            # Check if stop was requested
+            with self._state_lock:
+                if self._stop_requested:
+                    last_result = ActionResult(
+                        success=False,
+                        message='Workflow stopped'
+                    )
+                    break
+
+            # Retry with exponential backoff if not last attempt
+            if attempt < retry_count:
+                logger.info(f"步骤 {step.get('id')} 失败，{backoff}s后重试 (尝试 {attempt + 1}/{retry_count})")
+                time.sleep(backoff)
+                backoff *= 2  # Exponential backoff: 0.5, 1, 2, 4, ...
+                attempt += 1
+            else:
+                last_result = result
+                break
+
+        # Update metrics
+        metric.success = last_result.success if last_result else False
+        metric.end_time = datetime.now()
+        metric.duration = (metric.end_time - metric.start_time).total_seconds()
+        if last_result and not last_result.success:
+            metric.error_message = last_result.message
+        self._metrics.append(metric)
+
+        # Post-delay
+        post_delay: float = step.get('post_delay', 0)
+        if post_delay > 0:
+            time.sleep(post_delay)
+
+        if self._on_step_end:
+            self._on_step_end(step, last_result)
+        if self._on_step_callback:
+            self._on_step_callback(step_index, step, last_result)  # After callback
+
+        return last_result
+
+    def _execute_with_timeout(
+        self,
+        action_class: type,
+        step: Dict[str, Any],
+        timeout: float,
+        step_index: int
+    ) -> ActionResult:
+        """Execute action with timeout using threading.
+
+        Args:
+            action_class: The action class to instantiate.
+            step: Step dictionary.
+            timeout: Timeout in seconds.
+            step_index: Index of the step.
+
+        Returns:
+            ActionResult from the executed action or timeout result.
+        """
+        result_holder = [None]
+        exception_holder = [None]
+        thread_done = threading.Event()
+
+        def target():
+            try:
+                result_holder[0] = self._execute_action(action_class, step, step_index)
+            except Exception as e:
+                exception_holder[0] = e
+            finally:
+                thread_done.set()
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+
+        if not thread_done.wait(timeout=timeout):
+            # Timeout - kill is not possible in Python, so we just return timeout error
+            # The thread will continue but its result will be ignored
+            return ActionResult(
+                success=False,
+                message=f"步骤执行超时 ({timeout}s)"
+            )
+
+        if exception_holder[0] is not None:
+            return ActionResult(
+                success=False,
+                message=f"执行步骤失败: {str(exception_holder[0])}"
+            )
+
+        return result_holder[0]
+
+    def _execute_action(
+        self,
+        action_class: type,
+        step: Dict[str, Any],
+        step_index: int
+    ) -> ActionResult:
+        """Execute a single action (internal helper for timeout support).
+
+        Args:
+            action_class: The action class to instantiate.
+            step: Step dictionary.
+            step_index: Index of the step.
+
+        Returns:
+            ActionResult from the executed action.
+        """
+        start_time = time.time()
+
         try:
             action = action_class()
             params: Dict[str, Any] = step.copy()
             # Remove metadata keys
-            for key in ('type', 'id', 'next', 'pre_delay', 'post_delay'):
+            for key in ('type', 'id', 'next', 'pre_delay', 'post_delay', 'timeout', 'retry_count'):
                 params.pop(key, None)
-            
+
             # Resolve variable references in params
             params = self.context.resolve_value(params)
-            
+
             result: ActionResult = action.execute(self.context, params)
-            
+
             # Check if stop was requested during action execution
             with self._state_lock:
                 if self._stop_requested:
@@ -321,23 +541,15 @@ class FlowEngine:
                         success=False,
                         message='Workflow stopped'
                     )
-            
+
             result.duration = time.time() - start_time
-            
+
             # Store output to context variable if specified
             if result.success and 'output_var' in step and result.data is not None:
                 self.context.set(step['output_var'], result.data)
-            
-            # Post-delay
-            post_delay: float = step.get('post_delay', 0)
-            if post_delay > 0:
-                time.sleep(post_delay)
-            
-            if self._on_step_end:
-                self._on_step_end(step, result)
-            
+
             return result
-        
+
         except Exception as e:
             return ActionResult(
                 success=False,
@@ -392,7 +604,8 @@ class FlowEngine:
         on_step_start: Optional[Callable[[Dict], None]] = None,
         on_step_end: Optional[Callable[[Dict, ActionResult], None]] = None,
         on_workflow_end: Optional[Callable[[bool], None]] = None,
-        on_error: Optional[Callable[[Dict, str], None]] = None
+        on_error: Optional[Callable[[Dict, str], None]] = None,
+        on_step_callback: Optional[Callable[[int, Dict, Optional[ActionResult]], None]] = None
     ) -> None:
         """Set callback functions for workflow events.
         
@@ -401,11 +614,21 @@ class FlowEngine:
             on_step_end: Called when a step ends (step: Dict, result: ActionResult).
             on_workflow_end: Called when workflow ends (completed: bool).
             on_error: Called on step error (step: Dict, message: str).
+            on_step_callback: Called before/after each step (step_index: int, step: Dict, result: ActionResult or None).
         """
         self._on_step_start = on_step_start
         self._on_step_end = on_step_end
         self._on_workflow_end = on_workflow_end
         self._on_error = on_error
+        self._on_step_callback = on_step_callback
+
+    def get_metrics(self) -> List[StepMetric]:
+        """Get execution metrics for all steps.
+
+        Returns:
+            List of StepMetric objects for each step executed.
+        """
+        return self._metrics
     
     def get_action_info(self) -> Dict[str, Dict[str, Any]]:
         """Get information about all registered actions.
