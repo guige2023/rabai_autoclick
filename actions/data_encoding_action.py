@@ -1,418 +1,423 @@
-"""
-Data Encoding Action Module.
+"""Data Encoding Action module.
 
-Encodes and decodes data in various formats including Base64,
-URL encoding, HTML entities, Unicode, and custom codecs.
-
-Author: RabAi Team
+Provides data encoding and decoding utilities for various
+formats including base64, hex, URL encoding, JSON, and
+custom encoding schemes.
 """
 
 from __future__ import annotations
 
 import base64
-import html
 import json
-import quopri
-import sys
-import os
-import time
 import urllib.parse
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
-
-
-class EncodingType(Enum):
-    """Supported encoding types."""
-    BASE64 = "base64"
-    BASE32 = "base32"
-    BASE16 = "base16"
-    BASE85 = "base85"
-    URL = "url"
-    HTML = "html"
-    HTML_ENTITY = "html_entity"
-    UNICODE_ESCAPE = "unicode_escape"
-    UNICODE_NORMALIZE = "unicode_normalize"
-    QUOTED_PRINTABLE = "quoted_printable"
-    HEX = "hex"
-    ASCII = "ascii"
-    UTF8 = "utf8"
-    JSON_STRING = "json_string"
-    XML_STRING = "xml_string"
-
-
-class UnicodeForm(Enum):
-    """Unicode normalization forms."""
-    NFC = "nfc"
-    NFD = "nfd"
-    NFKC = "nfkc"
-    NFKD = "nfkd"
+import numpy as np
 
 
 @dataclass
 class EncodingResult:
-    """Result of encoding/decoding operation."""
+    """Result of encoding operation."""
+
     success: bool
-    input_value: Any
-    output_value: Any
-    encoding_type: EncodingType
-    operation: str
+    encoded: Any
     error: Optional[str] = None
+    format: str = ""
 
-
-class DataEncodingAction(BaseAction):
-    """Data encoding action.
-    
-    Encodes and decodes data in various formats with
-    support for chaining, batch processing, and custom codecs.
-    """
-    action_type = "data_encoding"
-    display_name = "数据编码"
-    description = "多格式数据编码解码"
-    
-    def __init__(self):
-        super().__init__()
-        self._custom_codecs: Dict[str, Callable] = {}
-    
-    def register_codec(self, name: str, encoder: Callable, decoder: Callable) -> None:
-        """Register a custom codec."""
-        self._custom_codecs[name] = {"encode": encoder, "decode": decoder}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Encode or decode data.
-        
-        Args:
-            context: The execution context.
-            params: Dictionary containing:
-                - operation: encode or decode
-                - encoding: Encoding type
-                - value: Value to encode/decode
-                - values: List of values for batch processing
-                - chain: List of encoding operations to chain
-                - input_encoding: Input encoding for decode
-                - output_encoding: Output encoding for encode
-                
-        Returns:
-            ActionResult with encoded/decoded data.
-        """
-        start_time = time.time()
-        
-        operation = params.get("operation", "encode")
-        encoding_str = params.get("encoding", "base64")
-        value = params.get("value")
-        values = params.get("values", [])
-        chain = params.get("chain", [])
-        input_encoding = params.get("input_encoding", "utf-8")
-        output_encoding = params.get("output_encoding", "utf-8")
-        
-        try:
-            encoding_type = EncodingType(encoding_str)
-        except ValueError:
-            return ActionResult(
-                success=False,
-                message=f"Unknown encoding type: {encoding_str}",
-                duration=time.time() - start_time
-            )
-        
-        if chain:
-            return self._chain_operation(chain, values if values else [value], operation, start_time)
-        
-        if values:
-            return self._batch_operation(encoding_type, values, operation, input_encoding, output_encoding, start_time)
-        
-        if value is None:
-            return ActionResult(
-                success=False,
-                message="No value provided",
-                duration=time.time() - start_time
-            )
-        
-        if operation == "encode":
-            result = self._encode(encoding_type, value, output_encoding)
-        elif operation == "decode":
-            result = self._decode(encoding_type, value, input_encoding)
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}",
-                duration=time.time() - start_time
-            )
-        
-        return ActionResult(
-            success=result.success,
-            message=f"{operation.capitalize()} {encoding_type.value} {'succeeded' if result.success else 'failed'}",
-            data={
-                "input": result.input_value,
-                "output": result.output_value,
-                "encoding": encoding_type.value,
-                "operation": operation,
-                "error": result.error
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _chain_operation(
-        self, chain: List[str], values: List[Any], operation: str, start_time: float
-    ) -> ActionResult:
-        """Perform chained encoding/decoding operations."""
-        results = []
-        
-        for value in values:
-            current = value
-            for encoding_str in chain:
-                try:
-                    encoding_type = EncodingType(encoding_str)
-                except ValueError:
-                    return ActionResult(
-                        success=False,
-                        message=f"Unknown encoding in chain: {encoding_str}",
-                        duration=time.time() - start_time
-                    )
-                
-                if operation == "encode":
-                    result = self._encode(encoding_type, current, "utf-8")
-                else:
-                    result = self._decode(encoding_type, current, "utf-8")
-                
-                if not result.success:
-                    return ActionResult(
-                        success=False,
-                        message=f"Chain failed at {encoding_type.value}: {result.error}",
-                        duration=time.time() - start_time
-                    )
-                
-                current = result.output_value
-            
-            results.append(current)
-        
-        return ActionResult(
-            success=True,
-            message=f"Chain operation complete ({len(chain)} steps)",
-            data={
-                "results": results,
-                "chain": chain,
-                "operation": operation
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _batch_operation(
-        self, encoding_type: EncodingType, values: List[Any], operation: str,
-        input_encoding: str, output_encoding: str, start_time: float
-    ) -> ActionResult:
-        """Perform batch encoding/decoding."""
-        results = []
-        errors = []
-        
-        for i, value in enumerate(values):
-            if operation == "encode":
-                result = self._encode(encoding_type, value, output_encoding)
-            else:
-                result = self._decode(encoding_type, value, input_encoding)
-            
-            if result.success:
-                results.append(result.output_value)
-            else:
-                errors.append({"index": i, "error": result.error})
-        
-        return ActionResult(
-            success=len(errors) == 0,
-            message=f"Batch {operation} complete: {len(results)}/{len(values)} succeeded",
-            data={
-                "results": results,
-                "encoding": encoding_type.value,
-                "operation": operation,
-                "total": len(values),
-                "succeeded": len(results),
-                "failed": len(errors),
-                "errors": errors
-            },
-            duration=time.time() - start_time
-        )
-    
-    def _encode(self, encoding_type: EncodingType, value: Any, output_encoding: str) -> EncodingResult:
-        """Encode a value."""
-        try:
-            str_value = self._to_string(value)
-            bytes_value = str_value.encode(output_encoding)
-            
-            if encoding_type == EncodingType.BASE64:
-                output = base64.b64encode(bytes_value).decode("ascii")
-            elif encoding_type == EncodingType.BASE32:
-                output = base64.b32encode(bytes_value).decode("ascii")
-            elif encoding_type == EncodingType.BASE16:
-                output = base64.b16encode(bytes_value).decode("ascii")
-            elif encoding_type == EncodingType.BASE85:
-                output = base64.b85encode(bytes_value).decode("ascii")
-            elif encoding_type == EncodingType.URL:
-                output = urllib.parse.quote(str_value)
-            elif encoding_type == EncodingType.HTML:
-                output = html.escape(str_value)
-            elif encoding_type == EncodingType.HTML_ENTITY:
-                output = self._to_html_entities(str_value)
-            elif encoding_type == EncodingType.UNICODE_ESCAPE:
-                output = str_value.encode("unicode_escape").decode("ascii")
-            elif encoding_type == EncodingType.QUOTED_PRINTABLE:
-                output = quopri.encodestring(bytes_value).decode("ascii")
-            elif encoding_type == EncodingType.HEX:
-                output = bytes_value.hex()
-            elif encoding_type == EncodingType.ASCII:
-                output = str_value.encode("ascii", errors="ignore").decode("ascii")
-            elif encoding_type == EncodingType.UTF8:
-                output = str_value.encode("utf-8").decode("utf-8")
-            elif encoding_type == EncodingType.JSON_STRING:
-                output = json.dumps(str_value)
-            elif encoding_type == EncodingType.XML_STRING:
-                import xml.sax.saxutils as saxutils
-                output = saxutils.quoteattr(str_value)
-            else:
-                return EncodingResult(
-                    success=False,
-                    input_value=value,
-                    output_value=None,
-                    encoding_type=encoding_type,
-                    operation="encode",
-                    error=f"Encoding not supported: {encoding_type}"
-                )
-            
-            return EncodingResult(
-                success=True,
-                input_value=value,
-                output_value=output,
-                encoding_type=encoding_type,
-                operation="encode"
-            )
-            
-        except Exception as e:
-            return EncodingResult(
-                success=False,
-                input_value=value,
-                output_value=None,
-                encoding_type=encoding_type,
-                operation="encode",
-                error=str(e)
-            )
-    
-    def _decode(self, encoding_type: EncodingType, value: Any, input_encoding: str) -> EncodingResult:
-        """Decode a value."""
-        try:
-            str_value = self._to_string(value)
-            
-            if encoding_type == EncodingType.BASE64:
-                output = base64.b64decode(str_value).decode(input_encoding)
-            elif encoding_type == EncodingType.BASE32:
-                output = base64.b32decode(str_value).decode(input_encoding)
-            elif encoding_type == EncodingType.BASE16:
-                output = base64.b16decode(str_value).decode(input_encoding)
-            elif encoding_type == EncodingType.BASE85:
-                output = base64.b85decode(str_value).decode(input_encoding)
-            elif encoding_type == EncodingType.URL:
-                output = urllib.parse.unquote(str_value)
-            elif encoding_type == EncodingType.HTML:
-                output = html.unescape(str_value)
-            elif encoding_type == EncodingType.HTML_ENTITY:
-                output = self._from_html_entities(str_value)
-            elif encoding_type == EncodingType.UNICODE_ESCAPE:
-                output = str_value.encode("utf-8").decode("unicode_escape")
-            elif encoding_type == EncodingType.QUOTED_PRINTABLE:
-                output = quopri.decodestring(str_value.encode()).decode(input_encoding)
-            elif encoding_type == EncodingType.HEX:
-                output = bytes.fromhex(str_value).decode(input_encoding)
-            elif encoding_type == EncodingType.ASCII:
-                output = str_value.encode("ascii").decode("ascii")
-            elif encoding_type == EncodingType.UTF8:
-                output = str_value.encode("utf-8").decode("utf-8")
-            elif encoding_type == EncodingType.JSON_STRING:
-                output = json.loads(str_value)
-            else:
-                return EncodingResult(
-                    success=False,
-                    input_value=value,
-                    output_value=None,
-                    encoding_type=encoding_type,
-                    operation="decode",
-                    error=f"Decoding not supported: {encoding_type}"
-                )
-            
-            return EncodingResult(
-                success=True,
-                input_value=value,
-                output_value=output,
-                encoding_type=encoding_type,
-                operation="decode"
-            )
-            
-        except Exception as e:
-            return EncodingResult(
-                success=False,
-                input_value=value,
-                output_value=None,
-                encoding_type=encoding_type,
-                operation="decode",
-                error=str(e)
-            )
-    
-    def _to_string(self, value: Any) -> str:
-        """Convert value to string."""
-        if isinstance(value, str):
-            return value
-        elif isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        elif isinstance(value, (dict, list)):
-            return json.dumps(value)
-        else:
-            return str(value)
-    
-    def _to_html_entities(self, text: str) -> str:
-        """Convert text to HTML entities."""
-        result = []
-        for char in text:
-            code = ord(char)
-            if code > 127:
-                result.append(f"&#{code};")
-            else:
-                result.append(html.escape(char))
-        return "".join(result)
-    
-    def _from_html_entities(self, text: str) -> str:
-        """Convert HTML entities to text."""
-        import re
-        entities = {
-            "nbsp": " ",
-            "amp": "&",
-            "lt": "<",
-            "gt": ">",
-            "quot": '"',
-            "apos": "'"
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "success": self.success,
+            "format": self.format,
+            "error": self.error,
         }
-        
-        def replace_entity(match):
-            name = match.group(1)
-            if name in entities:
-                return entities[name]
-            code = match.group(2)
-            if code:
-                return chr(int(code))
-            return match.group(0)
-        
-        text = re.sub(r"&([a-zA-Z]+);", replace_entity, text)
-        text = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
-        return text
-    
-    def normalize_unicode(self, text: str, form: UnicodeForm = UnicodeForm.NFC) -> str:
-        """Normalize unicode text."""
-        import unicodedata
-        return unicodedata.normalize(form.value, text)
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate encoding parameters."""
-        if "value" not in params and "values" not in params:
-            return False, "Must provide 'value' or 'values' parameter"
-        return True, ""
-    
-    def get_required_params(self) -> List[str]:
-        """Return required parameters."""
-        return []
+
+
+def encode_base64(data: str | bytes) -> EncodingResult:
+    """Encode data to base64.
+
+    Args:
+        data: String or bytes to encode
+
+    Returns:
+        EncodingResult
+    """
+    try:
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        encoded = base64.b64encode(data).decode("ascii")
+        return EncodingResult(success=True, encoded=encoded, format="base64")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="base64")
+
+
+def decode_base64(data: str) -> EncodingResult:
+    """Decode base64 data.
+
+    Args:
+        data: Base64 string to decode
+
+    Returns:
+        EncodingResult with decoded bytes
+    """
+    try:
+        decoded = base64.b64decode(data)
+        return EncodingResult(success=True, encoded=decoded, format="base64")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="base64")
+
+
+def encode_hex(data: str | bytes) -> EncodingResult:
+    """Encode data to hexadecimal.
+
+    Args:
+        data: String or bytes to encode
+
+    Returns:
+        EncodingResult
+    """
+    try:
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        encoded = data.hex()
+        return EncodingResult(success=True, encoded=encoded, format="hex")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="hex")
+
+
+def decode_hex(data: str) -> EncodingResult:
+    """Decode hexadecimal data.
+
+    Args:
+        data: Hex string to decode
+
+    Returns:
+        EncodingResult with decoded bytes
+    """
+    try:
+        decoded = bytes.fromhex(data)
+        return EncodingResult(success=True, encoded=decoded, format="hex")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="hex")
+
+
+def encode_url(data: str) -> EncodingResult:
+    """URL encode a string.
+
+    Args:
+        data: String to encode
+
+    Returns:
+        EncodingResult
+    """
+    try:
+        encoded = urllib.parse.quote(data)
+        return EncodingResult(success=True, encoded=encoded, format="url")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="url")
+
+
+def decode_url(data: str) -> EncodingResult:
+    """URL decode a string.
+
+    Args:
+        data: URL-encoded string
+
+    Returns:
+        EncodingResult
+    """
+    try:
+        decoded = urllib.parse.unquote(data)
+        return EncodingResult(success=True, encoded=decoded, format="url")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="url")
+
+
+def encode_json(data: Any) -> EncodingResult:
+    """Encode data to JSON string.
+
+    Args:
+        data: Data to encode
+
+    Returns:
+        EncodingResult
+    """
+    try:
+        encoded = json.dumps(data, ensure_ascii=False, default=str)
+        return EncodingResult(success=True, encoded=encoded, format="json")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="json")
+
+
+def decode_json(data: str) -> EncodingResult:
+    """Decode JSON string.
+
+    Args:
+        data: JSON string to decode
+
+    Returns:
+        EncodingResult with decoded data
+    """
+    try:
+        decoded = json.loads(data)
+        return EncodingResult(success=True, encoded=decoded, format="json")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="json")
+
+
+def encode_html(data: str) -> EncodingResult:
+    """HTML encode a string.
+
+    Args:
+        data: String to encode
+
+    Returns:
+        EncodingResult
+    """
+    html_escape_table = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#x27;",
+        "/": "&#x2F;",
+    }
+
+    try:
+        encoded = "".join(html_escape_table.get(c, c) for c in data)
+        return EncodingResult(success=True, encoded=encoded, format="html")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="html")
+
+
+def decode_html(data: str) -> EncodingResult:
+    """HTML decode a string.
+
+    Args:
+        data: HTML-encoded string
+
+    Returns:
+        EncodingResult
+    """
+    html_unescape_table = {
+        "&amp;": "&",
+        "&lt;": "<",
+        "&gt;": ">",
+        "&quot;": '"',
+        "&#x27;": "'",
+        "&#x2F;": "/",
+        "&#39;": "'",
+        "&nbsp;": " ",
+    }
+
+    try:
+        result = data
+        for k, v in html_unescape_table.items():
+            result = result.replace(k, v)
+        return EncodingResult(success=True, encoded=result, format="html")
+    except Exception as e:
+        return EncodingResult(success=False, encoded=None, error=str(e), format="html")
+
+
+class ColumnEncoder:
+    """Encode data columns to numeric format."""
+
+    def __init__(self):
+        self._mappings: dict[str, dict[Any, int]] = {}
+        self._reverse_mappings: dict[str, dict[int, Any]] = {}
+
+    def fit(self, data: list[dict[str, Any]], columns: list[str]) -> "ColumnEncoder":
+        """Fit encoder to data.
+
+        Args:
+            data: Training data
+            columns: Columns to encode
+
+        Returns:
+            Self
+        """
+        for col in columns:
+            unique_values = sorted(set(d.get(col) for d in data if col in d))
+            mapping = {v: i for i, v in enumerate(unique_values)}
+            reverse = {i: v for i, v in enumerate(unique_values)}
+
+            self._mappings[col] = mapping
+            self._reverse_mappings[col] = reverse
+
+        return self
+
+    def transform(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Transform data using fitted encoder.
+
+        Args:
+            data: Data to transform
+
+        Returns:
+            Transformed data
+        """
+        result = []
+        for record in data:
+            new_record = dict(record)
+            for col, mapping in self._mappings.items():
+                if col in new_record:
+                    value = new_record[col]
+                    new_record[col] = mapping.get(value, -1)
+            result.append(new_record)
+        return result
+
+    def fit_transform(self, data: list[dict[str, Any]], columns: list[str]) -> list[dict[str, Any]]:
+        """Fit and transform in one step.
+
+        Args:
+            data: Data to encode
+            columns: Columns to encode
+
+        Returns:
+            Transformed data
+        """
+        return self.fit(data, columns).transform(data)
+
+    def inverse_transform(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Reverse the encoding.
+
+        Args:
+            data: Encoded data
+
+        Returns:
+            Original data
+        """
+        result = []
+        for record in data:
+            new_record = dict(record)
+            for col, reverse in self._reverse_mappings.items():
+                if col in new_record:
+                    value = new_record[col]
+                    new_record[col] = reverse.get(value, value)
+            result.append(new_record)
+        return result
+
+
+def one_hot_encode(
+    data: list[Any],
+    categories: Optional[list[Any]] = None,
+) -> tuple[list[list[int]], list[Any]]:
+    """One-hot encode categorical data.
+
+    Args:
+        data: Categorical values
+        categories: Optional category list
+
+    Returns:
+        Tuple of (encoded array, category list)
+    """
+    if categories is None:
+        categories = sorted(set(data))
+
+    cat_to_idx = {cat: i for i, cat in enumerate(categories)}
+    encoded = []
+
+    for value in data:
+        row = [0] * len(categories)
+        if value in cat_to_idx:
+            row[cat_to_idx[value]] = 1
+        encoded.append(row)
+
+    return encoded, categories
+
+
+def label_encode(
+    data: list[Any],
+    categories: Optional[list[Any]] = None,
+) -> tuple[list[int], list[Any]]:
+    """Label encode categorical data.
+
+    Args:
+        data: Categorical values
+        categories: Optional category list
+
+    Returns:
+        Tuple of (encoded labels, category list)
+    """
+    if categories is None:
+        categories = sorted(set(data))
+
+    cat_to_idx = {cat: i for i, cat in enumerate(categories)}
+    encoded = [cat_to_idx.get(v, -1) for v in data]
+
+    return encoded, categories
+
+
+def target_encode(
+    data: list[dict[str, Any]],
+    category_col: str,
+    target_col: str,
+    smoothing: float = 1.0,
+) -> dict[Any, float]:
+    """Target encode categorical values.
+
+    Args:
+        data: Data records
+        category_col: Categorical column name
+        target_col: Target column name
+        smoothing: Smoothing factor
+
+    Returns:
+        Dictionary mapping categories to encoded values
+    """
+    category_stats: dict[Any, tuple[float, int]] = {}
+
+    for record in data:
+        cat = record.get(category_col)
+        target = record.get(target_col)
+
+        if cat is None or target is None:
+            continue
+
+        if cat not in category_stats:
+            category_stats[cat] = (0.0, 0)
+
+        total, count = category_stats[cat]
+        category_stats[cat] = (total + float(target), count + 1)
+
+    global_mean = sum(s for s, _ in category_stats.values()) / len(category_stats) if category_stats else 0.0
+
+    encoded = {}
+    for cat, (total, count) in category_stats.items():
+        smoothed = (total + smoothing * global_mean) / (count + smoothing)
+        encoded[cat] = smoothed
+
+    return encoded
+
+
+@dataclass
+class EncodingPipeline:
+    """Pipeline for chaining encoders."""
+
+    encoders: list[tuple[str, Callable]] = []
+
+    def add(self, name: str, encoder: Callable[[Any], Any]) -> "EncodingPipeline":
+        """Add an encoder to the pipeline."""
+        self.encoders.append((name, encoder))
+        return self
+
+    def encode(self, data: Any) -> Any:
+        """Encode data through pipeline."""
+        result = data
+        for name, encoder in self.encoders:
+            try:
+                result = encoder(result)
+            except Exception:
+                pass
+        return result
+
+    def decode(self, data: Any) -> Any:
+        """Decode data through pipeline (in reverse)."""
+        result = data
+        for name, encoder in reversed(self.encoders):
+            if hasattr(encoder, "inverse_transform"):
+                try:
+                    result = encoder.inverse_transform(result)
+                except Exception:
+                    pass
+        return result
