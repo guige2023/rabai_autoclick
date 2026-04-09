@@ -1,441 +1,285 @@
-"""API Gateway Action Module.
+"""API pagination action module for RabAI AutoClick.
 
-Provides API gateway capabilities including request routing, rate limiting,
-authentication, logging, and transformation middleware with support for
-microservices backend integration.
+Handles paginated API responses with support for cursor-based,
+offset-based, and link-header pagination patterns.
 """
 
-from __future__ import annotations
-
-import logging
-import threading
 import time
-from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import json
+from typing import Any, Dict, List, Optional, Union, Callable
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-logger = logging.getLogger(__name__)
-
-
-class AuthType(Enum):
-    """Authentication types."""
-    NONE = "none"
-    API_KEY = "api_key"
-    BASIC = "basic"
-    BEARER = "bearer"
-    OAUTH2 = "oauth2"
-    JWT = "jwt"
-
-
-class LoadBalancingMode(Enum):
-    """Backend load balancing modes."""
-    ROUND_ROBIN = "round_robin"
-    LEAST_CONNECTIONS = "least_connections"
-    IP_HASH = "ip_hash"
-    RANDOM = "random"
-
-
-@dataclass
-class BackendService:
-    """A backend service target."""
-    service_id: str
-    url: str
-    weight: int = 1
-    max_connections: int = 100
-    timeout_seconds: float = 30.0
-    health_check_path: str = "/health"
-    healthy: bool = True
-    active_connections: int = 0
-
-
-@dataclass
-class RouteConfig:
-    """Configuration for a gateway route."""
-    route_id: str
-    path_prefix: str
-    backend_service_id: str
-    methods: Set[str] = field(default_factory=set)
-    auth_type: AuthType = AuthType.NONE
-    rate_limit: Optional[int] = None
-    timeout_seconds: float = 30.0
-    strip_path: bool = True
-    add_prefix: Optional[str] = None
-    transforms: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class GatewayConfig:
-    """Configuration for API gateway."""
-    port: int = 8080
-    host: str = "0.0.0.0"
-    log_requests: bool = True
-    log_responses: bool = False
-    load_balancing: LoadBalancingMode = LoadBalancingMode.ROUND_ROBIN
-    global_rate_limit: int = 1000
-    auth_enabled: bool = True
-    middleware: List[str] = field(default_factory=list)
-
-
-@dataclass
-class RequestLog:
-    """Log entry for a gateway request."""
-    timestamp: datetime
-    method: str
-    path: str
-    status_code: Optional[int] = None
-    response_time_ms: float = 0.0
-    client_ip: Optional[str] = None
-    user_agent: Optional[str] = None
-    authenticated: bool = False
-    route_id: Optional[str] = None
-    backend_service_id: Optional[str] = None
-    error: Optional[str] = None
-
-
-class RateLimiter:
-    """Token bucket rate limiter."""
-
-    def __init__(self, capacity: int, refill_rate: float):
-        self._capacity = capacity
-        self._refill_rate = refill_rate
-        self._tokens = capacity
-        self._last_refill = time.time()
-        self._lock = threading.Lock()
-
-    def allow_request(self) -> bool:
-        """Check if request is allowed under rate limit."""
-        with self._lock:
-            self._refill()
-
-            if self._tokens >= 1:
-                self._tokens -= 1
-                return True
-            return False
-
-    def _refill(self):
-        """Refill tokens based on elapsed time."""
-        now = time.time()
-        elapsed = now - self._last_refill
-        refill_amount = elapsed * self._refill_rate
-        self._tokens = min(self._capacity, self._tokens + refill_amount)
-        self._last_refill = now
-
-
-class Authenticator:
-    """Handle authentication for gateway requests."""
-
-    def __init__(self):
-        self._valid_api_keys: Set[str] = set()
-        self._valid_tokens: Set[str] = set()
-
-    def authenticate(
+class ApiPaginationAction(BaseAction):
+    """Handle paginated API requests with multiple pagination strategies.
+    
+    Supports cursor-based, offset/limit, and Link header pagination.
+    Automatically fetches all pages or limits to max_pages.
+    """
+    action_type = "api_pagination"
+    display_name = "API分页"
+    description = "处理API分页请求，支持游标/偏移量/链接头分页策略"
+    VALID_STRATEGIES = ["cursor", "offset", "link_header", "page_number"]
+    
+    def execute(
         self,
-        auth_type: AuthType,
-        headers: Dict[str, str],
-        api_key: Optional[str] = None
-    ) -> Tuple[bool, Optional[str]]:
-        """Authenticate a request."""
-        if auth_type == AuthType.NONE:
-            return True, None
-
-        if auth_type == AuthType.API_KEY:
-            key = headers.get("X-API-Key") or api_key
-            if key and key in self._valid_api_keys:
-                return True, key
-            return False, "Invalid API key"
-
-        if auth_type == AuthType.BEARER:
-            token = headers.get("Authorization", "").replace("Bearer ", "")
-            if token in self._valid_tokens:
-                return True, token
-            return False, "Invalid bearer token"
-
-        return True, None
-
-    def add_api_key(self, key: str):
-        """Register a valid API key."""
-        self._valid_api_keys.add(key)
-
-    def add_token(self, token: str):
-        """Register a valid token."""
-        self._valid_tokens.add(token)
-
-
-class ApiGatewayAction(BaseAction):
-    """Action for API gateway operations."""
-
-    def __init__(self):
-        super().__init__(name="api_gateway")
-        self._config = GatewayConfig()
-        self._routes: Dict[str, RouteConfig] = {}
-        self._backends: Dict[str, BackendService] = {}
-        self._rate_limiters: Dict[str, RateLimiter] = {}
-        self._authenticator = Authenticator()
-        self._request_logs: List[RequestLog] = []
-        self._lock = threading.Lock()
-        self._route_stats: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        self._balancer_index: Dict[str, int] = defaultdict(int)
-
-    def configure(self, config: GatewayConfig):
-        """Configure gateway settings."""
-        self._config = config
-
-    def register_backend(
-        self,
-        service_id: str,
-        url: str,
-        weight: int = 1,
-        max_connections: int = 100
+        context: Any,
+        params: Dict[str, Any]
     ) -> ActionResult:
-        """Register a backend service."""
-        try:
-            with self._lock:
-                if service_id in self._backends:
-                    return ActionResult(success=False, error=f"Backend {service_id} already exists")
-
-                backend = BackendService(
-                    service_id=service_id,
-                    url=url,
-                    weight=weight,
-                    max_connections=max_connections
-                )
-                self._backends[service_id] = backend
-                self._rate_limiters[service_id] = RateLimiter(
-                    capacity=weight * 10,
-                    refill_rate=weight
-                )
-
-                return ActionResult(success=True, data={"service_id": service_id})
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
-
-    def register_route(
-        self,
-        route_id: str,
-        path_prefix: str,
-        backend_service_id: str,
-        methods: List[str],
-        auth_type: AuthType = AuthType.NONE,
-        rate_limit: Optional[int] = None,
-        timeout_seconds: float = 30.0
-    ) -> ActionResult:
-        """Register a gateway route."""
-        try:
-            with self._lock:
-                if route_id in self._routes:
-                    return ActionResult(success=False, error=f"Route {route_id} already exists")
-
-                if backend_service_id not in self._backends:
-                    return ActionResult(success=False, error=f"Backend {backend_service_id} not found")
-
-                route = RouteConfig(
-                    route_id=route_id,
-                    path_prefix=path_prefix,
-                    backend_service_id=backend_service_id,
-                    methods=set(m.upper() for m in methods),
-                    auth_type=auth_type,
-                    rate_limit=rate_limit,
-                    timeout_seconds=timeout_seconds
-                )
-                self._routes[route_id] = route
-
-                if rate_limit:
-                    self._rate_limiters[route_id] = RateLimiter(
-                        capacity=rate_limit,
-                        refill_rate=rate_limit / 60
-                    )
-
-                return ActionResult(success=True, data={"route_id": route_id})
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
-
-    def add_api_key(self, api_key: str) -> ActionResult:
-        """Add a valid API key."""
-        try:
-            self._authenticator.add_api_key(api_key)
-            return ActionResult(success=True)
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
-
-    def log_request(
-        self,
-        method: str,
-        path: str,
-        headers: Optional[Dict[str, str]] = None,
-        route_id: Optional[str] = None
-    ) -> ActionResult:
-        """Log a gateway request."""
-        try:
-            log = RequestLog(
-                timestamp=datetime.now(),
-                method=method,
-                path=path,
-                client_ip=headers.get("X-Forwarded-For", headers.get("Remote-Addr")) if headers else None,
-                user_agent=headers.get("User-Agent") if headers else None,
-                route_id=route_id
-            )
-            with self._lock:
-                self._request_logs.append(log)
-            return ActionResult(success=True)
-        except Exception as e:
-            return ActionResult(success=False, error=str(e))
-
-    def route_request(
-        self,
-        method: str,
-        path: str,
-        headers: Optional[Dict[str, str]] = None,
-        body: Optional[bytes] = None,
-        client_ip: Optional[str] = None
-    ) -> ActionResult:
-        """Route a request through the gateway."""
+        """Fetch paginated API data.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: url, strategy, cursor_param, limit_param,
+                   max_pages, total_param, headers, timeout.
+        
+        Returns:
+            ActionResult with all collected items and pagination metadata.
+        """
+        base_url = params.get("url", "")
+        strategy = params.get("strategy", "cursor")
+        cursor_param = params.get("cursor_param", "cursor")
+        limit_param = params.get("limit_param", "limit")
+        max_pages = params.get("max_pages", 10)
+        limit = params.get("limit", 100)
+        headers = params.get("headers", {})
+        timeout = params.get("timeout", 30)
+        total_param = params.get("total_param")
+        
+        if not base_url:
+            return ActionResult(success=False, message="URL is required")
+        
+        valid, msg = self.validate_in(strategy, self.VALID_STRATEGIES, "strategy")
+        if not valid:
+            return ActionResult(success=False, message=msg)
+        
+        all_items = []
+        page_count = 0
+        cursor = None
+        total_expected = None
         start_time = time.time()
-
+        errors = []
+        
         try:
-            matched_route = None
-            for route in self._routes.values():
-                if path.startswith(route.path_prefix):
-                    if not route.methods or method.upper() in route.methods:
-                        matched_route = route
+            while page_count < max_pages:
+                page_count += 1
+                
+                url = self._build_url(
+                    base_url, strategy, cursor, cursor_param,
+                    limit_param, limit, page_count, total_param, all_items
+                )
+                
+                request = Request(url, headers=headers)
+                
+                try:
+                    with urlopen(request, timeout=timeout) as response:
+                        body = json.loads(response.read().decode("utf-8"))
+                        status = response.status
+                except HTTPError as e:
+                    body = json.loads(e.read().decode("utf-8")) if e.fp else {}
+                    errors.append({"page": page_count, "error": f"HTTP {e.code}"})
+                    break
+                
+                items, cursor, total_expected = self._extract_items(
+                    body, strategy, cursor_param, total_param, items
+                )
+                
+                all_items.extend(items)
+                
+                if strategy == "link_header":
+                    next_cursor = self._get_next_cursor_from_headers(response.headers)
+                    if not next_cursor:
                         break
-
-            if not matched_route:
-                return ActionResult(
-                    success=False,
-                    error="No matching route found",
-                    data={"path": path, "method": method}
-                )
-
-            if matched_route.rate_limit:
-                limiter = self._rate_limiters.get(matched_route.route_id)
-                if limiter and not limiter.allow_request():
-                    return ActionResult(
-                        success=False,
-                        error="Rate limit exceeded",
-                        data={"route_id": matched_route.route_id}
-                    )
-
-            if self._config.auth_enabled and matched_route.auth_type != AuthType.NONE:
-                authenticated, error = self._authenticator.authenticate(
-                    matched_route.auth_type,
-                    headers or {}
-                )
-                if not authenticated:
-                    return ActionResult(
-                        success=False,
-                        error=error or "Authentication failed"
-                    )
-
-            backend = self._select_backend(matched_route.backend_service_id)
-            if not backend:
-                return ActionResult(success=False, error="No healthy backend available")
-
-            backend.active_connections += 1
-
-            try:
-                duration_ms = (time.time() - start_time) * 1000
-                return ActionResult(
-                    success=True,
-                    data={
-                        "route_id": matched_route.route_id,
-                        "backend_url": backend.url,
-                        "response_time_ms": duration_ms,
-                        "status": "forwarded"
-                    }
-                )
-            finally:
-                backend.active_connections = max(0, backend.active_connections - 1)
-
-        except Exception as e:
-            logger.exception("Request routing failed")
-            return ActionResult(success=False, error=str(e))
-
-    def _select_backend(self, service_id: str) -> Optional[BackendService]:
-        """Select a backend using configured load balancing."""
-        backends = [b for b in self._backends.values() if b.service_id == service_id]
-        if not backends:
-            return None
-
-        healthy = [b for b in backends if b.healthy]
-        if not healthy:
-            healthy = backends
-
-        if self._config.load_balancing == LoadBalancingMode.ROUND_ROBIN:
-            idx = self._balancer_index[service_id]
-            self._balancer_index[service_id] = (idx + 1) % len(healthy)
-            return healthy[idx]
-        elif self._config.load_balancing == LoadBalancingMode.LEAST_CONNECTIONS:
-            return min(healthy, key=lambda b: b.active_connections)
-        elif self._config.load_balancing == LoadBalancingMode.RANDOM:
-            import random
-            return random.choice(healthy)
-
-        return healthy[0]
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get gateway statistics."""
-        with self._lock:
-            total_requests = len(self._request_logs)
-            recent_requests = [
-                r for r in self._request_logs
-                if r.timestamp > datetime.now() - timedelta(minutes=5)
-            ]
-
-            return {
-                "total_requests": total_requests,
-                "recent_requests": len(recent_requests),
-                "total_routes": len(self._routes),
-                "total_backends": len(self._backends),
-                "healthy_backends": sum(1 for b in self._backends.values() if b.healthy),
-                "routes": {
-                    route_id: {
-                        "path_prefix": r.path_prefix,
-                        "methods": list(r.methods),
-                        "auth_type": r.auth_type.value,
-                        "stats": dict(self._route_stats[route_id])
-                    }
-                    for route_id, r in self._routes.items()
+                    cursor = next_cursor
+                else:
+                    if cursor is None or (total_expected and len(all_items) >= total_expected):
+                        break
+                
+                if page_count >= max_pages:
+                    break
+            
+            elapsed = time.time() - start_time
+            
+            return ActionResult(
+                success=len(errors) == 0,
+                message=f"Collected {len(all_items)} items in {page_count} pages ({elapsed:.2f}s)",
+                data={
+                    "items": all_items,
+                    "total_collected": len(all_items),
+                    "pages_fetched": page_count,
+                    "has_more": cursor is not None and page_count >= max_pages,
+                    "errors": errors,
+                    "elapsed": elapsed
                 }
-            }
-
-    def execute(self, params: Dict[str, Any]) -> ActionResult:
-        """Execute gateway action."""
-        try:
-            action = params.get("action", "route")
-
-            if action == "route":
-                return self.route_request(
-                    params["method"],
-                    params["path"],
-                    params.get("headers"),
-                    params.get("body"),
-                    params.get("client_ip")
-                )
-            elif action == "register_backend":
-                return self.register_backend(
-                    params["service_id"],
-                    params["url"],
-                    params.get("weight", 1)
-                )
-            elif action == "register_route":
-                return self.register_route(
-                    params["route_id"],
-                    params["path_prefix"],
-                    params["backend_service_id"],
-                    params.get("methods", ["GET"]),
-                    AuthType(params.get("auth_type", "none"))
-                )
-            elif action == "stats":
-                return ActionResult(success=True, data=self.get_stats())
-            else:
-                return ActionResult(success=False, error=f"Unknown action: {action}")
+            )
         except Exception as e:
-            return ActionResult(success=False, error=str(e))
+            return ActionResult(
+                success=False,
+                message=f"Pagination failed: {e}",
+                data={"items_collected": len(all_items), "errors": errors}
+            )
+    
+    def _build_url(
+        self, base_url: str, strategy: str, cursor: Optional[str],
+        cursor_param: str, limit_param: str, limit: int, page: int,
+        total_param: Optional[str], items: List
+    ) -> str:
+        separator = "&" if "?" in base_url else "?"
+        
+        if strategy == "cursor":
+            if cursor:
+                return f"{base_url}{separator}{cursor_param}={cursor}&{limit_param}={limit}"
+            return f"{base_url}{separator}{limit_param}={limit}"
+        elif strategy == "offset":
+            offset = len(items)
+            return f"{base_url}{separator}{limit_param}={limit}&offset={offset}"
+        elif strategy == "page_number":
+            return f"{base_url}{separator}{limit_param}={limit}&page={page}"
+        else:
+            return f"{base_url}{separator}{limit_param}={limit}"
+    
+    def _extract_items(
+        self, body: Any, strategy: str, cursor_param: str,
+        total_param: Optional[str], existing_items: List
+    ) -> tuple:
+        items = []
+        cursor = None
+        total = None
+        
+        if isinstance(body, dict):
+            if "data" in body:
+                items = body["data"] if isinstance(body["data"], list) else [body["data"]]
+            elif "items" in body:
+                items = body["items"] if isinstance(body["items"], list) else [body["items"]]
+            elif "results" in body:
+                items = body["results"] if isinstance(body["results"], list) else [body["results"]]
+            else:
+                for key in body:
+                    if isinstance(body[key], list):
+                        items = body[key]
+                        break
+            
+            if cursor_param in body:
+                cursor = body[cursor_param]
+            if total_param and total_param in body:
+                total = body[total_param]
+        elif isinstance(body, list):
+            items = body
+        
+        return items, cursor, total
+    
+    def _get_next_cursor_from_headers(self, headers: dict) -> Optional[str]:
+        link_header = headers.get("Link", "") or headers.get("link", "")
+        if not link_header:
+            return None
+        
+        import re
+        matches = re.findall(r'<([^>]+)>;\s*rel="([^"]+)"', link_header)
+        for url, rel in matches:
+            if rel == "next":
+                return url
+        return None
+
+
+class ApiCursorWalkAction(BaseAction):
+    """Iterate through cursor-paginated API endpoints.
+    
+    Specifically designed for GraphQL and REST APIs that use
+    cursor-based pagination with next/has_next patterns.
+    """
+    action_type = "api_cursor_walk"
+    display_name = "API游标遍历"
+    description = "遍历基于游标的API端点"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Walk through cursor-paginated API.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: url, data_path, cursor_path,
+                   has_next_path, headers, max_iterations.
+        
+        Returns:
+            ActionResult with all collected items.
+        """
+        url = params.get("url", "")
+        data_path = params.get("data_path", "data")
+        cursor_path = params.get("cursor_path", "cursor")
+        has_next_path = params.get("has_next_path", "has_next")
+        headers = params.get("headers", {})
+        max_iterations = params.get("max_iterations", 50)
+        body_template = params.get("body_template")
+        timeout = params.get("timeout", 30)
+        
+        if not url:
+            return ActionResult(success=False, message="URL is required")
+        
+        all_items = []
+        cursor = None
+        iteration = 0
+        start_time = time.time()
+        
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+                
+                current_url = url
+                if cursor:
+                    separator = "&" if "?" in url else "?"
+                    current_url = f"{url}{separator}cursor={cursor}"
+                
+                request = Request(
+                    current_url,
+                    data=json.dumps(body_template).encode() if body_template else None,
+                    headers={**headers, "Content-Type": "application/json"}
+                )
+                
+                with urlopen(request, timeout=timeout) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                
+                data = self._get_nested(body, data_path.split("."))
+                if data is None:
+                    data = body.get("data", body) if isinstance(body, dict) else body
+                
+                if not isinstance(data, list):
+                    data = [data]
+                
+                all_items.extend(data)
+                
+                cursor = self._get_nested(body, cursor_path.split("."))
+                has_next = self._get_nested(body, has_next_path.split("."))
+                
+                if not cursor or has_next is False or (isinstance(has_next, bool) and not has_next):
+                    break
+            
+            elapsed = time.time() - start_time
+            
+            return ActionResult(
+                success=True,
+                message=f"Cursor walk completed: {len(all_items)} items in {iteration} iterations",
+                data={
+                    "items": all_items,
+                    "total": len(all_items),
+                    "iterations": iteration,
+                    "elapsed": elapsed
+                }
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Cursor walk failed: {e}")
+    
+    def _get_nested(self, obj: Any, path: List[str]) -> Any:
+        for key in path:
+            if isinstance(obj, dict):
+                obj = obj.get(key)
+            else:
+                return None
+            if obj is None:
+                return None
+        return obj
