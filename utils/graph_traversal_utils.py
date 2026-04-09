@@ -1,249 +1,304 @@
+"""Graph traversal utilities for RabAI AutoClick.
+
+Provides:
+- BFS/DFS graph traversal
+- Dijkstra and A* pathfinding
+- Topological sorting
+- Connected components
 """
-Graph traversal algorithms implementation.
 
-Provides BFS, DFS, Dijkstra, and A* algorithms
-for graph traversal and pathfinding.
-"""
-
-from __future__ import annotations
-
+from typing import List, Set, Optional, Tuple, Callable, Dict, Any
+from dataclasses import dataclass
 import heapq
-from collections import deque
-from typing import Callable
+import math
 
 
-Node = str | int
-Cost = float
+@dataclass
+class GraphNode:
+    """A node in a graph."""
+    id: Any
+    data: Any = None
 
 
 class Graph:
-    """Simple weighted graph representation."""
+    """Simple weighted graph."""
 
-    def __init__(self) -> None:
-        self._adj: dict[Node, list[tuple[Node, Cost]]] = {}
+    def __init__(self):
+        """Initialize empty graph."""
+        self.nodes: Dict[Any, GraphNode] = {}
+        self.edges: Dict[Any, Dict[Any, float]] = {}
 
-    def add_node(self, node: Node) -> None:
-        if node not in self._adj:
-            self._adj[node] = []
+    def add_node(self, id: Any, data: Any = None) -> None:
+        """Add a node."""
+        self.nodes[id] = GraphNode(id=id, data=data)
+        if id not in self.edges:
+            self.edges[id] = {}
 
-    def add_edge(
-        self,
-        from_node: Node,
-        to_node: Node,
-        cost: Cost = 1.0,
-        bidirectional: bool = False,
-    ) -> None:
-        self.add_node(from_node)
-        self.add_node(to_node)
-        self._adj[from_node].append((to_node, cost))
-        if bidirectional:
-            self._adj[to_node].append((from_node, cost))
+    def add_edge(self, from_id: Any, to_id: Any, weight: float = 1.0) -> None:
+        """Add directed edge."""
+        if from_id not in self.nodes:
+            self.add_node(from_id)
+        if to_id not in self.nodes:
+            self.add_node(to_id)
+        self.edges[from_id][to_id] = weight
 
-    def neighbors(self, node: Node) -> list[tuple[Node, Cost]]:
-        return self._adj.get(node, [])
+    def add_undirected_edge(self, a: Any, b: Any, weight: float = 1.0) -> None:
+        """Add undirected edge."""
+        self.add_edge(a, b, weight)
+        self.add_edge(b, a, weight)
 
-    def nodes(self) -> list[Node]:
-        return list(self._adj.keys())
+    def neighbors(self, node_id: Any) -> List[Tuple[Any, float]]:
+        """Get (neighbor_id, weight) for all neighbors."""
+        return list(self.edges.get(node_id, {}).items())
 
 
 def bfs(
     graph: Graph,
-    start: Node,
-    goal: Node | None = None,
-    visit: Callable[[Node], bool] | None = None,
-) -> list[Node]:
-    """
-    Breadth-first search.
+    start: Any,
+    goal: Optional[Any] = None,
+    visit: Optional[Callable[[Any], bool]] = None,
+) -> List[Any]:
+    """Breadth-first search traversal.
 
     Args:
-        graph: Graph to traverse
-        start: Starting node
-        goal: Optional target node (stops when found)
-        visit: Optional early exit predicate
+        graph: Graph to traverse.
+        start: Starting node.
+        goal: Optional target node.
+        visit: Optional function(node) -> bool to continue.
 
     Returns:
-        Path from start to goal (or all reachable if no goal)
+        List of visited nodes.
     """
-    visited = {start}
-    queue = deque([(start, [start])])
+    visited: Set[Any] = set()
+    queue: List[Any] = [start]
+    order: List[Any] = []
 
     while queue:
-        node, path = queue.popleft()
-        if visit and visit(node):
-            return path
-        if goal and node == goal:
-            return path
+        node = queue.pop(0)
+        if node in visited:
+            continue
+        visited.add(node)
+        order.append(node)
+        if goal is not None and node == goal:
+            break
         for neighbor, _ in graph.neighbors(node):
             if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append((neighbor, path + [neighbor]))
-    return []
+                queue.append(neighbor)
+        if visit and not visit(node):
+            break
+
+    return order
 
 
 def dfs(
     graph: Graph,
-    start: Node,
-    goal: Node | None = None,
-    visit: Callable[[Node], bool] | None = None,
-) -> list[Node]:
-    """
-    Depth-first search.
+    start: Any,
+    goal: Optional[Any] = None,
+) -> List[Any]:
+    """Depth-first search traversal.
 
     Args:
-        graph: Graph to traverse
-        start: Starting node
-        goal: Optional target node
-        visit: Optional early exit predicate
+        graph: Graph to traverse.
+        start: Starting node.
+        goal: Optional target node.
 
     Returns:
-        Path from start to goal
+        List of visited nodes in DFS order.
     """
-    visited: set[Node] = set()
+    visited: Set[Any] = set()
+    order: List[Any] = []
 
-    def _dfs_rec(node: Node, path: list[Node]) -> list[Node] | None:
-        if visit and visit(node):
-            return path
-        if goal and node == goal:
-            return path
+    def dfs_rec(node: Any) -> None:
+        if node in visited:
+            return
         visited.add(node)
+        order.append(node)
+        if goal is not None and node == goal:
+            return
         for neighbor, _ in graph.neighbors(node):
-            if neighbor not in visited:
-                result = _dfs_rec(neighbor, path + [neighbor])
-                if result is not None:
-                    return result
-        return None
+            dfs_rec(neighbor)
 
-    result = _dfs_rec(start, [start])
-    return result if result else []
+    dfs_rec(start)
+    return order
 
 
 def dijkstra(
     graph: Graph,
-    start: Node,
-    goal: Node | None = None,
-) -> tuple[dict[Node, Cost], dict[Node, Node | None]]:
-    """
-    Dijkstra's shortest path algorithm.
+    start: Any,
+    end: Optional[Any] = None,
+) -> Tuple[Dict[Any, float], Dict[Any, Optional[Any]]]:
+    """Dijkstra's shortest path algorithm.
 
     Args:
-        graph: Weighted graph
-        start: Starting node
-        goal: Optional target node
+        graph: Weighted graph.
+        start: Start node.
+        end: Optional end node.
 
     Returns:
-        Tuple of (distances dict, predecessors dict)
+        (distances, predecessors) where distances[node] = shortest distance
+        and predecessors[node] = previous node on path.
     """
-    distances: dict[Node, Cost] = {n: float("inf") for n in graph.nodes()}
-    predecessors: dict[Node, Node | None] = {n: None for n in graph.nodes()}
-    distances[start] = 0.0
+    dist: Dict[Any, float] = {n: math.inf for n in graph.nodes}
+    prev: Dict[Any, Optional[Any]] = {n: None for n in graph.nodes}
+    dist[start] = 0.0
+    pq: List[Tuple[float, Any]] = [(0.0, start)]
+    visited: Set[Any] = set()
 
-    pq = [(0.0, start)]
     while pq:
-        current_dist, node = heapq.heappop(pq)
-        if current_dist > distances[node]:
+        d, u = heapq.heappop(pq)
+        if u in visited:
             continue
-        if goal and node == goal:
+        visited.add(u)
+        if end is not None and u == end:
             break
-        for neighbor, cost in graph.neighbors(node):
-            new_dist = current_dist + cost
-            if new_dist < distances[neighbor]:
-                distances[neighbor] = new_dist
-                predecessors[neighbor] = node
-                heapq.heappush(pq, (new_dist, neighbor))
+        for v, weight in graph.neighbors(u):
+            if v in visited:
+                continue
+            alt = dist[u] + weight
+            if alt < dist[v]:
+                dist[v] = alt
+                prev[v] = u
+                heapq.heappush(pq, (alt, v))
 
-    return distances, predecessors
+    return dist, prev
 
 
 def reconstruct_path(
-    predecessors: dict[Node, Node | None],
-    start: Node,
-    goal: Node,
-) -> list[Node]:
+    prev: Dict[Any, Optional[Any]],
+    start: Any,
+    end: Any,
+) -> List[Any]:
     """Reconstruct path from predecessors dict."""
-    path = [goal]
-    current = goal
-    while predecessors.get(current) is not None:
-        current = predecessors[current]  # type: ignore
+    path: List[Any] = []
+    current: Optional[Any] = end
+    while current is not None:
         path.append(current)
+        current = prev[current]
     path.reverse()
-    return path if path[0] == start else []
+    return path if path and path[0] == start else []
 
 
 def astar(
     graph: Graph,
-    start: Node,
-    goal: Node,
-    heuristic: Callable[[Node], Cost] | None = None,
-) -> list[Node]:
-    """
-    A* pathfinding algorithm.
+    start: Any,
+    goal: Any,
+    heuristic: Callable[[Any], float],
+) -> Optional[List[Any]]:
+    """A* pathfinding algorithm.
 
     Args:
-        graph: Weighted graph
-        start: Starting node
-        goal: Target node
-        heuristic: Heuristic function (node -> estimated cost to goal)
+        graph: Graph to search.
+        start: Start node.
+        goal: Goal node.
+        heuristic: Function(node) -> estimated distance to goal.
 
     Returns:
-        Path from start to goal, or empty list if no path
+        Path as list of nodes, or None if no path found.
     """
-    if heuristic is None:
-        heuristic = lambda _: 0.0
-
-    g_score: dict[Node, Cost] = {n: float("inf") for n in graph.nodes()}
-    f_score: dict[Node, Cost] = {n: float("inf") for n in graph.nodes()}
-    predecessors: dict[Node, Node | None] = {n: None for n in graph.nodes()}
-
+    g_score: Dict[Any, float] = {n: math.inf for n in graph.nodes}
     g_score[start] = 0.0
+    f_score: Dict[Any, float] = {n: math.inf for n in graph.nodes}
     f_score[start] = heuristic(start)
-
-    open_set = [(f_score[start], start)]
-    open_set_nodes = {start}
+    prev: Dict[Any, Optional[Any]] = {n: None for n in graph.nodes}
+    open_set: List[Tuple[float, Any]] = [(f_score[start], start)]
+    visited: Set[Any] = set()
 
     while open_set:
         _, current = heapq.heappop(open_set)
-        open_set_nodes.discard(current)
-
         if current == goal:
-            return reconstruct_path(predecessors, start, goal)
+            return reconstruct_path(prev, start, goal)
+        if current in visited:
+            continue
+        visited.add(current)
 
-        for neighbor, cost in graph.neighbors(current):
-            tentative_g = g_score[current] + cost
+        for neighbor, weight in graph.neighbors(current):
+            if neighbor in visited:
+                continue
+            tentative_g = g_score[current] + weight
             if tentative_g < g_score[neighbor]:
-                predecessors[neighbor] = current
+                prev[neighbor] = current
                 g_score[neighbor] = tentative_g
                 f = tentative_g + heuristic(neighbor)
                 f_score[neighbor] = f
-                if neighbor not in open_set_nodes:
-                    heapq.heappush(open_set, (f, neighbor))
-                    open_set_nodes.add(neighbor)
+                heapq.heappush(open_set, (f, neighbor))
 
-    return []
+    return None
 
 
-def topological_sort(graph: Graph) -> list[Node]:
-    """
-    Topological sort of a DAG.
+def topological_sort(graph: Graph) -> List[Any]:
+    """Topological sort of directed acyclic graph.
 
     Args:
-        graph: Directed acyclic graph
+        graph: DAG to sort.
 
     Returns:
-        Nodes in topological order
+        Nodes in topological order.
     """
-    visited: set[Node] = set()
-    result: list[Node] = []
+    visited: Set[Any] = set()
+    order: List[Any] = []
 
-    def _dfs(node: Node) -> None:
+    def dfs(node: Any) -> None:
         if node in visited:
             return
         visited.add(node)
         for neighbor, _ in graph.neighbors(node):
-            _dfs(neighbor)
-        result.append(node)
+            dfs(neighbor)
+        order.append(node)
 
-    for node in graph.nodes():
-        _dfs(node)
+    for node in graph.nodes:
+        dfs(node)
 
-    result.reverse()
-    return result
+    order.reverse()
+    return order
+
+
+def connected_components(graph: Graph) -> List[List[Any]]:
+    """Find connected components using BFS.
+
+    Args:
+        graph: Graph to analyze.
+
+    Returns:
+        List of component node lists.
+    """
+    visited: Set[Any] = set()
+    components: List[List[Any]] = []
+
+    for node in graph.nodes:
+        if node in visited:
+            continue
+        component = bfs(graph, node)
+        for c in component:
+            visited.add(c)
+        components.append(component)
+
+    return components
+
+
+def shortest_path(
+    graph: Graph,
+    start: Any,
+    end: Any,
+    algorithm: str = "dijkstra",
+) -> Optional[List[Any]]:
+    """Find shortest path between two nodes.
+
+    Args:
+        graph: Graph to search.
+        start: Start node.
+        end: End node.
+        algorithm: 'dijkstra' or 'astar'.
+
+    Returns:
+        Path as list of nodes, or None.
+    """
+    if algorithm == "astar":
+        dist, prev = dijkstra(graph, start, end)
+        if dist.get(end, math.inf) == math.inf:
+            return None
+        return reconstruct_path(prev, start, end)
+
+    dist, prev = dijkstra(graph, start, end)
+    if dist.get(end, math.inf) == math.inf:
+        return None
+    return reconstruct_path(prev, start, end)
