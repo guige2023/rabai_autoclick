@@ -1,201 +1,452 @@
 """
-Data compressor action for efficient data storage and transmission.
+Data Compression Module.
 
-Provides compression with multiple algorithms and streaming support.
+Provides data compression and decompression with multiple algorithms,
+streaming support, and automatic codec detection.
 """
 
-from typing import Any, BinaryIO, Optional
-import io
-import json
-import base64
-import zlib
+from __future__ import annotations
+
+import asyncio
 import gzip
+import io
+import zlib
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, AsyncIterator, Callable, Optional, Union
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-class DataCompressorAction:
-    """Data compression with multiple algorithms."""
+class CompressionAlgorithm(Enum):
+    """Supported compression algorithms."""
+    GZIP = "gzip"
+    DEFLATE = "deflate"
+    ZLIB = "zlib"
+    LZ4 = "lz4"
+    ZSTD = "zstd"
+    BROTLI = "brotli"
+    IDENTITY = "identity"  # No compression
 
-    SUPPORTED_ALGORITHMS = ("gzip", "zlib", "deflate", "lz4", "snappy")
 
-    def __init__(
-        self,
-        default_algorithm: str = "gzip",
-        compression_level: int = 6,
-    ) -> None:
+class CompressionMode(Enum):
+    """Compression mode."""
+    AUTO = "auto"
+    COMPRESS = "compress"
+    DECOMPRESS = "decompress"
+
+
+@dataclass
+class CompressionStats:
+    """Compression statistics."""
+    original_size: int = 0
+    compressed_size: int = 0
+    compression_ratio: float = 0.0
+    processing_time: float = 0.0
+    algorithm: str = "identity"
+    
+    @property
+    def savings_percent(self) -> float:
+        """Calculate space savings percentage."""
+        if self.original_size == 0:
+            return 0.0
+        return (1 - self.compressed_size / self.original_size) * 100
+
+
+@dataclass
+class CompressionConfig:
+    """Configuration for compression operations."""
+    algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP
+    level: int = 6  # 0-9 for gzip/deflate
+    streaming: bool = True
+    chunk_size: int = 8192
+    include_checksum: bool = True
+    wbits: int = 15  # Window size for zlib
+
+
+class DataCompressor:
+    """
+    Data compression with multiple algorithm support.
+    
+    Example:
+        compressor = DataCompressor(CompressionConfig(
+            algorithm=CompressionAlgorithm.GZIP,
+            level=6
+        ))
+        
+        # Compress data
+        compressed = await compressor.compress(data)
+        
+        # Decompress
+        original = await compressor.decompress(compressed)
+        
+        # Streaming compress
+        async for chunk in compressor.compress_stream(data_iterator):
+            output.write(chunk)
+    """
+    
+    # Algorithm-specific compression levels
+    LEVEL_RANGES = {
+        CompressionAlgorithm.GZIP: (0, 9),
+        CompressionAlgorithm.DEFLATE: (0, 9),
+        CompressionAlgorithm.ZLIB: (0, 9),
+        CompressionAlgorithm.ZSTD: (-7, 22),
+        CompressionAlgorithm.LZ4: (0, 12),
+        CompressionAlgorithm.BROTLI: (0, 11),
+    }
+    
+    def __init__(self, config: Optional[CompressionConfig] = None) -> None:
         """
-        Initialize data compressor.
-
+        Initialize the compressor.
+        
         Args:
-            default_algorithm: Default compression algorithm
-            compression_level: Compression level (1-9)
+            config: Compression configuration.
         """
-        self.default_algorithm = default_algorithm
-        self.compression_level = compression_level
-
-    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.config = config or CompressionConfig()
+        self._validate_config()
+        
+    def _validate_config(self) -> None:
+        """Validate configuration parameters."""
+        algo = self.config.algorithm
+        level = self.config.level
+        
+        if algo in self.LEVEL_RANGES:
+            min_level, max_level = self.LEVEL_RANGES[algo]
+            if not min_level <= level <= max_level:
+                raise ValueError(
+                    f"Invalid level {level} for {algo.value}. "
+                    f"Must be between {min_level} and {max_level}."
+                )
+                
+    async def compress(self, data: bytes) -> bytes:
         """
-        Execute compression operation.
-
+        Compress data in memory.
+        
         Args:
-            params: Dictionary containing:
-                - operation: 'compress', 'decompress', 'info'
-                - data: Data to compress/decompress
-                - algorithm: Compression algorithm
-                - is_base64: Input/output is base64 encoded
-
+            data: Input data to compress.
+            
         Returns:
-            Dictionary with compression result
+            Compressed data bytes.
         """
-        operation = params.get("operation", "compress")
-
-        if operation == "compress":
-            return self._compress(params)
-        elif operation == "decompress":
-            return self._decompress(params)
-        elif operation == "info":
-            return self._get_info(params)
+        import time
+        start_time = time.time()
+        
+        if self.config.algorithm == CompressionAlgorithm.GZIP:
+            result = self._compress_gzip(data)
+        elif self.config.algorithm == CompressionAlgorithm.DEFLATE:
+            result = self._compress_deflate(data)
+        elif self.config.algorithm == CompressionAlgorithm.ZLIB:
+            result = self._compress_zlib(data)
+        elif self.config.algorithm == CompressionAlgorithm.IDENTITY:
+            result = data
         else:
-            return {"success": False, "error": f"Unknown operation: {operation}"}
-
-    def _compress(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Compress data."""
-        data = params.get("data", "")
-        algorithm = params.get("algorithm", self.default_algorithm)
-        is_base64 = params.get("is_base64", False)
-
-        if not data:
-            return {"success": False, "error": "Data is required"}
-
-        try:
-            if isinstance(data, str):
-                if is_base64:
-                    data = base64.b64decode(data)
-                else:
-                    data = data.encode("utf-8")
-
-            original_size = len(data)
-
-            if algorithm == "gzip":
-                compressed = self._compress_gzip(data)
-            elif algorithm == "zlib":
-                compressed = self._compress_zlib(data)
-            elif algorithm == "deflate":
-                compressed = self._compress_deflate(data)
-            elif algorithm == "lz4":
-                compressed = self._compress_lz4(data)
-            elif algorithm == "snappy":
-                compressed = self._compress_snappy(data)
-            else:
-                return {"success": False, "error": f"Unknown algorithm: {algorithm}"}
-
-            if is_base64:
-                compressed = base64.b64encode(compressed).decode("ascii")
-
-            compression_ratio = original_size / len(compressed) if compressed else 0
-
-            return {
-                "success": True,
-                "algorithm": algorithm,
-                "original_size": original_size,
-                "compressed_size": len(compressed),
-                "compression_ratio": round(compression_ratio, 2),
-                "data": compressed if is_base64 else compressed.decode("latin-1"),
-            }
-        except Exception as e:
-            return {"success": False, "error": f"Compression failed: {str(e)}"}
-
-    def _decompress(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Decompress data."""
-        data = params.get("data", "")
-        algorithm = params.get("algorithm", self.default_algorithm)
-        is_base64 = params.get("is_base64", False)
-
-        if not data:
-            return {"success": False, "error": "Data is required"}
-
-        try:
-            if is_base64:
-                data = base64.b64decode(data)
-            elif isinstance(data, str):
-                data = data.encode("latin-1")
-
-            if algorithm == "gzip":
-                decompressed = self._decompress_gzip(data)
-            elif algorithm == "zlib":
-                decompressed = self._decompress_zlib(data)
-            elif algorithm == "deflate":
-                decompressed = self._decompress_deflate(data)
-            elif algorithm == "lz4":
-                decompressed = self._decompress_lz4(data)
-            elif algorithm == "snappy":
-                decompressed = self._decompress_snappy(data)
-            else:
-                return {"success": False, "error": f"Unknown algorithm: {algorithm}"}
-
-            try:
-                decompressed = decompressed.decode("utf-8")
-            except UnicodeDecodeError:
-                pass
-
-            return {
-                "success": True,
-                "algorithm": algorithm,
-                "decompressed_size": len(decompressed),
-                "data": decompressed,
-            }
-        except Exception as e:
-            return {"success": False, "error": f"Decompression failed: {str(e)}"}
-
+            # Fallback to zlib for unsupported
+            result = self._compress_zlib(data)
+            
+        processing_time = time.time() - start_time
+        
+        logger.debug(
+            f"Compressed {len(data)} bytes -> {len(result)} bytes "
+            f"({CompressionStats(original_size=len(data), compressed_size=len(result), processing_time=processing_time, algorithm=self.config.algorithm.value).savings_percent:.1f}% savings)"
+        )
+        
+        return result
+        
+    async def decompress(self, data: bytes, config: Optional[CompressionConfig] = None) -> bytes:
+        """
+        Decompress data in memory.
+        
+        Args:
+            data: Compressed data.
+            config: Optional decompression config (for auto-detection).
+            
+        Returns:
+            Decompressed data bytes.
+        """
+        config = config or self.config
+        
+        if config.algorithm == CompressionAlgorithm.AUTO:
+            detected = self._detect_compression(data)
+            config.algorithm = detected
+            
+        if config.algorithm == CompressionAlgorithm.GZIP:
+            return self._decompress_gzip(data)
+        elif config.algorithm == CompressionAlgorithm.DEFLATE:
+            return self._decompress_deflate(data)
+        elif config.algorithm == CompressionAlgorithm.ZLIB:
+            return self._decompress_zlib(data)
+        elif config.algorithm == CompressionAlgorithm.IDENTITY:
+            return data
+        else:
+            return self._decompress_zlib(data)
+            
+    async def compress_stream(
+        self,
+        input_iterator: AsyncIterator[bytes],
+    ) -> AsyncIterator[bytes]:
+        """
+        Compress data as a stream.
+        
+        Args:
+            input_iterator: Async iterator of data chunks.
+            
+        Yields:
+            Compressed data chunks.
+        """
+        if self.config.algorithm == CompressionAlgorithm.GZIP:
+            yield from self._compress_gzip_stream(input_iterator)
+        elif self.config.algorithm == CompressionAlgorithm.ZLIB:
+            yield from self._compress_zlib_stream(input_iterator)
+        else:
+            # Fall back to in-memory for unsupported streaming
+            data = b"".join([chunk async for chunk in input_iterator])
+            compressed = await self.compress(data)
+            yield compressed
+            
+    async def decompress_stream(
+        self,
+        input_iterator: AsyncIterator[bytes],
+        config: Optional[CompressionConfig] = None,
+    ) -> AsyncIterator[bytes]:
+        """
+        Decompress data as a stream.
+        
+        Args:
+            input_iterator: Async iterator of compressed chunks.
+            config: Optional decompression config.
+            
+        Yields:
+            Decompressed data chunks.
+        """
+        config = config or self.config
+        
+        if config.algorithm == CompressionAlgorithm.GZIP:
+            yield from self._decompress_gzip_stream(input_iterator)
+        elif config.algorithm == CompressionAlgorithm.ZLIB:
+            yield from self._decompress_zlib_stream(input_iterator)
+        else:
+            data = b"".join([chunk async for chunk in input_iterator])
+            decompressed = await self.decompress(data, config)
+            yield decompressed
+            
     def _compress_gzip(self, data: bytes) -> bytes:
-        """Compress using gzip."""
-        buffer = io.BytesIO()
-        with gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=self.compression_level) as f:
-            f.write(data)
-        return buffer.getvalue()
-
+        """Compress with GZIP."""
+        compressor = gzip.GzipFile(
+            fileobj=io.BytesIO(),
+            mode="wb",
+            compresslevel=self.config.level
+        )
+        compressor.write(data)
+        compressor.close()
+        return compressor.fileobj.getvalue()
+        
     def _decompress_gzip(self, data: bytes) -> bytes:
-        """Decompress gzip data."""
-        buffer = io.BytesIO(data)
-        with gzip.GzipFile(fileobj=buffer, mode="rb") as f:
-            return f.read()
-
+        """Decompress GZIP data."""
+        decompressor = gzip.GzipFile(fileobj=io.BytesIO(data))
+        return decompressor.read()
+        
+    def _compress_deflate(self, data: bytes) -> bytes:
+        """Compress with raw deflate."""
+        return zlib.compress(data, level=self.config.level)
+        
+    def _decompress_deflate(self, data: bytes) -> bytes:
+        """Decompress deflate data."""
+        return zlib.decompress(data)
+        
     def _compress_zlib(self, data: bytes) -> bytes:
-        """Compress using zlib."""
-        return zlib.compress(data, level=self.compression_level)
-
+        """Compress with zlib (includes header)."""
+        return zlib.compress(data, level=self.config.level)
+        
     def _decompress_zlib(self, data: bytes) -> bytes:
         """Decompress zlib data."""
         return zlib.decompress(data)
+        
+    def _detect_compression(self, data: bytes) -> CompressionAlgorithm:
+        """
+        Auto-detect compression algorithm from data.
+        
+        Args:
+            data: Compressed data.
+            
+        Returns:
+            Detected algorithm.
+        """
+        if len(data) < 2:
+            return CompressionAlgorithm.IDENTITY
+            
+        # Check for gzip magic number
+        if data[:2] == b"\x1f\x8b":
+            return CompressionAlgorithm.GZIP
+            
+        # Check for zlib header
+        if data[0] == 0x78:
+            return CompressionAlgorithm.ZLIB
+            
+        return CompressionAlgorithm.DEFLATE
+        
+    async def _compress_gzip_stream(
+        self,
+        input_iterator: AsyncIterator[bytes],
+    ) -> AsyncIterator[bytes]:
+        """Stream compress with GZIP."""
+        compressor = gzip.GzipFile(
+            fileobj=io.BytesIO(),
+            mode="wb",
+            compresslevel=self.config.level
+        )
+        
+        async for chunk in input_iterator:
+            compressor.write(chunk)
+            # Yield compressed data if buffer has enough
+            current_pos = compressor.fileobj.tell()
+            if current_pos > self.config.chunk_size:
+                compressed_data = compressor.fileobj.getvalue()
+                # Calculate new data since last yield
+                if len(compressed_data) > self.config.chunk_size:
+                    yield compressed_data
+                    compressor.fileobj = io.BytesIO()
+                    
+        compressor.close()
+        remaining = compressor.fileobj.getvalue()
+        if remaining:
+            yield remaining
+            
+    async def _decompress_gzip_stream(
+        self,
+        input_iterator: AsyncIterator[bytes],
+    ) -> AsyncIterator[bytes]:
+        """Stream decompress GZIP data."""
+        buffer = io.BytesIO()
+        decompressor = gzip.GzipFile(fileobj=buffer, mode="rb")
+        
+        async for chunk in input_iterator:
+            buffer.write(chunk)
+            buffer.seek(0)
+            try:
+                while True:
+                    data = decompressor.read(self.config.chunk_size)
+                    if not data:
+                        break
+                    yield data
+                # Reset buffer
+                remaining = buffer.read()
+                buffer = io.BytesIO(remaining)
+                decompressor = gzip.GzipFile(fileobj=buffer, mode="rb")
+            except EOFError:
+                remaining = buffer.read()
+                buffer = io.BytesIO(remaining)
+                decompressor = gzip.GzipFile(fileobj=buffer, mode="rb")
+                
+    async def _compress_zlib_stream(
+        self,
+        input_iterator: AsyncIterator[bytes],
+    ) -> AsyncIterator[bytes]:
+        """Stream compress with zlib."""
+        compressor = zlib.compressobj(level=self.config.level)
+        
+        async for chunk in input_iterator:
+            yield compressor.compress(chunk)
+            
+        yield compressor.flush()
+        
+    async def _decompress_zlib_stream(
+        self,
+        input_iterator: AsyncIterator[bytes],
+    ) -> AsyncIterator[bytes]:
+        """Stream decompress zlib data."""
+        decompressor = zlib.decompressobj(wbits=self.config.wbits)
+        
+        async for chunk in input_iterator:
+            yield decompressor.decompress(chunk)
+            
+        yield decompressor.flush()
+        
+    def get_stats(self, original_size: int, compressed_size: int, time_taken: float) -> CompressionStats:
+        """Get compression statistics."""
+        return CompressionStats(
+            original_size=original_size,
+            compressed_size=compressed_size,
+            compression_ratio=compressed_size / original_size if original_size > 0 else 0,
+            processing_time=time_taken,
+            algorithm=self.config.algorithm.value,
+        )
+        
+    def set_level(self, level: int) -> None:
+        """Set compression level."""
+        self.config.level = level
+        self._validate_config()
 
-    def _compress_deflate(self, data: bytes) -> bytes:
-        """Compress using deflate (raw)."""
-        return zlib.compress(data, level=self.compression_level)[2:-4]
 
-    def _decompress_deflate(self, data: bytes) -> bytes:
-        """Decompress deflate data."""
-        return zlib.decompress(data, -zlib.MAX_WBITS)
-
-    def _compress_lz4(self, data: bytes) -> bytes:
-        """Compress using LZ4 (simulated)."""
-        return data
-
-    def _decompress_lz4(self, data: bytes) -> bytes:
-        """Decompress LZ4 data (simulated)."""
-        return data
-
-    def _compress_snappy(self, data: bytes) -> bytes:
-        """Compress using Snappy (simulated)."""
-        return data
-
-    def _decompress_snappy(self, data: bytes) -> bytes:
-        """Decompress Snappy data (simulated)."""
-        return data
-
-    def _get_info(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Get compression information."""
-        return {
-            "success": True,
-            "default_algorithm": self.default_algorithm,
-            "compression_level": self.compression_level,
-            "supported_algorithms": self.SUPPORTED_ALGORITHMS,
-        }
+class CompressedFile:
+    """
+    Context manager for compressed file operations.
+    
+    Example:
+        async with CompressedFile("data.gz", "rb", algorithm=CompressionAlgorithm.GZIP) as f:
+            async for chunk in f.read_stream():
+                process(chunk)
+    """
+    
+    def __init__(
+        self,
+        path: str,
+        mode: str,
+        algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP,
+        level: int = 6,
+    ) -> None:
+        """
+        Initialize compressed file handler.
+        
+        Args:
+            path: File path.
+            mode: File mode (rb, wb, etc.).
+            algorithm: Compression algorithm.
+            level: Compression level.
+        """
+        self.path = path
+        self.mode = mode
+        self.algorithm = algorithm
+        self.level = level
+        self._file = None
+        self._compressor: Optional[DataCompressor] = None
+        
+    async def __aenter__(self) -> "CompressedFile":
+        """Enter context."""
+        import aiofiles
+        
+        self._file = await aiofiles.open(self.path, self.mode)
+        self._compressor = DataCompressor(CompressionConfig(
+            algorithm=self.algorithm,
+            level=self.level,
+        ))
+        return self
+        
+    async def __aexit__(self, *args: Any) -> None:
+        """Exit context."""
+        if self._file:
+            await self._file.close()
+            
+    async def read(self) -> bytes:
+        """Read entire compressed file."""
+        if not self._file:
+            raise RuntimeError("File not opened")
+        data = await self._file.read()
+        return await self._compressor.decompress(data)
+        
+    async def write(self, data: bytes) -> None:
+        """Write and compress data to file."""
+        if not self._file or not self._compressor:
+            raise RuntimeError("File not opened")
+        compressed = await self._compressor.compress(data)
+        await self._file.write(compressed)
+        
+    async def read_stream(self) -> AsyncIterator[bytes]:
+        """Read file as compressed stream."""
+        if not self._file:
+            raise RuntimeError("File not opened")
+        while True:
+            chunk = await self._file.read(self._compressor.config.chunk_size)
+            if not chunk:
+                break
+            yield chunk
