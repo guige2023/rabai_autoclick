@@ -1,324 +1,572 @@
-"""
-Data Stream Action Module.
+"""Data Stream Processing Action Module.
 
-Stream processing utilities for automation including filtering,
-transformation, windowing, and aggregation over data streams.
+Provides real-time data stream processing capabilities including
+windowing, aggregation, filtering, and transformation of event streams.
 
-MIT License - Copyright (c) 2025 RabAi Research
+Example:
+    >>> from actions.data.data_stream_action import DataStreamProcessor
+    >>> processor = DataStreamProcessor()
+    >>> await processor.process_stream(source, sink)
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
-from collections import deque
+import time
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Deque, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Generic
+import threading
 
-logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
-T_out = TypeVar("T_out")
+T = TypeVar('T')
 
 
 class WindowType(Enum):
-    """Window types for stream processing."""
-    TUMBLING = "tumbling"    # Fixed-size, non-overlapping
-    SLIDING = "sliding"      # Fixed-size, overlapping
-    SESSION = "session"      # Session-based windows
+    """Stream window types."""
+    TUMBLING = "tumbling"
+    SLIDING = "sliding"
+    SESSION = "session"
+    COUNT = "count"
+    GLOBAL = "global"
+
+
+class StreamStatus(Enum):
+    """Status of a stream processor."""
+    IDLE = "idle"
+    RUNNING = "running"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    ERROR = "error"
+
+
+@dataclass
+class StreamEvent:
+    """Represents a stream event.
+    
+    Attributes:
+        event_id: Unique event identifier
+        timestamp: Event timestamp
+        data: Event payload
+        key: Optional partitioning key
+        metadata: Additional event metadata
+    """
+    event_id: str
+    timestamp: datetime
+    data: Any
+    key: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class Window:
-    """A data window in a stream."""
+    """Represents a stream processing window.
+    
+    Attributes:
+        window_id: Unique window identifier
+        window_type: Type of window
+        start_time: Window start timestamp
+        end_time: Window end timestamp
+        events: Events in this window
+        state: Window state data
+    """
     window_id: str
     window_type: WindowType
-    start_time: float
-    end_time: float
-    items: List[Any] = field(default_factory=list)
+    start_time: datetime
+    end_time: datetime
+    events: List[StreamEvent] = field(default_factory=list)
+    state: Dict[str, Any] = field(default_factory=dict)
 
-    @property
-    def size(self) -> int:
-        """Number of items in window."""
-        return len(self.items)
 
-    @property
-    def duration_seconds(self) -> float:
-        """Duration of the window in seconds."""
-        return self.end_time - self.start_time
+@dataclass
+class WindowResult:
+    """Result of processing a window.
+    
+    Attributes:
+        window_id: Window identifier
+        window_type: Type of window
+        event_count: Number of events processed
+        result: Aggregation/transformation result
+        duration: Processing duration
+        errors: Any errors during processing
+    """
+    window_id: str
+    window_type: WindowType
+    event_count: int = 0
+    result: Any = None
+    duration: float = 0.0
+    errors: List[str] = field(default_factory=list)
 
 
 @dataclass
 class StreamConfig:
-    """Configuration for stream processing."""
-    name: str
-    buffer_size: int = 1000
-    window_size_seconds: float = 60.0
+    """Configuration for stream processing.
+    
+    Attributes:
+        window_type: Type of window to use
+        window_size: Window size in seconds (or count for COUNT window)
+        window_slide: Slide interval for sliding windows
+        session_gap: Gap for session windows
+        max_window_size: Maximum events in a window (for COUNT type)
+        enable_watermarks: Whether to use watermarks for late events
+        watermark_threshold: Late event threshold in seconds
+        buffer_size: Event buffer size
+    """
     window_type: WindowType = WindowType.TUMBLING
-    slide_seconds: float = 10.0
+    window_size: float = 60.0
+    window_slide: float = 30.0
+    session_gap: float = 5.0
+    max_window_size: int = 1000
+    enable_watermarks: bool = True
+    watermark_threshold: float = 10.0
+    buffer_size: int = 10000
 
 
-class StreamWindowManager(Generic[T]):
-    """Manages windows for stream data."""
+@dataclass
+class StreamMetrics:
+    """Stream processing metrics.
+    
+    Attributes:
+        total_events: Total events processed
+        total_windows: Total windows processed
+        windows_by_type: Window counts by type
+        avg_latency: Average event processing latency
+        throughput: Events per second
+        error_count: Number of processing errors
+    """
+    total_events: int = 0
+    total_windows: int = 0
+    windows_by_type: Dict[str, int] = field(default_factory=dict)
+    avg_latency: float = 0.0
+    throughput: float = 0.0
+    error_count: int = 0
 
-    def __init__(
+
+class DataStreamProcessor:
+    """Handles real-time data stream processing.
+    
+    Provides windowed stream processing with support for
+    various window types and aggregation operations.
+    
+    Attributes:
+        config: Stream processing configuration
+    
+    Example:
+        >>> processor = DataStreamProcessor()
+        >>> processor.add_aggregation("avg", my_aggregator)
+        >>> await processor.process_stream(events, output)
+    """
+    
+    def __init__(self, config: Optional[StreamConfig] = None):
+        """Initialize the stream processor.
+        
+        Args:
+            config: Stream configuration. Uses defaults if not provided.
+        """
+        self.config = config or StreamConfig()
+        self._windows: Dict[str, Window] = {}
+        self._event_buffer: deque = deque(maxlen=self.config.buffer_size)
+        self._aggregations: Dict[str, Callable] = {}
+        self._filters: List[Callable[[StreamEvent], bool]] = []
+        self._transformers: List[Callable[[StreamEvent], StreamEvent]] = []
+        self._status = StreamStatus.IDLE
+        self._metrics = StreamMetrics()
+        self._lock = threading.RLock()
+        self._window_counter = 0
+        self._event_counter = 0
+        self._processing_task: Optional[asyncio.Task] = None
+        self._last_metrics_update = time.time()
+        self._latency_sum = 0.0
+        self._latency_count = 0
+    
+    def add_filter(self, filter_fn: Callable[[StreamEvent], bool]) -> None:
+        """Add an event filter.
+        
+        Args:
+            filter_fn: Function that returns True to keep the event
+        """
+        with self._lock:
+            self._filters.append(filter_fn)
+    
+    def add_transformer(self, transformer_fn: Callable[[StreamEvent], StreamEvent]) -> None:
+        """Add an event transformer.
+        
+        Args:
+            transformer_fn: Function to transform events
+        """
+        with self._lock:
+            self._transformers.append(transformer_fn)
+    
+    def add_aggregation(self, name: str, agg_fn: Callable[[List[StreamEvent]], Any]) -> None:
+        """Add a named aggregation function.
+        
+        Args:
+            name: Aggregation name
+            agg_fn: Function that takes a list of events and returns aggregated result
+        """
+        with self._lock:
+            self._aggregations[name] = agg_fn
+    
+    async def process_stream(
         self,
-        window_size_seconds: float,
-        window_type: WindowType = WindowType.TUMBLING,
-        slide_seconds: float = 10.0,
+        source: Any,  # Async iterable of events
+            sink: Callable[[WindowResult], Any],
+            window_id: Optional[str] = None
     ) -> None:
-        self.window_size_seconds = window_size_seconds
-        self.window_type = window_type
-        self.slide_seconds = slide_seconds
-        self._windows: Deque[Window] = deque(maxlen=1000)
-        self._current_window_start: Optional[float] = None
-
-    def add_item(self, item: T, timestamp: float) -> List[Window]:
-        """Add an item to the stream, creating/closing windows as needed."""
-        new_windows: List[Window] = []
-
-        # Initialize first window
-        if self._current_window_start is None:
-            self._current_window_start = timestamp
-
-        if self.window_type == WindowType.TUMBLING:
-            # Tumbling: close window when full
-            window_end = self._current_window_start + self.window_size_seconds
-            if timestamp >= window_end:
-                # Close current window
-                window = Window(
-                    window_id=f"w-{int(self._current_window_start)}",
-                    window_type=self.window_type,
-                    start_time=self._current_window_start,
-                    end_time=window_end,
-                )
-                self._windows.append(window)
-                new_windows.append(window)
-                self._current_window_start = timestamp
-
-            # Start new window if needed
-            if self._current_window_start == timestamp or not self._windows:
-                if not new_windows:
-                    self._current_window_start = timestamp
-
-        elif self.window_type == WindowType.SLIDING:
-            # Sliding: create windows at slide intervals
-            while self._current_window_start + self.window_size_seconds <= timestamp:
-                window = Window(
-                    window_id=f"w-{int(self._current_window_start)}",
-                    window_type=self.window_type,
-                    start_time=self._current_window_start,
-                    end_time=self._current_window_start + self.window_size_seconds,
-                )
-                self._windows.append(window)
-                new_windows.append(window)
-                self._current_window_start += self.slide_seconds
-
-        return new_windows
-
-    def get_active_window(self) -> Optional[Window]:
-        """Get the most recent (active) window."""
-        return self._windows[-1] if self._windows else None
-
-    def get_windows(self) -> List[Window]:
-        """Get all windows."""
-        return list(self._windows)
-
-
-class StreamProcessor(Generic[T]):
-    """
-    Processes data streams with filtering, transformation, and aggregation.
-
-    Example:
-        processor = StreamProcessor[str](name="events")
-
-        processor.add_filter(lambda x: x.startswith("error"))
-        processor.add_transform(lambda x: x.upper())
-        processor.add_aggregate(lambda items: len(items), window_size_seconds=60)
-
-        async for result in processor.stream(source):
-            print(f"60s count: {result}")
-    """
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self._filters: List[Callable[[T], bool]] = []
-        self._transformers: List[Callable[[T], Any]] = []
-        self._aggregates: Dict[str, Callable[[List[T]], Any]] = {}
-        self._buffer: Deque[T] = deque(maxlen=10000)
-
-    def add_filter(self, fn: Callable[[T], bool]) -> "StreamProcessor[T]":
-        """Add a filter function to the pipeline."""
-        self._filters.append(fn)
-        return self
-
-    def add_transform(
-        self,
-        fn: Callable[[T], T_out],
-    ) -> "StreamProcessor[T_out]":
-        """Add a transformation function to the pipeline."""
-        # Return a new processor with the correct type
-        new_proc = StreamProcessor[T_out](self.name)
-        new_proc._filters = self._filters.copy()
-        new_proc._transformers = self._transformers.copy() + [fn]
-        new_proc._aggregates = self._aggregates.copy()
-        return new_proc
-
-    def add_aggregate(
-        self,
-        name: str,
-        fn: Callable[[List[T]], Any],
-    ) -> "StreamProcessor[T]":
-        """Add an aggregation function."""
-        self._aggregates[name] = fn
-        return self
-
-    def process(self, item: T) -> Optional[Any]:
-        """Process a single item through the pipeline."""
-        # Apply filters
-        for f in self._filters:
-            if not f(item):
-                return None
-
-        # Apply transformers
-        result = item
-        for t in self._transformers:
-            result = t(result)
-
-        self._buffer.append(result)
+        """Process an event stream.
+        
+        Args:
+            source: Async iterable producing StreamEvent objects
+            sink: Async function to receive WindowResult objects
+            window_id: Optional identifier for this stream
+        """
+        self._status = StreamStatus.RUNNING
+        
+        try:
+            async for event in self._wrap_source(source):
+                processed = self._apply_transformers(event)
+                
+                if self._should_drop(processed):
+                    continue
+                
+                self._emit_to_window(processed)
+                
+                # Process completed windows
+                completed = self._get_completed_windows()
+                for window in completed:
+                    result = await self._process_window(window)
+                    await sink(result)
+                    self._remove_window(window.window_id)
+            
+            # Process any remaining windows
+            remaining = self._get_all_windows()
+            for window in remaining:
+                result = await self._process_window(window)
+                await sink(result)
+                self._remove_window(window.window_id)
+        
+        except Exception as e:
+            self._status = StreamStatus.ERROR
+            raise
+        finally:
+            self._status = StreamStatus.STOPPED
+    
+    async def _wrap_source(self, source: Any) -> AsyncIterator[StreamEvent]:
+        """Wrap an async source into an async iterator.
+        
+        Args:
+            source: Async iterable
+        
+        Yields:
+            StreamEvent objects
+        """
+        if hasattr(source, '__anext__'):
+            # Already an async iterator
+            async for event in source:
+                yield event
+        else:
+            # Sync iterable - wrap in async
+            for event in source:
+                if isinstance(event, StreamEvent):
+                    yield event
+                else:
+                    yield self._create_event_from_data(event)
+    
+    def _create_event_from_data(self, data: Any) -> StreamEvent:
+        """Create a StreamEvent from raw data.
+        
+        Args:
+            data: Raw event data
+        
+        Returns:
+            StreamEvent
+        """
+        self._event_counter += 1
+        
+        if isinstance(data, dict):
+            return StreamEvent(
+                event_id=data.get("event_id", f"evt_{self._event_counter}"),
+                timestamp=datetime.fromisoformat(data.get("timestamp", datetime.now().isoformat())),
+                data=data.get("data", data),
+                key=data.get("key"),
+                metadata=data.get("metadata", {})
+            )
+        
+        return StreamEvent(
+            event_id=f"evt_{self._event_counter}",
+            timestamp=datetime.now(),
+            data=data
+        )
+    
+    def _should_drop(self, event: StreamEvent) -> bool:
+        """Check if an event should be dropped.
+        
+        Args:
+            event: Event to check
+        
+        Returns:
+            True if event should be dropped
+        """
+        for filter_fn in self._filters:
+            if not filter_fn(event):
+                return True
+        return False
+    
+    def _apply_transformers(self, event: StreamEvent) -> StreamEvent:
+        """Apply all transformers to an event.
+        
+        Args:
+            event: Event to transform
+        
+        Returns:
+            Transformed event
+        """
+        result = event
+        for transformer in self._transformers:
+            result = transformer(result)
+            if result is None:
+                return event  # Transformer dropped the event
         return result
-
-    def get_aggregate_results(self) -> Dict[str, Any]:
-        """Get results of all aggregations."""
-        items = list(self._buffer)
-        return {name: fn(items) for name, fn in self._aggregates.items()}
-
-    def clear(self) -> None:
-        """Clear the buffer."""
-        self._buffer.clear()
-
-
-class DataStreamAction:
-    """
-    Unified stream processing action for automation.
-
-    Provides stream creation, window management, and async iteration
-    over data streams with full pipeline support.
-
-    Example:
-        stream = DataStreamAction(name="metrics")
-
-        async for window in stream.tumbling_window(data_source, size_seconds=60):
-            avg = sum(window.items) / len(window.items)
-            print(f"60s average: {avg}")
-    """
-
-    def __init__(self, name: str = "stream") -> None:
-        self.name = name
-        self._processors: Dict[str, StreamProcessor] = {}
-
-    def create_processor(
-        self,
-        name: str,
-    ) -> StreamProcessor:
-        """Create a named stream processor."""
-        proc = StreamProcessor(name)
-        self._processors[name] = proc
-        return proc
-
-    def get_processor(self, name: str) -> Optional[StreamProcessor]:
-        """Get a named processor."""
-        return self._processors.get(name)
-
-    async def tumbling_window(
-        self,
-        source: Callable[[], Any],
-        size_seconds: float = 60.0,
-        max_items: int = 10000,
-    ) -> Any:
+    
+    def _emit_to_window(self, event: StreamEvent) -> None:
+        """Add an event to the appropriate window.
+        
+        Args:
+            event: Event to add
         """
-        Generate tumbling windows over a data source.
-
-        A tumbling window has fixed size and does not overlap.
+        with self._lock:
+            window_key = event.key or "_global"
+            window_id = self._get_or_create_window(window_key)
+            window = self._windows[window_id]
+            
+            window.events.append(event)
+            
+            # Update watermark
+            if self.config.enable_watermarks:
+                event_time = event.timestamp.timestamp()
+                current_watermark = window.state.get("_watermark", event_time)
+                window.state["_watermark"] = min(current_watermark, event_time)
+            
+            # Check for count-based window close
+            if self.config.window_type == WindowType.COUNT:
+                if len(window.events) >= self.config.max_window_size:
+                    window.end_time = datetime.now()
+    
+    def _get_or_create_window(self, key: str) -> str:
+        """Get or create a window for a key.
+        
+        Args:
+            key: Partitioning key
+        
+        Returns:
+            Window ID
         """
-        manager = StreamWindowManager(
-            window_size_seconds=size_seconds,
-            window_type=WindowType.TUMBLING,
+        window_key = f"{key}_{self.config.window_type.value}"
+        
+        if window_key in self._windows:
+            window = self._windows[window_key]
+            
+            # Check if window should be closed
+            if self._should_close_window(window):
+                self._window_counter += 1
+                new_id = f"window_{self._window_counter}_{int(time.time() * 1000)}"
+                window = self._create_window(new_id, key)
+                self._windows[new_id] = window
+                window_key = new_id
+            else:
+                return window_key
+        else:
+            self._window_counter += 1
+            window_id = f"window_{self._window_counter}_{int(time.time() * 1000)}"
+            window = self._create_window(window_id, key)
+            self._windows[window_id] = window
+            window_key = window_id
+        
+        return window_key
+    
+    def _create_window(self, window_id: str, key: str) -> Window:
+        """Create a new window.
+        
+        Args:
+            window_id: Window identifier
+            key: Partitioning key
+        
+        Returns:
+            Created window
+        """
+        now = datetime.now()
+        delta = timedelta(seconds=self.config.window_size)
+        
+        return Window(
+            window_id=window_id,
+            window_type=self.config.window_type,
+            start_time=now,
+            end_time=now + delta,
+            events=[],
+            state={"_key": key, "_watermark": now.timestamp()}
         )
-        buffer: Deque[Any] = deque(maxlen=max_items)
-        import time
-
-        while True:
-            try:
-                item = source()
-                timestamp = time.time()
-                manager.add_item(item, timestamp)
-                buffer.append(item)
-
-                active = manager.get_active_window()
-                if active:
-                    yield active
-
-            except Exception as e:
-                logger.error(f"Stream error: {e}")
-                break
-
-            await asyncio.sleep(0.01)
-
-    async def sliding_window(
-        self,
-        data: List[T],
-        size_seconds: float = 60.0,
-        slide_seconds: float = 10.0,
-    ) -> Any:
+    
+    def _should_close_window(self, window: Window) -> bool:
+        """Check if a window should be closed.
+        
+        Args:
+            window: Window to check
+        
+        Returns:
+            True if window should be closed
         """
-        Generate sliding windows over a data list.
+        if window.end_time is not None:
+            return datetime.now() >= window.end_time
+        
+        if self.config.window_type == WindowType.COUNT:
+            return len(window.events) >= self.config.max_window_size
+        
+        return False
+    
+    def _get_completed_windows(self) -> List[Window]:
+        """Get all windows that should be processed.
+        
+        Returns:
+            List of completed windows
         """
-        manager = StreamWindowManager(
-            window_size_seconds=size_seconds,
-            window_type=WindowType.SLIDING,
-            slide_seconds=slide_seconds,
+        completed = []
+        
+        for window in self._windows.values():
+            if self._should_close_window(window):
+                completed.append(window)
+        
+        return completed
+    
+    def _get_all_windows(self) -> List[Window]:
+        """Get all remaining windows.
+        
+        Returns:
+            List of all windows
+        """
+        return list(self._windows.values())
+    
+    def _remove_window(self, window_id: str) -> None:
+        """Remove a window.
+        
+        Args:
+            window_id: Window to remove
+        """
+        with self._lock:
+            if window_id in self._windows:
+                del self._windows[window_id]
+    
+    async def _process_window(self, window: Window) -> WindowResult:
+        """Process a completed window.
+        
+        Args:
+            window: Window to process
+        
+        Returns:
+            WindowResult
+        """
+        start_time = time.time()
+        result = WindowResult(
+            window_id=window.window_id,
+            window_type=window.window_type,
+            event_count=len(window.events)
         )
-        import time
+        
+        try:
+            if not window.events:
+                return result
+            
+            # Apply aggregations
+            agg_results = {}
+            for name, agg_fn in self._aggregations.items():
+                try:
+                    agg_results[name] = agg_fn(window.events)
+                except Exception as e:
+                    result.errors.append(f"Aggregation '{name}' error: {str(e)}")
+            
+            result.result = agg_results if agg_results else window.events[-1].data
+        
+        except Exception as e:
+            result.errors.append(f"Window processing error: {str(e)}")
+        
+        result.duration = time.time() - start_time
+        
+        # Update metrics
+        with self._lock:
+            self._metrics.total_windows += 1
+            window_type_key = window.window_type.value
+            self._metrics.windows_by_type[window_type_key] = (
+                self._metrics.windows_by_type.get(window_type_key, 0) + 1
+            )
+        
+        return result
+    
+    def _update_latency_metrics(self, latency: float) -> None:
+        """Update latency metrics.
+        
+        Args:
+            latency: Event processing latency
+        """
+        self._latency_sum += latency
+        self._latency_count += 1
+        self._metrics.avg_latency = self._latency_sum / self._latency_count
+        
+        # Calculate throughput
+        elapsed = time.time() - self._last_metrics_update
+        if elapsed >= 1.0:
+            self._metrics.throughput = self._metrics.total_events / elapsed
+            self._last_metrics_update = time.time()
+    
+    def pause(self) -> None:
+        """Pause stream processing."""
+        with self._lock:
+            self._status = StreamStatus.PAUSED
+    
+    def resume(self) -> None:
+        """Resume stream processing."""
+        with self._lock:
+            self._status = StreamStatus.RUNNING
+    
+    def stop(self) -> None:
+        """Stop stream processing."""
+        with self._lock:
+            self._status = StreamStatus.STOPPED
+            if self._processing_task:
+                self._processing_task.cancel()
+    
+    def get_status(self) -> StreamStatus:
+        """Get current processing status.
+        
+        Returns:
+            StreamStatus
+        """
+        with self._lock:
+            return self._status
+    
+    def get_metrics(self) -> StreamMetrics:
+        """Get current processing metrics.
+        
+        Returns:
+            StreamMetrics
+        """
+        with self._lock:
+            return StreamMetrics(
+                total_events=self._metrics.total_events,
+                total_windows=self._metrics.total_windows,
+                windows_by_type=dict(self._metrics.windows_by_type),
+                avg_latency=self._metrics.avg_latency,
+                throughput=self._metrics.throughput,
+                error_count=self._metrics.error_count
+            )
+    
+    def clear_state(self) -> None:
+        """Clear all windows and buffers."""
+        with self._lock:
+            self._windows.clear()
+            self._event_buffer.clear()
+            self._metrics = StreamMetrics()
 
-        for item in data:
-            manager.add_item(item, time.time())
-            active = manager.get_active_window()
-            if active:
-                yield active
 
-    async def windowed_aggregate(
-        self,
-        data: List[T],
-        size_seconds: float,
-        agg_fn: Callable[[List[T]], Any],
-    ) -> Dict[str, Any]:
-        """Aggregate data over time-based windows."""
-        manager = StreamWindowManager(
-            window_size_seconds=size_seconds,
-            window_type=WindowType.TUMBLING,
-        )
-        results = {}
-        import time
-
-        for item in data:
-            manager.add_item(item, time.time())
-
-        for window in manager.get_windows():
-            window_items = [i for i in data if window.start_time <= i]
-            results[window.window_id] = agg_fn(window_items)
-
-        return results
-
-    def count_stream(
-        self,
-        data: List[T],
-        key_fn: Callable[[T], str],
-    ) -> Dict[str, int]:
-        """Count occurrences by key in a stream."""
-        counts: Dict[str, int] = {}
-        for item in data:
-            key = key_fn(item)
-            counts[key] = counts.get(key, 0) + 1
-        return counts
+# Type alias for async iterator
+from typing import AsyncIterator
