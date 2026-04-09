@@ -1,291 +1,266 @@
-"""
-Data Validator Action Module.
+"""Data Validator Action Module.
 
-Provides comprehensive data validation with schema support,
- custom validators, and detailed error reporting.
+Provides data validation with support for schemas, type checking,
+range validation, and custom validation rules.
 """
 
 from __future__ import annotations
 
-import re
-from typing import Any, Callable, Optional, Type, Union
-from dataclasses import dataclass, field
-from enum import Enum
 import logging
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, Type, Union
 
 logger = logging.getLogger(__name__)
 
 
 class ValidationType(Enum):
-    """Type of validation to perform."""
-    REQUIRED = "required"
     TYPE = "type"
-    RANGE = "range"
-    LENGTH = "length"
+    REQUIRED = "required"
+    MIN = "min"
+    MAX = "max"
+    MIN_LENGTH = "min_length"
+    MAX_LENGTH = "max_length"
     PATTERN = "pattern"
     ENUM = "enum"
     CUSTOM = "custom"
-    SCHEMA = "schema"
-
-
-@dataclass
-class ValidationRule:
-    """A single validation rule."""
-    field: str
-    validation_type: ValidationType
-    rule_value: Any = None
-    error_message: Optional[str] = None
-    severity: str = "error"
 
 
 @dataclass
 class ValidationError:
-    """A single validation error."""
     field: str
+    validation_type: ValidationType
     message: str
     value: Any = None
-    severity: str = "error"
+    expected: Any = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class ValidationResult:
-    """Result of validation."""
     valid: bool
-    errors: list[ValidationError] = field(default_factory=list)
-    warnings: list[ValidationError] = field(default_factory=list)
-    validated_at: Optional[str] = None
+    errors: List[ValidationError] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    validated_at: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def add_error(self, error: ValidationError) -> None:
+        self.valid = False
+        self.errors.append(error)
+
+    def add_warning(self, warning: str) -> None:
+        self.warnings.append(warning)
 
 
-class DataValidatorAction:
-    """
-    Multi-purpose data validator with schema and custom rule support.
+@dataclass
+class FieldValidator:
+    name: str
+    validation_type: ValidationType
+    constraint: Any = None
+    message: Optional[str] = None
+    validator_fn: Optional[Callable[[Any], bool]] = None
+    required: bool = False
 
-    Validates data against configured rules and returns detailed
-    error reports with field-level information.
 
-    Example:
-        validator = DataValidatorAction()
-        validator.add_rule("email", ValidationRule(
-            field="email",
-            validation_type=ValidationType.PATTERN,
-            rule_value=r"^[a-zA-Z0-9_.+-]+@[a-z]+\.[a-z]+$",
-            error_message="Invalid email format",
-        ))
-        result = validator.validate({"email": "test@example.com"})
-    """
+class SchemaValidator:
+    def __init__(self):
+        self._field_validators: Dict[str, List[FieldValidator]] = {}
 
-    def __init__(self) -> None:
-        self._rules: list[ValidationRule] = []
-        self._custom_validators: dict[str, Callable[[Any], bool]] = {}
+    def add_field(self, name: str, validator: FieldValidator) -> None:
+        if name not in self._field_validators:
+            self._field_validators[name] = []
+        self._field_validators[name].append(validator)
 
-    def add_rule(
-        self,
-        field: str,
-        validation_type: ValidationType,
-        rule_value: Any = None,
-        error_message: Optional[str] = None,
-        severity: str = "error",
-    ) -> "DataValidatorAction":
-        """Add a validation rule."""
-        rule = ValidationRule(
-            field=field,
-            validation_type=validation_type,
-            rule_value=rule_value,
-            error_message=error_message,
-            severity=severity,
-        )
-        self._rules.append(rule)
-        return self
-
-    def add_required_fields(
-        self,
-        fields: list[str],
-    ) -> "DataValidatorAction":
-        """Add required field validation."""
-        for field_name in fields:
-            self.add_rule(
-                field=field_name,
-                validation_type=ValidationType.REQUIRED,
-                error_message=f"Field '{field_name}' is required",
-            )
-        return self
-
-    def add_type_validation(
-        self,
-        field: str,
-        expected_type: Type,
-    ) -> "DataValidatorAction":
-        """Add type validation for a field."""
-        self.add_rule(
-            field=field,
+    def add_required_field(self, name: str, field_type: Type) -> None:
+        self.add_field(name, FieldValidator(
+            name=name,
             validation_type=ValidationType.TYPE,
-            rule_value=expected_type,
-            error_message=f"Field '{field}' must be of type {expected_type.__name__}",
-        )
-        return self
+            constraint=field_type,
+            required=True,
+        ))
 
-    def add_range_validation(
-        self,
-        field: str,
-        min_value: Optional[Union[int, float]] = None,
-        max_value: Optional[Union[int, float]] = None,
-    ) -> "DataValidatorAction":
-        """Add numeric range validation."""
-        self.add_rule(
-            field=field,
-            validation_type=ValidationType.RANGE,
-            rule_value={"min": min_value, "max": max_value},
-            error_message=f"Field '{field}' must be between {min_value} and {max_value}",
-        )
-        return self
+    def add_optional_field(self, name: str, field_type: Type) -> None:
+        self.add_field(name, FieldValidator(
+            name=name,
+            validation_type=ValidationType.TYPE,
+            constraint=field_type,
+            required=False,
+        ))
 
-    def add_length_validation(
-        self,
-        field: str,
-        min_length: Optional[int] = None,
-        max_length: Optional[int] = None,
-    ) -> "DataValidatorAction":
-        """Add string length validation."""
-        self.add_rule(
-            field=field,
-            validation_type=ValidationType.LENGTH,
-            rule_value={"min": min_length, "max": max_length},
-            error_message=f"Field '{field}' length must be between {min_length} and {max_length}",
-        )
-        return self
+    def add_range_constraint(self, name: str, min_val: Any = None, max_val: Any = None) -> None:
+        if min_val is not None:
+            self.add_field(name, FieldValidator(
+                name=name,
+                validation_type=ValidationType.MIN,
+                constraint=min_val,
+            ))
+        if max_val is not None:
+            self.add_field(name, FieldValidator(
+                name=name,
+                validation_type=ValidationType.MAX,
+                constraint=max_val,
+            ))
 
-    def add_pattern_validation(
-        self,
-        field: str,
-        pattern: str,
-        error_message: Optional[str] = None,
-    ) -> "DataValidatorAction":
-        """Add regex pattern validation."""
-        self.add_rule(
-            field=field,
+    def add_pattern_constraint(self, name: str, pattern: str) -> None:
+        self.add_field(name, FieldValidator(
+            name=name,
             validation_type=ValidationType.PATTERN,
-            rule_value=pattern,
-            error_message=error_message or f"Field '{field}' does not match required pattern",
-        )
-        return self
+            constraint=re.compile(pattern),
+        ))
 
-    def add_enum_validation(
-        self,
-        field: str,
-        allowed_values: list[Any],
-    ) -> "DataValidatorAction":
-        """Add enum/allowed values validation."""
-        self.add_rule(
-            field=field,
+    def add_enum_constraint(self, name: str, allowed_values: List[Any]) -> None:
+        self.add_field(name, FieldValidator(
+            name=name,
             validation_type=ValidationType.ENUM,
-            rule_value=allowed_values,
-            error_message=f"Field '{field}' must be one of: {allowed_values}",
-        )
-        return self
+            constraint=set(allowed_values),
+        ))
 
     def add_custom_validator(
         self,
-        field: str,
-        validator_func: Callable[[Any], bool],
-        error_message: str,
-        severity: str = "error",
-    ) -> "DataValidatorAction":
-        """Add a custom validation function."""
-        self._custom_validators[field] = validator_func
-        self.add_rule(
-            field=field,
+        name: str,
+        validator_fn: Callable[[Any], bool],
+        message: str = "Custom validation failed",
+    ) -> None:
+        self.add_field(name, FieldValidator(
+            name=name,
             validation_type=ValidationType.CUSTOM,
-            rule_value=validator_func,
-            error_message=error_message,
-            severity=severity,
-        )
-        return self
+            validator_fn=validator_fn,
+            message=message,
+        ))
 
-    def validate(self, data: dict[str, Any]) -> ValidationResult:
-        """Validate data against all configured rules."""
-        errors: list[ValidationError] = []
-        warnings: list[ValidationError] = []
+    def validate(self, data: Dict[str, Any]) -> ValidationResult:
+        result = ValidationResult(valid=True)
 
-        for rule in self._rules:
-            value = data.get(rule.field)
-            error = self._validate_rule(rule, value)
+        for field_name, validators in self._field_validators.items():
+            value = data.get(field_name)
+            field_valid = True
 
-            if error:
-                if rule.severity == "warning":
-                    warnings.append(error)
-                else:
-                    errors.append(error)
+            for validator in validators:
+                if validator.validation_type == ValidationType.REQUIRED:
+                    if value is None or value == "":
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.REQUIRED,
+                            message=validator.message or f"Field '{field_name}' is required",
+                            value=value,
+                        ))
+                        field_valid = False
+                        break
 
-        return ValidationResult(
-            valid=len(errors) == 0,
-            errors=errors,
-            warnings=warnings,
-        )
+                elif value is None:
+                    continue
 
-    def _validate_rule(self, rule: ValidationRule, value: Any) -> Optional[ValidationError]:
-        """Validate a single rule against a value."""
-        from datetime import datetime
+                elif validator.validation_type == ValidationType.TYPE:
+                    if not isinstance(value, validator.constraint):
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.TYPE,
+                            message=validator.message or f"Field '{field_name}' must be of type {validator.constraint.__name__}",
+                            value=type(value).__name__,
+                            expected=validator.constraint.__name__,
+                        ))
+                        field_valid = False
 
-        if rule.validation_type == ValidationType.REQUIRED:
-            if value is None or value == "":
-                return ValidationError(
-                    field=rule.field,
-                    message=rule.error_message or f"Field '{rule.field}' is required",
-                    value=value,
-                    severity=rule.severity,
-                )
+                elif validator.validation_type == ValidationType.MIN:
+                    if value < validator.constraint:
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.MIN,
+                            message=validator.message or f"Field '{field_name}' must be >= {validator.constraint}",
+                            value=value,
+                            expected=f">= {validator.constraint}",
+                        ))
+                        field_valid = False
 
-        elif rule.validation_type == ValidationType.TYPE:
-            if value is not None and not isinstance(value, rule.rule_value):
-                return ValidationError(
-                    field=rule.field,
-                    message=rule.error_message or f"Field '{rule.field}' must be of type {rule.rule_value.__name__}",
-                    value=value,
-                    severity=rule.severity,
-                )
+                elif validator.validation_type == ValidationType.MAX:
+                    if value > validator.constraint:
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.MAX,
+                            message=validator.message or f"Field '{field_name}' must be <= {validator.constraint}",
+                            value=value,
+                            expected=f"<= {validator.constraint}",
+                        ))
+                        field_valid = False
 
-        elif rule.validation_type == ValidationType.RANGE:
-            if value is not None:
-                range_config = rule.rule_value
-                min_val = range_config.get("min")
-                max_val = range_config.get("max")
-                if min_val is not None and value < min_val:
-                    return ValidationError(field=rule.field, message=rule.error_message, value=value, severity=rule.severity)
-                if max_val is not None and value > max_val:
-                    return ValidationError(field=rule.field, message=rule.error_message, value=value, severity=rule.severity)
+                elif validator.validation_type == ValidationType.MIN_LENGTH:
+                    if len(value) < validator.constraint:
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.MIN_LENGTH,
+                            message=validator.message or f"Field '{field_name}' length must be >= {validator.constraint}",
+                            value=len(value),
+                            expected=f">= {validator.constraint}",
+                        ))
+                        field_valid = False
 
-        elif rule.validation_type == ValidationType.LENGTH:
-            if value is not None:
-                range_config = rule.rule_value
-                min_len = range_config.get("min")
-                max_len = range_config.get("max")
-                if min_len is not None and len(value) < min_len:
-                    return ValidationError(field=rule.field, message=rule.error_message, value=value, severity=rule.severity)
-                if max_len is not None and len(value) > max_len:
-                    return ValidationError(field=rule.field, message=rule.error_message, value=value, severity=rule.severity)
+                elif validator.validation_type == ValidationType.MAX_LENGTH:
+                    if len(value) > validator.constraint:
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.MAX_LENGTH,
+                            message=validator.message or f"Field '{field_name}' length must be <= {validator.constraint}",
+                            value=len(value),
+                            expected=f"<= {validator.constraint}",
+                        ))
+                        field_valid = False
 
-        elif rule.validation_type == ValidationType.PATTERN:
-            if value is not None:
-                try:
-                    if not re.match(rule.rule_value, str(value)):
-                        return ValidationError(field=rule.field, message=rule.error_message, value=value, severity=rule.severity)
-                except re.error:
-                    logger.warning(f"Invalid regex pattern: {rule.rule_value}")
+                elif validator.validation_type == ValidationType.PATTERN:
+                    if not validator.constraint.match(str(value)):
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.PATTERN,
+                            message=validator.message or f"Field '{field_name}' does not match pattern",
+                            value=value,
+                            expected=str(validator.constraint.pattern),
+                        ))
+                        field_valid = False
 
-        elif rule.validation_type == ValidationType.ENUM:
-            if value is not None and value not in rule.rule_value:
-                return ValidationError(field=rule.field, message=rule.error_message, value=value, severity=rule.severity)
+                elif validator.validation_type == ValidationType.ENUM:
+                    if value not in validator.constraint:
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.ENUM,
+                            message=validator.message or f"Field '{field_name}' must be one of {validator.constraint}",
+                            value=value,
+                            expected=list(validator.constraint),
+                        ))
+                        field_valid = False
 
-        elif rule.validation_type == ValidationType.CUSTOM:
-            try:
-                if not rule.rule_value(value):
-                    return ValidationError(field=rule.field, message=rule.error_message, value=value, severity=rule.severity)
-            except Exception as e:
-                return ValidationError(field=rule.field, message=f"Custom validation error: {e}", value=value, severity=rule.severity)
+                elif validator.validation_type == ValidationType.CUSTOM:
+                    try:
+                        if not validator.validator_fn(value):
+                            result.add_error(ValidationError(
+                                field=field_name,
+                                validation_type=ValidationType.CUSTOM,
+                                message=validator.message or "Custom validation failed",
+                                value=value,
+                            ))
+                            field_valid = False
+                    except Exception as e:
+                        result.add_error(ValidationError(
+                            field=field_name,
+                            validation_type=ValidationType.CUSTOM,
+                            message=f"Custom validator error: {e}",
+                            value=value,
+                        ))
+                        field_valid = False
 
-        return None
+        return result
 
-    def clear_rules(self) -> None:
-        """Clear all validation rules."""
-        self._rules.clear()
-        self._custom_validators.clear()
+
+def validate_email(email: str) -> bool:
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
+
+
+def validate_url(url: str) -> bool:
+    pattern = r'^https?://[^\s/$.?#].[^\s]*$'
+    return bool(re.match(pattern, url))
+
+
+def validate_phone(phone: str) -> bool:
+    pattern = r'^\+?1?\d{9,15}$'
+    return bool(re.match(pattern, phone.replace(r'[\s\-\(\)]', '')))
