@@ -1,276 +1,390 @@
-"""API Contract Test action module for RabAI AutoClick.
+"""API Contract Testing Action Module.
 
-Tests API contracts against OpenAPI specs and validates
-request/response compliance.
+Provides contract testing capabilities for validating API
+compatibility between producers and consumers.
 """
 
+import hashlib
 import json
+import logging
 import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
 import sys
 import os
-from typing import Any, Dict, List, Optional
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class ApiContractTestAction(BaseAction):
-    """Test API endpoints against OpenAPI contract.
+logger = logging.getLogger(__name__)
 
-    Validates request/response against spec definitions
-    including status codes, schemas, and headers.
+
+class ContractStatus(Enum):
+    """Contract validation status."""
+    PASSED = "passed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    PENDING = "pending"
+
+
+@dataclass
+class ContractRule:
+    """A single contract rule for validation."""
+    field_path: str
+    rule_type: str  # type, required, range, pattern, enum
+    expected: Any = None
+    description: str = ""
+
+
+@dataclass
+class ContractSpec:
+    """API contract specification."""
+    name: str
+    version: str = "1.0"
+    endpoint: str = ""
+    method: str = "GET"
+    rules: List[ContractRule] = field(default_factory=list)
+    request_schema: Dict[str, Any] = field(default_factory=dict)
+    response_schema: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ValidationResult:
+    """Result of a single field validation."""
+    field_path: str
+    passed: bool
+    actual_value: Any = None
+    expected_value: Any = None
+    error_message: str = ""
+
+
+class APIContractTestAction(BaseAction):
+    """API contract testing action.
+
+    Validates API requests and responses against defined
+    contract specifications with detailed error reporting.
+
+    Args:
+        context: Execution context.
+        params: Dict with keys:
+            - operation: Operation type (validate, create_contract, test, report)
+            - contract: Contract specification dict
+            - actual_data: Actual request/response to validate
+            - data_type: 'request' or 'response'
+            - contract_name: Name of contract to test
     """
     action_type = "api_contract_test"
     display_name = "API契约测试"
-    description = "根据OpenAPI规范测试API契约"
+    description = "API契约验证与兼容性检测"
+
+    def get_required_params(self) -> List[str]:
+        return ["operation"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            "contracts": [],
+            "contract": None,
+            "actual_data": None,
+            "data_type": "response",
+            "contract_name": None,
+            "strict_mode": False,
+        }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._contracts: Dict[str, ContractSpec] = {}
+        self._validation_history: List[Dict] = []
 
     def execute(
         self,
         context: Any,
         params: Dict[str, Any]
     ) -> ActionResult:
-        """Test API contract.
-
-        Args:
-            context: Execution context.
-            params: Dict with keys: base_url, spec, test_cases,
-                   stop_on_failure.
-
-        Returns:
-            ActionResult with test results.
-        """
+        """Execute contract testing operation."""
         start_time = time.time()
-        try:
-            base_url = params.get('base_url', '')
-            spec = params.get('spec', {})
-            test_cases = params.get('test_cases', [])
-            stop_on_failure = params.get('stop_on_failure', False)
 
-            if not base_url or not spec:
-                return ActionResult(
-                    success=False,
-                    message="base_url and spec are required",
-                    duration=time.time() - start_time,
-                )
+        operation = params.get("operation", "validate")
+        contract = params.get("contract")
+        actual_data = params.get("actual_data")
+        data_type = params.get("data_type", "response")
+        contract_name = params.get("contract_name")
+        strict_mode = params.get("strict_mode", False)
 
-            paths = spec.get('paths', {})
-            results = []
+        if operation == "create_contract":
+            return self._create_contract(contract, start_time)
+        elif operation == "validate":
+            return self._validate_against_contract(
+                contract, actual_data, data_type, strict_mode, start_time
+            )
+        elif operation == "test":
+            return self._test_contract(
+                contract_name, params.get("test_data"), start_time
+            )
+        elif operation == "report":
+            return self._get_test_report(start_time)
+        elif operation == "add_rule":
+            return self._add_contract_rule(
+                contract_name, params.get("rule"), start_time
+            )
+        else:
+            return ActionResult(
+                success=False,
+                message=f"Unknown operation: {operation}",
+                duration=time.time() - start_time
+            )
 
-            for test in test_cases:
-                test_name = test.get('name', 'unnamed')
-                method = test.get('method', 'GET').upper()
-                path = test.get('path', '/')
-                expected_status = test.get('expected_status', 200)
-                validate_response = test.get('validate_response', True)
+    def _create_contract(self, contract: Optional[Dict], start_time: float) -> ActionResult:
+        """Create a new contract specification."""
+        if not contract:
+            return ActionResult(success=False, message="Contract specification required", duration=time.time() - start_time)
 
-                url = base_url.rstrip('/') + path
-                headers = test.get('headers', {})
-                body = test.get('body')
-                test_start = time.time()
+        name = contract.get("name", "unnamed")
+        version = contract.get("version", "1.0")
+        rules = []
+        for rule_data in contract.get("rules", []):
+            rules.append(ContractRule(**rule_data))
 
+        spec = ContractSpec(
+            name=name,
+            version=version,
+            endpoint=contract.get("endpoint", ""),
+            method=contract.get("method", "GET"),
+            rules=rules,
+            request_schema=contract.get("request_schema", {}),
+            response_schema=contract.get("response_schema", {}),
+        )
+
+        key = f"{name}:{version}"
+        self._contracts[key] = spec
+
+        return ActionResult(
+            success=True,
+            message=f"Contract '{name}' v{version} created with {len(rules)} rules",
+            data={"contract_name": name, "version": version, "rules_count": len(rules)},
+            duration=time.time() - start_time
+        )
+
+    def _validate_against_contract(
+        self,
+        contract: Optional[Dict],
+        actual_data: Any,
+        data_type: str,
+        strict_mode: bool,
+        start_time: float
+    ) -> ActionResult:
+        """Validate data against a contract."""
+        if not contract:
+            return ActionResult(success=False, message="Contract required", duration=time.time() - start_time)
+
+        rules = []
+        for rule_data in contract.get("rules", []):
+            rules.append(ContractRule(**rule_data))
+
+        # Build field path to value map
+        flat_data = self._flatten_dict(actual_data) if isinstance(actual_data, dict) else {}
+
+        validation_results: List[ValidationResult] = []
+        failed_count = 0
+
+        for rule in rules:
+            result = self._validate_rule(rule, flat_data, actual_data)
+            validation_results.append(result)
+            if not result.passed:
+                failed_count += 1
+
+        passed = failed_count == 0
+
+        return ActionResult(
+            success=passed,
+            message=f"Contract validation {'PASSED' if passed else 'FAILED'}: {len(validation_results) - failed_count}/{len(validation_results)} rules passed",
+            data={
+                "passed": passed,
+                "total_rules": len(validation_results),
+                "passed_rules": len(validation_results) - failed_count,
+                "failed_rules": failed_count,
+                "strict_mode": strict_mode,
+                "validations": [
+                    {
+                        "field": vr.field_path,
+                        "rule_type": r.rule_type,
+                        "passed": vr.passed,
+                        "error": vr.error_message,
+                    }
+                    for vr, r in zip(validation_results, rules)
+                ]
+            },
+            duration=time.time() - start_time
+        )
+
+    def _validate_rule(
+        self,
+        rule: ContractRule,
+        flat_data: Dict[str, Any],
+        original_data: Any
+    ) -> ValidationResult:
+        """Validate a single rule."""
+        actual_value = flat_data.get(rule.field_path)
+        passed = True
+        error_msg = ""
+
+        if rule.rule_type == "required":
+            if actual_value is None:
+                passed = False
+                error_msg = f"Required field '{rule.field_path}' is missing"
+        elif rule.rule_type == "type":
+            expected_type = rule.expected
+            if expected_type == "string" and not isinstance(actual_value, str):
+                passed = False
+                error_msg = f"Field '{rule.field_path}' must be string, got {type(actual_value).__name__}"
+            elif expected_type == "number" and not isinstance(actual_value, (int, float)):
+                passed = False
+                error_msg = f"Field '{rule.field_path}' must be number, got {type(actual_value).__name__}"
+            elif expected_type == "boolean" and not isinstance(actual_value, bool):
+                passed = False
+                error_msg = f"Field '{rule.field_path}' must be boolean, got {type(actual_value).__name__}"
+            elif expected_type == "array" and not isinstance(actual_value, list):
+                passed = False
+                error_msg = f"Field '{rule.field_path}' must be array, got {type(actual_value).__name__}"
+            elif expected_type == "object" and not isinstance(actual_value, dict):
+                passed = False
+                error_msg = f"Field '{rule.field_path}' must be object, got {type(actual_value).__name__}"
+        elif rule.rule_type == "range":
+            if actual_value is not None and isinstance(actual_value, (int, float)):
+                min_val = rule.expected.get("min") if isinstance(rule.expected, dict) else None
+                max_val = rule.expected.get("max") if isinstance(rule.expected, dict) else None
+                if min_val is not None and actual_value < min_val:
+                    passed = False
+                    error_msg = f"Field '{rule.field_path}' value {actual_value} is below minimum {min_val}"
+                if max_val is not None and actual_value > max_val:
+                    passed = False
+                    error_msg = f"Field '{rule.field_path}' value {actual_value} exceeds maximum {max_val}"
+        elif rule.rule_type == "enum":
+            if actual_value not in rule.expected:
+                passed = False
+                error_msg = f"Field '{rule.field_path}' value '{actual_value}' not in allowed values {rule.expected}"
+        elif rule.rule_type == "pattern":
+            import re
+            if actual_value is not None and isinstance(actual_value, str):
                 try:
-                    body_bytes = None
-                    if body:
-                        body_bytes = json.dumps(body).encode('utf-8')
-                        headers.setdefault('Content-Type', 'application/json')
+                    if not re.match(rule.expected, actual_value):
+                        passed = False
+                        error_msg = f"Field '{rule.field_path}' value does not match pattern {rule.expected}"
+                except re.error:
+                    pass
 
-                    req = Request(url, data=body_bytes, headers=headers, method=method)
-                    with urlopen(req, timeout=30) as resp:
-                        latency_ms = int((time.time() - test_start) * 1000)
-                        status_ok = resp.status == expected_status
+        return ValidationResult(
+            field_path=rule.field_path,
+            passed=passed,
+            actual_value=actual_value,
+            expected_value=rule.expected,
+            error_message=error_msg
+        )
 
-                        response_data = json.loads(resp.read())
-
-                        errors = []
-                        if validate_response and 'response_schema' in test:
-                            schema = test['response_schema']
-                            self._validate_response(response_data, schema, errors)
-
-                        results.append({
-                            'name': test_name,
-                            'method': method,
-                            'path': path,
-                            'success': status_ok and len(errors) == 0,
-                            'status': resp.status,
-                            'expected_status': expected_status,
-                            'latency_ms': latency_ms,
-                            'validation_errors': errors,
-                        })
-
-                except HTTPError as e:
-                    latency_ms = int((time.time() - test_start) * 1000)
-                    results.append({
-                        'name': test_name,
-                        'method': method,
-                        'path': path,
-                        'success': e.code == expected_status,
-                        'status': e.code,
-                        'expected_status': expected_status,
-                        'latency_ms': latency_ms,
-                        'error': str(e),
-                    })
-                except Exception as e:
-                    results.append({
-                        'name': test_name,
-                        'method': method,
-                        'path': path,
-                        'success': False,
-                        'error': str(e),
-                    })
-
-                if stop_on_failure and results[-1].get('success') is False:
-                    break
-
-            passed = sum(1 for r in results if r.get('success'))
-            failed = len(results) - passed
-
-            duration = time.time() - start_time
-            return ActionResult(
-                success=failed == 0,
-                message=f"Contract tests: {passed} passed, {failed} failed",
-                data={
-                    'results': results,
-                    'passed': passed,
-                    'failed': failed,
-                    'total': len(results),
-                },
-                duration=duration,
-            )
-
-        except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Contract test error: {str(e)}",
-                duration=duration,
-            )
-
-    def _validate_response(self, data: Any, schema: Dict, errors: List) -> None:
-        """Validate response data against schema."""
-        if 'type' in schema:
-            expected = schema['type']
-            actual_type = type(data).__name__
-            if expected == 'object' and not isinstance(data, dict):
-                errors.append(f"Expected object, got {actual_type}")
-            elif expected == 'array' and not isinstance(data, list):
-                errors.append(f"Expected array, got {actual_type}")
-        if 'required' in schema and isinstance(data, dict):
-            for field in schema['required']:
-                if field not in data:
-                    errors.append(f"Missing required field: {field}")
-
-
-class ApiContractVerifierAction(BaseAction):
-    """Verify API implementation matches OpenAPI spec.
-
-    Scans endpoints and compares with spec definitions.
-    """
-    action_type = "api_contract_verifier"
-    display_name = "API契约验证"
-    description = "验证API实现与OpenAPI规范一致性"
-
-    def execute(
+    def _flatten_dict(
         self,
-        context: Any,
-        params: Dict[str, Any]
+        d: Dict,
+        parent_key: str = "",
+        sep: str = "."
+    ) -> Dict[str, Any]:
+        """Flatten a nested dictionary."""
+        items = {}
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.update(self._flatten_dict(v, new_key, sep))
+            else:
+                items[new_key] = v
+        return items
+
+    def _test_contract(
+        self,
+        contract_name: Optional[str],
+        test_data: Any,
+        start_time: float
     ) -> ActionResult:
-        """Verify API contract.
+        """Test a contract by name."""
+        if not contract_name:
+            return ActionResult(success=False, message="contract_name required", duration=time.time() - start_time)
 
-        Args:
-            context: Execution context.
-            params: Dict with keys: base_url, spec, strict.
+        # Find contract
+        key = None
+        for k in self._contracts:
+            if contract_name in k:
+                key = k
+                break
 
-        Returns:
-            ActionResult with verification results.
-        """
-        start_time = time.time()
-        try:
-            base_url = params.get('base_url', '')
-            spec = params.get('spec', {})
-            strict = params.get('strict', False)
+        if not key:
+            return ActionResult(success=False, message=f"Contract '{contract_name}' not found", duration=time.time() - start_time)
 
-            if not base_url or not spec:
-                return ActionResult(
-                    success=False,
-                    message="base_url and spec are required",
-                    duration=time.time() - start_time,
-                )
+        spec = self._contracts[key]
+        flat_data = self._flatten_dict(test_data) if isinstance(test_data, dict) else {}
 
-            paths = spec.get('paths', {})
-            verification_results = []
+        results = []
+        for rule in spec.rules:
+            result = self._validate_rule(rule, flat_data, test_data)
+            results.append((rule, result))
 
-            for path, methods in paths.items():
-                for method, details in methods.items():
-                    if method.upper() not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
-                        continue
+        passed = all(r.passed for _, r in results)
+        failed = sum(1 for _, r in results if not r.passed)
 
-                    url = base_url.rstrip('/') + path
-                    test_start = time.time()
+        return ActionResult(
+            success=passed,
+            message=f"Contract test {'PASSED' if passed else 'FAILED'}",
+            data={
+                "contract": spec.name,
+                "version": spec.version,
+                "passed": passed,
+                "passed_count": len(results) - failed,
+                "failed_count": failed,
+                "details": [{"field": r.field_path, "passed": r.passed, "error": r.error_message} for _, r in results]
+            },
+            duration=time.time() - start_time
+        )
 
-                    try:
-                        body = None
-                        if method.upper() in ('POST', 'PUT', 'PATCH'):
-                            body = json.dumps({}).encode('utf-8')
+    def _add_contract_rule(
+        self,
+        contract_name: Optional[str],
+        rule_data: Optional[Dict],
+        start_time: float
+    ) -> ActionResult:
+        """Add a rule to an existing contract."""
+        if not contract_name or not rule_data:
+            return ActionResult(success=False, message="contract_name and rule required", duration=time.time() - start_time)
 
-                        req = Request(url, data=body, method=method.upper())
-                        with urlopen(req, timeout=10) as resp:
-                            latency = int((time.time() - test_start) * 1000)
-                            defined_statuses = list(details.get('responses', {}).keys())
-                            actual_status = str(resp.status)
-                            is_defined = actual_status in [str(s) for s in defined_statuses]
+        key = None
+        for k in self._contracts:
+            if contract_name in k:
+                key = k
+                break
 
-                            verification_results.append({
-                                'path': path,
-                                'method': method.upper(),
-                                'url': url,
-                                'status': resp.status,
-                                'defined_statuses': defined_statuses,
-                                'defined': is_defined,
-                                'latency_ms': latency,
-                                'success': is_defined if strict else True,
-                            })
+        if not key:
+            return ActionResult(success=False, message=f"Contract '{contract_name}' not found", duration=time.time() - start_time)
 
-                    except HTTPError as e:
-                        defined_statuses = list(details.get('responses', {}).keys())
-                        is_defined = str(e.code) in [str(s) for s in defined_statuses]
-                        verification_results.append({
-                            'path': path,
-                            'method': method.upper(),
-                            'url': url,
-                            'status': e.code,
-                            'defined_statuses': defined_statuses,
-                            'defined': is_defined,
-                            'success': is_defined if strict else True,
-                        })
-                    except Exception as e:
-                        verification_results.append({
-                            'path': path,
-                            'method': method.upper(),
-                            'url': url,
-                            'success': False,
-                            'error': str(e),
-                        })
+        rule = ContractRule(**rule_data)
+        self._contracts[key].rules.append(rule)
 
-            all_defined = all(r.get('defined', False) for r in verification_results)
-            duration = time.time() - start_time
+        return ActionResult(
+            success=True,
+            message=f"Added rule to contract '{contract_name}'",
+            data={"contract": contract_name, "total_rules": len(self._contracts[key].rules)},
+            duration=time.time() - start_time
+        )
 
-            return ActionResult(
-                success=all_defined,
-                message=f"Verified {len(verification_results)} endpoints",
-                data={
-                    'verification': verification_results,
-                    'all_defined': all_defined,
-                    'total': len(verification_results),
-                },
-                duration=duration,
-            )
+    def _get_test_report(self, start_time: float) -> ActionResult:
+        """Get validation test report."""
+        return ActionResult(
+            success=True,
+            message="Test report retrieved",
+            data={
+                "total_contracts": len(self._contracts),
+                "contracts": [
+                    {"name": c.name, "version": c.version, "rules_count": len(c.rules)}
+                    for c in self._contracts.values()
+                ]
+            },
+            duration=time.time() - start_time
+        )
 
-        except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Verification error: {str(e)}",
-                duration=duration,
-            )
+
+from enum import Enum
