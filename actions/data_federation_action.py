@@ -1,471 +1,383 @@
+"""Data Federation Action Module.
+
+Provides data federation utilities: multi-source queries, query planning,
+result merging, schema reconciliation, and data virtualization.
+
+Example:
+    result = execute(context, {"action": "federated_query", "sources": [...]})
 """
-Data Federation Action Module.
-
-Provides data federation capabilities for querying and combining data from
-multiple sources into a unified view with support for various data connectors.
-
-Author: RabAI Team
-"""
-
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Optional
 from dataclasses import dataclass, field
-from enum import Enum
-import threading
 from datetime import datetime
-
-
-class DataSourceType(Enum):
-    """Types of data sources."""
-    REST_API = "rest_api"
-    DATABASE = "database"
-    FILE = "file"
-    CACHE = "cache"
-    MEMORY = "memory"
+from collections import defaultdict
 
 
 @dataclass
 class DataSource:
-    """Represents a data source configuration."""
+    """A federated data source."""
+    
     id: str
     name: str
-    source_type: DataSourceType
-    connection_config: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    source_type: str
+    connection_info: dict[str, Any]
+    priority: int = 1
+    latency_ms: float = 0.0
+    available: bool = True
+    
+    def __post_init__(self) -> None:
+        """Validate source type."""
+        valid_types = ["database", "api", "file", "cache", "stream"]
+        if self.source_type not in valid_types:
+            raise ValueError(f"Invalid source_type: {self.source_type}")
 
 
 @dataclass
 class FederatedQuery:
-    """Represents a federated query across sources."""
+    """A query spanning multiple data sources."""
+    
     id: str
-    sources: List[str]  # Source IDs
-    join_spec: Dict[str, Any] = field(default_factory=dict)
-    filter_spec: Dict[str, Any] = field(default_factory=dict)
-    projection: List[str] = field(default_factory=list)
+    query: str
+    sources: list[str]
+    timeout_seconds: float = 30.0
+    merge_strategy: str = "union"
+    
+    def __post_init__(self) -> None:
+        """Validate merge strategy."""
+        valid_strategies = ["union", "join", "broadcast", "scatter"]
+        if self.merge_strategy not in valid_strategies:
+            raise ValueError(f"Invalid merge_strategy: {self.merge_strategy}")
 
 
 @dataclass
 class QueryResult:
-    """Result of a federated query."""
+    """Result from a federated query."""
+    
     query_id: str
-    data: List[Dict]
-    source_results: Dict[str, int]
-    duration_ms: float
+    source_id: str
+    data: list[dict[str, Any]]
+    row_count: int
+    execution_time_ms: float
     timestamp: datetime
+    error: Optional[str] = None
 
 
-class DataConnector(ABC):
-    """Abstract base class for data connectors."""
+class SchemaResolver:
+    """Resolves schemas across federated data sources."""
     
-    @abstractmethod
-    def connect(self) -> bool:
-        """Establish connection."""
-        pass
+    def __init__(self) -> None:
+        """Initialize schema resolver."""
+        self._schemas: dict[str, dict[str, Any]] = {}
     
-    @abstractmethod
-    def disconnect(self):
-        """Close connection."""
-        pass
-    
-    @abstractmethod
-    def query(self, query_spec: Dict) -> List[Dict]:
-        """Execute query and return results."""
-        pass
-    
-    @abstractmethod
-    def health_check(self) -> bool:
-        """Check if connector is healthy."""
-        pass
-
-
-class MemoryConnector(DataConnector):
-    """
-    In-memory data connector for testing and caching.
-    
-    Example:
-        connector = MemoryConnector()
-        connector.connect()
-        connector.load_data([{"id": 1, "name": "test"}])
-        results = connector.query({"filter": {"id": 1}})
-    """
-    
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.data: List[Dict] = []
-        self._connected = False
-    
-    def connect(self) -> bool:
-        """Connect to memory store."""
-        self._connected = True
-        return True
-    
-    def disconnect(self):
-        """Disconnect from memory store."""
-        self._connected = False
-    
-    def load_data(self, data: List[Dict]):
-        """Load data into memory store."""
-        self.data = list(data)
-    
-    def query(self, query_spec: Dict) -> List[Dict]:
-        """Query memory store."""
-        results = list(self.data)
+    def register_schema(self, source_id: str, schema: dict[str, Any]) -> None:
+        """Register a schema for a source.
         
-        # Apply filter
-        if "filter" in query_spec:
-            filters = query_spec["filter"]
-            results = self._apply_filter(results, filters)
-        
-        # Apply projection
-        if "projection" in query_spec:
-            projections = query_spec["projection"]
-            results = self._apply_projection(results, projections)
-        
-        # Apply limit
-        if "limit" in query_spec:
-            results = results[:query_spec["limit"]]
-        
-        return results
+        Args:
+            source_id: Data source identifier
+            schema: Schema definition {table: {columns: [...]}}
+        """
+        self._schemas[source_id] = schema
     
-    def health_check(self) -> bool:
-        """Check connector health."""
-        return self._connected
-    
-    def _apply_filter(self, data: List[Dict], filters: Dict) -> List[Dict]:
-        """Apply filter to data."""
-        results = []
-        for item in data:
-            if self._matches_filter(item, filters):
-                results.append(item)
-        return results
-    
-    def _matches_filter(self, item: Dict, filters: Dict) -> bool:
-        """Check if item matches filter."""
-        for key, value in filters.items():
-            if "." in key:
-                keys = key.split(".")
-                item_val = item
-                for k in keys:
-                    if isinstance(item_val, dict):
-                        item_val = item_val.get(k)
-                    else:
-                        return False
-                if item_val != value:
-                    return False
-            else:
-                if item.get(key) != value:
-                    return False
-        return True
-    
-    def _apply_projection(self, data: List[Dict], projections: List[str]) -> List[Dict]:
-        """Apply projection to data."""
-        return [{k: item.get(k) for k in projections} for item in data]
-
-
-class RESTAPIConnector(DataConnector):
-    """
-    REST API data connector.
-    
-    Example:
-        connector = RESTAPIConnector({
-            "base_url": "https://api.example.com",
-            "headers": {"Authorization": "Bearer token"}
-        })
-        connector.connect()
-        results = connector.query({"endpoint": "/users", "params": {"limit": 10}})
-    """
-    
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.base_url = config.get("base_url", "")
-        self.headers = config.get("headers", {})
-        self._connected = False
-    
-    def connect(self) -> bool:
-        """Connect to REST API."""
-        self._connected = True
-        return True
-    
-    def disconnect(self):
-        """Disconnect from REST API."""
-        self._connected = False
-    
-    def query(self, query_spec: Dict) -> List[Dict]:
-        """Query REST API."""
-        endpoint = query_spec.get("endpoint", "/")
-        params = query_spec.get("params", {})
-        
-        # This is a placeholder - in real implementation would make HTTP request
-        # For now, return empty result
-        return []
-    
-    def health_check(self) -> bool:
-        """Check connector health."""
-        return self._connected
-
-
-class DataFederationEngine:
-    """
-    Main data federation engine.
-    
-    Example:
-        engine = DataFederationEngine()
-        engine.register_source("users", MemoryConnector({}))
-        engine.register_source("orders", MemoryConnector({}))
-        
-        result = engine.execute({
-            "sources": ["users", "orders"],
-            "join": {"on": "user_id", "type": "inner"}
-        })
-    """
-    
-    def __init__(self):
-        self.sources: Dict[str, DataConnector] = {}
-        self.source_configs: Dict[str, DataSource] = {}
-        self._lock = threading.RLock()
-    
-    def register_source(
+    def resolve_field(
         self,
-        source_id: str,
-        source_type: DataSourceType,
-        config: Dict[str, Any]
-    ) -> "DataFederationEngine":
-        """Register a data source."""
-        with self._lock:
-            source_config = DataSource(
-                id=source_id,
-                name=source_id,
-                source_type=source_type,
-                connection_config=config
-            )
-            self.source_configs[source_id] = source_config
-            
-            # Create connector
-            if source_type == DataSourceType.MEMORY:
-                connector = MemoryConnector(config)
-            elif source_type == DataSourceType.REST_API:
-                connector = RESTAPIConnector(config)
-            else:
-                connector = MemoryConnector(config)
-            
-            connector.connect()
-            self.sources[source_id] = connector
+        field_name: str,
+        sources: list[str],
+    ) -> list[tuple[str, str]]:
+        """Resolve a field across sources.
         
-        return self
+        Args:
+            field_name: Field to resolve
+            sources: Source IDs to search
+            
+        Returns:
+            List of (source_id, qualified_name) tuples
+        """
+        matches = []
+        
+        for source_id in sources:
+            schema = self._schemas.get(source_id, {})
+            for table, table_schema in schema.items():
+                columns = table_schema.get("columns", [])
+                for column in columns:
+                    if column.get("name") == field_name:
+                        qualified = f"{table}.{column['name']}"
+                        matches.append((source_id, qualified))
+        
+        return matches
     
-    def unregister_source(self, source_id: str) -> bool:
-        """Unregister a data source."""
-        with self._lock:
-            if source_id in self.sources:
-                self.sources[source_id].disconnect()
-                del self.sources[source_id]
-                del self.source_configs[source_id]
-                return True
-            return False
-    
-    def execute(self, query: FederatedQuery) -> QueryResult:
-        """Execute a federated query."""
-        import time
-        start_time = time.monotonic()
+    def reconcile_schemas(
+        self,
+        schemas: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Reconcile multiple schemas into a unified schema.
         
-        source_results: Dict[str, int] = {}
-        all_data: List[Dict] = []
-        
-        # Query each source
-        for source_id in query.sources:
-            if source_id not in self.sources:
-                continue
+        Args:
+            schemas: List of schemas to reconcile
             
-            connector = self.sources[source_id]
-            
-            query_spec = {
-                "filter": query.filter_spec,
-                "projection": query.projection if query.projection else None
-            }
-            
-            try:
-                results = connector.query(query_spec)
-                source_results[source_id] = len(results)
-                all_data.extend(results)
-            except Exception:
-                source_results[source_id] = 0
+        Returns:
+            Unified schema definition
+        """
+        unified: dict[str, set] = defaultdict(set)
         
-        # Apply join if specified
-        if query.join_spec:
-            all_data = self._apply_join(all_data, query.join_spec)
+        for schema in schemas:
+            for table, table_schema in schema.items():
+                columns = table_schema.get("columns", [])
+                for column in columns:
+                    unified[table].add(column.get("name", ""))
         
-        duration_ms = (time.monotonic() - start_time) * 1000
-        
-        return QueryResult(
-            query_id=query.id,
-            data=all_data,
-            source_results=source_results,
-            duration_ms=duration_ms,
-            timestamp=datetime.now()
-        )
-    
-    def _apply_join(self, data: List[Dict], join_spec: Dict) -> List[Dict]:
-        """Apply join operation to data."""
-        join_type = join_spec.get("type", "inner")
-        join_key = join_spec.get("on")
-        
-        if not join_key:
-            return data
-        
-        # Group by join key
-        groups: Dict[Any, List[Dict]] = {}
-        for item in data:
-            key_value = item.get(join_key)
-            if key_value not in groups:
-                groups[key_value] = []
-            groups[key_value].append(item)
-        
-        # Combine groups
-        results = []
-        for key, items in groups.items():
-            if len(items) > 1 or join_type == "left":
-                # Create combined record
-                combined = {}
-                for item in items:
-                    combined.update(item)
-                results.append(combined)
-            elif len(items) == 1 and join_type == "inner":
-                results.append(items[0])
-        
-        return results
-    
-    def health_check(self) -> Dict[str, bool]:
-        """Check health of all sources."""
-        health = {}
-        for source_id, connector in self.sources.items():
-            health[source_id] = connector.health_check()
-        return health
+        return {
+            table: {"columns": [{"name": col} for col in cols]}
+            for table, cols in unified.items()
+        }
 
 
-class BaseAction:
-    """Base class for all actions."""
+class QueryPlanner:
+    """Plans federated query execution across sources."""
     
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Any:
-        raise NotImplementedError
-
-
-class DataFederationAction(BaseAction):
-    """
-    Data federation action for multi-source queries.
+    def __init__(self) -> None:
+        """Initialize query planner."""
+        self._sources: dict[str, DataSource] = {}
     
-    Parameters:
-        operation: Operation type (register/execute/health)
-        source_id: Source identifier
-        source_type: Type of data source
-        config: Source configuration
-        query: Query definition
-    
-    Example:
-        action = DataFederationAction()
-        result = action.execute({}, {
-            "operation": "register",
-            "source_id": "users",
-            "source_type": "memory",
-            "config": {}
-        })
-    """
-    
-    _engine: Optional[DataFederationEngine] = None
-    _lock = threading.Lock()
-    
-    def _get_engine(self) -> DataFederationEngine:
-        """Get or create federation engine."""
-        with self._lock:
-            if self._engine is None:
-                self._engine = DataFederationEngine()
-            return self._engine
-    
-    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute federation operation."""
-        operation = params.get("operation", "register")
-        engine = self._get_engine()
+    def register_source(self, source: DataSource) -> None:
+        """Register a data source.
         
-        if operation == "register":
-            source_id = params.get("source_id")
-            source_type_str = params.get("source_type", "memory")
-            config = params.get("config", {})
-            
-            source_type = DataSourceType(source_type_str)
-            
-            engine.register_source(source_id, source_type, config)
-            
-            return {
-                "success": True,
-                "operation": "register",
-                "source_id": source_id,
-                "source_type": source_type_str,
-                "registered_at": datetime.now().isoformat()
-            }
+        Args:
+            source: Data source to register
+        """
+        self._sources[source.id] = source
+    
+    def plan_query(self, query: FederatedQuery) -> list[dict[str, Any]]:
+        """Create execution plan for federated query.
         
-        elif operation == "unregister":
-            source_id = params.get("source_id")
-            success = engine.unregister_source(source_id)
+        Args:
+            query: Federated query to plan
             
-            return {
-                "success": success,
-                "operation": "unregister",
-                "source_id": source_id
-            }
+        Returns:
+            List of execution steps
+        """
+        plan = []
         
-        elif operation == "execute":
-            query_id = params.get("query_id", str(datetime.now().timestamp()))
-            sources = params.get("sources", [])
-            join_spec = params.get("join", {})
-            filter_spec = params.get("filter", {})
-            projection = params.get("projection", [])
-            
-            query = FederatedQuery(
-                id=query_id,
-                sources=sources,
-                join_spec=join_spec,
-                filter_spec=filter_spec,
-                projection=projection
-            )
-            
-            result = engine.execute(query)
-            
-            return {
-                "success": True,
-                "operation": "execute",
-                "query_id": query_id,
-                "result_count": len(result.data),
-                "source_results": result.source_results,
-                "duration_ms": result.duration_ms,
-                "executed_at": result.timestamp.isoformat()
-            }
+        available_sources = [
+            self._sources[sid] for sid in query.sources
+            if sid in self._sources and self._sources[sid].available
+        ]
         
-        elif operation == "health":
-            health = engine.health_check()
-            
-            return {
-                "success": True,
-                "operation": "health",
-                "health": health
-            }
+        if not available_sources:
+            return [{"error": "No available sources"}]
         
-        elif operation == "load_data":
-            source_id = params.get("source_id")
-            data = params.get("data", [])
-            
-            if source_id in engine.sources:
-                connector = engine.sources[source_id]
-                if isinstance(connector, MemoryConnector):
-                    connector.load_data(data)
-                    return {
-                        "success": True,
-                        "operation": "load_data",
-                        "source_id": source_id,
-                        "records_loaded": len(data)
-                    }
-            
-            return {
-                "success": False,
-                "error": "Source not found or not a memory connector"
-            }
+        if query.merge_strategy == "scatter":
+            for source in available_sources:
+                plan.append({
+                    "step": "execute",
+                    "source_id": source.id,
+                    "query": query.query,
+                    "priority": source.priority,
+                })
+        
+        elif query.merge_strategy == "broadcast":
+            primary = min(available_sources, key=lambda s: s.priority)
+            plan.append({
+                "step": "execute",
+                "source_id": primary.id,
+                "query": query.query,
+                "priority": primary.priority,
+            })
+            plan.append({"step": "broadcast_results"})
+        
+        elif query.merge_strategy == "join":
+            for i, source in enumerate(available_sources):
+                plan.append({
+                    "step": "execute",
+                    "source_id": source.id,
+                    "query": query.query,
+                    "priority": source.priority,
+                    "order": i,
+                })
+            plan.append({"step": "join_results"})
         
         else:
-            return {"success": False, "error": f"Unknown operation: {operation}"}
+            for source in available_sources:
+                plan.append({
+                    "step": "execute",
+                    "source_id": source.id,
+                    "query": query.query,
+                    "priority": source.priority,
+                })
+            plan.append({"step": "union_results"})
+        
+        return plan
+
+
+class ResultMerger:
+    """Merges results from federated queries."""
+    
+    def __init__(self, strategy: str = "union") -> None:
+        """Initialize result merger.
+        
+        Args:
+            strategy: Merge strategy
+        """
+        self.strategy = strategy
+        self._results: list[QueryResult] = []
+    
+    def add_result(self, result: QueryResult) -> None:
+        """Add a query result.
+        
+        Args:
+            result: Query result to add
+        """
+        self._results.append(result)
+    
+    def merge(self) -> dict[str, Any]:
+        """Merge all results.
+        
+        Returns:
+            Merged result data
+        """
+        if not self._results:
+            return {"data": [], "row_count": 0}
+        
+        if self.strategy == "union":
+            return self._union_merge()
+        elif self.strategy == "join":
+            return self._join_merge()
+        elif self.strategy == "broadcast":
+            return self._broadcast_merge()
+        else:
+            return self._union_merge()
+    
+    def _union_merge(self) -> dict[str, Any]:
+        """Union all result sets."""
+        all_data: list[dict[str, Any]] = []
+        
+        for result in self._results:
+            if result.error is None:
+                all_data.extend(result.data)
+        
+        return {
+            "data": all_data,
+            "row_count": len(all_data),
+            "source_count": len(self._results),
+        }
+    
+    def _join_merge(self) -> dict[str, Any]:
+        """Join result sets."""
+        if not self._results:
+            return {"data": [], "row_count": 0}
+        
+        joined = self._results[0].data
+        
+        for result in self._results[1:]:
+            if result.error is None and result.data:
+                joined = self._join_two_sets(joined, result.data)
+        
+        return {
+            "data": joined,
+            "row_count": len(joined),
+            "source_count": len(self._results),
+        }
+    
+    def _join_two_sets(
+        self,
+        left: list[dict[str, Any]],
+        right: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Join two result sets."""
+        result = []
+        for l in left:
+            for r in right:
+                merged = {**l, **r}
+                result.append(merged)
+        return result
+    
+    def _broadcast_merge(self) -> dict[str, Any]:
+        """Broadcast first result to others."""
+        if not self._results:
+            return {"data": [], "row_count": 0}
+        
+        return {
+            "data": self._results[0].data,
+            "row_count": self._results[0].row_count,
+            "source_count": len(self._results),
+            "strategy": "broadcast",
+        }
+
+
+def execute(context: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    """Execute data federation action.
+    
+    Args:
+        context: Execution context
+        params: Parameters including action type
+        
+    Returns:
+        Result dictionary with status and data
+    """
+    action = params.get("action", "status")
+    result: dict[str, Any] = {"status": "success"}
+    
+    if action == "register_source":
+        source = DataSource(
+            id=params.get("id", ""),
+            name=params.get("name", ""),
+            source_type=params.get("source_type", "database"),
+            connection_info=params.get("connection_info", {}),
+            priority=params.get("priority", 1),
+        )
+        result["data"] = {
+            "source_id": source.id,
+            "source_type": source.source_type,
+        }
+    
+    elif action == "create_query":
+        query = FederatedQuery(
+            id=params.get("id", ""),
+            query=params.get("query", ""),
+            sources=params.get("sources", []),
+            timeout_seconds=params.get("timeout_seconds", 30.0),
+            merge_strategy=params.get("merge_strategy", "union"),
+        )
+        result["data"] = {
+            "query_id": query.id,
+            "source_count": len(query.sources),
+        }
+    
+    elif action == "plan_query":
+        planner = QueryPlanner()
+        query = FederatedQuery(
+            id="temp",
+            query="",
+            sources=params.get("sources", []),
+        )
+        plan = planner.plan_query(query)
+        result["data"] = {"plan": plan}
+    
+    elif action == "merge_results":
+        merger = ResultMerger(strategy=params.get("strategy", "union"))
+        merged = merger.merge()
+        result["data"] = merged
+    
+    elif action == "resolve_schema":
+        resolver = SchemaResolver()
+        field_name = params.get("field_name", "")
+        sources = params.get("sources", [])
+        resolved = resolver.resolve_field(field_name, sources)
+        result["data"] = {"resolved": resolved}
+    
+    elif action == "reconcile_schemas":
+        resolver = SchemaResolver()
+        schemas = params.get("schemas", [])
+        unified = resolver.reconcile_schemas(schemas)
+        result["data"] = {"unified_schema": unified}
+    
+    elif action == "source_status":
+        sources = params.get("sources", [])
+        result["data"] = {
+            "sources": sources,
+            "available_count": len(sources),
+        }
+    
+    else:
+        result["status"] = "error"
+        result["error"] = f"Unknown action: {action}"
+    
+    return result

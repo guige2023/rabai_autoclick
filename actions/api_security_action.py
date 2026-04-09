@@ -1,428 +1,379 @@
-"""API security action module for RabAI AutoClick.
+"""API Security Action Module.
 
-Provides security operations for API interactions:
-- APIKeyValidationAction: Validate API keys
-- TokenGeneratorAction: Generate secure tokens
-- RateLimitEnforcementAction: Enforce rate limits
-- RequestSigningAction: Sign API requests
-- IPWhitelistAction: IP whitelist management
+Provides API security utilities: rate limiting, input validation, sanitization,
+authentication helpers, and threat detection.
+
+Example:
+    result = execute(context, {"action": "validate_request", "schema": schema})
 """
-
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 import hashlib
 import hmac
-import secrets
-import base64
 import time
-
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from collections import defaultdict
 
 
-class APIKeyValidationAction(BaseAction):
-    """Validate API keys."""
-    action_type = "api_key_validation"
-    display_name = "API密钥验证"
-    description = "验证API密钥"
+class RateLimiter:
+    """Token bucket rate limiter for API requests.
     
-    def __init__(self):
-        super().__init__()
-        self._valid_keys: Dict[str, Dict] = {}
+    Implements token bucket algorithm with configurable refill rates.
+    """
     
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "validate")
+    def __init__(
+        self,
+        capacity: int = 100,
+        refill_rate: float = 10.0,
+        window_seconds: float = 60.0,
+    ) -> None:
+        """Initialize rate limiter.
+        
+        Args:
+            capacity: Maximum tokens in bucket
+            refill_rate: Tokens added per second
+            window_seconds: Time window for tracking
+        """
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self.window_seconds = window_seconds
+        
+        self._buckets: dict[str, tuple[float, float]] = defaultdict(
+            lambda: (float(capacity), time.time())
+        )
+    
+    def _refill(self, key: str) -> tuple[float, float]:
+        """Refill tokens for given key."""
+        tokens, last_refill = self._buckets[key]
+        now = time.time()
+        elapsed = now - last_refill
+        
+        new_tokens = min(self.capacity, tokens + elapsed * self.refill_rate)
+        self._buckets[key] = (new_tokens, now)
+        return new_tokens, now
+    
+    def acquire(self, key: str, tokens: int = 1) -> bool:
+        """Attempt to acquire tokens.
+        
+        Args:
+            key: Client identifier
+            tokens: Number of tokens to acquire
             
-            if operation == "validate":
-                return self._validate_key(params)
-            elif operation == "register":
-                return self._register_key(params)
-            elif operation == "revoke":
-                return self._revoke_key(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+        Returns:
+            True if tokens acquired, False otherwise
+        """
+        current_tokens, _ = self._refill(key)
+        
+        if current_tokens >= tokens:
+            new_tokens = current_tokens - tokens
+            self._buckets[key] = (new_tokens, time.time())
+            return True
+        
+        return False
     
-    def _validate_key(self, params: Dict[str, Any]) -> ActionResult:
-        api_key = params.get("api_key")
+    def get_remaining(self, key: str) -> int:
+        """Get remaining tokens for key."""
+        tokens, _ = self._refill(key)
+        return int(tokens)
+    
+    def get_state(self) -> dict[str, Any]:
+        """Get rate limiter state."""
+        return {
+            "capacity": self.capacity,
+            "refill_rate": self.refill_rate,
+            "tracked_keys": len(self._buckets),
+        }
+
+
+class InputSanitizer:
+    """Sanitizes user input for safe processing.
+    
+    Prevents injection attacks and validates input format.
+    """
+    
+    DANGEROUS_PATTERNS = [
+        "<script",
+        "javascript:",
+        "onerror=",
+        "onclick=",
+        "onload=",
+        "onmouseover=",
+        "<iframe",
+        "union select",
+        "--",
+        "drop table",
+        "exec(",
+    ]
+    
+    @classmethod
+    def sanitize_string(cls, value: str, max_length: int = 1000) -> str:
+        """Sanitize a string value.
         
-        if not api_key:
-            return ActionResult(success=False, message="api_key is required")
+        Args:
+            value: Input string
+            max_length: Maximum allowed length
+            
+        Returns:
+            Sanitized string
+        """
+        if not isinstance(value, str):
+            return ""
         
-        if api_key not in self._valid_keys:
-            return ActionResult(
-                success=False,
-                message="Invalid API key",
-                data={"valid": False}
-            )
+        result = value[:max_length]
         
-        key_info = self._valid_keys[api_key]
+        for pattern in cls.DANGEROUS_PATTERNS:
+            result = result.replace(pattern, "")
         
-        if key_info.get("expires_at"):
-            if time.time() > key_info["expires_at"]:
-                return ActionResult(
-                    success=False,
-                    message="API key has expired",
-                    data={"valid": False, "expired": True}
+        return result.strip()
+    
+    @classmethod
+    def sanitize_dict(cls, data: dict[str, Any], max_length: int = 1000) -> dict[str, Any]:
+        """Sanitize dictionary values.
+        
+        Args:
+            data: Input dictionary
+            max_length: Maximum string length
+            
+        Returns:
+            Sanitized dictionary
+        """
+        result = {}
+        for key, value in data.items():
+            if isinstance(value, str):
+                result[key] = cls.sanitize_string(value, max_length)
+            elif isinstance(value, dict):
+                result[key] = cls.sanitize_dict(value, max_length)
+            elif isinstance(value, list):
+                result[key] = [
+                    cls.sanitize_string(v, max_length) if isinstance(v, str) else v
+                    for v in value
+                ]
+            else:
+                result[key] = value
+        return result
+    
+    @classmethod
+    def validate_schema(cls, data: dict[str, Any], schema: dict[str, type]) -> tuple[bool, list[str]]:
+        """Validate data against schema.
+        
+        Args:
+            data: Input data
+            schema: Expected schema {field: type}
+            
+        Returns:
+            Tuple of (is_valid, error_messages)
+        """
+        errors = []
+        
+        for field, expected_type in schema.items():
+            if field not in data:
+                errors.append(f"Missing required field: {field}")
+                continue
+            
+            if not isinstance(data[field], expected_type):
+                errors.append(
+                    f"Field '{field}' expected {expected_type.__name__}, "
+                    f"got {type(data[field]).__name__}"
                 )
         
-        return ActionResult(
-            success=True,
-            message="API key is valid",
-            data={"valid": True, "key_info": key_info}
-        )
-    
-    def _register_key(self, params: Dict[str, Any]) -> ActionResult:
-        api_key = params.get("api_key", self._generate_key())
-        name = params.get("name", "unnamed")
-        scopes = params.get("scopes", [])
-        expires_in = params.get("expires_in")
-        
-        key_info = {
-            "name": name,
-            "scopes": scopes,
-            "created_at": time.time()
-        }
-        
-        if expires_in:
-            key_info["expires_at"] = time.time() + expires_in
-        
-        self._valid_keys[api_key] = key_info
-        
-        return ActionResult(
-            success=True,
-            message="API key registered",
-            data={"api_key": api_key, "key_info": key_info}
-        )
-    
-    def _revoke_key(self, params: Dict[str, Any]) -> ActionResult:
-        api_key = params.get("api_key")
-        
-        if api_key in self._valid_keys:
-            del self._valid_keys[api_key]
-            return ActionResult(success=True, message="API key revoked")
-        
-        return ActionResult(success=False, message="API key not found")
-    
-    def _generate_key(self) -> str:
-        return secrets.token_urlsafe(32)
+        return len(errors) == 0, errors
 
 
-class TokenGeneratorAction(BaseAction):
-    """Generate secure tokens."""
-    action_type = "token_generator"
-    display_name = "令牌生成"
-    description = "生成安全令牌"
+class ThreatDetector:
+    """Detects potential security threats in API requests.
     
-    def __init__(self):
-        super().__init__()
+    Analyzes request patterns for suspicious activity.
+    """
     
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            token_type = params.get("type", "random")
-            length = params.get("length", 32)
-            
-            if token_type == "random":
-                token = secrets.token_urlsafe(length)
-            elif token_type == "hex":
-                token = secrets.token_hex(length)
-            elif token_type == "bytes":
-                token = base64.b64encode(secrets.token_bytes(length)).decode()
-            else:
-                return ActionResult(success=False, message=f"Unknown token type: {token_type}")
-            
-            return ActionResult(
-                success=True,
-                message=f"Token generated ({token_type})",
-                data={
-                    "token": token,
-                    "type": token_type,
-                    "length": length
-                }
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-
-
-class RateLimitEnforcementAction(BaseAction):
-    """Enforce rate limits."""
-    action_type = "rate_limit_enforcement"
-    display_name = "限流执行"
-    description = "执行API限流"
-    
-    def __init__(self):
-        super().__init__()
-        self._limits: Dict[str, List[float]] = {}
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "check")
-            
-            if operation == "check":
-                return self._check_rate_limit(params)
-            elif operation == "configure":
-                return self._configure_limit(params)
-            elif operation == "reset":
-                return self._reset_limit(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _check_rate_limit(self, params: Dict[str, Any]) -> ActionResult:
-        key = params.get("key", "default")
-        limit = params.get("limit", 100)
-        window = params.get("window", 60)
+    def __init__(self, threshold: int = 10) -> None:
+        """Initialize threat detector.
         
-        if key not in self._limits:
-            self._limits[key] = []
+        Args:
+            threshold: Failed attempts before flagging as threat
+        """
+        self.threshold = threshold
+        self._failed_attempts: dict[str, list[float]] = defaultdict(list)
+    
+    def record_failed_attempt(self, identifier: str) -> None:
+        """Record a failed authentication attempt.
         
+        Args:
+            identifier: Client identifier (IP, user ID, etc.)
+        """
         now = time.time()
-        cutoff = now - window
+        self._failed_attempts[identifier].append(now)
         
-        self._limits[key] = [t for t in self._limits[key] if t > cutoff]
+        cutoff = now - 300
+        self._failed_attempts[identifier] = [
+            t for t in self._failed_attempts[identifier] if t > cutoff
+        ]
+    
+    def is_threat(self, identifier: str) -> bool:
+        """Check if identifier is flagged as threat.
         
-        remaining = limit - len(self._limits[key])
+        Args:
+            identifier: Client identifier
+            
+        Returns:
+            True if threat level exceeded
+        """
+        return len(self._failed_attempts[identifier]) >= self.threshold
+    
+    def get_threat_level(self, identifier: str) -> str:
+        """Get threat level for identifier.
         
-        if remaining > 0:
-            self._limits[key].append(now)
-            return ActionResult(
-                success=True,
-                message="Request allowed",
-                data={
-                    "allowed": True,
-                    "remaining": remaining - 1,
-                    "limit": limit,
-                    "window": window
-                }
-            )
+        Args:
+            identifier: Client identifier
+            
+        Returns:
+            Threat level: "none", "low", "medium", "high", "critical"
+        """
+        count = len(self._failed_attempts[identifier])
+        
+        if count == 0:
+            return "none"
+        elif count < 3:
+            return "low"
+        elif count < self.threshold:
+            return "medium"
+        elif count < self.threshold * 2:
+            return "high"
         else:
-            oldest = min(self._limits[key])
-            retry_after = oldest + window - now
-            
-            return ActionResult(
-                success=False,
-                message="Rate limit exceeded",
-                data={
-                    "allowed": False,
-                    "remaining": 0,
-                    "limit": limit,
-                    "window": window,
-                    "retry_after": retry_after
-                }
-            )
+            return "critical"
     
-    def _configure_limit(self, params: Dict[str, Any]) -> ActionResult:
-        key = params.get("key", "default")
-        limit = params.get("limit", 100)
-        window = params.get("window", 60)
+    def reset(self, identifier: str) -> None:
+        """Reset threat tracking for identifier.
         
-        return ActionResult(
-            success=True,
-            message=f"Rate limit configured for {key}",
-            data={
-                "key": key,
-                "limit": limit,
-                "window": window
-            }
-        )
-    
-    def _reset_limit(self, params: Dict[str, Any]) -> ActionResult:
-        key = params.get("key", "default")
-        
-        if key in self._limits:
-            count = len(self._limits[key])
-            self._limits[key] = []
-            return ActionResult(
-                success=True,
-                message=f"Rate limit reset for {key}",
-                data={"cleared_requests": count}
-            )
-        
-        return ActionResult(success=True, message="No rate limit to reset")
+        Args:
+            identifier: Client identifier
+        """
+        if identifier in self._failed_attempts:
+            del self._failed_attempts[identifier]
 
 
-class RequestSigningAction(BaseAction):
-    """Sign API requests."""
-    action_type = "request_signing"
-    display_name = "请求签名"
-    description = "签名API请求"
+class HMACHelper:
+    """HMAC-based request signing for API authentication."""
     
-    def __init__(self):
-        super().__init__()
-        self._secret_key: Optional[str] = None
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "sign")
+    @staticmethod
+    def generate_signature(
+        secret: str,
+        message: str,
+        algorithm: str = "sha256",
+    ) -> str:
+        """Generate HMAC signature for message.
+        
+        Args:
+            secret: Secret key
+            message: Message to sign
+            algorithm: Hash algorithm (sha256, sha512, etc.)
             
-            if operation == "sign":
-                return self._sign_request(params)
-            elif operation == "verify":
-                return self._verify_signature(params)
-            elif operation == "set_key":
-                return self._set_secret_key(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
-    
-    def _sign_request(self, params: Dict[str, Any]) -> ActionResult:
-        if not self._secret_key:
-            return ActionResult(success=False, message="Secret key not set")
-        
-        method = params.get("method", "GET")
-        path = params.get("path", "/")
-        body = params.get("body", "")
-        timestamp = params.get("timestamp", str(int(time.time())))
-        
-        message = f"{method}:{path}:{timestamp}:{body}"
-        
-        signature = hmac.new(
-            self._secret_key.encode(),
+        Returns:
+            Hex-encoded signature
+        """
+        return hmac.new(
+            secret.encode(),
             message.encode(),
-            hashlib.sha256
+            hashlib.new(algorithm),
         ).hexdigest()
-        
-        return ActionResult(
-            success=True,
-            message="Request signed",
-            data={
-                "signature": signature,
-                "timestamp": timestamp,
-                "message": message
-            }
-        )
     
-    def _verify_signature(self, params: Dict[str, Any]) -> ActionResult:
-        if not self._secret_key:
-            return ActionResult(success=False, message="Secret key not set")
+    @staticmethod
+    def verify_signature(
+        secret: str,
+        message: str,
+        signature: str,
+        algorithm: str = "sha256",
+    ) -> bool:
+        """Verify HMAC signature.
         
-        signature = params.get("signature")
-        method = params.get("method", "GET")
-        path = params.get("path", "/")
-        body = params.get("body", "")
-        timestamp = params.get("timestamp")
-        
-        message = f"{method}:{path}:{timestamp}:{body}"
-        
-        expected = hmac.new(
-            self._secret_key.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        
-        valid = hmac.compare_digest(signature, expected)
-        
-        return ActionResult(
-            success=True,
-            message="Signature verified",
-            data={"valid": valid}
-        )
-    
-    def _set_secret_key(self, params: Dict[str, Any]) -> ActionResult:
-        secret_key = params.get("secret_key")
-        
-        if not secret_key:
-            return ActionResult(success=False, message="secret_key is required")
-        
-        self._secret_key = secret_key
-        
-        return ActionResult(
-            success=True,
-            message="Secret key set"
-        )
-
-
-class IPWhitelistAction(BaseAction):
-    """IP whitelist management."""
-    action_type = "ip_whitelist"
-    display_name = "IP白名单"
-    description = "管理IP白名单"
-    
-    def __init__(self):
-        super().__init__()
-        self._whitelist: set = set()
-    
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "check")
+        Args:
+            secret: Secret key
+            message: Original message
+            signature: Signature to verify
+            algorithm: Hash algorithm
             
-            if operation == "check":
-                return self._check_ip(params)
-            elif operation == "add":
-                return self._add_ip(params)
-            elif operation == "remove":
-                return self._remove_ip(params)
-            elif operation == "list":
-                return self._list_ips()
-            else:
-                return ActionResult(success=False, message=f"Unknown operation: {operation}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+        Returns:
+            True if signature is valid
+        """
+        expected = HMACHelper.generate_signature(secret, message, algorithm)
+        return hmac.compare_digest(expected, signature)
+
+
+def execute(context: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    """Execute API security action.
     
-    def _check_ip(self, params: Dict[str, Any]) -> ActionResult:
-        ip = params.get("ip")
+    Args:
+        context: Execution context
+        params: Parameters including action type
         
-        if not ip:
-            return ActionResult(success=False, message="ip is required")
-        
-        if not self._whitelist:
-            return ActionResult(
-                success=True,
-                message="Whitelist is empty, all IPs allowed",
-                data={"whitelisted": True, "allow_all": True}
-            )
-        
-        whitelisted = ip in self._whitelist
-        
-        return ActionResult(
-            success=True,
-            message=f"IP {'is' if whitelisted else 'is not'} whitelisted",
-            data={
-                "ip": ip,
-                "whitelisted": whitelisted
-            }
+    Returns:
+        Result dictionary with status and data
+    """
+    action = params.get("action", "status")
+    result: dict[str, Any] = {"status": "success"}
+    
+    if action == "rate_limit_check":
+        limiter = RateLimiter(
+            capacity=params.get("capacity", 100),
+            refill_rate=params.get("refill_rate", 10.0),
         )
+        key = params.get("key", "default")
+        allowed = limiter.acquire(key, params.get("tokens", 1))
+        result["data"] = {
+            "allowed": allowed,
+            "remaining": limiter.get_remaining(key),
+        }
     
-    def _add_ip(self, params: Dict[str, Any]) -> ActionResult:
-        ip = params.get("ip")
-        
-        if not ip:
-            return ActionResult(success=False, message="ip is required")
-        
-        self._whitelist.add(ip)
-        
-        return ActionResult(
-            success=True,
-            message=f"IP {ip} added to whitelist",
-            data={"whitelist_count": len(self._whitelist)}
+    elif action == "rate_limit_status":
+        limiter = RateLimiter()
+        result["data"] = limiter.get_state()
+    
+    elif action == "sanitize":
+        data = params.get("data", {})
+        max_length = params.get("max_length", 1000)
+        if isinstance(data, dict):
+            result["data"] = InputSanitizer.sanitize_dict(data, max_length)
+        elif isinstance(data, str):
+            result["data"] = InputSanitizer.sanitize_string(data, max_length)
+        else:
+            result["data"] = data
+    
+    elif action == "validate":
+        data = params.get("data", {})
+        schema = params.get("schema", {})
+        is_valid, errors = InputSanitizer.validate_schema(data, schema)
+        result["data"] = {"valid": is_valid, "errors": errors}
+    
+    elif action == "threat_check":
+        detector = ThreatDetector(threshold=params.get("threshold", 10))
+        identifier = params.get("identifier", "")
+        level = detector.get_threat_level(identifier)
+        result["data"] = {
+            "is_threat": detector.is_threat(identifier),
+            "level": level,
+        }
+    
+    elif action == "threat_record":
+        detector = ThreatDetector(threshold=params.get("threshold", 10))
+        detector.record_failed_attempt(params.get("identifier", ""))
+        result["data"] = {"recorded": True}
+    
+    elif action == "sign":
+        signature = HMACHelper.generate_signature(
+            params.get("secret", ""),
+            params.get("message", ""),
+            params.get("algorithm", "sha256"),
         )
+        result["data"] = {"signature": signature}
     
-    def _remove_ip(self, params: Dict[str, Any]) -> ActionResult:
-        ip = params.get("ip")
-        
-        if not ip:
-            return ActionResult(success=False, message="ip is required")
-        
-        if ip in self._whitelist:
-            self._whitelist.remove(ip)
-            return ActionResult(
-                success=True,
-                message=f"IP {ip} removed from whitelist",
-                data={"whitelist_count": len(self._whitelist)}
-            )
-        
-        return ActionResult(success=False, message=f"IP {ip} not found in whitelist")
-    
-    def _list_ips(self) -> ActionResult:
-        return ActionResult(
-            success=True,
-            message=f"{len(self._whitelist)} IPs in whitelist",
-            data={"whitelist": list(self._whitelist)}
+    elif action == "verify":
+        valid = HMACHelper.verify_signature(
+            params.get("secret", ""),
+            params.get("message", ""),
+            params.get("signature", ""),
+            params.get("algorithm", "sha256"),
         )
+        result["data"] = {"valid": valid}
+    
+    else:
+        result["status"] = "error"
+        result["error"] = f"Unknown action: {action}"
+    
+    return result

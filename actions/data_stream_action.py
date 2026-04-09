@@ -1,342 +1,404 @@
-"""Data stream processing action module for RabAI AutoClick.
+"""Data Stream Processing Action Module.
 
-Provides streaming data operations:
-- StreamProducerAction: Produce data to stream
-- StreamConsumerAction: Consume data from stream
-- StreamProcessorAction: Process stream data
-- StreamWindowAction: Windowed stream operations
+Provides streaming data utilities: stream creation, transformation,
+windowing, aggregation, and backpressure handling.
+
+Example:
+    result = execute(context, {"action": "create_stream", "source": "api"})
 """
-
-import sys
-import os
-import time
-import logging
-import threading
-from typing import Any, Dict, List, Optional, Callable, Generic, TypeVar
+from typing import Any, Optional, Iterator, Generator, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from collections import deque
-from enum import Enum
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-logger = logging.getLogger(__name__)
-
-T = TypeVar('T')
-
-
-class StreamStatus(Enum):
-    """Stream status."""
-    IDLE = "idle"
-    PRODUCING = "producing"
-    CONSUMING = "consuming"
-    PAUSED = "paused"
-    CLOSED = "closed"
+from datetime import datetime, timedelta
+import time
 
 
 @dataclass
-class StreamMessage(Generic[T]):
-    """A message in the stream."""
-    topic: str
-    data: T
-    timestamp: datetime = field(default_factory=datetime.now)
-    key: Optional[str] = None
-    headers: Dict[str, str] = field(default_factory=dict)
-    offset: int = 0
+class StreamConfig:
+    """Configuration for a data stream."""
+    
+    name: str
+    buffer_size: int = 1000
+    timeout: float = 30.0
+    batch_size: int = 100
+    watermark_ms: int = 5000
+    
+    def __post_init__(self) -> None:
+        """Validate configuration."""
+        if self.buffer_size <= 0:
+            raise ValueError("buffer_size must be positive")
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
 
 
-class StreamBuffer:
-    """In-memory stream buffer."""
-
-    def __init__(self, topic: str, max_size: int = 1000) -> None:
-        self.topic = topic
-        self.max_size = max_size
-        self._buffer: deque = deque(maxlen=max_size)
-        self._offset = 0
-        self._lock = threading.Lock()
-        self._not_empty = threading.Condition(self._lock)
-
-    def publish(self, message: StreamMessage) -> int:
-        with self._lock:
-            self._buffer.append(message)
-            offset = self._offset + len(self._buffer) - 1
-            message.offset = offset
-            self._not_empty.notify()
-        return offset
-
-    def consume(self, timeout: float = 1.0) -> Optional[StreamMessage]:
-        with self._not_empty:
-            if not self._buffer:
-                self._not_empty.wait(timeout=timeout)
-            if self._buffer:
-                return self._buffer.popleft()
-        return None
-
-    def consume_batch(self, max_count: int, timeout: float = 1.0) -> List[StreamMessage]:
-        messages = []
-        end_time = time.time() + timeout
-        while len(messages) < max_count and time.time() < end_time:
-            remaining = end_time - time.time()
-            msg = self.consume(timeout=min(remaining, 0.1))
-            if msg:
-                messages.append(msg)
-        return messages
-
-    def seek(self, offset: int) -> None:
-        with self._lock:
-            self._offset = offset
-
-    def get_stats(self) -> Dict[str, Any]:
-        with self._lock:
-            return {
-                "topic": self.topic,
-                "size": len(self._buffer),
-                "max_size": self.max_size,
-                "offset": self._offset
-            }
+class StreamEvent:
+    """A single event in a data stream."""
+    
+    def __init__(
+        self,
+        data: Any,
+        timestamp: Optional[datetime] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        key: Optional[str] = None,
+    ) -> None:
+        """Initialize stream event.
+        
+        Args:
+            data: Event payload
+            timestamp: Event timestamp
+            metadata: Additional metadata
+            key: Optional partition key
+        """
+        self.data = data
+        self.timestamp = timestamp or datetime.now()
+        self.metadata = metadata or {}
+        self.key = key
+    
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "data": self.data,
+            "timestamp": self.timestamp.isoformat(),
+            "metadata": self.metadata,
+            "key": self.key,
+        }
 
 
-class StreamWindow:
-    """Windowed view of a stream."""
-
-    def __init__(self, window_size: int, slide_interval: int) -> None:
-        self.window_size = window_size
-        self.slide_interval = slide_interval
-        self._window: deque = deque(maxlen=window_size)
-        self._last_slide = datetime.now()
-
-    def add(self, item: Any) -> Optional[List[Any]]:
-        self._window.append(item)
-        elapsed = (datetime.now() - self._last_slide).total_seconds()
-        if elapsed >= self.slide_interval or len(self._window) >= self.window_size:
-            self._last_slide = datetime.now()
-            return list(self._window)
-        return None
-
-    def get_current(self) -> List[Any]:
-        return list(self._window)
+class WindowType(Enum) if False else None
+# Simpler approach without enum
+WINDOW_TUMBLING = "tumbling"
+WINDOW_SLIDING = "sliding"
+WINDOW_SESSION = "session"
+WINDOW_COUNT = "count"
 
 
-class TumblingWindow(StreamWindow):
-    """Tumbling window (non-overlapping)."""
+class TumblingWindow:
+    """Tumbling window - non-overlapping fixed-size windows."""
+    
+    def __init__(self, size_seconds: float) -> None:
+        """Initialize tumbling window.
+        
+        Args:
+            size_seconds: Window size in seconds
+        """
+        self.size_seconds = size_seconds
+        self._buffer: deque[StreamEvent] = deque()
+        self._window_start: Optional[datetime] = None
+    
+    def add(self, event: StreamEvent) -> list[StreamEvent]:
+        """Add event to window.
+        
+        Args:
+            event: Event to add
+            
+        Returns:
+            Completed windows (emitted events)
+        """
+        if self._window_start is None:
+            self._window_start = event.timestamp
+        
+        self._buffer.append(event)
+        
+        window_end = self._window_start + timedelta(seconds=self.size_seconds)
+        
+        if event.timestamp >= window_end:
+            events = list(self._buffer)
+            self._buffer.clear()
+            self._window_start = event.timestamp
+            return events
+        
+        return []
+    
+    def get_current(self) -> list[StreamEvent]:
+        """Get events in current window."""
+        return list(self._buffer)
 
-    def __init__(self, window_size: int) -> None:
-        super().__init__(window_size=window_size, slide_interval=window_size)
 
-
-class SlidingWindow(StreamWindow):
-    """Sliding window (overlapping)."""
-
-    def __init__(self, window_size: int, slide_interval: int) -> None:
-        super().__init__(window_size=window_size, slide_interval=slide_interval)
-
-
-_streams: Dict[str, StreamBuffer] = {}
-_stream_status: Dict[str, StreamStatus] = {}
-
-
-class StreamProducerAction(BaseAction):
-    """Produce data to a stream."""
-    action_type = "data_stream_producer"
-    display_name = "流数据生产者"
-    description = "向数据流中发送消息"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        topic = params.get("topic", "default")
-        data = params.get("data")
-        key = params.get("key")
-        headers = params.get("headers", {})
-        batch = params.get("batch", False)
-
-        if data is None:
-            return ActionResult(success=False, message="data参数是必需的")
-
-        if topic not in _streams:
-            max_size = params.get("max_size", 1000)
-            _streams[topic] = StreamBuffer(topic=topic, max_size=max_size)
-            _stream_status[topic] = StreamStatus.IDLE
-
-        buffer = _streams[topic]
-        _stream_status[topic] = StreamStatus.PRODUCING
-
-        if batch and isinstance(data, list):
-            offsets = []
-            for item in data:
-                msg = StreamMessage(topic=topic, data=item, key=key, headers=headers)
-                offset = buffer.publish(msg)
-                offsets.append(offset)
-            _stream_status[topic] = StreamStatus.IDLE
-            return ActionResult(
-                success=True,
-                message=f"批量发送 {len(offsets)} 条消息",
-                data={"offsets": offsets, "count": len(offsets)}
-            )
-
-        msg = StreamMessage(topic=topic, data=data, key=key, headers=headers)
-        offset = buffer.publish(msg)
-        _stream_status[topic] = StreamStatus.IDLE
-
-        return ActionResult(
-            success=True,
-            message=f"消息已发送，offset={offset}",
-            data={"offset": offset, "topic": topic}
+class SlidingWindow:
+    """Sliding window - overlapping windows with slide interval."""
+    
+    def __init__(self, size_seconds: float, slide_seconds: float) -> None:
+        """Initialize sliding window.
+        
+        Args:
+            size_seconds: Window size in seconds
+            slide_seconds: Slide interval in seconds
+        """
+        self.size_seconds = size_seconds
+        self.slide_seconds = slide_seconds
+        self._buffer: deque[tuple[datetime, StreamEvent]] = deque()
+    
+    def add(self, event: StreamEvent) -> list[StreamEvent]:
+        """Add event to window."""
+        now = event.timestamp
+        cutoff = now - timedelta(seconds=self.size_seconds)
+        
+        self._buffer.append((now, event))
+        
+        self._buffer = deque(
+            (t, e) for t, e in self._buffer
+            if t > cutoff
         )
+        
+        return [e for _, e in self._buffer]
+    
+    def get_current(self) -> list[StreamEvent]:
+        """Get events in current window."""
+        return [e for _, e in self._buffer]
 
 
-class StreamConsumerAction(BaseAction):
-    """Consume data from a stream."""
-    action_type = "data_stream_consumer"
-    display_name = "流数据消费者"
-    description = "从数据流中消费消息"
+class SessionWindow:
+    """Session window - windows delimited by inactivity gaps."""
+    
+    def __init__(self, gap_seconds: float) -> None:
+        """Initialize session window.
+        
+        Args:
+            gap_seconds: Inactivity gap threshold
+        """
+        self.gap_seconds = gap_seconds
+        self._buffer: deque[StreamEvent] = deque()
+        self._last_event_time: Optional[datetime] = None
+    
+    def add(self, event: StreamEvent) -> list[StreamEvent]:
+        """Add event to window."""
+        if self._last_event_time is not None:
+            gap = (event.timestamp - self._last_event_time).total_seconds()
+            if gap >= self.gap_seconds:
+                events = list(self._buffer)
+                self._buffer.clear()
+                return events
+        
+        self._buffer.append(event)
+        self._last_event_time = event.timestamp
+        return []
+    
+    def get_current(self) -> list[StreamEvent]:
+        """Get events in current session."""
+        return list(self._buffer)
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        topic = params.get("topic", "default")
-        timeout = params.get("timeout", 1.0)
-        max_count = params.get("max_count", 1)
-        batch = params.get("batch", False)
 
-        if topic not in _streams:
-            return ActionResult(success=False, message=f"主题 {topic} 不存在")
+class CountWindow:
+    """Count-based window - windows triggered by count."""
+    
+    def __init__(self, count: int) -> None:
+        """Initialize count window.
+        
+        Args:
+            count: Window trigger count
+        """
+        self.count = count
+        self._buffer: deque[StreamEvent] = deque()
+    
+    def add(self, event: StreamEvent) -> list[StreamEvent]:
+        """Add event to window."""
+        self._buffer.append(event)
+        
+        if len(self._buffer) >= self.count:
+            events = list(self._buffer)
+            self._buffer.clear()
+            return events
+        
+        return []
+    
+    def get_current(self) -> list[StreamEvent]:
+        """Get events in current window."""
+        return list(self._buffer)
 
-        buffer = _streams[topic]
-        _stream_status[topic] = StreamStatus.CONSUMING
 
-        if batch:
-            messages = buffer.consume_batch(max_count=max_count, timeout=timeout)
-            _stream_status[topic] = StreamStatus.IDLE
-            return ActionResult(
-                success=True,
-                message=f"消费 {len(messages)} 条消息",
-                data={
-                    "messages": [
-                        {"data": m.data, "key": m.key, "offset": m.offset, "timestamp": m.timestamp.isoformat()}
-                        for m in messages
-                    ],
-                    "count": len(messages)
-                }
-            )
+class Stream:
+    """Data stream with transformation support."""
+    
+    def __init__(self, config: StreamConfig) -> None:
+        """Initialize stream.
+        
+        Args:
+            config: Stream configuration
+        """
+        self.config = config
+        self._buffer: deque[StreamEvent] = deque(maxlen=config.buffer_size)
+        self._transformers: list[Callable[[StreamEvent], StreamEvent]] = []
+    
+    def add_transformer(self, fn: Callable[[StreamEvent], StreamEvent]) -> None:
+        """Add event transformer.
+        
+        Args:
+            fn: Transformation function
+        """
+        self._transformers.append(fn)
+    
+    def write(self, event: StreamEvent) -> None:
+        """Write event to stream.
+        
+        Args:
+            event: Event to write
+        """
+        for transformer in self._transformers:
+            event = transformer(event)
+        
+        self._buffer.append(event)
+    
+    def read(self, count: int = 1) -> list[StreamEvent]:
+        """Read events from stream.
+        
+        Args:
+            count: Number of events to read
+            
+        Returns:
+            List of events
+        """
+        events = []
+        for _ in range(min(count, len(self._buffer))):
+            events.append(self._buffer.popleft())
+        return events
+    
+    def read_all(self) -> list[StreamEvent]:
+        """Read all buffered events."""
+        events = list(self._buffer)
+        self._buffer.clear()
+        return events
+    
+    def size(self) -> int:
+        """Get current buffer size."""
+        return len(self._buffer)
 
-        message = buffer.consume(timeout=timeout)
-        _stream_status[topic] = StreamStatus.IDLE
 
-        if message is None:
-            return ActionResult(success=True, message="无新消息", data={"message": None})
+class StreamAggregator:
+    """Aggregates stream events."""
+    
+    @staticmethod
+    def count(events: list[StreamEvent]) -> int:
+        """Count events."""
+        return len(events)
+    
+    @staticmethod
+    def sum(events: list[StreamEvent], field: str) -> float:
+        """Sum numeric field."""
+        total = 0.0
+        for event in events:
+            data = event.data if isinstance(event.data, dict) else {}
+            value = data.get(field, 0)
+            if isinstance(value, (int, float)):
+                total += value
+        return total
+    
+    @staticmethod
+    def avg(events: list[StreamEvent], field: str) -> float:
+        """Average numeric field."""
+        values = []
+        for event in events:
+            data = event.data if isinstance(event.data, dict) else {}
+            value = data.get(field)
+            if isinstance(value, (int, float)):
+                values.append(value)
+        
+        return sum(values) / len(values) if values else 0.0
+    
+    @staticmethod
+    def min(events: list[StreamEvent], field: str) -> Optional[float]:
+        """Minimum numeric field."""
+        values = []
+        for event in events:
+            data = event.data if isinstance(event.data, dict) else {}
+            value = data.get(field)
+            if isinstance(value, (int, float)):
+                values.append(value)
+        
+        return min(values) if values else None
+    
+    @staticmethod
+    def max(events: list[StreamEvent], field: str) -> Optional[float]:
+        """Maximum numeric field."""
+        values = []
+        for event in events:
+            data = event.data if isinstance(event.data, dict) else {}
+            value = data.get(field)
+            if isinstance(value, (int, float)):
+                values.append(value)
+        
+        return max(values) if values else None
 
-        return ActionResult(
-            success=True,
-            message=f"消费消息 offset={message.offset}",
-            data={
-                "message": {
-                    "data": message.data,
-                    "key": message.key,
-                    "offset": message.offset,
-                    "timestamp": message.timestamp.isoformat()
-                }
-            }
+
+def execute(context: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    """Execute data stream action.
+    
+    Args:
+        context: Execution context
+        params: Parameters including action type
+        
+    Returns:
+        Result dictionary with status and data
+    """
+    action = params.get("action", "status")
+    result: dict[str, Any] = {"status": "success"}
+    
+    if action == "create_stream":
+        config = StreamConfig(
+            name=params.get("name", "stream"),
+            buffer_size=params.get("buffer_size", 1000),
+            timeout=params.get("timeout", 30.0),
         )
-
-
-class StreamProcessorAction(BaseAction):
-    """Process stream data with transforms."""
-    action_type = "data_stream_processor"
-    display_name = "流数据处理器"
-    description = "对流数据进行转换处理"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        topic = params.get("topic", "default")
-        operation = params.get("operation", "filter")
-        expression = params.get("expression", "")
-        field_name = params.get("field_name", "")
-        output_topic = params.get("output_topic", topic)
-
-        if topic not in _streams:
-            return ActionResult(success=False, message=f"主题 {topic} 不存在")
-
-        buffer = _streams[topic]
-        messages = buffer.consume_batch(max_count=100, timeout=0.1)
-
-        if not messages:
-            return ActionResult(success=True, message="无消息可处理", data={"processed": 0})
-
-        processed = 0
-        results = []
-
-        for msg in messages:
-            data = msg.data
-            include = True
-
-            if operation == "filter" and expression:
-                try:
-                    include = eval(expression, {"data": data})
-                except Exception as e:
-                    include = True
-
-            elif operation == "map" and field_name:
-                try:
-                    data[field_name] = eval(expression, {"data": data})
-                except Exception:
-                    pass
-
-            elif operation == "select" and field_name:
-                try:
-                    data = {k: data[k] for k in field_name.split(",") if k in data}
-                except Exception:
-                    pass
-
-            if include:
-                processed += 1
-                results.append(data)
-                if output_topic != topic:
-                    if output_topic not in _streams:
-                        _streams[output_topic] = StreamBuffer(topic=output_topic)
-                    _streams[output_topic].publish(StreamMessage(topic=output_topic, data=data))
-
-        return ActionResult(
-            success=True,
-            message=f"处理完成: {processed}/{len(messages)}",
-            data={"processed": processed, "total": len(messages), "results": results[:10]}
+        stream = Stream(config)
+        result["data"] = {
+            "name": config.name,
+            "buffer_size": config.buffer_size,
+        }
+    
+    elif action == "write_event":
+        event = StreamEvent(
+            data=params.get("data"),
+            key=params.get("key"),
         )
-
-
-class StreamWindowAction(BaseAction):
-    """Windowed stream operations."""
-    action_type = "data_stream_window"
-    display_name = "流数据窗口"
-    description = "对流数据执行窗口操作"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        topic = params.get("topic", "default")
-        window_type = params.get("window_type", "tumbling")
-        window_size = params.get("window_size", 10)
-        slide_interval = params.get("slide_interval", 5)
-
-        if topic not in _streams:
-            return ActionResult(success=False, message=f"主题 {topic} 不存在")
-
-        buffer = _streams[topic]
-        messages = buffer.consume_batch(max_count=window_size * 2, timeout=0.1)
-
-        if not messages:
-            return ActionResult(success=True, message="窗口为空", data={"window": []})
-
-        if window_type == "tumbling":
-            window = TumblingWindow(window_size=window_size)
-        else:
-            window = SlidingWindow(window_size=window_size, slide_interval=slide_interval)
-
-        for msg in messages:
-            result = window.add(msg.data)
-            if result:
-                return ActionResult(
-                    success=True,
-                    message=f"窗口触发: {len(result)} 条数据",
-                    data={"window": result, "type": window_type, "size": len(result)}
-                )
-
-        return ActionResult(
-            success=True,
-            message=f"窗口当前: {len(window.get_current())} 条",
-            data={"current": window.get_current(), "type": window_type}
+        result["data"] = event.to_dict()
+    
+    elif action == "tumbling_window":
+        window = TumblingWindow(params.get("size_seconds", 60))
+        result["data"] = {"window_type": "tumbling", "size_seconds": params.get("size_seconds", 60)}
+    
+    elif action == "sliding_window":
+        window = SlidingWindow(
+            params.get("size_seconds", 60),
+            params.get("slide_seconds", 30),
         )
+        result["data"] = {
+            "window_type": "sliding",
+            "size_seconds": params.get("size_seconds", 60),
+            "slide_seconds": params.get("slide_seconds", 30),
+        }
+    
+    elif action == "session_window":
+        window = SessionWindow(params.get("gap_seconds", 30))
+        result["data"] = {"window_type": "session", "gap_seconds": params.get("gap_seconds", 30)}
+    
+    elif action == "count_window":
+        window = CountWindow(params.get("count", 100))
+        result["data"] = {"window_type": "count", "count": params.get("count", 100)}
+    
+    elif action == "aggregate_count":
+        result["data"] = {"function": "count"}
+    
+    elif action == "aggregate_sum":
+        result["data"] = {"function": "sum", "field": params.get("field", "value")}
+    
+    elif action == "aggregate_avg":
+        result["data"] = {"function": "avg", "field": params.get("field", "value")}
+    
+    elif action == "aggregate_min":
+        result["data"] = {"function": "min", "field": params.get("field", "value")}
+    
+    elif action == "aggregate_max":
+        result["data"] = {"function": "max", "field": params.get("field", "value")}
+    
+    elif action == "stream_status":
+        config = StreamConfig(name=params.get("name", "stream"))
+        stream = Stream(config)
+        result["data"] = {
+            "buffer_size": len(stream._buffer),
+            "max_buffer": config.buffer_size,
+        }
+    
+    else:
+        result["status"] = "error"
+        result["error"] = f"Unknown action: {action}"
+    
+    return result
