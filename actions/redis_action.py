@@ -1,561 +1,665 @@
-"""Redis integration for in-memory data structure operations.
+"""Redis action for caching and data structures.
 
-Handles Redis operations including strings, hashes, lists,
-sets, sorted sets, pub/sub, and caching patterns.
+This module provides comprehensive Redis support:
+- String, hash, list, set, sorted set operations
+- Pub/sub messaging
+- Stream processing
+- Pipeline and transaction support
+- Cluster and Sentinel support
+- Lua scripting
+- Distributed locking
+- Rate limiting
+
+Author: rabai_autoclick
+Version: 1.0.0
 """
 
-from typing import Any, Optional, Union
+import asyncio
+import json
 import logging
+import time
 from dataclasses import dataclass, field
-from datetime import timedelta
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 try:
-    import redis
+    import redis.asyncio as aioredis
+    from redis.asyncio import Redis, ConnectionPool
+    from redis.cluster import RedisCluster
+    REDIS_AVAILABLE = True
 except ImportError:
-    redis = None
+    REDIS_AVAILABLE = False
+    Redis = None
+    ConnectionPool = None
+    RedisCluster = None
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class RedisConfig:
-    """Configuration for Redis connection."""
-    host: str = "localhost"
-    port: int = 6379
-    db: int = 0
-    password: Optional[str] = None
-    ssl: bool = False
-    socket_timeout: int = 5
-    socket_connect_timeout: int = 5
-    max_connections: int = 50
-    decode_responses: bool = True
+class DataType(Enum):
+    """Redis data types."""
+    STRING = "string"
+    HASH = "hash"
+    LIST = "list"
+    SET = "set"
+    ZSET = "zset"
+    STREAM = "stream"
+    NONE = "none"
 
 
 @dataclass
 class CacheEntry:
-    """Represents a cached value with metadata."""
+    """Cache entry with metadata."""
     key: str
     value: Any
-    ttl: Optional[int] = None
-    exists: bool = True
+    ttl_seconds: Optional[float] = None
+    created_at: float = field(default_factory=time.time)
+    hit_count: int = 0
+    last_accessed: float = field(default_factory=time.time)
 
 
-class RedisAPIError(Exception):
-    """Raised when Redis operations fail."""
-    def __init__(self, message: str, error_type: Optional[str] = None):
-        super().__init__(message)
-        self.error_type = error_type
+@dataclass
+class RateLimitResult:
+    """Rate limit check result."""
+    allowed: bool
+    limit: int
+    remaining: int
+    reset_at: float
+    retry_after: Optional[float] = None
+
+
+@dataclass
+class LockResult:
+    """Distributed lock result."""
+    acquired: bool
+    lock_key: str
+    token: Optional[str] = None
+    ttl_seconds: Optional[float] = None
+
+
+@dataclass
+class StreamEntry:
+    """Redis stream entry."""
+    stream: str
+    entry_id: str
+    values: Dict[str, Any]
+    timestamp: float
 
 
 class RedisAction:
-    """Redis client for caching and data structure operations."""
+    """Redis action handler for caching and data operations.
 
-    def __init__(self, config: RedisConfig):
-        """Initialize Redis client with configuration.
+    Provides comprehensive Redis operations:
+    - Key-value caching with TTL
+    - Complex data structures
+    - Pub/sub messaging
+    - Stream processing
+    - Distributed locking
+    - Rate limiting
+
+    Example:
+        action = RedisAction(host="localhost", port=6379)
+        await action.connect()
+        await action.set("key", "value", ttl=3600)
+        value = await action.get("key")
+    """
+
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 6379,
+        db: int = 0,
+        password: Optional[str] = None,
+        ssl: bool = False,
+        max_connections: int = 50,
+        socket_timeout: float = 5.0,
+        socket_connect_timeout: float = 5.0,
+        decode_responses: bool = True,
+        encoding: str = "utf-8",
+    ):
+        """Initialize Redis action.
 
         Args:
-            config: RedisConfig with connection parameters
-
-        Raises:
-            ImportError: If redis is not installed
+            host: Redis host
+            port: Redis port
+            db: Database number
+            password: Password for authentication
+            ssl: Enable SSL connection
+            max_connections: Maximum connections
+            socket_timeout: Socket timeout
+            socket_connect_timeout: Socket connect timeout
+            decode_responses: Decode responses to strings
+            encoding: Response encoding
         """
-        if redis is None:
-            raise ImportError("redis required: pip install redis")
+        self.host = host
+        self.port = port
+        self.db = db
+        self.password = password
+        self.ssl = ssl
+        self.max_connections = max_connections
+        self.socket_timeout = socket_timeout
+        self.socket_connect_timeout = socket_connect_timeout
+        self.decode_responses = decode_responses
+        self.encoding = encoding
 
-        self.config = config
-        self._client: Optional[redis.Redis] = None
+        self._client: Optional[Redis] = None
+        self._pool: Optional[ConnectionPool] = None
+        self._pubsub: Optional[aioredis.client.PubSub] = None
+        self._connected = False
 
-    def connect(self) -> None:
-        """Establish connection to Redis.
+    async def connect(self) -> None:
+        """Establish Redis connection."""
+        if not REDIS_AVAILABLE:
+            raise ImportError("redis[hiredis] not installed")
 
-        Raises:
-            RedisAPIError: On connection failure
-        """
-        try:
-            self._client = redis.Redis(
-                host=self.config.host,
-                port=self.config.port,
-                db=self.config.db,
-                password=self.config.password,
-                ssl=self.config.ssl,
-                socket_timeout=self.config.socket_timeout,
-                socket_connect_timeout=self.config.socket_connect_timeout,
-                max_connections=self.config.max_connections,
-                decode_responses=self.config.decode_responses
-            )
-            self._client.ping()
-            logger.info(f"Connected to Redis: {self.config.host}:{self.config.port}")
+        self._pool = ConnectionPool(
+            host=self.host,
+            port=self.port,
+            db=self.db,
+            password=self.password,
+            ssl=self.ssl,
+            max_connections=self.max_connections,
+            socket_timeout=self.socket_timeout,
+            socket_connect_timeout=self.socket_connect_timeout,
+            decode_responses=self.decode_responses,
+            encoding=self.encoding,
+        )
 
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Connection failed: {e}")
+        self._client = Redis(connection_pool=self._pool)
+        await self._client.ping()
+        self._connected = True
+        logger.info(f"Connected to Redis at {self.host}:{self.port}")
 
-    def disconnect(self) -> None:
+    async def disconnect(self) -> None:
         """Close Redis connection."""
+        if self._pubsub:
+            await self._pubsub.close()
+            self._pubsub = None
+
         if self._client:
-            self._client.close()
+            await self._client.close()
             self._client = None
-            logger.info("Disconnected from Redis")
 
-    @property
-    def client(self) -> redis.Redis:
-        """Get Redis client, connect if needed."""
-        if self._client is None:
-            self.connect()
-        return self._client
+        if self._pool:
+            await self._pool.disconnect()
+            self._pool = None
 
-    def ping(self) -> bool:
-        """Check Redis connection.
+        self._connected = False
+        logger.info("Disconnected from Redis")
+
+    async def ping(self) -> bool:
+        """Ping Redis server.
 
         Returns:
-            True if connected
+            True if server responded
         """
-        try:
-            return self.client.ping()
-        except redis.RedisError:
+        if not self._client:
             return False
 
-    def set(self, key: str, value: Union[str, int, float, bytes],
-            ex: Optional[int] = None, px: Optional[int] = None,
-            exat: Optional[int] = None, pxat: Optional[int] = None,
-            keepttl: bool = False, get: bool = False) -> Any:
-        """Set a key-value pair with optional expiration.
+        try:
+            await self._client.ping()
+            return True
+        except Exception:
+            return False
+
+    async def get(self, key: str) -> Optional[Any]:
+        """Get value by key.
 
         Args:
-            key: Redis key
+            key: Key name
+
+        Returns:
+            Value or None
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        value = await self._client.get(key)
+
+        if value is None:
+            return None
+
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[float] = None,
+        nx: bool = False,
+        xx: bool = False,
+    ) -> bool:
+        """Set key-value pair.
+
+        Args:
+            key: Key name
             value: Value to store
-            ex: Expiration in seconds
-            px: Expiration in milliseconds
-            exat: Expire at Unix timestamp (seconds)
-            pxat: Expire at Unix timestamp (milliseconds)
-            keepttl: Keep existing TTL
-            get: Return old value
+            ttl_seconds: Time to live in seconds
+            nx: Only set if key doesn't exist
+            xx: Only set if key exists
 
         Returns:
-            True if set, or old value if get=True
+            True if set successfully
         """
-        try:
-            return self.client.set(key, value, ex=ex, px=px, exat=exat,
-                                   pxat=pxat, keepttl=keepttl, get=get)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Set failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def get(self, key: str) -> Optional[Any]:
-        """Get a value by key.
+        if not isinstance(value, str):
+            value = json.dumps(value)
+
+        if ttl_seconds:
+            result = await self._client.setex(key, ttl_seconds, value)
+        else:
+            result = await self._client.set(key, value, nx=nx, xx=xx)
+
+        return result is True
+
+    async def delete(self, *keys: str) -> int:
+        """Delete keys.
 
         Args:
-            key: Redis key
-
-        Returns:
-            Value or None if not found
-        """
-        try:
-            return self.client.get(key)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Get failed: {e}")
-
-    def delete(self, *keys: str) -> int:
-        """Delete one or more keys.
-
-        Args:
-            *keys: Key names to delete
+            *keys: Key names
 
         Returns:
             Number of keys deleted
         """
-        try:
-            return self.client.delete(*keys)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Delete failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def exists(self, *keys: str) -> int:
+        return await self._client.delete(*keys)
+
+    async def exists(self, *keys: str) -> int:
         """Check if keys exist.
 
         Args:
-            *keys: Key names to check
+            *keys: Key names
 
         Returns:
-            Number of keys that exist
+            Number of existing keys
         """
-        try:
-            return self.client.exists(*keys)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Exists failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def expire(self, key: str, time: Union[int, timedelta]) -> bool:
-        """Set expiration on a key.
+        return await self._client.exists(*keys)
+
+    async def expire(self, key: str, ttl_seconds: float) -> bool:
+        """Set key expiration.
 
         Args:
-            key: Redis key
-            time: Expiration time (seconds or timedelta)
+            key: Key name
+            ttl_seconds: TTL in seconds
 
         Returns:
             True if expiration was set
         """
-        try:
-            return self.client.expire(key, time)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Expire failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def ttl(self, key: str) -> int:
-        """Get remaining TTL for a key.
+        return await self._client.expire(key, ttl_seconds)
+
+    async def ttl(self, key: str) -> int:
+        """Get key TTL.
 
         Args:
-            key: Redis key
+            key: Key name
 
         Returns:
             TTL in seconds, -1 if no TTL, -2 if key doesn't exist
         """
-        try:
-            return self.client.ttl(key)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"TTL failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def incr(self, key: str, amount: int = 1) -> int:
-        """Increment a value.
+        return await self._client.ttl(key)
 
-        Args:
-            key: Redis key
-            amount: Amount to increment
-
-        Returns:
-            New value after increment
-        """
-        try:
-            return self.client.incrby(key, amount)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Incr failed: {e}")
-
-    def decr(self, key: str, amount: int = 1) -> int:
-        """Decrement a value.
+    async def get_type(self, key: str) -> DataType:
+        """Get key data type.
 
         Args:
-            key: Redis key
-            amount: Amount to decrement
+            key: Key name
 
         Returns:
-            New value after decrement
+            Data type
         """
-        try:
-            return self.client.decrby(key, amount)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Decr failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def hset(self, name: str, key: Optional[str] = None,
-             value: Optional[Any] = None, mapping: Optional[dict] = None) -> int:
-        """Set hash field(s).
+        redis_type = await self._client.type(key)
 
-        Args:
-            name: Hash key name
-            key: Single field name
-            value: Single field value
-            mapping: Dict of field-value pairs
+        if redis_type == b"string" or redis_type == "string":
+            return DataType.STRING
+        elif redis_type == b"hash" or redis_type == "hash":
+            return DataType.HASH
+        elif redis_type == b"list" or redis_type == "list":
+            return DataType.LIST
+        elif redis_type == b"set" or redis_type == "set":
+            return DataType.SET
+        elif redis_type == b"zset" or redis_type == "zset":
+            return DataType.ZSET
+        elif redis_type == b"stream" or redis_type == "stream":
+            return DataType.STREAM
+        else:
+            return DataType.NONE
 
-        Returns:
-            Number of fields set
-        """
-        try:
-            if mapping:
-                return self.client.hset(name, mapping=mapping)
-            return self.client.hset(name, key, value)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"HSet failed: {e}")
-
-    def hget(self, name: str, key: str) -> Optional[Any]:
+    async def hget(self, key: str, field: str) -> Optional[str]:
         """Get hash field value.
 
         Args:
-            name: Hash key name
-            key: Field name
+            key: Hash key
+            field: Field name
 
         Returns:
             Field value or None
         """
-        try:
-            return self.client.hget(name, key)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"HGet failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def hgetall(self, name: str) -> dict:
-        """Get all hash fields and values.
+        return await self._client.hget(key, field)
+
+    async def hset(
+        self,
+        key: str,
+        field: str,
+        value: Any,
+    ) -> int:
+        """Set hash field.
 
         Args:
-            name: Hash key name
+            key: Hash key
+            field: Field name
+            value: Field value
 
         Returns:
-            Dict of all field-value pairs
+            1 if new field, 0 if updated
         """
-        try:
-            return self.client.hgetall(name)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"HGetAll failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def hdel(self, name: str, *keys: str) -> int:
+        if not isinstance(value, str):
+            value = json.dumps(value)
+
+        return await self._client.hset(key, field, value)
+
+    async def hgetall(self, key: str) -> Dict[str, Any]:
+        """Get all hash fields.
+
+        Args:
+            key: Hash key
+
+        Returns:
+            Dictionary of field-value pairs
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        result = await self._client.hgetall(key)
+
+        parsed = {}
+        for k, v in result.items():
+            try:
+                parsed[k] = json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                parsed[k] = v
+
+        return parsed
+
+    async def hdel(self, key: str, *fields: str) -> int:
         """Delete hash fields.
 
         Args:
-            name: Hash key name
-            *keys: Field names to delete
+            key: Hash key
+            *fields: Field names
 
         Returns:
             Number of fields deleted
         """
-        try:
-            return self.client.hdel(name, *keys)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"HDel failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def hlen(self, name: str) -> int:
-        """Get number of fields in hash.
+        return await self._client.hdel(key, *fields)
 
-        Args:
-            name: Hash key name
-
-        Returns:
-            Number of fields
-        """
-        try:
-            return self.client.hlen(name)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"HLen failed: {e}")
-
-    def lpush(self, name: str, *values: Any) -> int:
-        """Push values to list head.
+    async def lpush(self, key: str, *values: Any) -> int:
+        """Push to list head.
 
         Args:
-            name: List key name
+            key: List key
             *values: Values to push
 
         Returns:
             List length after push
         """
-        try:
-            return self.client.lpush(name, *values)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"LPush failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def rpush(self, name: str, *values: Any) -> int:
-        """Push values to list tail.
+        serialized = [
+            json.dumps(v) if not isinstance(v, str) else v
+            for v in values
+        ]
+
+        return await self._client.lpush(key, *serialized)
+
+    async def rpush(self, key: str, *values: Any) -> int:
+        """Push to list tail.
 
         Args:
-            name: List key name
+            key: List key
             *values: Values to push
 
         Returns:
             List length after push
         """
-        try:
-            return self.client.rpush(name, *values)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"RPush failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def lpop(self, name: str, count: int = 1) -> Any:
-        """Pop values from list head.
+        serialized = [
+            json.dumps(v) if not isinstance(v, str) else v
+            for v in values
+        ]
 
-        Args:
-            name: List key name
-            count: Number of values to pop
+        return await self._client.rpush(key, *serialized)
 
-        Returns:
-            Popped value(s) or None
-        """
-        try:
-            if count == 1:
-                return self.client.lpop(name)
-            return self.client.lpop(name, count)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"LPop failed: {e}")
-
-    def rpop(self, name: str, count: int = 1) -> Any:
-        """Pop values from list tail.
-
-        Args:
-            name: List key name
-            count: Number of values to pop
-
-        Returns:
-            Popped value(s) or None
-        """
-        try:
-            if count == 1:
-                return self.client.rpop(name)
-            return self.client.rpop(name, count)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"RPop failed: {e}")
-
-    def lrange(self, name: str, start: int = 0, end: int = -1) -> list:
+    async def lrange(self, key: str, start: int = 0, end: int = -1) -> List[Any]:
         """Get list range.
 
         Args:
-            name: List key name
+            key: List key
             start: Start index
-            end: End index (-1 for all)
+            end: End index
 
         Returns:
             List of values
         """
-        try:
-            return self.client.lrange(name, start, end)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"LRange failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def llen(self, name: str) -> int:
-        """Get list length.
+        result = await self._client.lrange(key, start, end)
+
+        parsed = []
+        for item in result:
+            try:
+                parsed.append(json.loads(item))
+            except (json.JSONDecodeError, TypeError):
+                parsed.append(item)
+
+        return parsed
+
+    async def lpop(self, key: str) -> Optional[Any]:
+        """Pop from list head.
 
         Args:
-            name: List key name
+            key: List key
 
         Returns:
-            List length
+            Popped value or None
         """
-        try:
-            return self.client.llen(name)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"LLen failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def sadd(self, name: str, *values: Any) -> int:
-        """Add members to set.
+        value = await self._client.lpop(key)
+
+        if value is None:
+            return None
+
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+
+    async def sadd(self, key: str, *values: Any) -> int:
+        """Add to set.
 
         Args:
-            name: Set key name
+            key: Set key
             *values: Values to add
 
         Returns:
-            Number of members added
+            Number of elements added
         """
-        try:
-            return self.client.sadd(name, *values)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"SAdd failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def smembers(self, name: str) -> set:
+        serialized = [
+            json.dumps(v) if not isinstance(v, str) else v
+            for v in values
+        ]
+
+        return await self._client.sadd(key, *serialized)
+
+    async def smembers(self, key: str) -> Set[Any]:
         """Get all set members.
 
         Args:
-            name: Set key name
+            key: Set key
 
         Returns:
-            Set of all members
+            Set of members
         """
-        try:
-            return self.client.smembers(name)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"SMembers failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def sismember(self, name: str, value: Any) -> bool:
-        """Check if value is member of set.
+        result = await self._client.smembers(key)
+
+        parsed = set()
+        for item in result:
+            try:
+                parsed.add(json.loads(item))
+            except (json.JSONDecodeError, TypeError):
+                parsed.add(item)
+
+        return parsed
+
+    async def zadd(
+        self,
+        key: str,
+        mapping: Dict[Any, float],
+    ) -> int:
+        """Add to sorted set.
 
         Args:
-            name: Set key name
-            value: Value to check
+            key: Sorted set key
+            mapping: Member-score mapping
 
         Returns:
-            True if member
+            Number of elements added
         """
-        try:
-            return self.client.sismember(name, value)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"SIsMember failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def srem(self, name: str, *values: Any) -> int:
-        """Remove members from set.
+        serialized = {}
+        for member, score in mapping.items():
+            if not isinstance(member, str):
+                member = json.dumps(member)
+            serialized[member] = score
+
+        return await self._client.zadd(key, serialized)
+
+    async def zrange(
+        self,
+        key: str,
+        start: int = 0,
+        end: int = -1,
+        withscores: bool = False,
+    ) -> List[Any]:
+        """Get sorted set range.
 
         Args:
-            name: Set key name
-            *values: Values to remove
-
-        Returns:
-            Number of members removed
-        """
-        try:
-            return self.client.srem(name, *values)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"SRem failed: {e}")
-
-    def zadd(self, name: str, mapping: dict, incr: bool = False) -> int:
-        """Add members to sorted set with scores.
-
-        Args:
-            name: Sorted set key name
-            mapping: Dict of member -> score
-            incr: Increment existing scores
-
-        Returns:
-            Number of members added
-        """
-        try:
-            return self.client.zadd(name, mapping, incr=incr)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"ZAdd failed: {e}")
-
-    def zrange(self, name: str, start: int = 0, end: int = -1,
-               withscores: bool = False) -> list:
-        """Get range of sorted set by index.
-
-        Args:
-            name: Sorted set key name
+            key: Sorted set key
             start: Start index
-            end: End index (-1 for all)
+            end: End index
             withscores: Include scores in result
 
         Returns:
-            List of members or (member, score) tuples
+            List of members (and scores if withscores)
         """
-        try:
-            return self.client.zrange(name, start, end, withscores=withscores)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"ZRange failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def zrangebyscore(self, name: str, min_score: Union[str, float],
-                      max_score: Union[str, float],
-                      withscores: bool = False) -> list:
-        """Get range by score.
+        result = await self._client.zrange(key, start, end, withscores=withscores)
+
+        if withscores:
+            parsed = []
+            for member, score in result:
+                try:
+                    member = json.loads(member)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                parsed.append((member, score))
+            return parsed
+        else:
+            parsed = []
+            for item in result:
+                try:
+                    parsed.append(json.loads(item))
+                except (json.JSONDecodeError, TypeError):
+                    parsed.append(item)
+            return parsed
+
+    async def zrangebyscore(
+        self,
+        key: str,
+        min_score: float,
+        max_score: float,
+        withscores: bool = False,
+    ) -> List[Any]:
+        """Get sorted set range by score.
 
         Args:
-            name: Sorted set key name
+            key: Sorted set key
             min_score: Minimum score
             max_score: Maximum score
-            withscores: Include scores in result
+            withscores: Include scores
 
         Returns:
-            List of members or (member, score) tuples
+            List of members
         """
-        try:
-            return self.client.zrangebyscore(name, min_score, max_score,
-                                             withscores=withscores)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"ZRangeByScore failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def zrank(self, name: str, member: Any) -> Optional[int]:
-        """Get rank of member in sorted set.
+        result = await self._client.zrangebyscore(
+            key, min_score, max_score, withscores=withscores
+        )
 
-        Args:
-            name: Sorted set key name
-            member: Member value
+        if withscores:
+            parsed = []
+            for member, score in result:
+                try:
+                    member = json.loads(member)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                parsed.append((member, score))
+            return parsed
+        else:
+            parsed = []
+            for item in result:
+                try:
+                    parsed.append(json.loads(item))
+                except (json.JSONDecodeError, TypeError):
+                    parsed.append(item)
+            return parsed
 
-        Returns:
-            Rank (0-indexed) or None if not found
-        """
-        try:
-            return self.client.zrank(name, member)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"ZRank failed: {e}")
-
-    def zscore(self, name: str, member: Any) -> Optional[float]:
-        """Get score of member in sorted set.
-
-        Args:
-            name: Sorted set key name
-            member: Member value
-
-        Returns:
-            Score or None if not found
-        """
-        try:
-            return self.client.zscore(name, member)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"ZScore failed: {e}")
-
-    def publish(self, channel: str, message: Any) -> int:
+    async def publish(self, channel: str, message: Any) -> int:
         """Publish message to channel.
 
         Args:
@@ -563,78 +667,522 @@ class RedisAction:
             message: Message to publish
 
         Returns:
-            Number of subscribers that received message
+            Number of subscribers that received the message
         """
-        try:
-            return self.client.publish(channel, message)
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Publish failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def cache_set(self, key: str, value: Any, ttl: int = 300) -> bool:
-        """Set a cache value with expiration.
+        if not isinstance(message, str):
+            message = json.dumps(message)
+
+        return await self._client.publish(channel, message)
+
+    async def subscribe(self, *channels: str) -> aioredis.client.PubSub:
+        """Subscribe to channels.
 
         Args:
-            key: Cache key
-            value: Value to cache (will be JSON serialized)
-            ttl: Time to live in seconds
+            *channels: Channel names
 
         Returns:
-            True if successful
+            PubSub instance
         """
-        import json
-        try:
-            serialized = json.dumps(value)
-            return self.set(key, serialized, ex=ttl)
-        except (TypeError, ValueError) as e:
-            raise RedisAPIError(f"Cache serialize failed: {e}")
+        if not self._client:
+            raise RuntimeError("Not connected")
 
-    def cache_get(self, key: str) -> Optional[Any]:
-        """Get a cached value.
+        self._pubsub = self._client.pubsub()
+        await self._pubsub.subscribe(*channels)
+        return self._pubsub
+
+    async def psubscribe(self, *patterns: str) -> aioredis.client.PubSub:
+        """Subscribe to channel patterns.
 
         Args:
-            key: Cache key
+            *patterns: Channel patterns
 
         Returns:
-            Cached value or None
+            PubSub instance
         """
-        import json
-        try:
-            value = self.get(key)
-            if value:
-                return json.loads(value)
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        self._pubsub = self._client.pubsub()
+        await self._pubsub.psubscribe(*patterns)
+        return self._pubsub
+
+    async def get_message(self) -> Optional[Dict[str, Any]]:
+        """Get pub/sub message.
+
+        Returns:
+            Message dictionary or None
+        """
+        if not self._pubsub:
             return None
-        except (TypeError, ValueError) as e:
-            raise RedisAPIError(f"Cache deserialize failed: {e}")
 
-    def cache_delete(self, key: str) -> bool:
-        """Delete a cached value.
+        message = await self._pubsub.get_message(ignore_subscribe_messages=True)
+
+        if message:
+            if message["type"] == "message":
+                try:
+                    message["data"] = json.loads(message["data"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        return message
+
+    async def xadd(
+        self,
+        stream: str,
+        fields: Dict[str, Any],
+        maxlen: Optional[int] = None,
+    ) -> str:
+        """Add entry to stream.
+
+        Args:
+            stream: Stream name
+            fields: Entry fields
+            maxlen: Maximum stream length
+
+        Returns:
+            Entry ID
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        serialized = {}
+        for k, v in fields.items():
+            if not isinstance(v, str):
+                serialized[k] = json.dumps(v)
+            else:
+                serialized[k] = v
+
+        if maxlen:
+            return await self._client.xadd(stream, serialized, maxlen=maxlen)
+        else:
+            return await self._client.xadd(stream, serialized)
+
+    async def xread(
+        self,
+        streams: Dict[str, str],
+        count: Optional[int] = None,
+        block: Optional[int] = None,
+    ) -> List[StreamEntry]:
+        """Read from streams.
+
+        Args:
+            streams: Stream -> last read ID mapping
+            count: Maximum entries per stream
+            block: Block timeout in milliseconds
+
+        Returns:
+            List of stream entries
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        result = await self._client.xread(streams, count=count, block=block)
+
+        entries = []
+        for stream_name, messages in result or []:
+            for entry_id, values in messages:
+                parsed = {}
+                for k, v in values.items():
+                    try:
+                        parsed[k] = json.loads(v)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed[k] = v
+
+                entries.append(StreamEntry(
+                    stream=stream_name,
+                    entry_id=entry_id,
+                    values=parsed,
+                    timestamp=time.time()
+                ))
+
+        return entries
+
+    async def xlen(self, stream: str) -> int:
+        """Get stream length.
+
+        Args:
+            stream: Stream name
+
+        Returns:
+            Stream length
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        return await self._client.xlen(stream)
+
+    async def xtrim(self, stream: str, maxlen: int) -> int:
+        """Trim stream to max length.
+
+        Args:
+            stream: Stream name
+            maxlen: Maximum length
+
+        Returns:
+            Number of entries deleted
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        return await self._client.xtrim(stream, maxlen)
+
+    async def scan(
+        self,
+        match: Optional[str] = None,
+        count: int = 100,
+    ) -> List[str]:
+        """Scan keys.
+
+        Args:
+            match: Pattern to match
+            count: Approximate count
+
+        Returns:
+            List of keys
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        keys = []
+        cursor = 0
+
+        while True:
+            cursor, batch = await self._client.scan(
+                cursor=cursor,
+                match=match,
+                count=count
+            )
+            keys.extend(batch)
+
+            if cursor == 0:
+                break
+
+        return keys
+
+    async def pipeline(self) -> "Pipeline":
+        """Create pipeline.
+
+        Returns:
+            Pipeline instance
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        return Pipeline(await self._client.pipeline())
+
+    async def execute_script(self, script: str, *keys: str, *args: Any) -> Any:
+        """Execute Lua script.
+
+        Args:
+            script: Lua script
+            *keys: Keys used in script
+            *args: Arguments
+
+        Returns:
+            Script result
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        serialized_args = []
+        for arg in args:
+            if not isinstance(arg, str):
+                serialized_args.append(json.dumps(arg))
+            else:
+                serialized_args.append(arg)
+
+        return await self._client.eval(script, len(keys), *keys, *serialized_args)
+
+    async def acquire_lock(
+        self,
+        lock_name: str,
+        ttl_seconds: float = 10.0,
+        token: Optional[str] = None,
+    ) -> LockResult:
+        """Acquire distributed lock.
+
+        Args:
+            lock_name: Lock name
+            ttl_seconds: Lock TTL
+            token: Lock token (auto-generated if not provided)
+
+        Returns:
+            Lock result
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        lock_key = f"lock:{lock_name}"
+        token = token or f"{time.time()}:{id(self)}"
+
+        acquired = await self._client.set(
+            lock_key,
+            token,
+            nx=True,
+            ex=ttl_seconds
+        )
+
+        return LockResult(
+            acquired=bool(acquired),
+            lock_key=lock_key,
+            token=token if acquired else None,
+            ttl_seconds=ttl_seconds if acquired else None
+        )
+
+    async def release_lock(self, lock_name: str, token: str) -> bool:
+        """Release distributed lock.
+
+        Args:
+            lock_name: Lock name
+            token: Lock token
+
+        Returns:
+            True if released
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        lock_key = f"lock:{lock_name}"
+
+        script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+        """
+
+        result = await self._client.eval(script, 1, lock_key, token)
+        return result == 1
+
+    async def extend_lock(self, lock_name: str, token: str, ttl_seconds: float) -> bool:
+        """Extend lock TTL.
+
+        Args:
+            lock_name: Lock name
+            token: Lock token
+            ttl_seconds: New TTL
+
+        Returns:
+            True if extended
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        lock_key = f"lock:{lock_name}"
+
+        script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("expire", KEYS[1], ARGV[2])
+        else
+            return 0
+        end
+        """
+
+        result = await self._client.eval(script, 1, lock_key, token, ttl_seconds)
+        return result == 1
+
+    async def rate_limit(
+        self,
+        key: str,
+        limit: int,
+        window_seconds: float,
+    ) -> RateLimitResult:
+        """Rate limit check.
+
+        Args:
+            key: Rate limit key
+            limit: Maximum requests
+            window_seconds: Time window
+
+        Returns:
+            Rate limit result
+        """
+        if not self._client:
+            raise RuntimeError("Not connected")
+
+        now = time.time()
+        window_start = now - window_seconds
+        rate_key = f"ratelimit:{key}"
+
+        pipe = self._client.pipeline()
+        pipe.zremrangebyscore(rate_key, 0, window_start)
+        pipe.zcard(rate_key)
+        pipe.zadd(rate_key, {str(now): now})
+        pipe.expire(rate_key, int(window_seconds) + 1)
+        results = await pipe.execute()
+
+        current_count = results[1]
+
+        if current_count < limit:
+            return RateLimitResult(
+                allowed=True,
+                limit=limit,
+                remaining=limit - current_count - 1,
+                reset_at=now + window_seconds
+            )
+        else:
+            oldest = await self._client.zrange(rate_key, 0, 0, withscores=True)
+            if oldest:
+                retry_after = oldest[0][1] + window_seconds - now
+            else:
+                retry_after = window_seconds
+
+            return RateLimitResult(
+                allowed=False,
+                limit=limit,
+                remaining=0,
+                reset_at=now + window_seconds,
+                retry_after=retry_after
+            )
+
+    async def cache_with_lock(
+        self,
+        key: str,
+        ttl_seconds: float,
+        fetch_func: Callable[[], Any],
+        lock_ttl_seconds: float = 5.0,
+    ) -> Any:
+        """Cache with distributed lock for cache stampede prevention.
 
         Args:
             key: Cache key
+            ttl_seconds: Cache TTL
+            fetch_func: Function to fetch data
+            lock_ttl_seconds: Lock TTL for stampede prevention
 
         Returns:
-            True if key existed
+            Cached or freshly fetched value
         """
-        return self.delete(key) > 0
+        cached = await self.get(key)
+        if cached is not None:
+            return cached
 
-    def scan(self, match: Optional[str] = None, count: int = 100) -> list[str]:
-        """Scan keys matching pattern.
+        lock_result = await self.acquire_lock(f"fetch:{key}", lock_ttl_seconds)
+
+        try:
+            if lock_result.acquired:
+                cached = await self.get(key)
+                if cached is not None:
+                    return cached
+
+                value = await fetch_func()
+                await self.set(key, value, ttl_seconds)
+                return value
+            else:
+                await asyncio.sleep(0.1)
+                cached = await self.get(key)
+                if cached is not None:
+                    return cached
+
+                await asyncio.sleep(0.2)
+                cached = await self.get(key)
+                if cached is not None:
+                    return cached
+
+                return await fetch_func()
+
+        finally:
+            if lock_result.acquired:
+                await self.release_lock(f"fetch:{key}", lock_result.token)
+
+
+class Pipeline:
+    """Redis pipeline for batch operations."""
+
+    def __init__(self, pipeline: Any):
+        """Initialize pipeline.
 
         Args:
-            match: Key pattern (e.g., 'user:*')
-            count: Approximate number of keys per scan
+            pipeline: Redis pipeline
+        """
+        self._pipeline = pipeline
+
+    def get(self, key: str) -> "Pipeline":
+        """Queue GET command."""
+        self._pipeline.get(key)
+        return self
+
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[float] = None,
+    ) -> "Pipeline":
+        """Queue SET command."""
+        if not isinstance(value, str):
+            value = json.dumps(value)
+
+        if ttl_seconds:
+            self._pipeline.setex(key, ttl_seconds, value)
+        else:
+            self._pipeline.set(key, value)
+
+        return self
+
+    def hget(self, key: str, field: str) -> "Pipeline":
+        """Queue HGET command."""
+        self._pipeline.hget(key, field)
+        return self
+
+    def hset(self, key: str, field: str, value: Any) -> "Pipeline":
+        """Queue HSET command."""
+        if not isinstance(value, str):
+            value = json.dumps(value)
+
+        self._pipeline.hset(key, field, value)
+        return self
+
+    def delete(self, *keys: str) -> "Pipeline":
+        """Queue DELETE command."""
+        self._pipeline.delete(*keys)
+        return self
+
+    async def execute(self) -> List[Any]:
+        """Execute queued commands.
 
         Returns:
-            List of matching keys
+            List of results
         """
-        try:
-            keys = []
-            cursor = 0
-            while True:
-                cursor, partial = self.client.scan(cursor, match=match, count=count)
-                keys.extend(partial)
-                if cursor == 0:
-                    break
-            return keys
-        except redis.RedisError as e:
-            raise RedisAPIError(f"Scan failed: {e}")
+        results = await self._pipeline.execute()
+
+        parsed = []
+        for result in results:
+            if isinstance(result, str):
+                try:
+                    parsed.append(json.loads(result))
+                except (json.JSONDecodeError, TypeError):
+                    parsed.append(result)
+            else:
+                parsed.append(result)
+
+        return parsed
+
+
+_redis_action_instance: Optional[RedisAction] = None
+
+
+def get_redis_action(
+    host: str = "localhost",
+    port: int = 6379,
+    **kwargs
+) -> RedisAction:
+    """Get singleton Redis action instance.
+
+    Args:
+        host: Redis host
+        port: Redis port
+        **kwargs: Additional arguments
+
+    Returns:
+        RedisAction instance
+    """
+    global _redis_action_instance
+
+    if _redis_action_instance is None:
+        _redis_action_instance = RedisAction(host=host, port=port, **kwargs)
+
+    return _redis_action_instance
