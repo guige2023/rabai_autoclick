@@ -1,318 +1,170 @@
-"""
-Workflow Routing Action.
+"""Workflow Routing Action Module.
 
-Provides content-based workflow routing.
-Supports:
-- Rule-based routing
-- Condition evaluation
-- Multi-destination routing
-- Fallback routing
+Route workflow execution based on conditions and load balancing.
 """
 
-from typing import Dict, List, Optional, Any, Callable
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import time
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
-import logging
-import json
-import re
+from enum import Enum
+from typing import Any, Callable
 
-logger = logging.getLogger(__name__)
+from .automation_executor_action import StepStatus
+
+
+class RoutingStrategy(Enum):
+    """Routing strategies."""
+    ROUND_ROBIN = "round_robin"
+    RANDOM = "random"
+    WEIGHTED = "weighted"
+    HASH = "hash"
+    LEAST_LOADED = "least_loaded"
 
 
 @dataclass
-class RouteRule:
-    """Routing rule definition."""
-    rule_id: str
-    name: str
-    condition: Callable[[Dict], bool]
-    destination: str
-    priority: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class RouteTarget:
+    """Routing target endpoint."""
+    id: str
+    url: str
+    weight: float = 1.0
+    max_concurrent: int = 10
+    current_load: int = 0
+    enabled: bool = True
 
 
 @dataclass
 class RouteResult:
-    """Result of routing."""
-    matched_rule: Optional[RouteRule]
-    destination: Optional[str]
-    evaluated_rules: List[str]
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    
-    @property
-    def matched(self) -> bool:
-        return self.matched_rule is not None
+    """Result of routing decision."""
+    target_id: str
+    target: RouteTarget
+    timestamp: float
 
 
-class WorkflowRoutingAction:
-    """
-    Workflow Routing Action.
-    
-    Provides content-based routing with support for:
-    - Rule-based routing
-    - Priority ordering
-    - Default/fallback routes
-    - Multiple destinations
-    """
-    
-    def __init__(self, default_destination: Optional[str] = None):
-        """
-        Initialize the Workflow Routing Action.
-        
-        Args:
-            default_destination: Default destination if no rules match
-        """
-        self.default_destination = default_destination
-        self._rules: List[RouteRule] = []
-        self._stats: Dict[str, int] = {}
-    
-    def add_rule(
-        self,
-        name: str,
-        condition: Callable[[Dict], bool],
-        destination: str,
-        priority: int = 0,
-        rule_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> "WorkflowRoutingAction":
-        """
-        Add a routing rule.
-        
-        Args:
-            name: Rule name
-            condition: Function that returns True if condition matches
-            destination: Destination to route to
-            priority: Rule priority (higher = evaluated first)
-            rule_id: Unique rule ID
-            metadata: Additional metadata
-        
-        Returns:
-            Self for chaining
-        """
-        rule = RouteRule(
-            rule_id=rule_id or f"rule-{len(self._rules)}",
-            name=name,
-            condition=condition,
-            destination=destination,
-            priority=priority,
-            metadata=metadata or {}
-        )
-        
-        self._rules.append(rule)
-        self._rules.sort(key=lambda r: -r.priority)  # Sort by priority descending
-        
-        logger.info(f"Added routing rule: {name} -> {destination}")
-        return self
-    
-    def add_rule_regex(
-        self,
-        name: str,
-        field_name: str,
-        pattern: str,
-        destination: str,
-        priority: int = 0
-    ) -> "WorkflowRoutingAction":
-        """Add a regex-based routing rule."""
-        compiled_pattern = re.compile(pattern)
-        
-        def condition(data: Dict) -> bool:
-            value = data.get(field_name, "")
-            return bool(compiled_pattern.search(str(value)))
-        
-        return self.add_rule(name, condition, destination, priority)
-    
-    def add_rule_range(
-        self,
-        name: str,
-        field_name: str,
-        min_value: Optional[float] = None,
-        max_value: Optional[float] = None,
-        destination: str = "",
-        priority: int = 0
-    ) -> "WorkflowRoutingAction":
-        """Add a range-based routing rule."""
-        def condition(data: Dict) -> bool:
-            try:
-                value = float(data.get(field_name, 0))
-                
-                if min_value is not None and value < min_value:
-                    return False
-                if max_value is not None and value >= max_value:
-                    return False
-                return True
-            except (ValueError, TypeError):
-                return False
-        
-        return self.add_rule(name, condition, destination, priority)
-    
-    def add_rule_value(
-        self,
-        name: str,
-        field_name: str,
-        values: List[Any],
-        destination: str = "",
-        priority: int = 0
-    ) -> "WorkflowRoutingAction":
-        """Add a value-based routing rule."""
-        value_set = set(values)
-        
-        def condition(data: Dict) -> bool:
-            return data.get(field_name) in value_set
-        
-        return self.add_rule(name, condition, destination, priority)
-    
-    def route(self, data: Dict[str, Any]) -> RouteResult:
-        """
-        Route data based on rules.
-        
-        Args:
-            data: Data to route
-        
-        Returns:
-            RouteResult with matched destination
-        """
-        evaluated = []
-        
-        for rule in self._rules:
-            evaluated.append(rule.rule_id)
-            
-            try:
-                if rule.condition(data):
-                    self._stats[rule.rule_id] = self._stats.get(rule.rule_id, 0) + 1
-                    
-                    logger.debug(f"Rule '{rule.name}' matched for data")
-                    return RouteResult(
-                        matched_rule=rule,
-                        destination=rule.destination,
-                        evaluated_rules=evaluated
-                    )
-            except Exception as e:
-                logger.error(f"Error evaluating rule '{rule.name}': {e}")
-        
-        # No rule matched, use default
-        if self.default_destination:
-            return RouteResult(
-                matched_rule=None,
-                destination=self.default_destination,
-                evaluated_rules=evaluated
-            )
-        
-        return RouteResult(
-            matched_rule=None,
-            destination=None,
-            evaluated_rules=evaluated
-        )
-    
-    def route_multiple(
-        self,
-        data: Dict[str, Any]
-    ) -> List[str]:
-        """
-        Route to multiple destinations (fan-out).
-        
-        Args:
-            data: Data to route
-        
-        Returns:
-            List of matching destinations
-        """
-        destinations = []
-        
-        for rule in self._rules:
-            try:
-                if rule.condition(data):
-                    destinations.append(rule.destination)
-            except Exception as e:
-                logger.error(f"Error evaluating rule '{rule.name}': {e}")
-        
-        return destinations
-    
-    def remove_rule(self, rule_id: str) -> bool:
-        """Remove a routing rule."""
-        for i, rule in enumerate(self._rules):
-            if rule.rule_id == rule_id:
-                self._rules.pop(i)
-                logger.info(f"Removed rule: {rule_id}")
-                return True
+class WorkflowRouter:
+    """Route workflow tasks to appropriate targets."""
+
+    def __init__(self, strategy: RoutingStrategy = RoutingStrategy.ROUND_ROBIN) -> None:
+        self.strategy = strategy
+        self._targets: dict[str, RouteTarget] = {}
+        self._round_robin_index = 0
+        self._lock = asyncio.Lock()
+        self._request_counts: dict[str, int] = {}
+
+    def add_target(self, target: RouteTarget) -> None:
+        """Add a routing target."""
+        self._targets[target.id] = target
+
+    def remove_target(self, target_id: str) -> bool:
+        """Remove a routing target."""
+        if target_id in self._targets:
+            del self._targets[target_id]
+            return True
         return False
-    
-    def clear_rules(self) -> None:
-        """Clear all routing rules."""
-        count = len(self._rules)
-        self._rules = []
-        logger.info(f"Cleared {count} routing rules")
-    
-    def get_rules(self) -> List[Dict[str, Any]]:
-        """Get all routing rules."""
-        return [
-            {
-                "rule_id": r.rule_id,
-                "name": r.name,
-                "destination": r.destination,
-                "priority": r.priority,
-                "metadata": r.metadata
-            }
-            for r in self._rules
-        ]
-    
-    def get_stats(self) -> Dict[str, Any]:
+
+    async def route(self, context: dict | None = None) -> RouteResult | None:
+        """Route to a target based on strategy."""
+        async with self._lock:
+            enabled_targets = [t for t in self._targets.values() if t.enabled]
+            if not enabled_targets:
+                return None
+            if self.strategy == RoutingStrategy.ROUND_ROBIN:
+                target = self._round_robin(enabled_targets)
+            elif self.strategy == RoutingStrategy.RANDOM:
+                target = self._random(enabled_targets)
+            elif self.strategy == RoutingStrategy.WEIGHTED:
+                target = self._weighted(enabled_targets)
+            elif self.strategy == RoutingStrategy.HASH:
+                target = await self._hash_route(enabled_targets, context)
+            elif self.strategy == RoutingStrategy.LEAST_LOADED:
+                target = self._least_loaded(enabled_targets)
+            else:
+                target = enabled_targets[0]
+            target.current_load += 1
+            self._request_counts[target.id] = self._request_counts.get(target.id, 0) + 1
+            return RouteResult(
+                target_id=target.id,
+                target=target,
+                timestamp=time.time()
+            )
+
+    def _round_robin(self, targets: list[RouteTarget]) -> RouteTarget:
+        """Round-robin routing."""
+        target = targets[self._round_robin_index % len(targets)]
+        self._round_robin_index += 1
+        return target
+
+    def _random(self, targets: list[RouteTarget]) -> RouteTarget:
+        """Random routing."""
+        import random
+        return random.choice(targets)
+
+    def _weighted(self, targets: list[RouteTarget]) -> RouteTarget:
+        """Weighted random routing."""
+        import random
+        total_weight = sum(t.weight for t in targets)
+        r = random.uniform(0, total_weight)
+        cumulative = 0
+        for target in targets:
+            cumulative += target.weight
+            if r <= cumulative:
+                return target
+        return targets[-1]
+
+    async def _hash_route(self, targets: list[RouteTarget], context: dict | None) -> RouteTarget:
+        """Consistent hashing routing."""
+        if not context:
+            return targets[0]
+        key = str(sorted(context.items()))
+        hash_value = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        index = hash_value % len(targets)
+        return targets[index]
+
+    def _least_loaded(self, targets: list[RouteTarget]) -> RouteTarget:
+        """Route to least loaded target."""
+        return min(targets, key=lambda t: t.current_load / max(t.max_concurrent, 1))
+
+    async def release(self, target_id: str) -> None:
+        """Release a target (decrement load)."""
+        async with self._lock:
+            target = self._targets.get(target_id)
+            if target and target.current_load > 0:
+                target.current_load -= 1
+
+    def get_stats(self) -> dict[str, Any]:
         """Get routing statistics."""
         return {
-            "total_rules": len(self._rules),
-            "total_routes": sum(self._stats.values()),
-            "by_rule": self._stats.copy(),
-            "default_destination": self.default_destination
+            "strategy": self.strategy.value,
+            "total_targets": len(self._targets),
+            "enabled_targets": sum(1 for t in self._targets.values() if t.enabled),
+            "request_counts": dict(self._request_counts),
         }
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    router = WorkflowRoutingAction(default_destination="default_queue")
-    
-    # Add rules
-    router.add_rule(
-        "high_priority",
-        lambda d: d.get("priority") == "high",
-        "high_priority_queue",
-        priority=100
-    )
-    
-    router.add_rule_regex(
-        "email_routing",
-        "type",
-        r"email|notification",
-        "email_queue",
-        priority=50
-    )
-    
-    router.add_rule_range(
-        "amount_routing",
-        "amount",
-        min_value=10000,
-        destination="large_transaction_queue",
-        priority=75
-    )
-    
-    router.add_rule_value(
-        "vip_routing",
-        "customer_tier",
-        ["gold", "platinum"],
-        "vip_queue",
-        priority=90
-    )
-    
-    # Test routing
-    test_cases = [
-        {"priority": "high", "type": "order"},
-        {"type": "email_notification", "content": "Hello"},
-        {"amount": 15000, "type": "payment"},
-        {"customer_tier": "platinum", "purchase": 500},
-        {"type": "order", "status": "pending"},
-    ]
-    
-    for data in test_cases:
-        result = router.route(data)
-        print(f"Data: {json.dumps(data)[:50]}...")
-        print(f"  -> {result.destination} (matched: {result.matched})")
-    
-    print(f"\nStats: {json.dumps(router.get_stats(), indent=2)}")
+class ConditionalRouter:
+    """Router with conditional routing rules."""
+
+    def __init__(self) -> None:
+        self._rules: list[tuple[Callable[[dict], bool], str]] = []
+        self._default_target_id: str | None = None
+
+    def add_rule(self, condition: Callable[[dict], bool], target_id: str) -> None:
+        """Add a routing rule."""
+        self._rules.append((condition, target_id))
+
+    def set_default(self, target_id: str) -> None:
+        """Set default routing target."""
+        self._default_target_id = target_id
+
+    async def route(self, context: dict) -> str | None:
+        """Route based on conditions."""
+        for condition, target_id in self._rules:
+            try:
+                if condition(context):
+                    return target_id
+            except Exception:
+                continue
+        return self._default_target_id

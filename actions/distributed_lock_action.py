@@ -1,321 +1,342 @@
-"""Distributed Lock Action Module.
+"""Distributed lock action module for RabAI AutoClick.
 
-Provides distributed locking mechanism for coordinating access
-to shared resources across processes or machines.
+Provides distributed locking mechanisms:
+- RedisDistributedLock: Redis-based distributed lock
+- LockAcquirer: Acquire locks with retry logic
+- LockContext: Context manager for lock lifecycle
+- LockRegistry: Track and manage multiple locks
+- Semaphore: Counting semaphore for resource limiting
 """
-from __future__ import annotations
 
-import time
-import uuid
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
 import sys
 import os
+import time
+import uuid
+import threading
+from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from contextlib import contextmanager
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-class LockStatus(Enum):
-    """Lock status."""
-    ACQUIRED = "acquired"
-    RELEASED = "released"
-    EXPIRED = "expired"
-    CONFLICT = "conflict"
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
 
 
 @dataclass
-class Lock:
-    """Distributed lock."""
-    key: str
-    owner_id: str
+class LockInfo:
+    """Lock metadata container."""
+    lock_key: str
+    lock_id: str
     acquired_at: float
     expires_at: float
-    ttl_seconds: float
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    ttl: int
+    is_held: bool = True
 
 
-class DistributedLockStore:
-    """In-memory distributed lock store."""
+class RedisDistributedLockAction(BaseAction):
+    """Redis-based distributed lock implementation."""
+    action_type = "redis_distributed_lock"
+    display_name = "Redis分布式锁"
+    description = "基于Redis的分布式锁"
 
-    def __init__(self):
-        self._locks: Dict[str, Lock] = {}
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        if not REDIS_AVAILABLE:
+            return ActionResult(success=False, message="redis not installed: pip install redis")
 
-    def acquire(self, key: str, owner_id: str,
-               ttl_seconds: float = 60.0,
-               metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Acquire lock."""
-        now = time.time()
+        try:
+            operation = params.get("operation", "acquire")
+            lock_key = params.get("lock_key", "")
+            lock_value = params.get("lock_value", str(uuid.uuid4()))
+            ttl_ms = params.get("ttl_ms", 30000)
+            retry_count = params.get("retry_count", 3)
+            retry_delay_ms = params.get("retry_delay_ms", 200)
+            redis_url = params.get("redis_url", "redis://localhost:6379/0")
 
-        if key in self._locks:
-            existing = self._locks[key]
-            if existing.expires_at > now:
-                if existing.owner_id != owner_id:
-                    return False
+            if not lock_key:
+                return ActionResult(success=False, message="lock_key is required")
 
-        lock = Lock(
-            key=key,
-            owner_id=owner_id,
-            acquired_at=now,
-            expires_at=now + ttl_seconds,
-            ttl_seconds=ttl_seconds,
-            metadata=metadata or {}
-        )
-        self._locks[key] = lock
-        return True
+            client = redis.from_url(redis_url, decode_responses=False)
 
-    def release(self, key: str, owner_id: str) -> bool:
-        """Release lock."""
-        if key not in self._locks:
-            return False
+            if operation == "acquire":
+                acquired = False
+                lock_id = ""
+                for attempt in range(retry_count + 1):
+                    lock_id = f"{lock_value}:{attempt}"
+                    acquired = client.set(
+                        lock_key,
+                        lock_id,
+                        nx=True,
+                        px=ttl_ms,
+                    )
+                    if acquired:
+                        break
+                    if attempt < retry_count:
+                        time.sleep(retry_delay_ms / 1000.0)
 
-        lock = self._locks[key]
-        if lock.owner_id != owner_id:
-            return False
+                if acquired:
+                    return ActionResult(
+                        success=True,
+                        message=f"Lock acquired: {lock_key}",
+                        data={"lock_key": lock_key, "lock_id": lock_id, "ttl_ms": ttl_ms}
+                    )
+                else:
+                    return ActionResult(success=False, message=f"Lock not acquired: {lock_key}")
 
-        del self._locks[key]
-        return True
+            elif operation == "release":
+                lua_script = """
+                if redis.call("get", KEYS[1]) == ARGV[1] then
+                    return redis.call("del", KEYS[1])
+                else
+                    return 0
+                end
+                """
+                result = client.eval(lua_script, 1, lock_key, lock_value)
+                released = result == 1
 
-    def extend(self, key: str, owner_id: str,
-              additional_seconds: float) -> bool:
-        """Extend lock TTL."""
-        if key not in self._locks:
-            return False
+                if released:
+                    return ActionResult(success=True, message=f"Lock released: {lock_key}")
+                else:
+                    return ActionResult(success=False, message=f"Lock not owned or expired: {lock_key}")
 
-        lock = self._locks[key]
-        if lock.owner_id != owner_id:
-            return False
+            elif operation == "extend":
+                new_ttl_ms = params.get("new_ttl_ms", ttl_ms)
+                lua_script = """
+                if redis.call("get", KEYS[1]) == ARGV[1] then
+                    return redis.call("pexpire", KEYS[1], ARGV[2])
+                else
+                    return 0
+                end
+                """
+                result = client.eval(lua_script, 1, lock_key, lock_value, new_ttl_ms)
+                extended = result == 1
 
-        lock.expires_at += additional_seconds
-        lock.ttl_seconds += additional_seconds
-        return True
+                if extended:
+                    return ActionResult(success=True, message=f"Lock extended: {lock_key}")
+                else:
+                    return ActionResult(success=False, message=f"Lock not owned: {lock_key}")
 
-    def is_locked(self, key: str) -> bool:
-        """Check if key is locked."""
-        if key not in self._locks:
-            return False
+            elif operation == "status":
+                exists = client.exists(lock_key)
+                if exists:
+                    current_value = client.get(lock_key)
+                    ttl = client.pttl(lock_key)
+                    return ActionResult(
+                        success=True,
+                        message=f"Lock held: {lock_key}",
+                        data={"lock_key": lock_key, "is_held": True, "ttl_ms": ttl, "owner": current_value.decode() if current_value else None}
+                    )
+                else:
+                    return ActionResult(success=True, message=f"Lock not held: {lock_key}", data={"lock_key": lock_key, "is_held": False})
 
-        lock = self._locks[key]
-        if time.time() > lock.expires_at:
-            del self._locks[key]
-            return False
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
 
-        return True
-
-    def get_lock(self, key: str) -> Optional[Lock]:
-        """Get lock info."""
-        if key in self._locks:
-            lock = self._locks[key]
-            if time.time() > lock.expires_at:
-                del self._locks[key]
-                return None
-            return lock
-        return None
-
-    def cleanup_expired(self) -> int:
-        """Remove expired locks."""
-        now = time.time()
-        expired = [k for k, v in self._locks.items() if v.expires_at <= now]
-        for k in expired:
-            del self._locks[k]
-        return len(expired)
+        except Exception as e:
+            return ActionResult(success=False, message=f"Lock error: {str(e)}")
 
 
-_global_store = DistributedLockStore()
+class LockContextManagerAction(BaseAction):
+    """Context manager for distributed locks with automatic release."""
+    action_type = "lock_context_manager"
+    display_name = "锁上下文管理"
+    description = "自动释放的锁上下文管理器"
 
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        if not REDIS_AVAILABLE:
+            return ActionResult(success=False, message="redis not installed: pip install redis")
 
-class DistributedLockAction:
-    """Distributed lock action.
+        try:
+            lock_key = params.get("lock_key", "")
+            ttl_ms = params.get("ttl_ms", 30000)
+            redis_url = params.get("redis_url", "redis://localhost:6379/0")
+            auto_release = params.get("auto_release", True)
+            lock_timeout_s = params.get("lock_timeout_s", 60)
 
-    Example:
-        action = DistributedLockAction()
+            if not lock_key:
+                return ActionResult(success=False, message="lock_key is required")
 
-        if action.acquire("resource-1", ttl=30):
-            try:
-                process_resource()
-            finally:
-                action.release("resource-1")
-    """
+            client = redis.from_url(redis_url, decode_responses=False)
+            lock_id = str(uuid.uuid4())
 
-    def __init__(self, store: Optional[DistributedLockStore] = None):
-        self._store = store or _global_store
-        self._local_owner = uuid.uuid4().hex
+            acquired = client.set(lock_key, lock_id, nx=True, px=ttl_ms)
 
-    def acquire(self, key: str, owner_id: Optional[str] = None,
-               ttl_seconds: float = 60.0,
-               metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Acquire lock."""
-        owner = owner_id or self._local_owner
-        acquired = self._store.acquire(key, owner, ttl_seconds, metadata)
+            if not acquired:
+                return ActionResult(success=False, message=f"Could not acquire lock: {lock_key}")
 
-        if acquired:
-            return {
-                "success": True,
-                "key": key,
-                "owner_id": owner,
-                "ttl_seconds": ttl_seconds,
-                "message": f"Acquired lock: {key}"
-            }
+            acquired_at = time.time()
 
-        lock = self._store.get_lock(key)
-        return {
-            "success": False,
-            "key": key,
-            "owner_id": lock.owner_id if lock else None,
-            "message": "Lock already held"
-        }
+            if auto_release:
+                def release():
+                    lua_script = """
+                    if redis.call("get", KEYS[1]) == ARGV[1] then
+                        return redis.call("del", KEYS[1])
+                    else
+                        return 0
+                    end
+                    """
+                    client.eval(lua_script, 1, lock_key, lock_id)
 
-    def release(self, key: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
-        """Release lock."""
-        owner = owner_id or self._local_owner
-        released = self._store.release(key, owner)
+                import atexit
+                atexit.register(release)
 
-        if released:
-            return {
-                "success": True,
-                "key": key,
-                "message": f"Released lock: {key}"
-            }
-
-        return {
-            "success": False,
-            "key": key,
-            "message": "Not lock owner or lock not found"
-        }
-
-    def extend(self, key: str, additional_seconds: float,
-              owner_id: Optional[str] = None) -> Dict[str, Any]:
-        """Extend lock TTL."""
-        owner = owner_id or self._local_owner
-        extended = self._store.extend(key, owner, additional_seconds)
-
-        if extended:
-            return {
-                "success": True,
-                "key": key,
-                "additional_seconds": additional_seconds,
-                "message": f"Extended lock: {key}"
-            }
-
-        return {
-            "success": False,
-            "key": key,
-            "message": "Not lock owner or lock not found"
-        }
-
-    def is_locked(self, key: str) -> Dict[str, Any]:
-        """Check if key is locked."""
-        locked = self._store.is_locked(key)
-        lock = self._store.get_lock(key) if locked else None
-
-        return {
-            "success": True,
-            "key": key,
-            "locked": locked,
-            "owner_id": lock.owner_id if lock else None,
-            "ttl_remaining": (lock.expires_at - time.time()) if lock else 0
-        }
-
-    def get_lock_info(self, key: str) -> Dict[str, Any]:
-        """Get detailed lock info."""
-        lock = self._store.get_lock(key)
-        if lock:
-            return {
-                "success": True,
-                "key": key,
-                "owner_id": lock.owner_id,
-                "acquired_at": lock.acquired_at,
-                "expires_at": lock.expires_at,
-                "ttl_seconds": lock.ttl_seconds,
-                "metadata": lock.metadata
-            }
-
-        return {
-            "success": False,
-            "key": key,
-            "message": "Lock not found or expired"
-        }
-
-    def list_locks(self) -> Dict[str, Any]:
-        """List all active locks."""
-        locks = list(self._store._locks.values())
-        return {
-            "success": True,
-            "locks": [
-                {
-                    "key": l.key,
-                    "owner_id": l.owner_id,
-                    "acquired_at": l.acquired_at,
-                    "expires_at": l.expires_at,
-                    "ttl_remaining": l.expires_at - time.time()
+            return ActionResult(
+                success=True,
+                message=f"Lock acquired with context: {lock_key}",
+                data={
+                    "lock_key": lock_key,
+                    "lock_id": lock_id,
+                    "acquired_at": acquired_at,
+                    "ttl_ms": ttl_ms,
+                    "auto_release": auto_release,
                 }
-                for l in locks
-            ],
-            "count": len(locks)
-        }
-
-    def cleanup(self) -> Dict[str, Any]:
-        """Cleanup expired locks."""
-        count = self._store.cleanup_expired()
-        return {
-            "success": True,
-            "cleaned": count,
-            "message": f"Cleaned {count} expired locks"
-        }
-
-
-def execute(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute distributed lock action."""
-    operation = params.get("operation", "")
-    action = DistributedLockAction()
-
-    try:
-        if operation == "acquire":
-            key = params.get("key", "")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.acquire(
-                key=key,
-                owner_id=params.get("owner_id"),
-                ttl_seconds=params.get("ttl_seconds", 60.0),
-                metadata=params.get("metadata")
             )
 
-        elif operation == "release":
-            key = params.get("key", "")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.release(key, params.get("owner_id"))
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
 
-        elif operation == "extend":
-            key = params.get("key", "")
-            additional_seconds = params.get("additional_seconds", 60.0)
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.extend(key, additional_seconds, params.get("owner_id"))
 
-        elif operation == "is_locked":
-            key = params.get("key", "")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.is_locked(key)
+class LockRegistryAction(BaseAction):
+    """Registry for tracking multiple distributed locks."""
+    action_type = "lock_registry"
+    display_name = "锁注册表"
+    description = "管理多个分布式锁的注册表"
 
-        elif operation == "get_info":
-            key = params.get("key", "")
-            if not key:
-                return {"success": False, "message": "key required"}
-            return action.get_lock_info(key)
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        if not REDIS_AVAILABLE:
+            return ActionResult(success=False, message="redis not installed: pip install redis")
 
-        elif operation == "list":
-            return action.list_locks()
+        try:
+            operation = params.get("operation", "register")
+            lock_key = params.get("lock_key", "")
+            metadata = params.get("metadata", {})
+            redis_url = params.get("redis_url", "redis://localhost:6379/0")
+            registry_prefix = params.get("registry_prefix", "lock:registry:")
 
-        elif operation == "cleanup":
-            return action.cleanup()
+            client = redis.from_url(redis_url, decode_responses=False)
 
-        else:
-            return {"success": False, "message": f"Unknown operation: {operation}"}
+            if operation == "register":
+                if not lock_key:
+                    return ActionResult(success=False, message="lock_key is required")
 
-    except Exception as e:
-        return {"success": False, "message": f"Distributed lock error: {str(e)}"}
+                lock_info = {
+                    "key": lock_key,
+                    "registered_at": time.time(),
+                    "metadata": metadata,
+                }
+                client.hset(registry_prefix + "keys", lock_key, json.dumps(lock_info))
+                return ActionResult(success=True, message=f"Lock registered: {lock_key}")
+
+            elif operation == "unregister":
+                if not lock_key:
+                    return ActionResult(success=False, message="lock_key is required")
+                client.hdel(registry_prefix + "keys", lock_key)
+                return ActionResult(success=True, message=f"Lock unregistered: {lock_key}")
+
+            elif operation == "list":
+                all_locks = client.hgetall(registry_prefix + "keys")
+                locks = []
+                for key, info in all_locks.items():
+                    locks.append({
+                        "key": key.decode() if isinstance(key, bytes) else key,
+                        "info": json.loads(info.decode() if isinstance(info, bytes) else info),
+                    })
+                return ActionResult(success=True, message=f"Registry has {len(locks)} locks", data={"locks": locks})
+
+            elif operation == "check_status":
+                if not lock_key:
+                    return ActionResult(success=False, message="lock_key is required")
+                exists = client.exists(lock_key)
+                ttl = client.pttl(lock_key) if exists else None
+                return ActionResult(
+                    success=True,
+                    message=f"Status: {lock_key}",
+                    data={"lock_key": lock_key, "is_held": bool(exists), "ttl_ms": ttl}
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
+
+
+import json
+
+
+class SemaphoreAction(BaseAction):
+    """Counting semaphore for distributed resource limiting."""
+    action_type = "semaphore"
+    display_name = "分布式信号量"
+    description = "用于限制资源的分布式信号量"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        if not REDIS_AVAILABLE:
+            return ActionResult(success=False, message="redis not installed: pip install redis")
+
+        try:
+            operation = params.get("operation", "acquire")
+            sem_key = params.get("sem_key", "")
+            permits = params.get("permits", 1)
+            ttl_ms = params.get("ttl_ms", 60000)
+            timeout_ms = params.get("timeout_ms", 10000)
+            redis_url = params.get("redis_url", "redis://localhost:6379/0")
+
+            if not sem_key:
+                return ActionResult(success=False, message="sem_key is required")
+
+            client = redis.from_url(redis_url, decode_responses=False)
+
+            if operation == "acquire":
+                start = time.time()
+                acquired = False
+                while time.time() * 1000 - start < timeout_ms:
+                    current = client.get(sem_key)
+                    current_val = int(current) if current else 0
+                    if current_val + permits <= permits * 100:
+                        pipe = client.pipeline()
+                        pipe.incrby(sem_key, permits)
+                        pipe.pexpire(sem_key, ttl_ms)
+                        pipe.execute()
+                        acquired = True
+                        break
+                    time.sleep(0.01)
+
+                if acquired:
+                    return ActionResult(success=True, message=f"Semaphore acquired: {sem_key}", data={"permits": permits})
+                else:
+                    return ActionResult(success=False, message=f"Semaphore timeout: {sem_key}")
+
+            elif operation == "release":
+                current = client.get(sem_key)
+                current_val = int(current) if current else 0
+                new_val = max(0, current_val - permits)
+                if new_val == 0:
+                    client.delete(sem_key)
+                else:
+                    client.decrby(sem_key, permits)
+                return ActionResult(success=True, message=f"Semaphore released: {sem_key}", data={"permits": permits})
+
+            elif operation == "status":
+                current = client.get(sem_key)
+                current_val = int(current) if current else 0
+                ttl = client.pttl(sem_key)
+                return ActionResult(
+                    success=True,
+                    message=f"Semaphore status: {sem_key}",
+                    data={"current_permits": current_val, "ttl_ms": ttl}
+                )
+
+            else:
+                return ActionResult(success=False, message=f"Unknown operation: {operation}")
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Error: {str(e)}")
