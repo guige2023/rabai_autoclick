@@ -1,30 +1,16 @@
-"""Data Merger and Join Engine.
+"""
+Data Merger Action Module.
 
-This module provides data joining and merging:
-- SQL-style joins (inner, left, right, full, cross)
-- Multiple key joins
-- Conflict resolution
-- Denormalization
-
-Example:
-    >>> from actions.data_merger_action import DataMerger
-    >>> merger = DataMerger()
-    >>> result = merger.join(left_df, right_df, left_on="user_id", right_on="id", how="left")
+Merges and joins data from multiple sources.
 """
 
 from __future__ import annotations
 
-import logging
-import threading
-from typing import Any, Callable, Optional
-from dataclasses import dataclass
-from enum import Enum
-
-logger = logging.getLogger(__name__)
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 
-class JoinType(Enum):
-    """Join types."""
+class MergeStrategy(Enum):
+    """Merge strategies."""
     INNER = "inner"
     LEFT = "left"
     RIGHT = "right"
@@ -32,239 +18,233 @@ class JoinType(Enum):
     CROSS = "cross"
 
 
-@dataclass
-class MergeResult:
-    """Result of a merge operation."""
-    success: bool
-    merged_records: list[dict[str, Any]]
-    join_type: str
-    left_key_field: str
-    right_key_field: str
-    matched_count: int
-    unmatched_count: int
+class DataMergerAction:
+    """
+    Merge and join data from multiple sources.
 
-
-class DataMerger:
-    """Merges and joins data from multiple sources."""
+    Supports SQL-style joins and custom merge strategies.
+    """
 
     def __init__(self) -> None:
-        """Initialize the data merger."""
-        self._lock = threading.Lock()
-        self._stats = {"merges": 0, "records_merged": 0}
+        self._transforms: Dict[str, Callable[[Any], Any]] = {}
 
-    def join(
+    def add_field_transform(
         self,
-        left: list[dict[str, Any]],
-        right: list[dict[str, Any]],
-        left_on: str,
-        right_on: str,
-        how: str = "inner",
-        suffix_left: str = "_x",
-        suffix_right: str = "_y",
-    ) -> MergeResult:
-        """Join two lists of records.
+        field: str,
+        transform: Callable[[Any], Any],
+    ) -> None:
+        """Add a field transformation for merging."""
+        self._transforms[field] = transform
+
+    def merge(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        on: Optional[Dict[str, str]] = None,
+        strategy: MergeStrategy = MergeStrategy.INNER,
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge two lists of records.
 
         Args:
-            left: Left records.
-            right: Right records.
-            left_on: Left key field.
-            right_on: Right key field.
-            how: Join type (inner, left, right, full, cross).
-            suffix_left: Suffix for conflicting left fields.
-            suffix_right: Suffix for conflicting right fields.
+            left: Left dataset
+            right: Right dataset
+            on: Join keys {"left_key": "right_key"}
+            strategy: Merge strategy
 
         Returns:
-            MergeResult with merged records.
+            Merged records
         """
-        self._stats["merges"] += 1
+        if on is None:
+            return self._merge_all(left, right, strategy)
 
-        if how == "cross":
-            return self._cross_join(left, right, suffix_left, suffix_right)
+        return self._merge_on_key(left, right, on, strategy)
 
-        right_index = self._build_index(right, right_on)
+    def _merge_on_key(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        on: Dict[str, str],
+        strategy: MergeStrategy,
+    ) -> List[Dict[str, Any]]:
+        """Merge on specified keys."""
+        left_key = list(on.keys())[0]
+        right_key = on[left_key]
+
+        right_index = {r.get(right_key): r for r in right}
+
         result = []
-        matched_count = 0
-        unmatched_count = 0
 
-        left_keyed = {r.get(left_on): r for r in left}
+        for l_record in left:
+            l_val = l_record.get(left_key)
+            r_record = right_index.get(l_val)
 
-        if how in ("inner", "left", "full"):
-            for left_rec in left:
-                key = left_rec.get(left_on)
-                right_rec = right_index.get(key)
-
-                if right_rec:
-                    merged = self._merge_records(left_rec, right_rec, left_on, right_on, suffix_left, suffix_right)
-                    result.append(merged)
-                    matched_count += 1
-                else:
-                    if how in ("inner", "left"):
-                        result.append(self._add_suffix_to_right_fields(dict(left_rec), right[0] if right else {}, suffix_right))
-                        unmatched_count += 1
-
-        if how in ("right", "full"):
-            matched_left_keys = set()
-            for left_rec in left:
-                key = left_rec.get(left_on)
-                right_rec = right_index.get(key)
-                if right_rec:
-                    matched_left_keys.add(key)
-
-            for right_rec in right:
-                key = right_rec.get(right_on)
-                if key in matched_left_keys:
-                    continue
-                merged = self._merge_records(
-                    left_keyed.get(key, {}),
-                    right_rec,
-                    left_on, right_on,
-                    suffix_left, suffix_right
-                )
+            if r_record is not None:
+                merged = {**l_record, **r_record}
                 result.append(merged)
-                unmatched_count += 1
+            elif strategy in (MergeStrategy.LEFT, MergeStrategy.FULL):
+                result.append(l_record.copy())
 
-        self._stats["records_merged"] += len(result)
-
-        return MergeResult(
-            success=True,
-            merged_records=result,
-            join_type=how,
-            left_key_field=left_on,
-            right_key_field=right_on,
-            matched_count=matched_count,
-            unmatched_count=unmatched_count,
-        )
-
-    def _build_index(
-        self,
-        records: list[dict[str, Any]],
-        key_field: str,
-    ) -> dict[Any, dict[str, Any]]:
-        """Build an index on a key field."""
-        index = {}
-        for r in records:
-            key = r.get(key_field)
-            if key not in index:
-                index[key] = r
-        return index
-
-    def _merge_records(
-        self,
-        left_rec: dict[str, Any],
-        right_rec: dict[str, Any],
-        left_key: str,
-        right_key: str,
-        suffix_left: str,
-        suffix_right: str,
-    ) -> dict[str, Any]:
-        """Merge two records, handling key conflicts."""
-        result = {}
-
-        all_keys = set(left_rec.keys()) | set(right_rec.keys())
-
-        for key in all_keys:
-            left_val = left_rec.get(key)
-            right_val = right_rec.get(key)
-
-            if key == right_key:
-                result[key] = right_val
-            elif key == left_key:
-                result[key] = left_val
-            elif left_val is not None and right_val is not None:
-                result[key + suffix_left] = left_val
-                result[key + suffix_right] = right_val
-            elif left_val is not None:
-                result[key] = left_val
-            else:
-                result[key] = right_val
+        if strategy in (MergeStrategy.RIGHT, MergeStrategy.FULL):
+            matched_keys = {r.get(right_key) for r in result}
+            for r_record in right:
+                r_val = r_record.get(right_key)
+                if r_val not in matched_keys:
+                    result.append(r_record.copy())
 
         return result
 
-    def _add_suffix_to_right_fields(
+    def _merge_all(
         self,
-        left_rec: dict[str, Any],
-        right_rec: dict[str, Any],
-        suffix_right: str,
-    ) -> dict[str, Any]:
-        """Add right record fields with suffix."""
-        result = dict(left_rec)
-        for key, val in right_rec.items():
-            if key not in left_rec:
-                result[key + suffix_right] = val
-        return result
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        strategy: MergeStrategy,
+    ) -> List[Dict[str, Any]]:
+        """Merge all records without key."""
+        if strategy == MergeStrategy.CROSS:
+            return self._cross_join(left, right)
+
+        return []
 
     def _cross_join(
         self,
-        left: list[dict[str, Any]],
-        right: list[dict[str, Any]],
-        suffix_left: str,
-        suffix_right: str,
-    ) -> MergeResult:
-        """Create a cross join (Cartesian product)."""
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Cross join all records."""
         result = []
         for l in left:
             for r in right:
-                merged = self._merge_records(l, r, "", "", suffix_left, suffix_right)
-                result.append(merged)
-
-        self._stats["records_merged"] += len(result)
-
-        return MergeResult(
-            success=True,
-            merged_records=result,
-            join_type="cross",
-            left_key_field="",
-            right_key_field="",
-            matched_count=len(result),
-            unmatched_count=0,
-        )
+                result.append({**l, **r})
+        return result
 
     def union(
         self,
-        *tables: list[dict[str, Any]],
-        dedupe: bool = True,
-    ) -> list[dict[str, Any]]:
-        """Union multiple tables.
+        datasets: List[List[Dict[str, Any]]],
+        dedupe: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Union multiple datasets.
 
         Args:
-            *tables: Tables to union.
-            dedupe: Remove duplicate records.
+            datasets: List of datasets
+            dedupe: Remove duplicates
 
         Returns:
-            Unioned records.
+            Combined dataset
         """
         result = []
-        seen = set() if dedupe else None
+        seen_keys: Set[str] = set()
 
-        for table in tables:
-            for record in table:
-                key = tuple(sorted(record.items()))
-                if dedupe and key in seen:
-                    continue
+        for dataset in datasets:
+            for record in dataset:
+                if dedupe:
+                    key = self._record_key(record)
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
                 result.append(record)
-                if seen is not None:
-                    seen.add(key)
 
         return result
 
-    def concatenate(
+    def intersect(
         self,
-        *tables: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Concatenate tables vertically.
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        key_fields: List[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Find intersection of two datasets.
 
         Args:
-            *tables: Tables to concatenate.
+            left: Left dataset
+            right: Right dataset
+            key_fields: Fields to use for comparison
 
         Returns:
-            Concatenated records.
+            Records in both datasets
         """
+        right_keys = {self._record_key(r, key_fields) for r in right}
         result = []
-        for table in tables:
-            result.extend(table)
+
+        for record in left:
+            if self._record_key(record, key_fields) in right_keys:
+                result.append(record)
+
         return result
 
-    def get_stats(self) -> dict[str, int]:
-        """Get merger statistics."""
-        with self._lock:
-            return dict(self._stats)
+    def difference(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        key_fields: List[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Find records in left but not in right.
+
+        Args:
+            left: Left dataset
+            right: Right dataset
+            key_fields: Fields to use for comparison
+
+        Returns:
+            Records only in left
+        """
+        right_keys = {self._record_key(r, key_fields) for r in right}
+        result = []
+
+        for record in left:
+            if self._record_key(record, key_fields) not in right_keys:
+                result.append(record)
+
+        return result
+
+    def _record_key(
+        self,
+        record: Dict[str, Any],
+        fields: Optional[List[str]] = None,
+    ) -> str:
+        """Generate a unique key for a record."""
+        if fields is None:
+            fields = sorted(record.keys())
+
+        values = [str(record.get(f, "")) for f in fields]
+        return "|".join(values)
+
+    def lookup_merge(
+        self,
+        primary: List[Dict[str, Any]],
+        lookup: Dict[str, Dict[str, Any]],
+        key_field: str,
+        lookup_fields: List[str],
+        prefix: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge lookup data into primary dataset.
+
+        Args:
+            primary: Primary dataset
+            lookup: Lookup table
+            key_field: Key field in primary
+            lookup_fields: Fields to add from lookup
+            prefix: Prefix for lookup field names
+
+        Returns:
+            Merged dataset
+        """
+        result = []
+
+        for record in primary:
+            new_record = record.copy()
+            key = record.get(key_field)
+
+            if key in lookup:
+                lookup_record = lookup[key]
+                for field in lookup_fields:
+                    new_name = f"{prefix}{field}" if prefix else field
+                    if field in lookup_record:
+                        new_record[new_name] = lookup_record[field]
+
+            result.append(new_record)
+
+        return result

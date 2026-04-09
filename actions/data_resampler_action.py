@@ -1,180 +1,251 @@
-"""Data resampler action module for RabAI AutoClick.
+"""
+Data Resampler Action Module.
 
-Provides data resampling operations:
-- ResampleUpAction: Upsample data
-- ResampleDownAction: Downsample data
-- ResampleInterpolateAction: Interpolate missing values
-- ResampleReshapeAction: Reshape data
+Resample and interpolate data series.
 """
 
-from typing import Any, Dict, List
+from __future__ import annotations
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
-class ResampleUpAction(BaseAction):
-    """Upsample data."""
-    action_type = "resample_up"
-    display_name = "上采样"
-    description = "上采样数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            factor = params.get("factor", 2)
-            method = params.get("method", "repeat")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            if method == "repeat":
-                upsampled = []
-                for item in data:
-                    for _ in range(factor):
-                        upsampled.append(item.copy())
-            else:
-                upsampled = data
-
-            return ActionResult(
-                success=True,
-                data={"upsampled": upsampled, "original_count": len(data), "upsampled_count": len(upsampled), "factor": factor},
-                message=f"Upsampled {len(data)} → {len(upsampled)} (factor={factor})",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Resample up failed: {e}")
+class ResampleMethod(Enum):
+    """Resampling methods."""
+    NEAREST = "nearest"
+    INTERPOLATE = "interpolate"
+    AGGREGATE = "aggregate"
+    DECIMATE = "decimate"
 
 
-class ResampleDownAction(BaseAction):
-    """Downsample data."""
-    action_type = "resample_down"
-    display_name = "下采样"
-    description = "下采样数据"
+class DataResamplerAction:
+    """
+    Resample data series.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            factor = params.get("factor", 2)
-            method = params.get("method", "first")
+    Supports upsampling, downsampling, and interpolation.
+    """
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+    def __init__(self) -> None:
+        self._interpolators: Dict[str, Callable[[float, List[Tuple[float, float]]], float]] = {}
 
-            if method == "first":
-                downsampled = data[::factor]
+    def downsample(
+        self,
+        data: List[Tuple[float, Any]],
+        target_size: int,
+        method: str = "mean",
+    ) -> List[Tuple[float, Any]]:
+        """
+        Downsample data to target size.
+
+        Args:
+            data: List of (timestamp, value) tuples
+            target_size: Target number of points
+            method: Aggregation method (mean, min, max, first, last)
+
+        Returns:
+            Downsampled data
+        """
+        if len(data) <= target_size:
+            return data
+
+        chunk_size = len(data) / target_size
+        result = []
+
+        for i in range(target_size):
+            start = int(i * chunk_size)
+            end = int((i + 1) * chunk_size)
+            chunk = data[start:end]
+
+            if not chunk:
+                continue
+
+            timestamp = chunk[0][0]
+
+            if method == "mean":
+                values = [c[1] for c in chunk if c[1] is not None]
+                value = sum(values) / len(values) if values else None
+            elif method == "min":
+                value = min((c[1] for c in chunk if c[1] is not None), default=None)
+            elif method == "max":
+                value = max((c[1] for c in chunk if c[1] is not None), default=None)
+            elif method == "first":
+                value = chunk[0][1]
             elif method == "last":
-                downsampled = data[-1 :: -factor][::-1]
-            elif method == "mean":
-                downsampled = []
-                for i in range(0, len(data), factor):
-                    chunk = data[i : i + factor]
-                    if chunk:
-                        downsampled.append({"resampled": True, "chunk_size": len(chunk)})
+                value = chunk[-1][1]
             else:
-                downsampled = data[::factor]
+                value = chunk[len(chunk) // 2][1]
 
-            return ActionResult(
-                success=True,
-                data={"downsampled": downsampled, "original_count": len(data), "downsampled_count": len(downsampled), "factor": factor},
-                message=f"Downsampled {len(data)} → {len(downsampled)} (factor={factor})",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Resample down failed: {e}")
+            result.append((timestamp, value))
 
+        return result
 
-class ResampleInterpolateAction(BaseAction):
-    """Interpolate missing values."""
-    action_type = "resample_interpolate"
-    display_name = "插值填充"
-    description = "插值填充缺失值"
+    def upsample(
+        self,
+        data: List[Tuple[float, Any]],
+        target_timestamps: List[float],
+        method: str = "linear",
+    ) -> List[Tuple[float, Any]]:
+        """
+        Upsample data to target timestamps.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            field = params.get("field", "value")
-            method = params.get("method", "linear")
+        Args:
+            data: List of (timestamp, value) tuples
+            target_timestamps: Target timestamps
+            method: Interpolation method
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+        Returns:
+            Upsampled data
+        """
+        if not data:
+            return [(t, None) for t in target_timestamps]
 
-            values = [d.get(field, 0) for d in data]
-            indices = [i for i, v in enumerate(values) if v is None or v == ""]
+        if method == "nearest":
+            return self._upsample_nearest(data, target_timestamps)
+        elif method == "linear":
+            return self._upsample_linear(data, target_timestamps)
+        elif method == "forward":
+            return self._upsample_forward(data, target_timestamps)
 
-            interpolated = values.copy()
-            for idx in indices:
-                if method == "linear":
-                    prev_idx = next((i for i in range(idx - 1, -1, -1) if interpolated[i] not in (None, "")), None)
-                    next_idx = next((i for i in range(idx + 1, len(interpolated)) if interpolated[i] not in (None, "")), None)
-                    if prev_idx is not None and next_idx is not None:
-                        interpolated[idx] = (interpolated[prev_idx] + interpolated[next_idx]) / 2
-                    elif prev_idx is not None:
-                        interpolated[idx] = interpolated[prev_idx]
-                    elif next_idx is not None:
-                        interpolated[idx] = interpolated[next_idx]
-                elif method == "forward":
-                    prev_idx = next((i for i in range(idx - 1, -1, -1) if interpolated[i] not in (None, "")), None)
-                    if prev_idx is not None:
-                        interpolated[idx] = interpolated[prev_idx]
+        return [(t, None) for t in target_timestamps]
 
-            result = []
-            for i, d in enumerate(data):
-                new_d = d.copy()
-                new_d[f"{field}_interpolated"] = interpolated[i]
-                result.append(new_d)
+    def _upsample_nearest(
+        self,
+        data: List[Tuple[float, Any]],
+        target_timestamps: List[float],
+    ) -> List[Tuple[float, Any]]:
+        """Nearest neighbor upsampling."""
+        sorted_data = sorted(data, key=lambda x: x[0])
+        result = []
 
-            return ActionResult(
-                success=True,
-                data={"result": result, "interpolated_count": len(indices), "method": method},
-                message=f"Interpolated {len(indices)} missing values using {method}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Resample interpolate failed: {e}")
+        for target in target_timestamps:
+            nearest = min(sorted_data, key=lambda x: abs(x[0] - target))
+            result.append((target, nearest[1]))
 
+        return result
 
-class ResampleReshapeAction(BaseAction):
-    """Reshape data."""
-    action_type = "resample_reshape"
-    display_name = "重塑数据"
-    description = "重塑数据结构"
+    def _upsample_linear(
+        self,
+        data: List[Tuple[float, Any]],
+        target_timestamps: List[float],
+    ) -> List[Tuple[float, Any]]:
+        """Linear interpolation upsampling."""
+        sorted_data = sorted(data, key=lambda x: x[0])
+        result = []
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            rows = params.get("rows", None)
-            cols = params.get("cols", None)
+        for target in target_timestamps:
+            value = self._linear_interpolate(target, sorted_data)
+            result.append((target, value))
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+        return result
 
-            total = len(data)
-            if rows is None and cols is None:
-                rows = total
-                cols = 1
-            elif rows is None:
-                rows = (total + cols - 1) // cols
-            elif cols is None:
-                cols = (total + rows - 1) // rows
+    def _upsample_forward(
+        self,
+        data: List[Tuple[float, Any]],
+        target_timestamps: List[float],
+    ) -> List[Tuple[float, Any]]:
+        """Forward fill upsampling."""
+        sorted_data = sorted(data, key=lambda x: x[0])
+        result = []
+        last_value = None
 
-            reshaped = []
-            idx = 0
-            for r in range(rows):
-                row = []
-                for c in range(cols):
-                    if idx < total:
-                        row.append(data[idx])
-                        idx += 1
-                    else:
-                        row.append(None)
-                reshaped.append(row)
+        for target in target_timestamps:
+            for timestamp, value in sorted_data:
+                if timestamp <= target:
+                    last_value = value
+                else:
+                    break
 
-            return ActionResult(
-                success=True,
-                data={"reshaped": reshaped, "rows": rows, "cols": cols, "original_count": total},
-                message=f"Reshaped {total} items into {rows}x{cols}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Resample reshape failed: {e}")
+            result.append((target, last_value))
+
+        return result
+
+    def _linear_interpolate(
+        self,
+        x: float,
+        points: List[Tuple[float, Any]],
+    ) -> Optional[float]:
+        """Linear interpolation between points."""
+        if not points:
+            return None
+
+        if x <= points[0][0]:
+            return points[0][1]
+
+        if x >= points[-1][0]:
+            return points[-1][1]
+
+        for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
+
+            if x1 <= x <= x2:
+                if y1 is None or y2 is None:
+                    return y1 or y2
+                t = (x - x1) / (x2 - x1)
+                return y1 + t * (y2 - y1)
+
+        return None
+
+    def resample_to_interval(
+        self,
+        data: List[Tuple[float, Any]],
+        interval_seconds: float,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        aggregation: str = "mean",
+    ) -> List[Tuple[float, Any]]:
+        """
+        Resample to fixed interval.
+
+        Args:
+            data: List of (timestamp, value) tuples
+            interval_seconds: Interval in seconds
+            start_time: Start time for bins
+            end_time: End time for bins
+            aggregation: How to aggregate values
+
+        Returns:
+            Resampled data
+        """
+        if not data:
+            return []
+
+        sorted_data = sorted(data, key=lambda x: x[0])
+
+        start = start_time or sorted_data[0][0]
+        end = end_time or sorted_data[-1][0]
+
+        bins: Dict[int, List[Any]] = {}
+
+        for timestamp, value in sorted_data:
+            if timestamp < start or timestamp > end:
+                continue
+
+            bin_key = int((timestamp - start) / interval_seconds)
+            if bin_key not in bins:
+                bins[bin_key] = []
+            bins[bin_key].append(value)
+
+        result = []
+        for bin_key in sorted(bins.keys()):
+            timestamp = start + bin_key * interval_seconds
+            values = bins[bin_key]
+
+            if not values:
+                continue
+
+            if aggregation == "mean":
+                agg_value = sum(v for v in values if v is not None) / len(values)
+            elif aggregation == "sum":
+                agg_value = sum(v for v in values if v is not None)
+            elif aggregation == "min":
+                agg_value = min(v for v in values if v is not None)
+            elif aggregation == "max":
+                agg_value = max(v for v in values if v is not None)
+            elif aggregation == "count":
+                agg_value = len(values)
+            else:
+                agg_value = values[0]
+
+            result.append((timestamp, agg_value))
+
+        return result
