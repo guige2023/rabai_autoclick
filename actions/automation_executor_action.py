@@ -1,222 +1,165 @@
-"""Automation executor action module for RabAI AutoClick.
+"""Automation Executor Action Module.
 
-Provides automation executor operations:
-- ExecutorSubmitAction: Submit task to executor
-- ExecutorBatchAction: Submit batch tasks
-- ExecutorCancelAction: Cancel a task
-- ExecutorStatusAction: Check task status
-- ExecutorResultAction: Get task result
-- ExecutorShutdownAction: Shutdown executor
+Execute automation workflows with step tracking and error recovery.
 """
 
+from __future__ import annotations
+
+import asyncio
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from .command_handler_action import CommandStatus
 
 
-class ExecutorSubmitAction(BaseAction):
-    """Submit a task to executor."""
-    action_type = "executor_submit"
-    display_name = "任务提交"
-    description = "提交任务到执行器"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            task_name = params.get("task_name", "")
-            task_params = params.get("params", {})
-            priority = params.get("priority", 0)
-            timeout = params.get("timeout", 300)
-
-            if not task_name:
-                return ActionResult(success=False, message="task_name is required")
-
-            task_id = str(uuid.uuid4())[:8]
-
-            if not hasattr(context, "executor_tasks"):
-                context.executor_tasks = {}
-            context.executor_tasks[task_id] = {
-                "task_id": task_id,
-                "task_name": task_name,
-                "params": task_params,
-                "priority": priority,
-                "status": "queued",
-                "submitted_at": time.time(),
-                "timeout": timeout,
-            }
-
-            return ActionResult(
-                success=True,
-                data={"task_id": task_id, "task_name": task_name, "status": "queued"},
-                message=f"Task {task_id} submitted",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Executor submit failed: {e}")
+class StepStatus(Enum):
+    """Step execution status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    RETRYING = "retrying"
 
 
-class ExecutorBatchAction(BaseAction):
-    """Submit batch tasks to executor."""
-    action_type = "executor_batch"
-    display_name = "批量任务提交"
-    description = "批量提交任务"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            tasks = params.get("tasks", [])
-            if not tasks:
-                return ActionResult(success=False, message="tasks list is required")
-
-            if not hasattr(context, "executor_tasks"):
-                context.executor_tasks = {}
-
-            submitted = []
-            for task in tasks:
-                task_id = str(uuid.uuid4())[:8]
-                context.executor_tasks[task_id] = {
-                    "task_id": task_id,
-                    "task_name": task.get("task_name", "unknown"),
-                    "params": task.get("params", {}),
-                    "priority": task.get("priority", 0),
-                    "status": "queued",
-                    "submitted_at": time.time(),
-                }
-                submitted.append(task_id)
-
-            return ActionResult(
-                success=True,
-                data={"submitted_count": len(submitted), "task_ids": submitted},
-                message=f"Batch submitted {len(submitted)} tasks",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Executor batch failed: {e}")
+@dataclass
+class AutomationStep:
+    """Single automation step."""
+    step_id: str
+    name: str
+    action: Callable
+    args: tuple = field(default_factory=tuple)
+    kwargs: dict = field(default_factory=dict)
+    timeout: float = 60.0
+    retry_count: int = 0
+    max_retries: int = 3
+    depends_on: list[str] = field(default_factory=list)
+    status: StepStatus = StepStatus.PENDING
+    started_at: float | None = None
+    completed_at: float | None = None
+    error: str | None = None
+    result: Any = None
 
 
-class ExecutorCancelAction(BaseAction):
-    """Cancel a task."""
-    action_type = "executor_cancel"
-    display_name = "任务取消"
-    description = "取消执行中的任务"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            task_id = params.get("task_id", "")
-            if not task_id:
-                return ActionResult(success=False, message="task_id is required")
-
-            if not hasattr(context, "executor_tasks") or task_id not in context.executor_tasks:
-                return ActionResult(success=False, message=f"Task {task_id} not found")
-
-            task = context.executor_tasks[task_id]
-            if task["status"] in ("completed", "failed", "cancelled"):
-                return ActionResult(success=False, message=f"Task {task_id} already {task['status']}")
-
-            task["status"] = "cancelled"
-            task["cancelled_at"] = time.time()
-
-            return ActionResult(success=True, data={"task_id": task_id, "status": "cancelled"}, message=f"Task {task_id} cancelled")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Executor cancel failed: {e}")
+@dataclass
+class WorkflowResult:
+    """Result of workflow execution."""
+    workflow_id: str
+    status: StepStatus
+    steps_completed: int
+    steps_failed: int
+    total_time: float
+    results: dict[str, Any]
+    errors: dict[str, str]
 
 
-class ExecutorStatusAction(BaseAction):
-    """Check task status."""
-    action_type = "executor_status"
-    display_name = "任务状态"
-    description = "查询任务状态"
+class AutomationExecutor:
+    """Execute automation workflows with step management."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            task_id = params.get("task_id", "")
-            if not task_id:
-                return ActionResult(success=False, message="task_id is required")
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.workflow_id = str(uuid.uuid4())
+        self._steps: dict[str, AutomationStep] = {}
+        self._step_order: list[str] = []
+        self._running = False
 
-            if not hasattr(context, "executor_tasks") or task_id not in context.executor_tasks:
-                return ActionResult(success=False, message=f"Task {task_id} not found")
+    def add_step(
+        self,
+        name: str,
+        action: Callable,
+        *args,
+        step_id: str | None = None,
+        timeout: float = 60.0,
+        retry_count: int = 0,
+        max_retries: int = 3,
+        depends_on: list[str] | None = None,
+        **kwargs
+    ) -> str:
+        """Add a step to the workflow."""
+        step_id = step_id or str(uuid.uuid4())
+        step = AutomationStep(
+            step_id=step_id,
+            name=name,
+            action=action,
+            args=args,
+            kwargs=kwargs,
+            timeout=timeout,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            depends_on=depends_on or []
+        )
+        self._steps[step_id] = step
+        self._step_order.append(step_id)
+        return step_id
 
-            task = context.executor_tasks[task_id]
-            return ActionResult(
-                success=True,
-                data={"task_id": task_id, "status": task["status"], "submitted_at": task["submitted_at"]},
-                message=f"Task {task_id}: {task['status']}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Executor status failed: {e}")
+    async def execute(self) -> WorkflowResult:
+        """Execute the workflow."""
+        self._running = True
+        start_time = time.time()
+        results = {}
+        errors = {}
+        completed_steps: set[str] = set()
+        steps_completed = 0
+        steps_failed = 0
+        while self._running and len(completed_steps) < len(self._steps):
+            progress_made = False
+            for step_id in self._step_order:
+                step = self._steps[step_id]
+                if step_id in completed_steps:
+                    continue
+                if not all(dep in completed_steps for dep in step.depends_on):
+                    continue
+                if step.status == StepStatus.PENDING:
+                    step.status = StepStatus.RUNNING
+                    step.started_at = time.time()
+                    progress_made = True
+                    try:
+                        result = await asyncio.wait_for(
+                            step.action(*step.args, **step.kwargs),
+                            timeout=step.timeout
+                        )
+                        step.result = result
+                        step.status = StepStatus.COMPLETED
+                        step.completed_at = time.time()
+                        results[step_id] = result
+                        completed_steps.add(step_id)
+                        steps_completed += 1
+                    except asyncio.TimeoutError:
+                        step.error = "Step timed out"
+                        step.status = StepStatus.FAILED
+                        step.completed_at = time.time()
+                        errors[step_id] = "Timeout"
+                        steps_failed += 1
+                        completed_steps.add(step_id)
+                    except Exception as e:
+                        step.error = str(e)
+                        if step.retry_count < step.max_retries:
+                            step.retry_count += 1
+                            step.status = StepStatus.RETRYING
+                            await asyncio.sleep(2 ** step.retry_count)
+                        else:
+                            step.status = StepStatus.FAILED
+                            step.completed_at = time.time()
+                            errors[step_id] = str(e)
+                            steps_failed += 1
+                            completed_steps.add(step_id)
+            if not progress_made and len(completed_steps) < len(self._steps):
+                break
+            await asyncio.sleep(0.1)
+        overall_status = StepStatus.COMPLETED if steps_failed == 0 else StepStatus.FAILED
+        return WorkflowResult(
+            workflow_id=self.workflow_id,
+            status=overall_status,
+            steps_completed=steps_completed,
+            steps_failed=steps_failed,
+            total_time=time.time() - start_time,
+            results=results,
+            errors=errors
+        )
 
-
-class ExecutorResultAction(BaseAction):
-    """Get task result."""
-    action_type = "executor_result"
-    display_name = "任务结果"
-    description = "获取任务执行结果"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            task_id = params.get("task_id", "")
-            block = params.get("block", False)
-            timeout = params.get("timeout", 10)
-
-            if not task_id:
-                return ActionResult(success=False, message="task_id is required")
-
-            if not hasattr(context, "executor_tasks") or task_id not in context.executor_tasks:
-                return ActionResult(success=False, message=f"Task {task_id} not found")
-
-            task = context.executor_tasks[task_id]
-            if task["status"] == "running" and block:
-                time.sleep(min(timeout, 5))
-
-            if task["status"] == "completed":
-                return ActionResult(
-                    success=True,
-                    data={"task_id": task_id, "result": task.get("result", {}), "status": task["status"]},
-                    message=f"Task {task_id} result retrieved",
-                )
-            else:
-                return ActionResult(
-                    success=True,
-                    data={"task_id": task_id, "status": task["status"]},
-                    message=f"Task {task_id} not completed yet",
-                )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Executor result failed: {e}")
-
-
-class ExecutorShutdownAction(BaseAction):
-    """Shutdown executor."""
-    action_type = "executor_shutdown"
-    display_name = "执行器关闭"
-    description = "关闭执行器"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            force = params.get("force", False)
-            timeout = params.get("timeout", 30)
-
-            tasks = getattr(context, "executor_tasks", {})
-            pending = sum(1 for t in tasks.values() if t["status"] == "queued")
-            running = sum(1 for t in tasks.values() if t["status"] == "running")
-
-            if not force and running > 0:
-                return ActionResult(
-                    success=False,
-                    data={"pending": pending, "running": running},
-                    message=f"Cannot shutdown: {running} tasks still running",
-                )
-
-            for task in tasks.values():
-                if task["status"] == "queued":
-                    task["status"] = "cancelled"
-
-            return ActionResult(
-                success=True,
-                data={"force": force, "pending_cancelled": pending, "running": running},
-                message="Executor shutdown complete",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Executor shutdown failed: {e}")
+    def get_step(self, step_id: str) -> AutomationStep | None:
+        """Get step by ID."""
+        return self._steps.get(step_id)
