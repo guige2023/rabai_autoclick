@@ -1,384 +1,339 @@
-"""Load balancer action module for RabAI AutoClick.
+"""
+Load Balancer Action Module.
 
-Provides load balancing across multiple endpoints with
-health checking and failover support.
+Provides multi-endpoint load distribution with
+multiple balancing algorithms.
 """
 
-import sys
-import os
-import time
+import asyncio
 import random
-from typing import Any, Dict, List, Optional, Callable
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-from threading import Lock
+from typing import Any, Callable, Optional, TypeVar
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
 
 
-class BalanceStrategy(Enum):
+class BalancingStrategy(Enum):
     """Load balancing strategies."""
     ROUND_ROBIN = "round_robin"
+    WEIGHTED_ROUND_ROBIN = "weighted_round_robin"
+    LEAST_CONNECTIONS = "least_connections"
     RANDOM = "random"
-    LEAST_LOADED = "least_loaded"
-    WEIGHTED = "weighted"
     IP_HASH = "ip_hash"
-    ADAPTIVE = "adaptive"
+    LEAST_RESPONSE_TIME = "least_response_time"
 
 
 @dataclass
 class Endpoint:
-    """A backend endpoint."""
+    """Load balancer endpoint."""
     id: str
-    url: str
+    address: str
     weight: int = 1
     healthy: bool = True
-    last_check: float = 0
-    response_time: float = 0
-    failures: int = 0
-    requests: int = 0
+    active_connections: int = 0
+    total_requests: int = 0
+    failed_requests: int = 0
+    total_response_time: float = 0.0
+    last_used: float = 0.0
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def avg_response_time(self) -> float:
+        if self.total_requests == 0:
+            return 0.0
+        return self.total_response_time / self.total_requests
+
+    @property
+    def failure_rate(self) -> float:
+        if self.total_requests == 0:
+            return 0.0
+        return self.failed_requests / self.total_requests
 
 
-class LoadBalancerAction(BaseAction):
-    """Balance load across multiple backend endpoints.
-    
-    Supports multiple balancing strategies, health checking,
-    automatic failover, and endpoint weighting.
-    """
-    action_type = "load_balancer"
-    display_name = "负载均衡器"
-    description = "多后端负载均衡和健康检查"
-    
+@dataclass
+class LoadBalancerConfig:
+    """Load balancer configuration."""
+    strategy: BalancingStrategy = BalancingStrategy.ROUND_ROBIN
+    health_check_interval: float = 30.0
+    health_check_timeout: float = 5.0
+    max_failures: int = 3
+    circuit_breaker_threshold: int = 5
+
+
+@dataclass
+class LoadBalancerStats:
+    """Load balancer statistics."""
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    redirected_requests: int = 0
+    active_endpoints: int = 0
+
+
+class RoundRobinBalancer:
+    """Round-robin balancer."""
+
     def __init__(self):
-        super().__init__()
-        self._endpoints: Dict[str, Endpoint] = {}
-        self._strategy = BalanceStrategy.ROUND_ROBIN
-        self._round_robin_index: Dict[str, int] = {}
-        self._lock = Lock()
-    
-    def execute(
+        self._current: int = 0
+        self._lock = asyncio.Lock()
+
+    async def select(self, endpoints: list[Endpoint]) -> Optional[Endpoint]:
+        """Select endpoint."""
+        if not endpoints:
+            return None
+
+        healthy = [e for e in endpoints if e.healthy]
+        if not healthy:
+            return None
+
+        async with self._lock:
+            selected = healthy[self._current % len(healthy)]
+            self._current += 1
+            return selected
+
+
+class WeightedRoundRobinBalancer:
+    """Weighted round-robin balancer."""
+
+    def __init__(self):
+        self._counters: dict[str, int] = {}
+        self._lock = asyncio.Lock()
+
+    async def select(self, endpoints: list[Endpoint]) -> Optional[Endpoint]:
+        """Select endpoint based on weight."""
+        if not endpoints:
+            return None
+
+        healthy = [e for e in endpoints if e.healthy]
+        if not healthy:
+            return None
+
+        async with self._lock:
+            selected = None
+            for endpoint in healthy:
+                counter = self._counters.get(endpoint.id, 0)
+                if counter < endpoint.weight:
+                    selected = endpoint
+                    self._counters[endpoint.id] = counter + 1
+                    break
+
+            if selected is None:
+                self._counters = {e.id: 0 for e in healthy}
+                selected = healthy[0]
+                self._counters[selected.id] = 1
+
+            return selected
+
+
+class LeastConnectionsBalancer:
+    """Least connections balancer."""
+
+    async def select(self, endpoints: list[Endpoint]) -> Optional[Endpoint]:
+        """Select endpoint with least connections."""
+        if not endpoints:
+            return None
+
+        healthy = [e for e in endpoints if e.healthy]
+        if not healthy:
+            return None
+
+        return min(healthy, key=lambda e: e.active_connections)
+
+
+class RandomBalancer:
+    """Random selection balancer."""
+
+    async def select(self, endpoints: list[Endpoint]) -> Optional[Endpoint]:
+        """Select random endpoint."""
+        if not endpoints:
+            return None
+
+        healthy = [e for e in endpoints if e.healthy]
+        if not healthy:
+            return None
+
+        return random.choice(healthy)
+
+
+class IPHashBalancer:
+    """IP hash balancer."""
+
+    def __init__(self):
+        self._node_count = 0
+        self._endpoints: list[Endpoint] = []
+
+    async def select(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute load balancer operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - operation: 'register', 'deregister', 'select', 'health', 'status'
-                - endpoint: Endpoint config (for register)
-                - strategy: Balancing strategy (for register)
-        
-        Returns:
-            ActionResult with operation result.
-        """
-        operation = params.get('operation', 'select').lower()
-        
-        if operation == 'register':
-            return self._register(params)
-        elif operation == 'deregister':
-            return self._deregister(params)
-        elif operation == 'select':
-            return self._select(params)
-        elif operation == 'health':
-            return self._health_check(params)
-        elif operation == 'status':
-            return self._status(params)
+        endpoints: list[Endpoint],
+        client_ip: str = ""
+    ) -> Optional[Endpoint]:
+        """Select endpoint based on IP hash."""
+        if not endpoints:
+            return None
+
+        self._endpoints = [e for e in endpoints if e.healthy]
+        if not self._endpoints:
+            return None
+
+        hash_value = sum(ord(c) for c in client_ip)
+        index = hash_value % len(self._endpoints)
+        return self._endpoints[index]
+
+
+class LeastResponseTimeBalancer:
+    """Least response time balancer."""
+
+    async def select(self, endpoints: list[Endpoint]) -> Optional[Endpoint]:
+        """Select endpoint with fastest response time."""
+        if not endpoints:
+            return None
+
+        healthy = [e for e in endpoints if e.healthy]
+        if not healthy:
+            return None
+
+        return min(healthy, key=lambda e: e.avg_response_time)
+
+
+class LoadBalancerAction:
+    """
+    Multi-endpoint load balancer.
+
+    Example:
+        lb = LoadBalancerAction(
+            strategy=BalancingStrategy.LEAST_CONNECTIONS
+        )
+
+        await lb.add_endpoint("api1", "http://api1.example.com", weight=2)
+        await lb.add_endpoint("api2", "http://api2.example.com", weight=1)
+
+        endpoint = await lb.select()
+        result = await lb.route_request(endpoint, api_call)
+    """
+
+    def __init__(
+        self,
+        strategy: BalancingStrategy = BalancingStrategy.ROUND_ROBIN
+    ):
+        self.config = LoadBalancerConfig(strategy=strategy)
+        self._endpoints: dict[str, Endpoint] = {}
+        self._stats = LoadBalancerStats()
+        self._lock = asyncio.Lock()
+
+        if strategy == BalancingStrategy.ROUND_ROBIN:
+            self._balancer = RoundRobinBalancer()
+        elif strategy == BalancingStrategy.WEIGHTED_ROUND_ROBIN:
+            self._balancer = WeightedRoundRobinBalancer()
+        elif strategy == BalancingStrategy.LEAST_CONNECTIONS:
+            self._balancer = LeastConnectionsBalancer()
+        elif strategy == BalancingStrategy.RANDOM:
+            self._balancer = RandomBalancer()
+        elif strategy == BalancingStrategy.IP_HASH:
+            self._balancer = IPHashBalancer()
+        elif strategy == BalancingStrategy.LEAST_RESPONSE_TIME:
+            self._balancer = LeastResponseTimeBalancer()
         else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}"
+            self._balancer = RoundRobinBalancer()
+
+    async def add_endpoint(
+        self,
+        endpoint_id: str,
+        address: str,
+        weight: int = 1,
+        metadata: Optional[dict] = None
+    ) -> None:
+        """Add endpoint."""
+        async with self._lock:
+            endpoint = Endpoint(
+                id=endpoint_id,
+                address=address,
+                weight=weight,
+                metadata=metadata or {}
             )
-    
-    def _register(self, params: Dict[str, Any]) -> ActionResult:
-        """Register a backend endpoint."""
-        endpoint_id = params.get('endpoint_id')
-        url = params.get('url')
-        weight = params.get('weight', 1)
-        strategy = params.get('strategy', 'round_robin').lower()
-        
-        if not endpoint_id or not url:
-            return ActionResult(
-                success=False,
-                message="endpoint_id and url are required"
-            )
-        
-        endpoint = Endpoint(
-            id=endpoint_id,
-            url=url,
-            weight=weight,
-            last_check=time.time()
-        )
-        
-        with self._lock:
             self._endpoints[endpoint_id] = endpoint
-            if endpoint_id not in self._round_robin_index:
-                self._round_robin_index[endpoint_id] = 0
-        
-        if strategy:
-            try:
-                self._strategy = BalanceStrategy(strategy)
-            except ValueError:
-                pass
-        
-        return ActionResult(
-            success=True,
-            message=f"Registered endpoint '{endpoint_id}'",
-            data={'endpoint_id': endpoint_id, 'url': url}
-        )
-    
-    def _deregister(self, params: Dict[str, Any]) -> ActionResult:
-        """Remove a backend endpoint."""
-        endpoint_id = params.get('endpoint_id')
-        
-        with self._lock:
+            self._stats.active_endpoints = sum(1 for e in self._endpoints.values() if e.healthy)
+
+    async def remove_endpoint(self, endpoint_id: str) -> None:
+        """Remove endpoint."""
+        async with self._lock:
             if endpoint_id in self._endpoints:
                 del self._endpoints[endpoint_id]
-                return ActionResult(
-                    success=True,
-                    message=f"Removed endpoint '{endpoint_id}'"
-                )
-        
-        return ActionResult(
-            success=False,
-            message=f"Endpoint '{endpoint_id}' not found"
-        )
-    
-    def _select(self, params: Dict[str, Any]) -> ActionResult:
-        """Select an endpoint using configured strategy."""
-        client_ip = params.get('client_ip')
-        
-        with self._lock:
-            healthy_endpoints = [
-                e for e in self._endpoints.values() if e.healthy
-            ]
-        
-        if not healthy_endpoints:
-            return ActionResult(
-                success=False,
-                message="No healthy endpoints available"
-            )
-        
-        selected = self._apply_strategy(
-            healthy_endpoints,
-            client_ip
-        )
-        
-        # Update stats
-        with self._lock:
-            selected.requests += 1
-        
-        return ActionResult(
-            success=True,
-            message=f"Selected endpoint '{selected.id}'",
-            data={
-                'endpoint_id': selected.id,
-                'url': selected.url,
-                'strategy': self._strategy.value
-            }
-        )
-    
-    def _apply_strategy(
+                self._stats.active_endpoints = sum(1 for e in self._endpoints.values() if e.healthy)
+
+    async def select(
         self,
-        endpoints: List[Endpoint],
-        client_ip: Optional[str]
-    ) -> Endpoint:
-        """Apply load balancing strategy."""
-        if self._strategy == BalanceStrategy.ROUND_ROBIN:
-            # Simple round-robin across all endpoints
-            index = 0
-            for ep in endpoints:
-                if ep.id in self._round_robin_index:
-                    idx = self._round_robin_index[ep.id]
-                    if idx > index:
-                        index = idx
-            # Select endpoint with highest index
-            result = endpoints[0]
-            max_idx = self._round_robin_index.get(result.id, 0)
-            for ep in endpoints:
-                idx = self._round_robin_index.get(ep.id, 0)
-                if idx >= max_idx:
-                    max_idx = idx
-                    result = ep
-            # Increment for next time
-            self._round_robin_index[result.id] = max_idx + 1
-            return result
-        
-        elif self._strategy == BalanceStrategy.RANDOM:
-            return random.choice(endpoints)
-        
-        elif self._strategy == BalanceStrategy.LEAST_LOADED:
-            return min(endpoints, key=lambda e: e.requests)
-        
-        elif self._strategy == BalanceStrategy.WEIGHTED:
-            weighted = []
-            for ep in endpoints:
-                weighted.extend([ep] * ep.weight)
-            return random.choice(weighted)
-        
-        elif self._strategy == BalanceStrategy.IP_HASH and client_ip:
-            hash_val = sum(ord(c) for c in client_ip)
-            index = hash_val % len(endpoints)
-            return endpoints[index]
-        
-        elif self._strategy == BalanceStrategy.ADAPTIVE:
-            # Choose by response time
-            return min(endpoints, key=lambda e: e.response_time)
-        
-        return endpoints[0]
-    
-    def _health_check(self, params: Dict[str, Any]) -> ActionResult:
-        """Perform health check on endpoints."""
-        endpoint_id = params.get('endpoint_id')
-        check_func = params.get('check_func')
-        healthy_threshold = params.get('healthy_threshold', 1.0)
-        
-        results = {}
-        
-        with self._lock:
-            endpoints_to_check = (
-                [self._endpoints[endpoint_id]] if endpoint_id
-                else list(self._endpoints.values())
-            )
-        
-        for ep in endpoints_to_check:
-            if check_func and callable(check_func):
-                try:
-                    start = time.time()
-                    is_healthy = check_func(ep.url)
-                    ep.response_time = (time.time() - start) * 1000
-                    ep.healthy = is_healthy
-                except Exception:
-                    ep.healthy = False
-                    ep.failures += 1
+        client_ip: str = ""
+    ) -> Optional[Endpoint]:
+        """Select endpoint."""
+        endpoints = list(self._endpoints.values())
+
+        if isinstance(self._balancer, IPHashBalancer):
+            return await self._balancer.select(endpoints, client_ip)
+
+        return await self._balancer.select(endpoints)
+
+    async def record_success(
+        self,
+        endpoint_id: str,
+        response_time: float
+    ) -> None:
+        """Record successful request."""
+        async with self._lock:
+            if endpoint_id in self._endpoints:
+                e = self._endpoints[endpoint_id]
+                e.active_connections = max(0, e.active_connections - 1)
+                e.total_requests += 1
+                e.total_response_time += response_time
+                e.last_used = time.time()
+            self._stats.total_requests += 1
+            self._stats.successful_requests += 1
+
+    async def record_failure(self, endpoint_id: str) -> None:
+        """Record failed request."""
+        async with self._lock:
+            if endpoint_id in self._endpoints:
+                e = self._endpoints[endpoint_id]
+                e.active_connections = max(0, e.active_connections - 1)
+                e.total_requests += 1
+                e.failed_requests += 1
+                e.last_used = time.time()
+
+                if e.failed_requests >= self.config.circuit_breaker_threshold:
+                    e.healthy = False
+
+            self._stats.total_requests += 1
+            self._stats.failed_requests += 1
+
+    async def route_request(
+        self,
+        endpoint: Endpoint,
+        func: Callable,
+        *args: Any,
+        **kwargs: Any
+    ) -> Any:
+        """Route request to endpoint."""
+        endpoint.active_connections += 1
+        start = time.monotonic()
+
+        try:
+            if asyncio.iscoroutinefunction(func):
+                result = await func(endpoint.address, *args, **kwargs)
             else:
-                # Default: mark as healthy if no failures
-                ep.healthy = ep.failures < 3
-            
-            ep.last_check = time.time()
-            results[ep.id] = ep.healthy
-        
-        return ActionResult(
-            success=True,
-            message="Health check complete",
-            data={'results': results}
-        )
-    
-    def _status(self, params: Dict[str, Any]) -> ActionResult:
-        """Get load balancer status."""
-        with self._lock:
-            endpoints = [
-                {
-                    'id': e.id,
-                    'url': e.url,
-                    'healthy': e.healthy,
-                    'weight': e.weight,
-                    'requests': e.requests,
-                    'failures': e.failures,
-                    'response_time': round(e.response_time, 2),
-                    'last_check': e.last_check
-                }
-                for e in self._endpoints.values()
-            ]
-        
-        return ActionResult(
-            success=True,
-            message=f"{len(endpoints)} endpoints",
-            data={
-                'endpoints': endpoints,
-                'strategy': self._strategy.value,
-                'healthy_count': sum(1 for e in endpoints if e['healthy'])
-            }
-        )
+                result = func(endpoint.address, *args, **kwargs)
 
+            await self.record_success(endpoint.id, time.monotonic() - start)
+            return result
 
-class FailoverAction(BaseAction):
-    """Handle failover between endpoints."""
-    action_type = "failover"
-    display_name = "故障转移"
-    description = "后端故障自动转移"
-    
-    def __init__(self):
-        super().__init__()
-        self._primary: Optional[str] = None
-        self._backups: List[str] = []
-        self._current: Optional[str] = None
-    
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute failover operation."""
-        operation = params.get('operation', 'failover').lower()
-        
-        if operation == 'setup':
-            return self._setup(params)
-        elif operation == 'failover':
-            return self._do_failover(params)
-        elif operation == 'reset':
-            return self._reset(params)
-        else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}"
-            )
-    
-    def _setup(self, params: Dict[str, Any]) -> ActionResult:
-        """Setup primary and backup endpoints."""
-        primary = params.get('primary')
-        backups = params.get('backups', [])
-        
-        if not primary:
-            return ActionResult(success=False, message="primary is required")
-        
-        self._primary = primary
-        self._backups = backups
-        self._current = primary
-        
-        return ActionResult(
-            success=True,
-            message=f"Setup complete: primary={primary}, backups={backups}"
-        )
-    
-    def _do_failover(self, params: Dict[str, Any]) -> ActionResult:
-        """Perform failover to next backup."""
-        if not self._backups:
-            return ActionResult(
-                success=False,
-                message="No backup endpoints available"
-            )
-        
-        failed_endpoint = params.get('failed_endpoint', self._current)
-        
-        if failed_endpoint == self._primary and self._backups:
-            self._current = self._backups[0]
-            self._backups = self._backups[1:]
-            self._backups.append(self._primary)
-            return ActionResult(
-                success=True,
-                message=f"Failed over to {self._current}",
-                data={'current': self._current}
-            )
-        
-        return ActionResult(
-            success=False,
-            message="No failover target available"
-        )
-    
-    def _reset(self, params: Dict[str, Any]) -> ActionResult:
-        """Reset to primary."""
-        if self._primary:
-            self._current = self._primary
-            return ActionResult(
-                success=True,
-                message=f"Reset to primary {self._primary}",
-                data={'current': self._current}
-            )
-        
-        return ActionResult(
-            success=False,
-            message="No primary configured"
-        )
+        except Exception as e:
+            await self.record_failure(endpoint.id)
+            raise
+
+    def get_stats(self) -> LoadBalancerStats:
+        """Get load balancer statistics."""
+        return self._stats
+
+    def get_endpoints(self) -> list[Endpoint]:
+        """Get all endpoints."""
+        return list(self._endpoints.values())
