@@ -1,305 +1,297 @@
+"""Metrics collection and reporting utilities.
+
+Provides counters, gauges, histograms, and
+timers for performance monitoring.
 """
-Metric and evaluation utilities.
 
-Provides classification metrics, regression metrics, ranking metrics,
-confusion matrix analysis, and threshold optimization.
-"""
-
-from __future__ import annotations
-
-import math
-from typing import Any
+import time
+import threading
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 
 
-def accuracy(y_true: list, y_pred: list) -> float:
-    """Accuracy score."""
-    if not y_true:
-        return 0.0
-    return sum(1 for t, p in zip(y_true, y_pred) if t == p) / len(y_true)
+@dataclass
+class MetricPoint:
+    """Single metric measurement."""
+    value: float
+    timestamp: float = field(default_factory=time.time)
+    labels: Dict[str, str] = field(default_factory=dict)
 
 
-def precision(y_true: list, y_pred: list, pos_label: Any = 1) -> float:
-    """Precision: TP / (TP + FP)"""
-    tp = sum(1 for t, p in zip(y_true, y_pred) if t == pos_label and p == pos_label)
-    fp = sum(1 for t, p in zip(y_true, y_pred) if t != pos_label and p == pos_label)
-    if tp + fp == 0:
-        return 0.0
-    return tp / (tp + fp)
+class Counter:
+    """Increment-only metric counter.
 
-
-def recall(y_true: list, y_pred: list, pos_label: Any = 1) -> float:
-    """Recall: TP / (TP + FN)"""
-    tp = sum(1 for t, p in zip(y_true, y_pred) if t == pos_label and p == pos_label)
-    fn = sum(1 for t, p in zip(y_true, y_pred) if t == pos_label and p != pos_label)
-    if tp + fn == 0:
-        return 0.0
-    return tp / (tp + fn)
-
-
-def f1_score(y_true: list, y_pred: list, pos_label: Any = 1) -> float:
-    """F1 score: 2 * precision * recall / (precision + recall)"""
-    p = precision(y_true, y_pred, pos_label)
-    r = recall(y_true, y_pred, pos_label)
-    if p + r == 0:
-        return 0.0
-    return 2 * p * r / (p + r)
-
-
-def f_beta_score(y_true: list, y_pred: list, beta: float = 1.0, pos_label: Any = 1) -> float:
-    """F-beta score generalization of F1."""
-    p = precision(y_true, y_pred, pos_label)
-    r = recall(y_true, y_pred, pos_label)
-    if p + r == 0:
-        return 0.0
-    return (1 + beta ** 2) * p * r / (beta ** 2 * p + r)
-
-
-def confusion_matrix(y_true: list, y_pred: list) -> dict[tuple[Any, Any], int]:
-    """Compute confusion matrix entries."""
-    matrix: dict[tuple[Any, Any], int] = {}
-    for t, p in zip(y_true, y_pred):
-        matrix[(t, p)] = matrix.get((t, p), 0) + 1
-    return matrix
-
-
-def specificity(y_true: list, y_pred: list, neg_label: Any = 0) -> float:
-    """Specificity: TN / (TN + FP)"""
-    tn = sum(1 for t, p in zip(y_true, y_pred) if t == neg_label and p == neg_label)
-    fp = sum(1 for t, p in zip(y_true, y_pred) if t != neg_label and p == neg_label)
-    if tn + fp == 0:
-        return 0.0
-    return tn / (tn + fp)
-
-
-def matthews_corrcoef(y_true: list, y_pred: list) -> float:
-    """Matthews correlation coefficient."""
-    if not y_true:
-        return 0.0
-    tp = sum(1 for t, p in zip(y_true, y_pred) if t == 1 and p == 1)
-    tn = sum(1 for t, p in zip(y_true, y_pred) if t == 0 and p == 0)
-    fp = sum(1 for t, p in zip(y_true, y_pred) if t == 0 and p == 1)
-    fn = sum(1 for t, p in zip(y_true, y_pred) if t == 1 and p == 0)
-    denom = math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
-    if denom == 0:
-        return 0.0
-    return (tp * tn - fp * fn) / denom
-
-
-def roc_auc_score(y_true: list, y_scores: list) -> float:
+    Example:
+        counter = Counter("requests_total", labels={"method": "GET"})
+        counter.inc()
+        counter.inc(5)
     """
-    Approximate AUC-ROC using Mann-Whitney U statistic.
 
-    Args:
-        y_true: True binary labels
-        y_scores: Predicted scores/probabilities
+    def __init__(
+        self,
+        name: str,
+        initial_value: float = 0.0,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.name = name
+        self._labels = labels or {}
+        self._value = initial_value
+        self._lock = threading.Lock()
 
-    Returns:
-        AUC value in [0, 1].
+    def inc(self, amount: float = 1.0) -> None:
+        """Increment counter."""
+        with self._lock:
+            self._value += amount
+
+    def get(self) -> float:
+        """Get current value."""
+        return self._value
+
+    def reset(self) -> None:
+        """Reset counter to zero."""
+        with self._lock:
+            self._value = 0.0
+
+
+class Gauge:
+    """Value that can go up or down.
+
+    Example:
+        gauge = Gauge("memory_usage_bytes")
+        gauge.set(1024 * 1024)
+        gauge.inc(100)
+        gauge.dec(50)
     """
-    pos = [y_scores[i] for i in range(len(y_true)) if y_true[i] == 1]
-    neg = [y_scores[i] for i in range(len(y_true)) if y_true[i] == 0]
-    if not pos or not neg:
-        return 0.0
-    # Count pairs where pos > neg
-    n_pos, n_neg = len(pos), len(neg)
-    concordant = sum(1 for p in pos for n in neg if p > n)
-    ties = sum(1 for p in pos for n in neg if p == n)
-    return (concordant + 0.5 * ties) / (n_pos * n_neg)
+
+    def __init__(
+        self,
+        name: str,
+        initial_value: float = 0.0,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.name = name
+        self._labels = labels or {}
+        self._value = initial_value
+        self._lock = threading.Lock()
+
+    def set(self, value: float) -> None:
+        """Set absolute value."""
+        with self._lock:
+            self._value = value
+
+    def inc(self, amount: float = 1.0) -> None:
+        """Increment gauge."""
+        with self._lock:
+            self._value += amount
+
+    def dec(self, amount: float = 1.0) -> None:
+        """Decrement gauge."""
+        with self._lock:
+            self._value -= amount
+
+    def get(self) -> float:
+        """Get current value."""
+        return self._value
 
 
-def pr_auc_score(y_true: list, y_scores: list) -> float:
+class Histogram:
+    """Distribution of values.
+
+    Example:
+        hist = Histogram("request_duration_seconds", buckets=[0.01, 0.05, 0.1, 0.5, 1.0])
+        hist.observe(0.12)
     """
-    Approximate AUC-PR (area under precision-recall curve).
 
-    Uses piecewise constant approximation.
+    DEFAULT_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+
+    def __init__(
+        self,
+        name: str,
+        buckets: Optional[List[float]] = None,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.name = name
+        self.buckets = buckets or self.DEFAULT_BUCKETS
+        self._labels = labels or {}
+        self._counts: Dict[float, int] = defaultdict(int)
+        self._sum = 0.0
+        self._count = 0
+        self._lock = threading.Lock()
+
+    def observe(self, value: float) -> None:
+        """Record an observation."""
+        with self._lock:
+            self._sum += value
+            self._count += 1
+            for bound in self.buckets:
+                if value <= bound:
+                    self._counts[bound] += 1
+
+    def get_stats(self) -> Dict[str, float]:
+        """Get histogram statistics."""
+        with self._lock:
+            if self._count == 0:
+                return {"count": 0, "sum": 0, "avg": 0, "min": 0, "max": 0}
+            return {
+                "count": self._count,
+                "sum": self._sum,
+                "avg": self._sum / self._count,
+                "min": min(k for k, v in self._counts.items() if v > 0),
+                "max": max(self.buckets[:self._count]),
+            }
+
+    def get_bucket_counts(self) -> Dict[float, int]:
+        """Get counts per bucket."""
+        return dict(self._counts)
+
+
+class Timer:
+    """Context manager for timing operations.
+
+    Example:
+        timer = Timer("operation_seconds")
+        with timer:
+            do_work()
+        print(timer.elapsed)
     """
-    if not y_true or sum(y_true) == 0 or sum(y_true) == len(y_true):
-        return 0.0
-    # Sort by score descending
-    pairs = sorted(zip(y_true, y_scores), key=lambda x: -x[1])
-    tp = 0
-    fp = 0
-    prev_score = None
-    precisions = []
-    recalls = []
-    total_pos = sum(y_true)
-    total_neg = len(y_true) - total_pos
-    for label, score in pairs:
-        if score != prev_score and (tp + fp) > 0:
-            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            rec = tp / total_pos if total_pos > 0 else 0.0
-            precisions.append(prec)
-            recalls.append(rec)
-            prev_score = score
-        if label == 1:
-            tp += 1
-        else:
-            fp += 1
-    if precisions:
-        precisions.append(tp / (tp + fp) if (tp + fp) > 0 else 0.0)
-        recalls.append(tp / total_pos if total_pos > 0 else 0.0)
-    # Trapezoidal integration
-    auc = 0.0
-    for i in range(len(precisions) - 1):
-        auc += (recalls[i + 1] - recalls[i]) * (precisions[i] + precisions[i + 1]) / 2
-    return auc
 
+    def __init__(
+        self,
+        name: str,
+        histogram: Optional[Histogram] = None,
+    ) -> None:
+        self.name = name
+        self.histogram = histogram
+        self._start: Optional[float] = None
+        self._end: Optional[float] = None
 
-def mean_absolute_error(y_true: list[float], y_pred: list[float]) -> float:
-    """MAE."""
-    return sum(abs(t - p) for t, p in zip(y_true, y_pred)) / len(y_true)
+    def __enter__(self) -> "Timer":
+        self._start = time.perf_counter()
+        return self
 
+    def __exit__(self, *args: Any) -> None:
+        self._end = time.perf_counter()
+        if self.histogram:
+            self.histogram.observe(self.elapsed)
 
-def mean_squared_error(y_true: list[float], y_pred: list[float]) -> float:
-    """MSE."""
-    return sum((t - p) ** 2 for t, p in zip(y_true, y_pred)) / len(y_true)
-
-
-def root_mean_squared_error(y_true: list[float], y_pred: list[float]) -> float:
-    """RMSE."""
-    return math.sqrt(mean_squared_error(y_true, y_pred))
-
-
-def mean_absolute_percentage_error(y_true: list[float], y_pred: list[float]) -> float:
-    """MAPE."""
-    n = len(y_true)
-    if n == 0:
-        return 0.0
-    pct_errors = [abs((t - p) / t) for t, p in zip(y_true, y_pred) if abs(t) > 1e-12]
-    return sum(pct_errors) / len(pct_errors) if pct_errors else 0.0
-
-
-def r2_score(y_true: list[float], y_pred: list[float]) -> float:
-    """R-squared (coefficient of determination)."""
-    n = len(y_true)
-    if n < 2:
-        return 0.0
-    mean_true = sum(y_true) / n
-    ss_tot = sum((t - mean_true) ** 2 for t in y_true)
-    ss_res = sum((t - p) ** 2 for t, p in zip(y_true, y_pred))
-    if ss_tot < 1e-12:
-        return 0.0
-    return 1.0 - ss_res / ss_tot
-
-
-def explained_variance(y_true: list[float], y_pred: list[float]) -> float:
-    """Explained variance score."""
-    n = len(y_true)
-    if n < 2:
-        return 0.0
-    mean_true = sum(y_true) / n
-    var_true = sum((t - mean_true) ** 2 for t in y_true) / n
-    var_res = sum((t - p) ** 2 for t, p in zip(y_true, y_pred)) / n
-    if var_true < 1e-12:
-        return 0.0
-    return 1.0 - var_res / var_true
-
-
-def ndcg_score(y_true: list[list[float]], y_pred: list[list[float]], k: int | None = None) -> float:
-    """
-    Normalized Discounted Cumulative Gain.
-
-    Args:
-        y_true: True relevance scores per query
-        y_pred: Predicted scores per query
-        k: Cutoff position
-    """
-    def dcg(scores: list[float], k: int | None = None) -> float:
-        if k:
-            scores = scores[:k]
-        return sum((2 ** rel - 1) / math.log2(i + 2) for i, rel in enumerate(scores))
-
-    def ndcg_single(true: list[float], pred: list[float], k: int | None = None) -> float:
-        sorted_true = sorted(true, reverse=True)
-        ideal_dcg = dcg(sorted_true, k)
-        if ideal_dcg == 0:
+    @property
+    def elapsed(self) -> float:
+        """Get elapsed time in seconds."""
+        if self._start is None:
             return 0.0
-        # Sort by predicted
-        paired = sorted(zip(pred, true), reverse=True)
-        actual_dcg = dcg([t for _, t in paired], k)
-        return actual_dcg / ideal_dcg
-
-    if k is None:
-        k = max(len(y) for y in y_true)
-    return sum(ndcg_single(t, p, k) for t, p in zip(y_true, y_pred)) / len(y_true)
+        end = self._end if self._end else time.perf_counter()
+        return end - self._start
 
 
-def map_score(y_true: list[list[Any]], y_pred: list[list[Any]]) -> float:
+class MetricsRegistry:
+    """Central metrics registry.
+
+    Example:
+        registry = MetricsRegistry()
+        counter = registry.counter("requests_total")
+        gauge = registry.gauge("active_connections")
+        registry.report()
     """
-    Mean Average Precision.
 
-    Args:
-        y_true: True relevant items per query
-        y_pred: Predicted items per query
-    """
-    def ap(true: list, pred: list) -> float:
-        hits = 0
-        sum_prec = 0.0
-        for i, p in enumerate(pred):
-            if p in true:
-                hits += 1
-                sum_prec += hits / (i + 1)
-        return sum_prec / len(true) if true else 0.0
+    def __init__(self) -> None:
+        self._counters: Dict[str, Counter] = {}
+        self._gauges: Dict[str, Gauge] = {}
+        self._histograms: Dict[str, Histogram] = {}
+        self._lock = threading.Lock()
 
-    return sum(ap(t, p) for t, p in zip(y_true, y_pred)) / len(y_true)
+    def counter(
+        self,
+        name: str,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> Counter:
+        """Get or create counter."""
+        with self._lock:
+            key = self._make_key(name, labels)
+            if key not in self._counters:
+                self._counters[key] = Counter(name, labels=labels)
+            return self._counters[key]
+
+    def gauge(
+        self,
+        name: str,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> Gauge:
+        """Get or create gauge."""
+        with self._lock:
+            key = self._make_key(name, labels)
+            if key not in self._gauges:
+                self._gauges[key] = Gauge(name, labels=labels)
+            return self._gauges[key]
+
+    def histogram(
+        self,
+        name: str,
+        buckets: Optional[List[float]] = None,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> Histogram:
+        """Get or create histogram."""
+        with self._lock:
+            key = self._make_key(name, labels)
+            if key not in self._histograms:
+                self._histograms[key] = Histogram(name, buckets=buckets, labels=labels)
+            return self._histograms[key]
+
+    def timer(self, name: str) -> Timer:
+        """Create timer for measuring durations."""
+        return Timer(name, self.histogram(name))
+
+    def _make_key(self, name: str, labels: Optional[Dict[str, str]]) -> str:
+        """Create unique key for metric."""
+        if not labels:
+            return name
+        label_str = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+        return f"{name}{{{label_str}}}"
+
+    def report(self) -> Dict[str, Any]:
+        """Generate metrics report."""
+        with self._lock:
+            report: Dict[str, Any] = {
+                "counters": {},
+                "gauges": {},
+                "histograms": {},
+            }
+
+            for key, counter in self._counters.items():
+                report["counters"][key] = counter.get()
+
+            for key, gauge in self._gauges.items():
+                report["gauges"][key] = gauge.get()
+
+            for key, hist in self._histograms.items():
+                report["histograms"][key] = hist.get_stats()
+
+            return report
 
 
-def optimal_f1_threshold(y_true: list, y_scores: list) -> float:
-    """
-    Find threshold that maximizes F1 score.
-
-    Args:
-        y_true: True binary labels
-        y_scores: Predicted probabilities/scores
-
-    Returns:
-        Optimal threshold.
-    """
-    thresholds = sorted(set(y_scores))
-    best_f1 = 0.0
-    best_thresh = thresholds[0] if thresholds else 0.0
-    for thresh in thresholds:
-        y_pred = [1 if s >= thresh else 0 for s in y_scores]
-        f1 = f1_score(y_true, y_pred)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_thresh = thresh
-    return best_thresh
+_global_registry = MetricsRegistry()
 
 
-def bootstrap_confidence_interval(
-    metric_fn: Callable[[list, list], float],
-    y_true: list,
-    y_pred: list,
-    n_bootstrap: int = 1000,
-    confidence: float = 0.95,
-) -> tuple[float, float]:
-    """
-    Bootstrap confidence interval for a metric.
-
-    Args:
-        metric_fn: Metric function (e.g., accuracy)
-        y_true: True values
-        y_pred: Predicted values
-        n_bootstrap: Number of bootstrap samples
-        confidence: Confidence level
-
-    Returns:
-        Tuple of (lower, upper) bounds.
-    """
-    import random
-    n = len(y_true)
-    scores = []
-    for _ in range(n_bootstrap):
-        indices = [random.randint(0, n - 1) for _ in range(n)]
-        t_sample = [y_true[i] for i in indices]
-        p_sample = [y_pred[i] for i in indices]
-        scores.append(metric_fn(t_sample, p_sample))
-    scores.sort()
-    alpha = (1 - confidence) / 2
-    lower_idx = int(alpha * n_bootstrap)
-    upper_idx = int((1 - alpha) * n_bootstrap)
-    return scores[lower_idx], scores[upper_idx]
+def get_registry() -> MetricsRegistry:
+    """Get global metrics registry."""
+    return _global_registry
 
 
-from typing import Callable
+def counter(name: str, **labels: str) -> Counter:
+    """Get counter from global registry."""
+    return _global_registry.counter(name, labels=labels or None)
+
+
+def gauge(name: str, **labels: str) -> Gauge:
+    """Get gauge from global registry."""
+    return _global_registry.gauge(name, labels=labels or None)
+
+
+def histogram(name: str, **labels: str) -> Histogram:
+    """Get histogram from global registry."""
+    return _global_registry.histogram(name, labels=labels or None)
+
+
+def timer(name: str) -> Timer:
+    """Create timer from global registry."""
+    return _global_registry.timer(name)
