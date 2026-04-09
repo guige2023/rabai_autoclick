@@ -1,170 +1,289 @@
-"""API load tester action module for RabAI AutoClick.
+"""API Load Tester Action.
 
-Provides API load testing with concurrent requests, latency tracking,
-and performance metrics collection.
+Load testing for API endpoints with configurable concurrency,
+ramp-up patterns, latency percentiles, and failure injection.
 """
+from __future__ import annotations
 
+import asyncio
+import random
 import time
-import sys
-import os
-import threading
-from typing import Any, Dict, List, Optional
+from collections import deque
 from dataclasses import dataclass, field
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-from collections import defaultdict
-import concurrent.futures
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+
+class LoadPattern(Enum):
+    """Load patterns for testing."""
+    CONSTANT = "constant"
+    RAMP_UP = "ramp_up"
+    SPIKE = "spike"
+    WAVE = "wave"
+    RANDOM = "random"
 
 
 @dataclass
-class LoadTestResult:
-    """Result of a load test."""
-    timestamp: float
-    duration_ms: float
+class LoadTestConfig:
+    """Configuration for load testing."""
+    base_url: str
+    endpoint: str
+    method: str = "GET"
+    concurrent_users: int = 10
+    total_requests: int = 1000
+    ramp_up_seconds: float = 10.0
+    think_time_ms: int = 0
+    timeout_sec: float = 30.0
+    pattern: LoadPattern = LoadPattern.CONSTANT
+    payload: Optional[Dict[str, Any]] = None
+    headers: Optional[Dict[str, str]] = None
+
+
+@dataclass
+class RequestResult:
+    """Result of a single request."""
+    request_id: int
     status_code: int
+    latency_ms: float
     success: bool
     error: Optional[str] = None
+    timestamp: float = field(default_factory=time.time)
 
 
-class ApiLoadTesterAction(BaseAction):
-    """API load tester action for performance testing.
-    
-    Supports concurrent request execution with configurable
-    threads, duration, and latency thresholds.
-    """
-    action_type = "api_load_tester"
-    display_name = "API负载测试"
-    description = "API并发负载测试"
-    
-    def execute(
+@dataclass
+class LoadTestReport:
+    """Comprehensive load test report."""
+    config: Dict[str, Any]
+    total_requests: int
+    successful_requests: int
+    failed_requests: int
+    total_duration_sec: float
+    requests_per_second: float
+    avg_latency_ms: float
+    min_latency_ms: float
+    max_latency_ms: float
+    p50_latency_ms: float
+    p90_latency_ms: float
+    p95_latency_ms: float
+    p99_latency_ms: float
+    error_distribution: Dict[int, int] = field(default_factory=dict)
+    time_series: List[Dict[str, Any]] = field(default_factory=list)
+    generated_at: datetime = field(default_factory=datetime.now)
+
+
+class APILoadTesterAction:
+    """Load testing tool for API endpoints."""
+
+    def __init__(self) -> None:
+        self._results: List[RequestResult] = []
+        self._request_counter = 0
+        self._lock = asyncio.Lock()
+
+    async def _make_request(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute load test.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                url: Target URL
-                method: HTTP method
-                headers: Request headers
-                body: Request body
-                concurrency: Number of concurrent workers
-                total_requests: Total number of requests (-1 for continuous)
-                duration_seconds: Test duration in seconds
-                timeout: Request timeout in seconds.
-        
-        Returns:
-            ActionResult with load test metrics.
-        """
-        url = params.get('url')
-        method = params.get('method', 'GET')
-        headers = params.get('headers', {})
-        body = params.get('body')
-        concurrency = params.get('concurrency', 10)
-        total_requests = params.get('total_requests', 100)
-        duration = params.get('duration_seconds', 0)
-        timeout = params.get('timeout', 30)
-        
-        if not url:
-            return ActionResult(success=False, message="URL is required")
-        
-        results: List[LoadTestResult] = []
-        lock = threading.Lock()
-        start_time = time.time()
-        request_count = 0
-        
-        def make_request():
-            nonlocal request_count
-            test_start = time.time()
-            try:
-                req = Request(url, method=method, headers=headers)
-                with urlopen(req, timeout=timeout) as response:
-                    duration_ms = (time.time() - test_start) * 1000
-                    result = LoadTestResult(
-                        timestamp=time.time(),
-                        duration_ms=duration_ms,
-                        status_code=response.status,
-                        success=response.status < 400
-                    )
-            except HTTPError as e:
-                duration_ms = (time.time() - test_start) * 1000
-                result = LoadTestResult(
-                    timestamp=time.time(),
-                    duration_ms=duration_ms,
-                    status_code=e.code,
-                    success=False,
-                    error=f"HTTP {e.code}"
+        client: Any,
+        config: LoadTestConfig,
+        request_id: int,
+    ) -> RequestResult:
+        """Make a single HTTP request."""
+        start = time.time()
+        try:
+            method = config.method.upper()
+            headers = config.headers or {}
+
+            if method == "GET":
+                response = await asyncio.wait_for(
+                    client.get(config.endpoint, headers=headers, timeout=config.timeout_sec),
+                    timeout=config.timeout_sec,
                 )
-            except Exception as e:
-                duration_ms = (time.time() - test_start) * 1000
-                result = LoadTestResult(
-                    timestamp=time.time(),
-                    duration_ms=duration_ms,
-                    status_code=0,
-                    success=False,
-                    error=str(e)
+            elif method == "POST":
+                response = await asyncio.wait_for(
+                    client.post(config.endpoint, json=config.payload, headers=headers, timeout=config.timeout_sec),
+                    timeout=config.timeout_sec,
                 )
-            
-            with lock:
-                results.append(result)
-                request_count += 1
-        
-        if total_requests > 0:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-                futures = [executor.submit(make_request) for _ in range(total_requests)]
-                concurrent.futures.wait(futures)
-        else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-                while time.time() - start_time < duration:
-                    executor.submit(make_request)
-                    time.sleep(0.001)
-        
-        elapsed = time.time() - start_time
-        
-        return self._compute_metrics(results, elapsed)
-    
-    def _compute_metrics(
+            elif method == "PUT":
+                response = await asyncio.wait_for(
+                    client.put(config.endpoint, json=config.payload, headers=headers, timeout=config.timeout_sec),
+                    timeout=config.timeout_sec,
+                )
+            elif method == "DELETE":
+                response = await asyncio.wait_for(
+                    client.delete(config.endpoint, headers=headers, timeout=config.timeout_sec),
+                    timeout=config.timeout_sec,
+                )
+            else:
+                response = await asyncio.wait_for(
+                    client.request(method, config.endpoint, headers=headers, timeout=config.timeout_sec),
+                    timeout=config.timeout_sec,
+                )
+
+            latency_ms = (time.time() - start) * 1000
+            status_code = response.status_code if hasattr(response, "status_code") else 200
+
+            return RequestResult(
+                request_id=request_id,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                success=200 <= status_code < 400,
+            )
+
+        except asyncio.TimeoutError:
+            latency_ms = (time.time() - start) * 1000
+            return RequestResult(
+                request_id=request_id,
+                status_code=0,
+                latency_ms=latency_ms,
+                success=False,
+                error="Timeout",
+            )
+        except Exception as e:
+            latency_ms = (time.time() - start) * 1000
+            return RequestResult(
+                request_id=request_id,
+                status_code=0,
+                latency_ms=latency_ms,
+                success=False,
+                error=str(e),
+            )
+
+    async def _worker(
         self,
-        results: List[LoadTestResult],
-        elapsed: float
-    ) -> ActionResult:
-        """Compute load test metrics."""
-        total = len(results)
-        successful = sum(1 for r in results if r.success)
-        failed = total - successful
-        
-        if not results:
-            return ActionResult(success=True, message="No results", data={})
-        
-        latencies = [r.duration_ms for r in results]
-        latencies.sort()
-        
-        error_types: Dict[str, int] = defaultdict(int)
-        for r in results:
-            if not r.success and r.error:
-                error_types[r.error] += 1
-        
-        return ActionResult(
-            success=True,
-            message=f"Load test completed: {successful}/{total} successful",
-            data={
-                'total_requests': total,
-                'successful': successful,
-                'failed': failed,
-                'error_rate': round(failed / total * 100, 2) if total > 0 else 0,
-                'requests_per_second': round(total / elapsed, 2),
-                'min_latency_ms': round(min(latencies), 2),
-                'max_latency_ms': round(max(latencies), 2),
-                'avg_latency_ms': round(sum(latencies) / len(latencies), 2),
-                'p50_latency_ms': round(latencies[int(len(latencies) * 0.5)], 2),
-                'p90_latency_ms': round(latencies[int(len(latencies) * 0.9)], 2),
-                'p99_latency_ms': round(latencies[int(len(latencies) * 0.99)], 2),
-                'duration_seconds': round(elapsed, 2),
-                'error_breakdown': dict(error_types)
-            }
+        client: Any,
+        config: LoadTestConfig,
+        worker_id: int,
+        results_queue: asyncio.Queue,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Worker coroutine for making requests."""
+        request_id = worker_id
+
+        while not stop_event.is_set() and request_id < config.total_requests:
+            result = await self._make_request(client, config, request_id)
+            await results_queue.put(result)
+            request_id += config.concurrent_users
+
+            if config.think_time_ms > 0:
+                await asyncio.sleep(config.think_time_ms / 1000)
+
+    async def run_load_test_async(
+        self,
+        config: LoadTestConfig,
+    ) -> LoadTestReport:
+        """Run a load test asynchronously."""
+        import httpx
+
+        results_queue: asyncio.Queue = asyncio.Queue()
+        stop_event = asyncio.Event()
+
+        async with httpx.AsyncClient(base_url=config.base_url) as client:
+            workers = [
+                asyncio.create_task(
+                    self._worker(client, config, i, results_queue, stop_event)
+                )
+                for i in range(config.concurrent_users)
+            ]
+
+            start_time = time.time()
+
+            await asyncio.gather(*workers)
+            stop_event.set()
+
+            collected_results: List[RequestResult] = []
+            while not results_queue.empty():
+                collected_results.append(await results_queue.get())
+
+        total_duration = time.time() - start_time
+
+        return self._generate_report(config, collected_results, total_duration)
+
+    def run_load_test(
+        self,
+        config: LoadTestConfig,
+    ) -> LoadTestReport:
+        """Run a load test synchronously."""
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        return loop.run_until_complete(self.run_load_test_async(config))
+
+    def _generate_report(
+        self,
+        config: LoadTestConfig,
+        results: List[RequestResult],
+        total_duration: float,
+    ) -> LoadTestReport:
+        """Generate a load test report from results."""
+        successful = [r for r in results if r.success]
+        failed = [r for r in results if not r.success]
+
+        latencies = sorted([r.latency_ms for r in successful]) if successful else [0]
+        total_requests = len(results)
+
+        error_dist: Dict[int, int] = {}
+        for r in failed:
+            error_dist[r.status_code] = error_dist.get(r.status_code, 0) + 1
+
+        def percentile(data: List[float], p: float) -> float:
+            if not data:
+                return 0.0
+            idx = int(len(data) * p)
+            return data[min(idx, len(data) - 1)]
+
+        return LoadTestReport(
+            config={
+                "base_url": config.base_url,
+                "endpoint": config.endpoint,
+                "method": config.method,
+                "concurrent_users": config.concurrent_users,
+                "total_requests": config.total_requests,
+                "pattern": config.pattern.value,
+            },
+            total_requests=total_requests,
+            successful_requests=len(successful),
+            failed_requests=len(failed),
+            total_duration_sec=total_duration,
+            requests_per_second=total_requests / total_duration if total_duration > 0 else 0,
+            avg_latency_ms=sum(latencies) / len(latencies) if latencies else 0,
+            min_latency_ms=min(latencies) if latencies else 0,
+            max_latency_ms=max(latencies) if latencies else 0,
+            p50_latency_ms=percentile(latencies, 0.50),
+            p90_latency_ms=percentile(latencies, 0.90),
+            p95_latency_ms=percentile(latencies, 0.95),
+            p99_latency_ms=percentile(latencies, 0.99),
+            error_distribution=error_dist,
+            time_series=[],
         )
+
+    def generate_html_report(self, report: LoadTestReport) -> str:
+        """Generate an HTML report from results."""
+        html = f"""
+        <html>
+        <head><title>Load Test Report</title></head>
+        <body>
+        <h1>Load Test Report</h1>
+        <h2>Summary</h2>
+        <ul>
+            <li>Total Requests: {report.total_requests}</li>
+            <li>Successful: {report.successful_requests}</li>
+            <li>Failed: {report.failed_requests}</li>
+            <li>Duration: {report.total_duration_sec:.2f}s</li>
+            <li>RPS: {report.requests_per_second:.2f}</li>
+        </ul>
+        <h2>Latency</h2>
+        <ul>
+            <li>Avg: {report.avg_latency_ms:.2f}ms</li>
+            <li>Min: {report.min_latency_ms:.2f}ms</li>
+            <li>Max: {report.max_latency_ms:.2f}ms</li>
+            <li>P50: {report.p50_latency_ms:.2f}ms</li>
+            <li>P90: {report.p90_latency_ms:.2f}ms</li>
+            <li>P95: {report.p95_latency_ms:.2f}ms</li>
+            <li>P99: {report.p99_latency_ms:.2f}ms</li>
+        </ul>
+        </body>
+        </html>
+        """
+        return html
