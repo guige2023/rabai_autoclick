@@ -1,226 +1,367 @@
-"""API Throttle action module for RabAI AutoClick.
+"""
+API Throttle Action Module.
 
-Provides API throttling operations:
-- ThrottleRateAction: Rate limiting
-- ThrottleQuotaAction: Quota management
-- ThrottleBurstAction: Burst limiting
-- ThrottleAdaptiveAction: Adaptive throttling
+Provides request throttling and rate limiting for API endpoints,
+managing request queues and enforcing rate limits.
 """
 
-from __future__ import annotations
-
-import sys
-import os
+from typing import Any, Callable, Dict, List, Optional, Set
+from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
+from enum import Enum, auto
+import asyncio
+import logging
 import time
-from typing import Any, Dict, Optional
-from collections import defaultdict, deque
 
-import os as _os
-_parent_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ThrottleRateAction(BaseAction):
-    """Rate limiting."""
-    action_type = "throttle_rate"
-    display_name = "速率限制"
-    description = "API速率限制"
-    version = "1.0"
+class ThrottleStrategy(Enum):
+    """Throttling strategies."""
+    TOKEN_BUCKET = auto()
+    LEAKY_BUCKET = auto()
+    SLIDING_WINDOW = auto()
+    FIXED_WINDOW = auto()
 
-    def __init__(self):
-        super().__init__()
-        self._buckets = defaultdict(lambda: {'tokens': 100, 'last_refill': time.time()})
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute rate limiting."""
-        key = params.get('key', 'default')
-        rate = params.get('rate', 100)
-        period = params.get('period', 60)
-        cost = params.get('cost', 1)
-        output_var = params.get('output_var', 'throttle_result')
+@dataclass
+class ThrottleLimit:
+    """Defines a throttling limit."""
+    requests_per_second: Optional[float] = None
+    requests_per_minute: Optional[float] = None
+    requests_per_hour: Optional[float] = None
+    burst_size: Optional[int] = None
+    concurrent_limit: Optional[int] = None
 
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_rate = context.resolve_value(rate) if context else rate
-            resolved_period = context.resolve_value(period) if context else period
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "requests_per_second": self.requests_per_second,
+            "requests_per_minute": self.requests_per_minute,
+            "requests_per_hour": self.requests_per_hour,
+            "burst_size": self.burst_size,
+            "concurrent_limit": self.concurrent_limit,
+        }
 
-            bucket = self._buckets[resolved_key]
-            now = time.time()
 
-            elapsed = now - bucket['last_refill']
-            tokens_to_add = (elapsed / resolved_period) * resolved_rate
-            bucket['tokens'] = min(resolved_rate, bucket['tokens'] + tokens_to_add)
-            bucket['last_refill'] = now
+@dataclass
+class ThrottleResult:
+    """Result of a throttle check."""
+    allowed: bool
+    wait_time_ms: float = 0.0
+    remaining: int = 0
+    reset_at: Optional[datetime] = None
+    error: Optional[str] = None
 
-            allowed = bucket['tokens'] >= cost
-            if allowed:
-                bucket['tokens'] -= cost
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "allowed": self.allowed,
+            "wait_time_ms": self.wait_time_ms,
+            "remaining": self.remaining,
+            "reset_at": self.reset_at.isoformat() if self.reset_at else None,
+            "error": self.error,
+        }
 
-            result = {
-                'allowed': allowed,
-                'key': resolved_key,
-                'remaining': int(bucket['tokens']),
-                'limit': resolved_rate,
-                'reset_in': int(resolved_period * (1 - bucket['tokens'] / resolved_rate)) if bucket['tokens'] < resolved_rate else 0,
-            }
 
-            return ActionResult(
-                success=allowed,
-                data={output_var: result},
-                message=f"Rate limit: {'allowed' if allowed else 'limited'}, {result['remaining']}/{resolved_rate} remaining"
+@dataclass
+class ThrottleStats:
+    """Statistics for throttling."""
+    total_requests: int = 0
+    allowed_requests: int = 0
+    rejected_requests: int = 0
+    throttled_requests: int = 0
+    wait_time_ms: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "total_requests": self.total_requests,
+            "allowed_requests": self.allowed_requests,
+            "rejected_requests": self.rejected_requests,
+            "throttled_requests": self.throttled_requests,
+            "wait_time_ms": self.wait_time_ms,
+        }
+
+
+class TokenBucket:
+    """Token bucket implementation for rate limiting."""
+
+    def __init__(self, rate: float, capacity: int):
+        """
+        Initialize token bucket.
+
+        Args:
+            rate: Tokens added per second.
+            capacity: Maximum tokens.
+        """
+        self.rate = rate
+        self.capacity = capacity
+        self._tokens = float(capacity)
+        self._last_update = time.time()
+
+    def consume(self, tokens: int = 1) -> Tuple[bool, float]:
+        """
+        Try to consume tokens.
+
+        Returns:
+            Tuple of (success, wait_time_ms).
+        """
+        self._refill()
+
+        if self._tokens >= tokens:
+            self._tokens -= tokens
+            return True, 0.0
+
+        wait_time = (tokens - self._tokens) / self.rate * 1000
+        return False, wait_time
+
+    def _refill(self) -> None:
+        """Refill tokens based on elapsed time."""
+        now = time.time()
+        elapsed = now - self._last_update
+        self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
+        self._last_update = now
+
+
+class SlidingWindowCounter:
+    """Sliding window counter implementation."""
+
+    def __init__(self, max_requests: int, window_seconds: float):
+        """
+        Initialize sliding window.
+
+        Args:
+            max_requests: Maximum requests in window.
+            window_seconds: Window size in seconds.
+        """
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._requests: List[float] = []
+
+    def allow(self) -> Tuple[bool, float]:
+        """
+        Check if request is allowed.
+
+        Returns:
+            Tuple of (allowed, wait_time_ms).
+        """
+        now = time.time()
+        cutoff = now - self.window_seconds
+
+        self._requests = [t for t in self._requests if t > cutoff]
+
+        if len(self._requests) < self.max_requests:
+            self._requests.append(now)
+            return True, 0.0
+
+        oldest = min(self._requests)
+        wait_time = (oldest + self.window_seconds - now) * 1000
+        return False, wait_time
+
+
+class ApiThrottleAction:
+    """
+    Provides request throttling and rate limiting.
+
+    This action implements various throttling strategies including
+    token bucket, leaky bucket, and sliding window for controlling
+    API request rates.
+
+    Example:
+        >>> throttle = ApiThrottleAction()
+        >>> throttle.set_limit("api", ThrottleLimit(requests_per_second=10))
+        >>> result = await throttle.check("api")
+        >>> if result.allowed:
+        ...     await process_request()
+    """
+
+    def __init__(
+        self,
+        strategy: ThrottleStrategy = ThrottleStrategy.TOKEN_BUCKET,
+    ):
+        """
+        Initialize the API Throttle Action.
+
+        Args:
+            strategy: Default throttling strategy.
+        """
+        self.strategy = strategy
+        self._limits: Dict[str, ThrottleLimit] = {}
+        self._buckets: Dict[str, TokenBucket] = {}
+        self._windows: Dict[str, SlidingWindowCounter] = {}
+        self._concurrent_counts: Dict[str, int] = {}
+        self._stats: Dict[str, ThrottleStats] = {}
+        self._lock = asyncio.Lock()
+
+    def set_limit(self, name: str, limit: ThrottleLimit) -> None:
+        """
+        Set a throttling limit.
+
+        Args:
+            name: Limit name/identifier.
+            limit: Throttle limit configuration.
+        """
+        self._limits[name] = limit
+
+        if limit.requests_per_second:
+            bucket = TokenBucket(
+                rate=limit.requests_per_second,
+                capacity=limit.burst_size or int(limit.requests_per_second * 2),
             )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Throttle rate error: {e}")
+            self._buckets[name] = bucket
 
+        if limit.requests_per_minute:
+            window = SlidingWindowCounter(
+                max_requests=int(limit.requests_per_minute),
+                window_seconds=60.0,
+            )
+            self._windows[f"{name}:minute"] = window
 
-class ThrottleQuotaAction(BaseAction):
-    """Quota management."""
-    action_type = "throttle_quota"
-    display_name = "配额管理"
-    description = "API配额管理"
-    version = "1.0"
+        self._stats[name] = ThrottleStats()
 
-    def __init__(self):
-        super().__init__()
-        self._quotas = defaultdict(lambda: {'used': 0, 'limit': 1000, 'reset_at': time.time() + 86400})
+    async def check(self, name: str) -> ThrottleResult:
+        """
+        Check if a request is allowed.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute quota check."""
-        key = params.get('key', 'default')
-        cost = params.get('cost', 1)
-        output_var = params.get('output_var', 'quota_result')
+        Args:
+            name: Limit name to check.
+
+        Returns:
+            ThrottleResult with decision and metadata.
+        """
+        async with self._lock:
+            limit = self._limits.get(name)
+            if not limit:
+                return ThrottleResult(allowed=True)
+
+            stats = self._stats.get(name, ThrottleStats())
+            stats.total_requests += 1
+
+            if limit.concurrent_limit:
+                current = self._concurrent_counts.get(name, 0)
+                if current >= limit.concurrent_limit:
+                    stats.rejected_requests += 1
+                    return ThrottleResult(
+                        allowed=False,
+                        error="Concurrent limit exceeded",
+                    )
+
+            if name in self._buckets:
+                bucket = self._buckets[name]
+                allowed, wait_ms = bucket.consume()
+
+                if not allowed:
+                    stats.throttled_requests += 1
+                    stats.wait_time_ms += wait_ms
+                    return ThrottleResult(
+                        allowed=False,
+                        wait_time_ms=wait_ms,
+                        remaining=int(bucket._tokens),
+                    )
+
+            if f"{name}:minute" in self._windows:
+                window = self._windows[f"{name}:minute"]
+                allowed, wait_ms = window.allow()
+
+                if not allowed:
+                    stats.throttled_requests += 1
+                    stats.wait_time_ms += wait_ms
+                    return ThrottleResult(
+                        allowed=False,
+                        wait_time_ms=wait_ms,
+                    )
+
+            self._concurrent_counts[name] = self._concurrent_counts.get(name, 0) + 1
+            stats.allowed_requests += 1
+
+            return ThrottleResult(
+                allowed=True,
+                remaining=self._get_remaining(name),
+            )
+
+    async def release(self, name: str) -> None:
+        """
+        Release a request slot.
+
+        Args:
+            name: Limit name.
+        """
+        async with self._lock:
+            if name in self._concurrent_counts:
+                self._concurrent_counts[name] = max(0, self._concurrent_counts[name] - 1)
+
+    def _get_remaining(self, name: str) -> int:
+        """Get remaining requests for a limit."""
+        if name in self._buckets:
+            return int(self._buckets[name]._tokens)
+        return 0
+
+    async def with_throttle(
+        self,
+        name: str,
+        operation: Callable,
+    ) -> Any:
+        """
+        Execute operation with throttle checking.
+
+        Args:
+            name: Limit name.
+            operation: Async operation.
+
+        Returns:
+            Operation result.
+
+        Raises:
+            RuntimeError: If throttled.
+        """
+        result = await self.check(name)
+
+        if not result.allowed:
+            raise RuntimeError(f"Throttled: {result.error}, wait {result.wait_time_ms}ms")
 
         try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_cost = context.resolve_value(cost) if context else cost
+            return await operation()
+        finally:
+            await self.release(name)
 
-            quota = self._quotas[resolved_key]
-            now = time.time()
+    def get_stats(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get stats for a limit."""
+        stats = self._stats.get(name)
+        if not stats:
+            return None
 
-            if now >= quota['reset_at']:
-                quota['used'] = 0
-                quota['reset_at'] = now + 86400
+        return stats.to_dict()
 
-            if quota['used'] + resolved_cost <= quota['limit']:
-                quota['used'] += resolved_cost
-                allowed = True
+    def get_all_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Get all stats."""
+        return {
+            name: stats.to_dict()
+            for name, stats in self._stats.items()
+        }
+
+    async def reset(self, name: Optional[str] = None) -> None:
+        """
+        Reset throttle state.
+
+        Args:
+            name: Optional specific limit to reset.
+        """
+        async with self._lock:
+            if name:
+                self._buckets.pop(name, None)
+                self._windows.pop(f"{name}:minute", None)
+                self._stats[name] = ThrottleStats()
+                self._concurrent_counts.pop(name, None)
             else:
-                allowed = False
-
-            result = {
-                'allowed': allowed,
-                'key': resolved_key,
-                'used': quota['used'],
-                'limit': quota['limit'],
-                'remaining': quota['limit'] - quota['used'],
-                'reset_at': quota['reset_at'],
-            }
-
-            return ActionResult(
-                success=allowed,
-                data={output_var: result},
-                message=f"Quota: {'allowed' if allowed else 'exceeded'}, {result['remaining']} remaining"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Throttle quota error: {e}")
+                self._buckets.clear()
+                self._windows.clear()
+                self._stats.clear()
+                self._concurrent_counts.clear()
 
 
-class ThrottleBurstAction(BaseAction):
-    """Burst limiting."""
-    action_type = "throttle_burst"
-    display_name = "突发限制"
-    description = "API突发限制"
-    version = "1.0"
-
-    def __init__(self):
-        super().__init__()
-        self._bursts = defaultdict(lambda: deque(maxlen=10))
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute burst limiting."""
-        key = params.get('key', 'default')
-        burst_limit = params.get('burst_limit', 10)
-        window_seconds = params.get('window', 1)
-        output_var = params.get('output_var', 'burst_result')
-
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_limit = context.resolve_value(burst_limit) if context else burst_limit
-            resolved_window = context.resolve_value(window_seconds) if context else window_seconds
-
-            now = time.time()
-            burst = self._bursts[resolved_key]
-
-            while burst and burst[0] < now - resolved_window:
-                burst.popleft()
-
-            if len(burst) < resolved_limit:
-                burst.append(now)
-                allowed = True
-            else:
-                allowed = False
-
-            result = {
-                'allowed': allowed,
-                'key': resolved_key,
-                'current_burst': len(burst),
-                'burst_limit': resolved_limit,
-            }
-
-            return ActionResult(
-                success=allowed,
-                data={output_var: result},
-                message=f"Burst: {'allowed' if allowed else 'limited'} ({len(burst)}/{resolved_limit})"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Throttle burst error: {e}")
-
-
-class ThrottleAdaptiveAction(BaseAction):
-    """Adaptive throttling."""
-    action_type = "throttle_adaptive"
-    display_name = "自适应限制"
-    description = "自适应API限制"
-    version = "1.0"
-
-    def __init__(self):
-        super().__init__()
-        self._state = defaultdict(lambda: {'load': 0, 'rate': 100, 'last_update': time.time()})
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute adaptive throttling."""
-        key = params.get('key', 'default')
-        load = params.get('load', 0)
-        base_rate = params.get('base_rate', 100)
-        output_var = params.get('output_var', 'adaptive_result')
-
-        try:
-            resolved_key = context.resolve_value(key) if context else key
-            resolved_load = context.resolve_value(load) if context else load
-
-            state = self._state[resolved_key]
-            now = time.time()
-
-            decay = min(1.0, (now - state['last_update']) / 60)
-            state['load'] = state['load'] * (1 - decay) + resolved_load * decay
-            state['last_update'] = now
-
-            load_factor = 1.0 - (state['load'] / 100.0)
-            current_rate = int(base_rate * max(0.1, load_factor))
-
-            result = {
-                'key': resolved_key,
-                'current_rate': current_rate,
-                'load': state['load'],
-                'base_rate': base_rate,
-                'load_factor': load_factor,
-            }
-
-            return ActionResult(
-                success=True,
-                data={output_var: result},
-                message=f"Adaptive: rate={current_rate}, load={state['load']:.1f}%"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Throttle adaptive error: {e}")
+def create_throttle_action(
+    strategy: ThrottleStrategy = ThrottleStrategy.TOKEN_BUCKET,
+) -> ApiThrottleAction:
+    """Factory function to create an ApiThrottleAction."""
+    return ApiThrottleAction(strategy=strategy)
