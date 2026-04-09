@@ -1,48 +1,46 @@
 """
-Coordinate Transform Utilities for UI Automation.
+Coordinate system transformation utilities.
 
-This module provides utilities for transforming coordinates between different
-coordinate systems used in UI automation (screen, window, element-relative).
+Handles conversion between screen coordinates, window coordinates,
+element-relative coordinates, and various display scaling factors.
 
-Author: AI Assistant
-License: MIT
+Author: Auto-generated
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Sequence
 
 
 @dataclass
 class Point:
-    """Represents a 2D point."""
+    """A 2D point with x and y coordinates."""
     x: float
     y: float
     
-    def __add__(self, other: 'Point') -> 'Point':
+    def __add__(self, other: Point) -> Point:
         return Point(self.x + other.x, self.y + other.y)
     
-    def __sub__(self, other: 'Point') -> 'Point':
+    def __sub__(self, other: Point) -> Point:
         return Point(self.x - other.x, self.y - other.y)
     
-    def __mul__(self, scalar: float) -> 'Point':
+    def __mul__(self, scalar: float) -> Point:
         return Point(self.x * scalar, self.y * scalar)
     
-    def distance_to(self, other: 'Point') -> float:
-        """Calculate Euclidean distance to another point."""
+    def distance_to(self, other: Point) -> float:
         dx = self.x - other.x
         dy = self.y - other.y
-        return (dx * dx + dy * dy) ** 0.5
+        return math.sqrt(dx * dx + dy * dy)
     
-    def midpoint(self, other: 'Point') -> 'Point':
-        """Get the midpoint between this point and another."""
-        return Point((self.x + other.x) / 2, (self.y + other.y) / 2)
+    def to_tuple(self) -> tuple[float, float]:
+        return (self.x, self.y)
 
 
 @dataclass
 class Rect:
-    """Represents a rectangle in 2D space."""
+    """A rectangle defined by origin and size."""
     x: float
     y: float
     width: float
@@ -76,238 +74,244 @@ class Rect:
     def center_y(self) -> float:
         return self.y + self.height / 2
     
-    def contains_point(self, point: Point) -> bool:
-        """Check if a point is inside this rectangle."""
-        return (self.left <= point.x <= self.right and 
-                self.top <= point.y <= self.bottom)
+    def contains_point(self, x: float, y: float) -> bool:
+        return self.left <= x <= self.right and self.top <= y <= self.bottom
     
-    def intersects(self, other: 'Rect') -> bool:
-        """Check if this rectangle intersects with another."""
-        return not (self.right < other.left or 
-                    self.left > other.right or
-                    self.bottom < other.top or 
-                    self.top > other.bottom)
+    def contains_point_relative(
+        self, x: float, y: float, parent: Rect
+    ) -> bool:
+        """Check if point is within rect when parent has given bounds."""
+        abs_x = parent.x + x
+        abs_y = parent.y + y
+        return self.contains_point(abs_x, abs_y)
     
-    def intersection(self, other: 'Rect') -> Optional['Rect']:
-        """Get the intersection rectangle with another."""
-        if not self.intersects(other):
-            return None
-        x = max(self.left, other.left)
-        y = max(self.top, other.top)
-        width = min(self.right, other.right) - x
-        height = min(self.bottom, other.bottom) - y
-        return Rect(x, y, width, height)
+    def to_tuple(self) -> tuple[float, float, float, float]:
+        return (self.x, self.y, self.width, self.height)
 
 
 @dataclass
 class TransformMatrix:
     """
-    Represents a 2D transformation matrix for coordinate transforms.
+    2D affine transformation matrix.
     
     Matrix layout:
-    [a c e]
-    [b d f]
+    [a c tx]
+    [b d ty]
     [0 0 1]
     
-    Transforms point (x, y) to (a*x + c*y + e, b*x + d*y + f)
+    Transforms point (x, y) to (a*x + c*y + tx, b*x + d*y + ty)
     """
     a: float = 1.0
     b: float = 0.0
     c: float = 0.0
     d: float = 1.0
-    e: float = 0.0
-    f: float = 0.0
+    tx: float = 0.0
+    ty: float = 0.0
     
     @classmethod
-    def identity(cls) -> 'TransformMatrix':
-        """Create an identity matrix."""
-        return cls()
+    def identity(cls) -> TransformMatrix:
+        """Create identity transformation."""
+        return cls(a=1.0, d=1.0)
     
     @classmethod
-    def translation(cls, tx: float, ty: float) -> 'TransformMatrix':
-        """Create a translation matrix."""
-        return cls(e=tx, f=ty)
+    def translation(cls, tx: float, ty: float) -> TransformMatrix:
+        """Create translation transformation."""
+        return cls(tx=tx, ty=ty)
     
     @classmethod
-    def scaling(cls, sx: float, sy: float) -> 'TransformMatrix':
-        """Create a scaling matrix."""
+    def scale(cls, sx: float, sy: float) -> TransformMatrix:
+        """Create scale transformation."""
         return cls(a=sx, d=sy)
     
     @classmethod
-    def rotation(cls, angle_degrees: float) -> 'TransformMatrix':
-        """Create a rotation matrix."""
-        import math
-        angle_rad = math.radians(angle_degrees)
-        cos_a = math.cos(angle_rad)
-        sin_a = math.sin(angle_rad)
+    def rotation(cls, angle_radians: float) -> TransformMatrix:
+        """Create rotation transformation."""
+        cos_a = math.cos(angle_radians)
+        sin_a = math.sin(angle_radians)
         return cls(a=cos_a, b=sin_a, c=-sin_a, d=cos_a)
     
-    def transform_point(self, x: float, y: float) -> Tuple[float, float]:
-        """Transform a point using this matrix."""
-        new_x = self.a * x + self.c * y + self.e
-        new_y = self.b * x + self.d * y + self.f
-        return (new_x, new_y)
-    
-    def transform_point_obj(self, point: Point) -> Point:
-        """Transform a Point object."""
-        new_x, new_y = self.transform_point(point.x, point.y)
-        return Point(new_x, new_y)
-    
-    def multiply(self, other: 'TransformMatrix') -> 'TransformMatrix':
-        """Multiply this matrix with another."""
-        return TransformMatrix(
-            a=self.a * other.a + self.c * other.b,
-            b=self.b * other.a + self.d * other.b,
-            c=self.a * other.c + self.c * other.d,
-            d=self.b * other.c + self.d * other.d,
-            e=self.a * other.e + self.c * other.f + self.e,
-            f=self.b * other.e + self.d * other.f + self.f
+    def transform_point(self, x: float, y: float) -> Point:
+        """Apply transformation to a point."""
+        return Point(
+            self.a * x + self.c * y + self.tx,
+            self.b * x + self.d * y + self.ty,
         )
     
-    def inverse(self) -> 'TransformMatrix':
-        """Get the inverse of this matrix."""
-        import math
+    def transform_points(
+        self, points: Sequence[tuple[float, float]]
+    ) -> list[Point]:
+        """Apply transformation to multiple points."""
+        return [self.transform_point(x, y) for x, y in points]
+    
+    def invert(self) -> TransformMatrix:
+        """Compute inverse transformation."""
         det = self.a * self.d - self.b * self.c
         if abs(det) < 1e-10:
             raise ValueError("Matrix is not invertible")
+        
         inv_det = 1.0 / det
         return TransformMatrix(
             a=self.d * inv_det,
             b=-self.b * inv_det,
             c=-self.c * inv_det,
             d=self.a * inv_det,
-            e=(self.c * self.f - self.d * self.e) * inv_det,
-            f=(self.b * self.e - self.a * self.f) * inv_det
+            tx=(self.c * self.ty - self.d * self.tx) * inv_det,
+            ty=(self.b * self.tx - self.a * self.ty) * inv_det,
+        )
+    
+    def compose(self, other: TransformMatrix) -> TransformMatrix:
+        """Compose this transformation with another."""
+        return TransformMatrix(
+            a=self.a * other.a + self.c * other.b,
+            b=self.b * other.a + self.d * other.b,
+            c=self.a * other.c + self.c * other.d,
+            d=self.b * other.c + self.d * other.d,
+            tx=self.a * other.tx + self.c * other.ty + self.tx,
+            ty=self.b * other.tx + self.d * other.ty + self.ty,
         )
 
 
 class CoordinateTransformer:
     """
-    Handles coordinate transformations between different coordinate spaces.
+    Transforms coordinates between different coordinate systems.
     
-    Supported spaces:
-    - Screen: Absolute screen coordinates
-    - Window: Coordinates relative to window origin
-    - Element: Coordinates relative to element bounds
+    Supports:
+    - Screen to window coordinates
+    - Window to screen coordinates
+    - Element-relative to absolute coordinates
+    - Display DPI scaling transformations
     """
     
-    def __init__(self):
-        self._transforms: dict[str, TransformMatrix] = {}
+    def __init__(self, screen_bounds: Rect, window_bounds: Rect):
+        self._screen_bounds = screen_bounds
+        self._window_bounds = window_bounds
     
-    def add_transform(self, name: str, matrix: TransformMatrix) -> None:
-        """Add a named transformation."""
-        self._transforms[name] = matrix
+    @classmethod
+    def from_display_info(
+        cls,
+        screen_width: float,
+        screen_height: float,
+        window_x: float,
+        window_y: float,
+        window_width: float,
+        window_height: float,
+    ) -> CoordinateTransformer:
+        """Create transformer from display information."""
+        return cls(
+            screen_bounds=Rect(0, 0, screen_width, screen_height),
+            window_bounds=Rect(window_x, window_y, window_width, window_height),
+        )
     
-    def screen_to_window(
-        self, 
-        screen_point: Point, 
-        window_offset: Point
-    ) -> Point:
+    def screen_to_window(self, x: float, y: float) -> Point:
         """Convert screen coordinates to window coordinates."""
-        matrix = TransformMatrix.translation(-window_offset.x, -window_offset.y)
-        return matrix.transform_point_obj(screen_point)
+        return Point(
+            x - self._window_bounds.x,
+            y - self._window_bounds.y,
+        )
     
-    def window_to_screen(
-        self, 
-        window_point: Point, 
-        window_offset: Point
-    ) -> Point:
+    def window_to_screen(self, x: float, y: float) -> Point:
         """Convert window coordinates to screen coordinates."""
-        matrix = TransformMatrix.translation(window_offset.x, window_offset.y)
-        return matrix.transform_point_obj(window_point)
+        return Point(
+            x + self._window_bounds.x,
+            y + self._window_bounds.y,
+        )
+    
+    def element_to_window(
+        self,
+        element_bounds: Rect,
+        local_x: float,
+        local_y: float,
+    ) -> Point:
+        """Convert element-local coordinates to window coordinates."""
+        return Point(
+            element_bounds.x + local_x,
+            element_bounds.y + local_y,
+        )
     
     def element_to_screen(
         self,
-        element_point: Point,
-        element_rect: Rect,
-        window_offset: Point
+        element_bounds: Rect,
+        local_x: float,
+        local_y: float,
     ) -> Point:
-        """Convert element-relative coordinates to screen coordinates."""
-        # Element -> Window
-        window_point = Point(
-            element_rect.x + element_point.x,
-            element_rect.y + element_point.y
-        )
-        # Window -> Screen
-        return self.window_to_screen(window_point, window_offset)
+        """Convert element-local coordinates to screen coordinates."""
+        window_point = self.element_to_window(element_bounds, local_x, local_y)
+        return self.window_to_screen(window_point.x, window_point.y)
     
-    def screen_to_element(
-        self,
-        screen_point: Point,
-        element_rect: Rect,
-        window_offset: Point
+    def normalize_coordinates(
+        self, x: float, y: float, source_bounds: Rect
     ) -> Point:
-        """Convert screen coordinates to element-relative coordinates."""
-        # Screen -> Window
-        window_point = self.screen_to_window(screen_point, window_offset)
-        # Window -> Element
+        """
+        Normalize coordinates relative to source bounds.
+        
+        Returns coordinates in range [0, 1].
+        """
         return Point(
-            window_point.x - element_rect.x,
-            window_point.y - element_rect.y
+            (x - source_bounds.x) / source_bounds.width,
+            (y - source_bounds.y) / source_bounds.height,
         )
     
-    def transform(
-        self,
-        point: Point,
-        from_space: str,
-        to_space: str
+    def denormalize_coordinates(
+        self, normalized_x: float, normalized_y: float, target_bounds: Rect
     ) -> Point:
-        """Transform a point between named coordinate spaces."""
-        if from_space == to_space:
-            return point
-        
-        path_key = f"{from_space}_to_{to_space}"
-        if path_key in self._transforms:
-            return self._transforms[path_key].transform_point_obj(point)
-        
-        # Try to find a path through identity
-        if 'identity' in self._transforms:
-            return self._transforms['identity'].transform_point_obj(point)
-        
-        return point
+        """
+        Convert normalized [0, 1] coordinates to absolute coordinates.
+        """
+        return Point(
+            target_bounds.x + normalized_x * target_bounds.width,
+            target_bounds.y + normalized_y * target_bounds.height,
+        )
 
 
-def normalize_coordinates(
-    x: float, 
-    y: float, 
-    bounds: Rect,
-    normalize_to: Tuple[float, float] = (1.0, 1.0)
-) -> Tuple[float, float]:
+def transform_rect(
+    matrix: TransformMatrix,
+    rect: Rect,
+) -> Rect:
     """
-    Normalize coordinates to a 0-1 range within bounds.
+    Transform a rectangle using a transformation matrix.
     
-    Args:
-        x: X coordinate
-        y: Y coordinate
-        bounds: Reference bounds
-        normalize_to: Target range (e.g., (1.0, 1.0) for 0-1)
-        
-    Returns:
-        Normalized (x, y) tuple
+    Computes the bounding box of all four corners transformed.
     """
-    norm_x = (x - bounds.x) / bounds.width * normalize_to[0]
-    norm_y = (y - bounds.y) / bounds.height * normalize_to[1]
-    return (norm_x, norm_y)
-
-
-def denormalize_coordinates(
-    norm_x: float,
-    norm_y: float,
-    bounds: Rect,
-    from_range: Tuple[float, float] = (1.0, 1.0)
-) -> Tuple[float, float]:
-    """
-    Denormalize coordinates from 0-1 range to absolute coordinates.
+    corners = [
+        (rect.x, rect.y),
+        (rect.x + rect.width, rect.y),
+        (rect.x, rect.y + rect.height),
+        (rect.x + rect.width, rect.y + rect.height),
+    ]
     
-    Args:
-        norm_x: Normalized X coordinate
-        norm_y: Normalized Y coordinate
-        bounds: Target bounds
-        from_range: Source range (e.g., (1.0, 1.0) for 0-1)
-        
-    Returns:
-        Absolute (x, y) tuple
+    transformed = matrix.transform_points(corners)
+    
+    min_x = min(p.x for p in transformed)
+    max_x = max(p.x for p in transformed)
+    min_y = min(p.y for p in transformed)
+    max_y = max(p.y for p in transformed)
+    
+    return Rect(min_x, min_y, max_x - min_x, max_y - min_y)
+
+
+def clip_point_to_rect(x: float, y: float, rect: Rect) -> Point:
     """
-    x = norm_x / from_range[0] * bounds.width + bounds.x
-    y = norm_y / from_range[1] * bounds.height + bounds.y
-    return (x, y)
+    Clip a point to be within a rectangle.
+    
+    Returns the closest point on or within the rectangle.
+    """
+    clipped_x = max(rect.left, min(rect.right, x))
+    clipped_y = max(rect.top, min(rect.bottom, y))
+    return Point(clipped_x, clipped_y)
+
+
+def clip_rect_to_bounds(rect: Rect, bounds: Rect) -> Rect | None:
+    """
+    Clip a rectangle to be within bounds.
+    
+    Returns None if the rectangles don't intersect.
+    """
+    left = max(rect.left, bounds.left)
+    top = max(rect.top, bounds.top)
+    right = min(rect.right, bounds.right)
+    bottom = min(rect.bottom, bounds.bottom)
+    
+    if left >= right or top >= bottom:
+        return None
+    
+    return Rect(left, top, right - left, bottom - top)
