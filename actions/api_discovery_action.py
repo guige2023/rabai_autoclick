@@ -1,366 +1,306 @@
+"""API discovery action module for RabAI AutoClick.
+
+Provides API discovery operations:
+- ApiDiscoveryAction: Discover APIs from configuration
+- ApiServiceRegistryAction: Register and lookup services
+- ApiEndpointDiscoveryAction: Discover endpoints dynamically
+- ApiVersionDiscoveryAction: Discover available API versions
 """
-API Service Discovery Action.
 
-Provides service discovery capabilities for microservices architecture.
-Supports multiple discovery strategies: static, dynamic, and hybrid.
-"""
+import re
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
 
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-import threading
-import logging
-import hashlib
-import json
+import sys
+import os
 
-logger = logging.getLogger(__name__)
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _parent_dir)
+from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class ServiceInstance:
-    """Represents a single service instance."""
-    instance_id: str
-    service_name: str
-    host: str
-    port: int
-    health_url: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    status: str = "healthy"
-    weight: int = 1
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    last_heartbeat: datetime = field(default_factory=datetime.utcnow)
-    tags: List[str] = field(default_factory=list)
+class ApiDiscoveryAction(BaseAction):
+    """Discover APIs from OpenAPI/Swagger specs or URLs."""
+    action_type = "api_discovery"
+    display_name = "API发现"
+    description = "从配置或规范发现API"
 
-    @property
-    def address(self) -> str:
-        """Return the service address."""
-        return f"{self.host}:{self.port}"
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            source = params.get("source")
+            source_type = params.get("source_type", "url")
+            filter_methods = params.get("filter_methods", [])
+            filter_tags = params.get("filter_tags", [])
 
-    @property
-    def is_healthy(self) -> bool:
-        """Check if the instance is healthy based on heartbeat."""
-        timeout = timedelta(seconds=30)
-        return datetime.utcnow() - self.last_heartbeat < timeout
+            if not source:
+                return ActionResult(success=False, message="source is required")
 
+            discovered_apis = []
 
-@dataclass
-class ServiceRegistry:
-    """Registry for managing service instances."""
-    services: Dict[str, List[ServiceInstance]] = field(default_factory=dict)
-    lock: threading.RLock = field(default_factory=threading.RLock)
+            if source_type == "url":
+                discovered_apis = self._discover_from_url(source, filter_methods, filter_tags)
+            elif source_type == "openapi":
+                discovered_apis = self._parse_openapi_spec(source, filter_methods, filter_tags)
+            elif source_type == "endpoints":
+                discovered_apis = self._discover_from_list(source, filter_methods, filter_tags)
+            else:
+                return ActionResult(success=False, message=f"Unknown source_type: {source_type}")
 
-    def register(self, instance: ServiceInstance) -> bool:
-        """Register a new service instance."""
-        with self.lock:
-            if instance.service_name not in self.services:
-                self.services[instance.service_name] = []
-            
-            # Check if instance already exists
-            for existing in self.services[instance.service_name]:
-                if existing.instance_id == instance.instance_id:
-                    existing.last_heartbeat = datetime.utcnow()
-                    return False
-            
-            self.services[instance.service_name].append(instance)
-            logger.info(f"Registered service: {instance.service_name}/{instance.instance_id}")
-            return True
+            return ActionResult(
+                success=True,
+                message=f"Discovered {len(discovered_apis)} API endpoints",
+                data={"apis": discovered_apis, "count": len(discovered_apis)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"API discovery error: {e}")
 
-    def deregister(self, service_name: str, instance_id: str) -> bool:
-        """Deregister a service instance."""
-        with self.lock:
-            if service_name not in self.services:
-                return False
-            
-            self.services[service_name] = [
-                i for i in self.services[service_name]
-                if i.instance_id != instance_id
-            ]
-            logger.info(f"Deregistered service: {service_name}/{instance_id}")
-            return True
+    def _discover_from_url(self, url: str, filter_methods: List[str], filter_tags: List[str]) -> List[Dict[str, Any]]:
+        """Fetch and parse API spec from URL."""
+        try:
+            import urllib.request
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=30) as response:
+                content = response.read().decode()
 
-    def get_instances(self, service_name: str, tags: Optional[List[str]] = None) -> List[ServiceInstance]:
-        """Get healthy instances for a service, optionally filtered by tags."""
-        with self.lock:
-            if service_name not in self.services:
-                return []
-            
-            instances = [
-                i for i in self.services[service_name]
-                if i.is_healthy
-            ]
-            
-            if tags:
-                instances = [
-                    i for i in instances
-                    if any(tag in i.tags for tag in tags)
-                ]
-            
-            return instances
-
-    def heartbeat(self, service_name: str, instance_id: str) -> bool:
-        """Update heartbeat for a service instance."""
-        with self.lock:
-            if service_name not in self.services:
-                return False
-            
-            for instance in self.services[service_name]:
-                if instance.instance_id == instance_id:
-                    instance.last_heartbeat = datetime.utcnow()
-                    return True
-            return False
-
-
-class ApiDiscoveryAction:
-    """
-    API Service Discovery Action.
-    
-    Provides dynamic service discovery with support for:
-    - Multiple load balancing strategies
-    - Health checking
-    - Service tagging and filtering
-    - Caching with TTL
-    """
-    
-    STRATEGIES = ["random", "round_robin", "weighted", "least_connections"]
-    
-    def __init__(
-        self,
-        strategy: str = "random",
-        cache_ttl: int = 60,
-        health_check_interval: int = 10
-    ):
-        """
-        Initialize the API Discovery Action.
-        
-        Args:
-            strategy: Load balancing strategy
-            cache_ttl: Cache TTL in seconds
-            health_check_interval: Health check interval in seconds
-        """
-        if strategy not in self.STRATEGIES:
-            raise ValueError(f"Unknown strategy: {strategy}")
-        
-        self.strategy = strategy
-        self.cache_ttl = cache_ttl
-        self.health_check_interval = health_check_interval
-        self.registry = ServiceRegistry()
-        self.cache: Dict[str, tuple] = {}
-        self.cache_lock = threading.RLock()
-        self.round_robin_counters: Dict[str, int] = {}
-        self._running = False
-        self._health_thread: Optional[threading.Thread] = None
-    
-    def register(
-        self,
-        service_name: str,
-        host: str,
-        port: int,
-        instance_id: Optional[str] = None,
-        health_url: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        tags: Optional[List[str]] = None,
-        weight: int = 1
-    ) -> ServiceInstance:
-        """
-        Register a new service instance.
-        
-        Args:
-            service_name: Name of the service
-            host: Service host
-            port: Service port
-            instance_id: Unique instance ID (auto-generated if not provided)
-            health_url: Health check URL
-            metadata: Additional metadata
-            tags: Service tags for filtering
-            weight: Instance weight for load balancing
-        
-        Returns:
-            The registered ServiceInstance
-        """
-        if instance_id is None:
-            content = f"{service_name}:{host}:{port}:{datetime.utcnow().isoformat()}"
-            instance_id = hashlib.md5(content.encode()).hexdigest()[:12]
-        
-        instance = ServiceInstance(
-            instance_id=instance_id,
-            service_name=service_name,
-            host=host,
-            port=port,
-            health_url=health_url or f"http://{host}:{port}/health",
-            metadata=metadata or {},
-            weight=weight,
-            tags=tags or []
-        )
-        
-        self.registry.register(instance)
-        self._invalidate_cache(service_name)
-        return instance
-    
-    def deregister(self, service_name: str, instance_id: str) -> bool:
-        """Deregister a service instance."""
-        result = self.registry.deregister(service_name, instance_id)
-        if result:
-            self._invalidate_cache(service_name)
-        return result
-    
-    def discover(self, service_name: str, tags: Optional[List[str]] = None) -> Optional[ServiceInstance]:
-        """
-        Discover a service instance using the configured strategy.
-        
-        Args:
-            service_name: Name of the service to discover
-            tags: Optional tags to filter instances
-        
-        Returns:
-            A service instance or None if not found
-        """
-        instances = self._get_cached_instances(service_name, tags)
-        
-        if not instances:
-            return None
-        
-        return self._select_instance(instances)
-    
-    def discover_all(self, service_name: str, tags: Optional[List[str]] = None) -> List[ServiceInstance]:
-        """Get all healthy instances for a service."""
-        return self._get_cached_instances(service_name, tags)
-    
-    def _get_cached_instances(
-        self,
-        service_name: str,
-        tags: Optional[List[str]] = None
-    ) -> List[ServiceInstance]:
-        """Get instances with caching."""
-        cache_key = f"{service_name}:{','.join(tags or [])}"
-        
-        with self.cache_lock:
-            if cache_key in self.cache:
-                cached_time, cached_instances = self.cache[cache_key]
-                if datetime.utcnow() - cached_time < timedelta(seconds=self.cache_ttl):
-                    return cached_instances
-        
-        instances = self.registry.get_instances(service_name, tags)
-        
-        with self.cache_lock:
-            self.cache[cache_key] = (datetime.utcnow(), instances)
-        
-        return instances
-    
-    def _invalidate_cache(self, service_name: str) -> None:
-        """Invalidate cache for a service."""
-        with self.cache_lock:
-            self.cache = {
-                k: v for k, v in self.cache.items()
-                if not k.startswith(f"{service_name}:")
-            }
-    
-    def _select_instance(self, instances: List[ServiceInstance]) -> ServiceInstance:
-        """Select an instance based on the configured strategy."""
-        if not instances:
-            raise ValueError("No instances available")
-        
-        if self.strategy == "random":
-            import random
-            return random.choice(instances)
-        
-        elif self.strategy == "round_robin":
-            service_name = instances[0].service_name
-            if service_name not in self.round_robin_counters:
-                self.round_robin_counters[service_name] = 0
-            
-            index = self.round_robin_counters[service_name] % len(instances)
-            self.round_robin_counters[service_name] += 1
-            return instances[index]
-        
-        elif self.strategy == "weighted":
-            total_weight = sum(i.weight for i in instances)
-            import random
-            r = random.uniform(0, total_weight)
-            cumulative = 0
-            for instance in instances:
-                cumulative += instance.weight
-                if r <= cumulative:
-                    return instance
-            return instances[-1]
-        
-        elif self.strategy == "least_connections":
-            # Placeholder: would track active connections per instance
-            return instances[0]
-        
-        raise ValueError(f"Unknown strategy: {self.strategy}")
-    
-    def start_health_checker(self) -> None:
-        """Start the background health checker."""
-        if self._running:
-            return
-        
-        self._running = True
-        self._health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
-        self._health_thread.start()
-        logger.info("Health checker started")
-    
-    def stop_health_checker(self) -> None:
-        """Stop the background health checker."""
-        self._running = False
-        if self._health_thread:
-            self._health_thread.join(timeout=5)
-        logger.info("Health checker stopped")
-    
-    def _health_check_loop(self) -> None:
-        """Background health check loop."""
-        import time
-        
-        while self._running:
             try:
-                self._check_all_health()
-            except Exception as e:
-                logger.error(f"Health check error: {e}")
-            
-            time.sleep(self.health_check_interval)
-    
-    def _check_all_health(self) -> None:
-        """Check health of all registered instances."""
-        # Placeholder for actual health check implementation
-        # Would use httpx or similar to check health endpoints
-        pass
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get discovery statistics."""
-        stats = {
-            "strategy": self.strategy,
-            "cache_ttl": self.cache_ttl,
-            "services": {},
-            "total_instances": 0
-        }
-        
-        for service_name, instances in self.registry.services.items():
-            healthy = [i for i in instances if i.is_healthy]
-            stats["services"][service_name] = {
-                "total": len(instances),
-                "healthy": len(healthy),
-                "unhealthy": len(instances) - len(healthy)
-            }
-            stats["total_instances"] += len(instances)
-        
-        return stats
+                import json
+                spec = json.loads(content)
+                if "paths" in spec:
+                    return self._parse_openapi_spec(spec, filter_methods, filter_tags)
+            except json.JSONDecodeError:
+                pass
+
+            return self._discover_from_text(content, filter_methods, filter_tags)
+        except Exception:
+            return []
+
+    def _parse_openapi_spec(self, spec: Any, filter_methods: List[str], filter_tags: List[str]) -> List[Dict[str, Any]]:
+        """Parse OpenAPI spec."""
+        if isinstance(spec, str):
+            try:
+                import json
+                spec = json.loads(spec)
+            except Exception:
+                return []
+
+        paths = spec.get("paths", {})
+        results = []
+
+        for path, methods in paths.items():
+            for method, details in methods.items():
+                if method.upper() not in ("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"):
+                    continue
+
+                if filter_methods and method.upper() not in [m.upper() for m in filter_methods]:
+                    continue
+
+                tags = details.get("tags", [])
+                if filter_tags and not any(t in tags for t in filter_tags):
+                    continue
+
+                results.append({
+                    "path": path,
+                    "method": method.upper(),
+                    "summary": details.get("summary", ""),
+                    "description": details.get("description", ""),
+                    "tags": tags,
+                    "parameters": details.get("parameters", []),
+                    "operation_id": details.get("operationId"),
+                })
+
+        return results
+
+    def _discover_from_list(self, endpoints: List[str], filter_methods: List[str], filter_tags: List[str]) -> List[Dict[str, Any]]:
+        """Discover from a list of endpoint strings."""
+        results = []
+        for endpoint in endpoints:
+            if isinstance(endpoint, str):
+                parts = endpoint.split()
+                if len(parts) >= 2:
+                    method, path = parts[0].upper(), parts[1]
+                else:
+                    method, path = "GET", parts[0]
+                results.append({"method": method, "path": path, "summary": "", "tags": []})
+            elif isinstance(endpoint, dict):
+                results.append(endpoint)
+        return results
+
+    def _discover_from_text(self, text: str, filter_methods: List[str], filter_tags: List[str]) -> List[Dict[str, Any]]:
+        """Discover endpoints from text."""
+        results = []
+        pattern = r"(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s+([^\s]+)"
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for method, path in matches:
+            if filter_methods and method.upper() not in [m.upper() for m in filter_methods]:
+                continue
+            results.append({"method": method.upper(), "path": path, "summary": "", "tags": []})
+        return results
 
 
-# Standalone execution
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    discovery = ApiDiscoveryAction(strategy="round_robin")
-    
-    # Register some services
-    discovery.register("user-service", "localhost", 8001, tags=["v1"], weight=1)
-    discovery.register("user-service", "localhost", 8002, tags=["v1"], weight=2)
-    discovery.register("order-service", "localhost", 8003, tags=["v1"])
-    
-    # Discover services
-    user_instance = discovery.discover("user-service")
-    print(f"Discovered user service: {user_instance.address if user_instance else 'None'}")
-    
-    order_instances = discovery.discover_all("order-service")
-    print(f"Order service instances: {len(order_instances)}")
-    
-    print(f"Stats: {json.dumps(discovery.get_stats(), indent=2, default=str)}")
+class ApiServiceRegistryAction(BaseAction):
+    """Register and lookup services."""
+    action_type = "api_service_registry"
+    display_name = "API服务注册表"
+    description = "注册和查找服务"
+
+    def __init__(self):
+        super().__init__()
+        self._registry: Dict[str, Dict[str, Any]] = {}
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            operation = params.get("operation", "register")
+            service_name = params.get("service_name")
+            endpoint = params.get("endpoint")
+            metadata = params.get("metadata", {})
+            health_check_url = params.get("health_check_url")
+
+            if operation == "register":
+                if not service_name or not endpoint:
+                    return ActionResult(success=False, message="service_name and endpoint are required")
+
+                self._registry[service_name] = {
+                    "endpoint": endpoint,
+                    "metadata": metadata,
+                    "health_check_url": health_check_url,
+                    "registered_at": datetime.now().isoformat(),
+                    "status": "active",
+                }
+                return ActionResult(success=True, message=f"Service {service_name} registered", data={"service_name": service_name})
+
+            elif operation == "lookup":
+                if not service_name:
+                    return ActionResult(success=False, message="service_name is required")
+                if service_name not in self._registry:
+                    return ActionResult(success=False, message=f"Service {service_name} not found")
+                return ActionResult(success=True, message=f"Found {service_name}", data=self._registry[service_name])
+
+            elif operation == "list":
+                return ActionResult(success=True, message=f"{len(self._registry)} services registered", data={"services": self._registry})
+
+            elif operation == "deregister":
+                if service_name and service_name in self._registry:
+                    del self._registry[service_name]
+                    return ActionResult(success=True, message=f"Service {service_name} deregistered")
+                return ActionResult(success=False, message=f"Service {service_name} not found")
+
+            elif operation == "update":
+                if not service_name or service_name not in self._registry:
+                    return ActionResult(success=False, message="Service not found")
+                if endpoint:
+                    self._registry[service_name]["endpoint"] = endpoint
+                self._registry[service_name]["metadata"].update(metadata)
+                return ActionResult(success=True, message=f"Service {service_name} updated")
+
+            return ActionResult(success=False, message=f"Unknown operation: {operation}")
+        except Exception as e:
+            return ActionResult(success=False, message=f"Service registry error: {e}")
+
+
+class ApiEndpointDiscoveryAction(BaseAction):
+    """Discover API endpoints dynamically."""
+    action_type = "api_endpoint_discovery"
+    display_name = "API端点发现"
+    description = "动态发现API端点"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            base_url = params.get("base_url", "")
+            paths_to_check = params.get("paths_to_check", ["/", "/api", "/v1", "/v2", "/health", "/ping", "/api-docs", "/swagger"])
+            methods = params.get("methods", ["GET"])
+            timeout = params.get("timeout", 5)
+
+            if not base_url:
+                return ActionResult(success=False, message="base_url is required")
+
+            discovered = []
+
+            for path in paths_to_check:
+                url = base_url.rstrip("/") + "/" + path.lstrip("/")
+                for method in methods:
+                    try:
+                        import urllib.request
+                        req = urllib.request.Request(url, method=method)
+                        try:
+                            with urllib.request.urlopen(req, timeout=timeout) as response:
+                                discovered.append({
+                                    "url": url,
+                                    "method": method,
+                                    "status": response.status,
+                                    "accessible": True,
+                                })
+                        except urllib.error.HTTPError as e:
+                            discovered.append({
+                                "url": url,
+                                "method": method,
+                                "status": e.code,
+                                "accessible": True,
+                                "error": str(e),
+                            })
+                    except Exception as e:
+                        discovered.append({"url": url, "method": method, "accessible": False, "error": str(e)})
+
+            accessible = [d for d in discovered if d.get("accessible", False)]
+            return ActionResult(
+                success=True,
+                message=f"Discovered {len(accessible)} accessible endpoints",
+                data={"discovered": discovered, "accessible_count": len(accessible), "total_checked": len(discovered)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Endpoint discovery error: {e}")
+
+
+class ApiVersionDiscoveryAction(BaseAction):
+    """Discover available API versions."""
+    action_type = "api_version_discovery"
+    display_name = "API版本发现"
+    description = "发现可用API版本"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        try:
+            base_url = params.get("base_url", "")
+            version_paths = params.get("version_paths", ["/v1", "/v2", "/v3", "/api/v1", "/api/v2", "/api/v3"])
+            timeout = params.get("timeout", 5)
+
+            if not base_url:
+                return ActionResult(success=False, message="base_url is required")
+
+            versions = {}
+
+            for vp in version_paths:
+                url = base_url.rstrip("/") + "/" + vp.lstrip("/")
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(url)
+                    try:
+                        with urllib.request.urlopen(req, timeout=timeout) as response:
+                            content = response.read().decode()
+                            versions[vp] = {
+                                "accessible": True,
+                                "status": response.status,
+                                "version": self._extract_version_from_content(content, vp),
+                            }
+                    except urllib.error.HTTPError as e:
+                        versions[vp] = {"accessible": True, "status": e.code, "version": None, "error": str(e)}
+                except Exception as e:
+                    versions[vp] = {"accessible": False, "version": None, "error": str(e)}
+
+            supported = {k: v for k, v in versions.items() if v.get("accessible", False)}
+
+            return ActionResult(
+                success=True,
+                message=f"Found {len(supported)} accessible versions",
+                data={"versions": versions, "supported_versions": list(supported.keys()), "count": len(supported)}
+            )
+        except Exception as e:
+            return ActionResult(success=False, message=f"Version discovery error: {e}")
+
+    def _extract_version_from_content(self, content: str, path_hint: str) -> Optional[str]:
+        """Extract version from content."""
+        version_match = re.search(r'"version"\s*:\s*"([^"]+)"', content)
+        if version_match:
+            return version_match.group(1)
+        version_in_path = re.search(r'v(\d+)', path_hint)
+        if version_in_path:
+            return f"v{version_in_path.group(1)}"
+        return None
