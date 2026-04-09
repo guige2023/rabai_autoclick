@@ -1,4 +1,9 @@
-"""API health check and status monitoring action."""
+"""API Health Check Action module.
+
+Provides health check capabilities for API monitoring
+with support for dependency checks, latency thresholds,
+and composite health evaluations.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +13,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
 
-import httpx
+import aiohttp
 
 
-class HealthStatus(str, Enum):
-    """Health status levels."""
+class HealthStatus(Enum):
+    """Health check status levels."""
 
     HEALTHY = "healthy"
     DEGRADED = "degraded"
@@ -20,187 +25,311 @@ class HealthStatus(str, Enum):
     UNKNOWN = "unknown"
 
 
-class CheckType(str, Enum):
-    """Type of health check."""
-
-    HTTP = "http"
-    TCP = "tcp"
-    PROCESS = "process"
-
-
 @dataclass
 class HealthCheckResult:
     """Result of a health check."""
 
-    endpoint: str
+    name: str
     status: HealthStatus
-    latency_ms: float
-    timestamp: float
-    message: Optional[str] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    message: str = ""
+    latency_ms: float = 0.0
+    timestamp: float = field(default_factory=time.time)
+    details: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_healthy(self) -> bool:
+        """Check if status is healthy."""
+        return self.status == HealthStatus.HEALTHY
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "name": self.name,
+            "status": self.status.value,
+            "message": self.message,
+            "latency_ms": self.latency_ms,
+            "timestamp": self.timestamp,
+            "details": self.details,
+        }
 
 
 @dataclass
 class HealthCheckConfig:
-    """Configuration for a health check."""
+    """Configuration for health checks."""
 
-    name: str
-    endpoint: str
-    check_type: CheckType = CheckType.HTTP
-    timeout_seconds: float = 5.0
-    expected_status: int = 200
-    headers: Optional[dict[str, str]] = None
-    interval_seconds: float = 60.0
+    timeout: float = 5.0
+    max_retries: int = 2
+    retry_delay: float = 0.5
+    latency_threshold_ms: float = 1000.0
+    failure_threshold: int = 3
 
 
-class APIHealthCheckAction:
-    """Monitors API health and reports status changes."""
+class HealthCheck:
+    """Base health check."""
 
     def __init__(
         self,
-        checks: Optional[list[HealthCheckConfig]] = None,
-        on_status_change: Optional[Callable[[str, HealthStatus, HealthStatus], None]] = None,
+        name: str,
+        config: Optional[HealthCheckConfig] = None,
     ):
-        """Initialize the health check action.
+        self.name = name
+        self.config = config or HealthCheckConfig()
+        self._last_result: Optional[HealthCheckResult] = None
+        self._failure_count = 0
 
-        Args:
-            checks: List of health check configurations.
-            on_status_change: Callback when status changes (name, old, new).
-        """
-        self._checks = checks or []
-        self._results: dict[str, HealthCheckResult] = {}
-        self._on_status_change = on_status_change
-        self._last_status: dict[str, HealthStatus] = {}
+    async def check(self) -> HealthCheckResult:
+        """Perform health check."""
+        raise NotImplementedError
 
-    def add_check(self, config: HealthCheckConfig) -> None:
-        """Add a health check configuration."""
-        self._checks.append(config)
+    async def check_with_retry(self) -> HealthCheckResult:
+        """Perform health check with retry logic."""
+        last_error: Optional[Exception] = None
 
-    async def check_http(self, config: HealthCheckConfig) -> HealthCheckResult:
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                result = await asyncio.wait_for(
+                    self.check(),
+                    timeout=self.config.timeout,
+                )
+                self._failure_count = 0
+                self._last_result = result
+                return result
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(f"Health check timed out after {self.config.timeout}s")
+                if attempt < self.config.max_retries:
+                    await asyncio.sleep(self.config.retry_delay)
+            except Exception as e:
+                last_error = e
+                if attempt < self.config.max_retries:
+                    await asyncio.sleep(self.config.retry_delay)
+
+        self._failure_count += 1
+
+        return HealthCheckResult(
+            name=self.name,
+            status=HealthStatus.UNHEALTHY if self._failure_count >= self.config.failure_threshold else HealthStatus.DEGRADED,
+            message=str(last_error),
+            latency_ms=self.config.timeout * 1000,
+        )
+
+    @property
+    def last_result(self) -> Optional[HealthCheckResult]:
+        """Get last check result."""
+        return self._last_result
+
+    @property
+    def is_healthy(self) -> bool:
+        """Check if last result was healthy."""
+        return self._last_result is not None and self._last_result.is_healthy
+
+
+class HttpHealthCheck(HealthCheck):
+    """HTTP endpoint health check."""
+
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        expected_status: int = 200,
+        check_json: Optional[dict] = None,
+        headers: Optional[dict[str, str]] = None,
+        config: Optional[HealthCheckConfig] = None,
+    ):
+        super().__init__(name, config)
+        self.url = url
+        self.expected_status = expected_status
+        self.check_json = check_json
+        self.headers = headers or {}
+
+    async def check(self) -> HealthCheckResult:
         """Perform HTTP health check."""
         start = time.monotonic()
+
         try:
-            async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
-                response = await client.get(
-                    config.endpoint,
-                    headers=config.headers or {},
-                )
-                latency_ms = (time.monotonic() - start) * 1000
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.url,
+                    headers=self.headers,
+                    timeout=aiohttp.ClientTimeout(total=self.config.timeout),
+                ) as response:
+                    latency_ms = (time.monotonic() - start) * 1000
 
-                if response.status_code == config.expected_status:
+                    if response.status != self.expected_status:
+                        return HealthCheckResult(
+                            name=self.name,
+                            status=HealthStatus.UNHEALTHY,
+                            message=f"Unexpected status: {response.status}",
+                            latency_ms=latency_ms,
+                        )
+
+                    if self.check_json:
+                        try:
+                            data = await response.json()
+                            for key, expected in self.check_json.items():
+                                if data.get(key) != expected:
+                                    return HealthCheckResult(
+                                        name=self.name,
+                                        status=HealthStatus.UNHEALTHY,
+                                        message=f"JSON check failed for key '{key}'",
+                                        latency_ms=latency_ms,
+                                    )
+                        except Exception as e:
+                            return HealthCheckResult(
+                                name=self.name,
+                                status=HealthStatus.UNHEALTHY,
+                                message=f"JSON parse error: {e}",
+                                latency_ms=latency_ms,
+                            )
+
                     status = HealthStatus.HEALTHY
-                elif 400 <= response.status_code < 500:
-                    status = HealthStatus.DEGRADED
-                else:
-                    status = HealthStatus.UNHEALTHY
+                    if latency_ms > self.config.latency_threshold_ms:
+                        status = HealthStatus.DEGRADED
 
-                return HealthCheckResult(
-                    endpoint=config.endpoint,
-                    status=status,
-                    latency_ms=latency_ms,
-                    timestamp=time.time(),
-                    message=f"HTTP {response.status_code}",
-                    metadata={"status_code": response.status_code},
-                )
-        except httpx.TimeoutException:
-            return HealthCheckResult(
-                endpoint=config.endpoint,
-                status=HealthStatus.UNHEALTHY,
-                latency_ms=(time.monotonic() - start) * 1000,
-                timestamp=time.time(),
-                message="Request timeout",
-            )
+                    return HealthCheckResult(
+                        name=self.name,
+                        status=status,
+                        message="OK",
+                        latency_ms=latency_ms,
+                        details={"status_code": response.status},
+                    )
+
         except Exception as e:
+            latency_ms = (time.monotonic() - start) * 1000
             return HealthCheckResult(
-                endpoint=config.endpoint,
+                name=self.name,
                 status=HealthStatus.UNHEALTHY,
-                latency_ms=(time.monotonic() - start) * 1000,
-                timestamp=time.time(),
                 message=str(e),
+                latency_ms=latency_ms,
             )
 
-    async def check_tcp(self, config: HealthCheckConfig) -> HealthCheckResult:
+
+class TcpHealthCheck(HealthCheck):
+    """TCP port health check."""
+
+    def __init__(
+        self,
+        name: str,
+        host: str,
+        port: int,
+        config: Optional[HealthCheckConfig] = None,
+    ):
+        super().__init__(name, config)
+        self.host = host
+        self.port = port
+
+    async def check(self) -> HealthCheckResult:
         """Perform TCP health check."""
         start = time.monotonic()
-        host = config.endpoint.replace("tcp://", "")
+
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host.split(":")[0], int(host.split(":")[1])),
-                timeout=config.timeout_seconds,
+                asyncio.open_connection(self.host, self.port),
+                timeout=self.config.timeout,
             )
             writer.close()
             await writer.wait_closed()
             latency_ms = (time.monotonic() - start) * 1000
+
             return HealthCheckResult(
-                endpoint=config.endpoint,
+                name=self.name,
                 status=HealthStatus.HEALTHY,
-                latency_ms=latency_ms,
-                timestamp=time.time(),
                 message="TCP connection successful",
+                latency_ms=latency_ms,
             )
+
         except Exception as e:
+            latency_ms = (time.monotonic() - start) * 1000
             return HealthCheckResult(
-                endpoint=config.endpoint,
+                name=self.name,
                 status=HealthStatus.UNHEALTHY,
-                latency_ms=(time.monotonic() - start) * 1000,
-                timestamp=time.time(),
                 message=str(e),
+                latency_ms=latency_ms,
             )
 
-    async def run_check(self, config: HealthCheckConfig) -> HealthCheckResult:
-        """Run a single health check based on type."""
-        if config.check_type == CheckType.HTTP:
-            return await self.check_http(config)
-        elif config.check_type == CheckType.TCP:
-            return await self.check_tcp(config)
-        else:
-            return HealthCheckResult(
-                endpoint=config.endpoint,
-                status=HealthStatus.UNKNOWN,
-                latency_ms=0,
-                timestamp=time.time(),
-                message=f"Unsupported check type: {config.check_type}",
-            )
 
-    async def run_all_checks(self) -> dict[str, HealthCheckResult]:
-        """Run all configured health checks."""
-        tasks = [self.run_check(check) for check in self._checks]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+@dataclass
+class CompositeHealthCheck:
+    """Composite health check combining multiple checks."""
 
-        for check, result in zip(self._checks, results):
-            if isinstance(result, Exception):
-                self._results[check.name] = HealthCheckResult(
-                    endpoint=check.endpoint,
-                    status=HealthStatus.UNHEALTHY,
-                    latency_ms=0,
-                    timestamp=time.time(),
-                    message=str(result),
-                )
+    name: str
+    checks: list[HealthCheck] = field(default_factory=list)
+    strategy: str = "all"
+    unhealthy_threshold: float = 0.5
+
+    async def check_all(self) -> HealthCheckResult:
+        """Run all health checks."""
+        results = []
+        for check in self.checks:
+            result = await check.check_with_retry()
+            results.append(result)
+
+        statuses = [r.status for r in results]
+
+        if self.strategy == "all":
+            if all(s == HealthStatus.HEALTHY for s in statuses):
+                overall = HealthStatus.HEALTHY
+            elif any(s == HealthStatus.UNHEALTHY for s in statuses):
+                overall = HealthStatus.UNHEALTHY
             else:
-                self._notify_status_change(check.name, result.status)
-                self._results[check.name] = result
+                overall = HealthStatus.DEGRADED
+        elif self.strategy == "any":
+            if any(s == HealthStatus.HEALTHY for s in statuses):
+                overall = HealthStatus.HEALTHY
+            else:
+                overall = HealthStatus.UNHEALTHY
+        elif self.strategy == "majority":
+            healthy_count = sum(1 for s in statuses if s == HealthStatus.HEALTHY)
+            if healthy_count / len(statuses) >= self.unhealthy_threshold:
+                overall = HealthStatus.HEALTHY
+            elif any(s == HealthStatus.UNHEALTHY for s in statuses):
+                overall = HealthStatus.UNHEALTHY
+            else:
+                overall = HealthStatus.DEGRADED
+        else:
+            overall = HealthStatus.UNKNOWN
 
-        return self._results
+        unhealthy = [r for r in results if r.status == HealthStatus.UNHEALTHY]
+        message = f"{len([r for r in results if r.is_healthy])}/{len(results)} checks healthy"
 
-    def _notify_status_change(self, name: str, new_status: HealthStatus) -> None:
-        """Notify if status changed."""
-        old_status = self._last_status.get(name, HealthStatus.UNKNOWN)
-        if old_status != new_status and self._on_status_change:
-            self._on_status_change(name, old_status, new_status)
-        self._last_status[name] = new_status
+        return HealthCheckResult(
+            name=self.name,
+            status=overall,
+            message=message,
+            details={"checks": [r.to_dict() for r in results]},
+        )
 
-    def get_aggregate_status(self) -> HealthStatus:
-        """Get aggregate health status across all checks."""
-        if not self._results:
-            return HealthStatus.UNKNOWN
 
-        statuses = [r.status for r in self._results.values()]
-        if all(s == HealthStatus.HEALTHY for s in statuses):
-            return HealthStatus.HEALTHY
-        elif any(s == HealthStatus.UNHEALTHY for s in statuses):
-            return HealthStatus.UNHEALTHY
-        return HealthStatus.DEGRADED
+class HealthCheckRegistry:
+    """Registry for managing health checks."""
 
-    def get_results(self) -> dict[str, HealthCheckResult]:
-        """Get all health check results."""
-        return self._results.copy()
+    def __init__(self):
+        self._checks: dict[str, HealthCheck] = {}
+
+    def register(self, check: HealthCheck) -> None:
+        """Register a health check."""
+        self._checks[check.name] = check
+
+    def unregister(self, name: str) -> bool:
+        """Unregister a health check."""
+        if name in self._checks:
+            del self._checks[name]
+            return True
+        return False
+
+    def get(self, name: str) -> Optional[HealthCheck]:
+        """Get a health check by name."""
+        return self._checks.get(name)
+
+    async def check_all(self) -> dict[str, HealthCheckResult]:
+        """Run all registered health checks."""
+        results = {}
+        for name, check in self._checks.items():
+            results[name] = await check.check_with_retry()
+        return results
+
+    def get_status(self) -> dict[str, str]:
+        """Get status of all checks."""
+        return {
+            name: check.last_result.status.value if check.last_result else "unknown"
+            for name, check in self._checks.items()
+        }
