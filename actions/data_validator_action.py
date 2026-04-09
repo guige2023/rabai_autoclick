@@ -1,44 +1,31 @@
-"""Data Validator Action Module.
+"""Data validation utilities for API inputs and outputs.
 
-Provides schema validation, type checking, range validation,
-and custom validation rules for data records.
+This module provides comprehensive data validation:
+- Schema-based validation
+- Type checking
+- Range and constraint validation
+- Custom validator functions
+
+Example:
+    >>> from actions.data_validator_action import Validator, Schema
+    >>> schema = Schema({"name": str, "age": int})
+    >>> validator = Validator(schema)
+    >>> validator.validate({"name": "Alice", "age": 30})
 """
+
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Pattern, Set, Union
 import logging
+from typing import Any, Optional, Callable
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
 
-class ValidationType(Enum):
-    """Validation type."""
-    REQUIRED = "required"
-    TYPE = "type"
-    RANGE = "range"
-    PATTERN = "pattern"
-    ENUM = "enum"
-    CUSTOM = "custom"
-    LENGTH = "length"
-
-
-@dataclass
-class ValidationRule:
-    """Single validation rule."""
-    field: str
-    validation_type: ValidationType
-    rule: Any = None
-    message: str = ""
-    validator: Optional[Callable[[Any], bool]] = None
-
-
 @dataclass
 class ValidationError:
-    """Validation error."""
+    """A validation error."""
     field: str
     message: str
     value: Any = None
@@ -46,284 +33,226 @@ class ValidationError:
 
 @dataclass
 class ValidationResult:
-    """Validation result."""
+    """Result of a validation operation."""
     valid: bool
-    errors: List[ValidationError] = field(default_factory=list)
+    errors: list[ValidationError] = field(default_factory=list)
+
+    @property
+    def error_messages(self) -> list[str]:
+        """Get flat list of error messages."""
+        return [e.message for e in self.errors]
 
 
-class DataValidatorAction:
-    """Data validator with multiple validation types.
+class FieldValidator:
+    """Validator for a single field."""
 
-    Example:
-        validator = DataValidatorAction()
+    def __init__(self, field_name: str) -> None:
+        self.field_name = field_name
+        self._validators: list[Callable[[Any], Optional[str]]] = []
 
-        validator.add_rule(ValidationRule(
-            field="email",
-            validation_type=ValidationType.PATTERN,
-            rule=r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$",
-            message="Invalid email format"
-        ))
-
-        validator.add_rule(ValidationRule(
-            field="age",
-            validation_type=ValidationType.RANGE,
-            rule={"min": 0, "max": 150},
-            message="Age must be between 0 and 150"
-        ))
-
-        result = validator.validate({
-            "email": "user@example.com",
-            "age": 25
-        })
-    """
-
-    def __init__(self) -> None:
-        self._rules: List[ValidationRule] = []
-        self._compiled_patterns: Dict[str, Pattern] = {}
-
-    def add_rule(self, rule: ValidationRule) -> "DataValidatorAction":
-        """Add validation rule.
-
-        Returns self for chaining.
-        """
-        self._rules.append(rule)
+    def required(self) -> FieldValidator:
+        """Field cannot be None or empty."""
+        def validate(value: Any) -> Optional[str]:
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return f"{self.field_name} is required"
+            return None
+        self._validators.append(validate)
         return self
 
-    def add_required(self, field: str) -> "DataValidatorAction":
-        """Add required field rule."""
-        self.add_rule(ValidationRule(
-            field=field,
-            validation_type=ValidationType.REQUIRED,
-            message=f"{field} is required"
-        ))
+    def type_check(self, expected_type: type) -> FieldValidator:
+        """Validate field type."""
+        def validate(value: Any) -> Optional[str]:
+            if value is not None and not isinstance(value, expected_type):
+                return f"{self.field_name} must be {expected_type.__name__}"
+            return None
+        self._validators.append(validate)
         return self
 
-    def add_type_check(
+    def range_check(
         self,
-        field: str,
-        expected_type: type,
-    ) -> "DataValidatorAction":
-        """Add type check rule."""
-        self.add_rule(ValidationRule(
-            field=field,
-            validation_type=ValidationType.TYPE,
-            rule=expected_type,
-            message=f"{field} must be of type {expected_type.__name__}"
-        ))
+        min_val: Optional[Any] = None,
+        max_val: Optional[Any] = None,
+    ) -> FieldValidator:
+        """Validate numeric range."""
+        def validate(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            if min_val is not None and value < min_val:
+                return f"{self.field_name} must be >= {min_val}"
+            if max_val is not None and value > max_val:
+                return f"{self.field_name} must be <= {max_val}"
+            return None
+        self._validators.append(validate)
         return self
 
-    def add_range(
+    def length_check(
         self,
-        field: str,
-        min_val: Optional[float] = None,
-        max_val: Optional[float] = None,
-    ) -> "DataValidatorAction":
-        """Add range validation rule."""
-        self.add_rule(ValidationRule(
-            field=field,
-            validation_type=ValidationType.RANGE,
-            rule={"min": min_val, "max": max_val},
-            message=f"{field} must be between {min_val} and {max_val}"
-        ))
-        return self
-
-    def add_pattern(
-        self,
-        field: str,
-        pattern: str,
-        message: Optional[str] = None,
-    ) -> "DataValidatorAction":
-        """Add pattern match rule."""
-        self.add_rule(ValidationRule(
-            field=field,
-            validation_type=ValidationType.PATTERN,
-            rule=pattern,
-            message=message or f"{field} does not match required pattern"
-        ))
-        return self
-
-    def add_enum(
-        self,
-        field: str,
-        allowed_values: List[Any],
-    ) -> "DataValidatorAction":
-        """Add enum validation rule."""
-        self.add_rule(ValidationRule(
-            field=field,
-            validation_type=ValidationType.ENUM,
-            rule=allowed_values,
-            message=f"{field} must be one of {allowed_values}"
-        ))
-        return self
-
-    def add_length(
-        self,
-        field: str,
         min_length: Optional[int] = None,
         max_length: Optional[int] = None,
-    ) -> "DataValidatorAction":
-        """Add length validation rule."""
-        self.add_rule(ValidationRule(
-            field=field,
-            validation_type=ValidationType.LENGTH,
-            rule={"min": min_length, "max": max_length},
-            message=f"{field} length must be between {min_length} and {max_length}"
-        ))
+    ) -> FieldValidator:
+        """Validate string/list length."""
+        def validate(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            length = len(value)
+            if min_length is not None and length < min_length:
+                return f"{self.field_name} length must be >= {min_length}"
+            if max_length is not None and length > max_length:
+                return f"{self.field_name} length must be <= {max_length}"
+            return None
+        self._validators.append(validate)
         return self
 
-    def add_custom(
-        self,
-        field: str,
-        validator: Callable[[Any], bool],
-        message: str,
-    ) -> "DataValidatorAction":
-        """Add custom validation rule."""
-        self.add_rule(ValidationRule(
-            field=field,
-            validation_type=ValidationType.CUSTOM,
-            validator=validator,
-            message=message
-        ))
+    def pattern(self, regex: str) -> FieldValidator:
+        """Validate string pattern."""
+        compiled = re.compile(regex)
+        def validate(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                return f"{self.field_name} must be a string for pattern matching"
+            if not compiled.match(value):
+                return f"{self.field_name} does not match pattern {regex}"
+            return None
+        self._validators.append(validate)
         return self
 
-    def validate(self, data: Dict[str, Any]) -> ValidationResult:
-        """Validate data against all rules.
+    def one_of(self, choices: list[Any]) -> FieldValidator:
+        """Validate value is one of choices."""
+        def validate(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            if value not in choices:
+                return f"{self.field_name} must be one of {choices}"
+            return None
+        self._validators.append(validate)
+        return self
+
+    def custom(self, func: Callable[[Any], bool]) -> FieldValidator:
+        """Add a custom validator function."""
+        def validate(value: Any) -> Optional[str]:
+            try:
+                if not func(value):
+                    return f"{self.field_name} failed custom validation"
+            except Exception as e:
+                return f"{self.field_name} validation error: {e}"
+            return None
+        self._validators.append(validate)
+        return self
+
+    def validate(self, value: Any) -> list[ValidationError]:
+        """Run all validators.
+
+        Returns:
+            List of ValidationErrors (empty if valid).
+        """
+        errors = []
+        for validator in self._validators:
+            error_msg = validator(value)
+            if error_msg:
+                errors.append(ValidationError(
+                    field=self.field_name,
+                    message=error_msg,
+                    value=value,
+                ))
+        return errors
+
+
+class SchemaValidator:
+    """Validate data against a schema."""
+
+    def __init__(self, schema: dict[str, Any]) -> None:
+        self.schema = schema
+
+    def validate(self, data: dict[str, Any]) -> ValidationResult:
+        """Validate data against schema.
 
         Args:
-            data: Data record to validate
+            data: Data to validate.
 
         Returns:
-            ValidationResult with errors if any
+            ValidationResult with errors if any.
         """
-        errors: List[ValidationError] = []
+        errors: list[ValidationError] = []
+        for field_name, rules in self.schema.items():
+            value = data.get(field_name)
+            if isinstance(rules, dict):
+                errors.extend(self._validate_field_rules(field_name, value, rules))
+            elif isinstance(rules, type):
+                if value is not None and not isinstance(value, rules):
+                    errors.append(ValidationError(
+                        field=field_name,
+                        message=f"must be {rules.__name__}",
+                        value=value,
+                    ))
+        return ValidationResult(valid=len(errors) == 0, errors=errors)
 
-        for rule in self._rules:
-            error = self._validate_rule(data, rule)
-            if error:
-                errors.append(error)
-
-        return ValidationResult(
-            valid=len(errors) == 0,
-            errors=errors
-        )
-
-    def validate_batch(
+    def _validate_field_rules(
         self,
-        data_list: List[Dict[str, Any]],
-    ) -> List[ValidationResult]:
-        """Validate batch of records.
+        field_name: str,
+        value: Any,
+        rules: dict[str, Any],
+    ) -> list[ValidationError]:
+        """Validate a field against its rules."""
+        errors = []
+        validator = FieldValidator(field_name)
+        if rules.get("required"):
+            validator.required()
+        if "type" in rules:
+            validator.type_check(rules["type"])
+        if "min" in rules or "max" in rules:
+            validator.range_check(min_val=rules.get("min"), max_val=rules.get("max"))
+        if "min_length" in rules or "max_length" in rules:
+            validator.length_check(
+                min_length=rules.get("min_length"),
+                max_length=rules.get("max_length"),
+            )
+        if "pattern" in rules:
+            validator.pattern(rules["pattern"])
+        if "choices" in rules:
+            validator.one_of(rules["choices"])
+        errors.extend(validator.validate(value))
+        return errors
+
+
+class Validator:
+    """Main validation class with fluent API."""
+
+    def __init__(self, schema: Optional[dict[str, Any]] = None) -> None:
+        self.schema = schema
+        self._field_validators: dict[str, FieldValidator] = {}
+
+    def field(self, name: str) -> FieldValidator:
+        """Get or create a field validator."""
+        if name not in self._field_validators:
+            self._field_validators[name] = FieldValidator(name)
+        return self._field_validators[name]
+
+    def validate(self, data: dict[str, Any]) -> ValidationResult:
+        """Validate data against configured schema.
 
         Returns:
-            List of ValidationResults
+            ValidationResult with errors if any.
         """
-        return [self.validate(data) for data in data_list]
+        all_errors: list[ValidationError] = []
+        for field_name, validator in self._field_validators.items():
+            value = data.get(field_name)
+            all_errors.extend(validator.validate(value))
+        if self.schema:
+            schema_result = SchemaValidator(self.schema).validate(data)
+            all_errors.extend(schema_result.errors)
+        return ValidationResult(valid=len(all_errors) == 0, errors=all_errors)
 
-    def _validate_rule(
-        self,
-        data: Dict[str, Any],
-        rule: ValidationRule,
-    ) -> Optional[ValidationError]:
-        """Validate single rule."""
-        value = data.get(rule.field)
 
-        if rule.validation_type == ValidationType.REQUIRED:
-            if value is None or (isinstance(value, str) and not value.strip()):
-                return ValidationError(
-                    field=rule.field,
-                    message=rule.message or f"{rule.field} is required",
-                    value=value
-                )
+def validate_json_schema(data: Any, schema: dict[str, Any]) -> ValidationResult:
+    """Validate data against a JSON-like schema.
 
-        elif rule.validation_type == ValidationType.TYPE:
-            if value is not None and not isinstance(value, rule.rule):
-                return ValidationError(
-                    field=rule.field,
-                    message=rule.message or f"{rule.field} must be {rule.rule.__name__}",
-                    value=value
-                )
+    Args:
+        data: Data to validate.
+        schema: Schema definition.
 
-        elif rule.validation_type == ValidationType.RANGE:
-            if value is not None:
-                range_spec = rule.rule
-                min_val = range_spec.get("min")
-                max_val = range_spec.get("max")
-
-                if min_val is not None and value < min_val:
-                    return ValidationError(
-                        field=rule.field,
-                        message=rule.message or f"{rule.field} must be >= {min_val}",
-                        value=value
-                    )
-
-                if max_val is not None and value > max_val:
-                    return ValidationError(
-                        field=rule.field,
-                        message=rule.message or f"{rule.field} must be <= {max_val}",
-                        value=value
-                    )
-
-        elif rule.validation_type == ValidationType.PATTERN:
-            if value is not None:
-                pattern = rule.rule
-                if pattern not in self._compiled_patterns:
-                    self._compiled_patterns[pattern] = re.compile(pattern)
-
-                if not self._compiled_patterns[pattern].match(str(value)):
-                    return ValidationError(
-                        field=rule.field,
-                        message=rule.message,
-                        value=value
-                    )
-
-        elif rule.validation_type == ValidationType.ENUM:
-            if value is not None and value not in rule.rule:
-                return ValidationError(
-                    field=rule.field,
-                    message=rule.message,
-                    value=value
-                )
-
-        elif rule.validation_type == ValidationType.LENGTH:
-            if value is not None:
-                length_spec = rule.rule
-                length = len(value)
-                min_len = length_spec.get("min")
-                max_len = length_spec.get("max")
-
-                if min_len is not None and length < min_len:
-                    return ValidationError(
-                        field=rule.field,
-                        message=rule.message or f"{rule.field} length must be >= {min_len}",
-                        value=value
-                    )
-
-                if max_len is not None and length > max_len:
-                    return ValidationError(
-                        field=rule.field,
-                        message=rule.message or f"{rule.field} length must be <= {max_len}",
-                        value=value
-                    )
-
-        elif rule.validation_type == ValidationType.CUSTOM:
-            if value is not None and rule.validator:
-                try:
-                    if not rule.validator(value):
-                        return ValidationError(
-                            field=rule.field,
-                            message=rule.message,
-                            value=value
-                        )
-                except Exception as e:
-                    logger.error(f"Custom validator error for {rule.field}: {e}")
-                    return ValidationError(
-                        field=rule.field,
-                        message=f"Validation error: {str(e)}",
-                        value=value
-                    )
-
-        return None
-
-    def clear_rules(self) -> None:
-        """Clear all validation rules."""
-        self._rules.clear()
-        self._compiled_patterns.clear()
+    Returns:
+        ValidationResult.
+    """
+    validator = Validator(schema)
+    return validator.validate(data if isinstance(data, dict) else {})

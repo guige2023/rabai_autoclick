@@ -1,223 +1,247 @@
-"""API Batch Action Module.
+"""Batch API operations with parallel execution.
 
-Provides batch request processing with grouping,
-parallel execution, and result aggregation.
+This module provides batch processing capabilities for API operations:
+- Parallel execution with configurable concurrency
+- Batch request splitting
+- Result aggregation and error handling
+
+Example:
+    >>> from actions.api_batch_action import BatchProcessor
+    >>> processor = BatchProcessor(max_concurrency=5)
+    >>> results = await processor.execute_batch(api_calls)
 """
+
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+from collections import deque
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 
 @dataclass
 class BatchItem:
-    """Single batch item."""
+    """A single item in a batch operation."""
     id: str
-    data: Any
+    operation: Callable[..., Any]
+    args: tuple[Any, ...] = field(default_factory=tuple)
+    kwargs: dict[str, Any] = field(default_factory=dict)
     priority: int = 0
+    retries: int = 0
+    max_retries: int = 3
 
 
 @dataclass
 class BatchResult:
-    """Batch operation result."""
-    item_id: str
+    """Result of a batch operation."""
+    id: str
     success: bool
-    result: Any = None
+    data: Any = None
     error: Optional[str] = None
+    duration: float = 0.0
 
 
-class APIBatchAction:
-    """Batch request processor.
+@dataclass
+class BatchResponse:
+    """Response from a batch execution."""
+    results: list[BatchResult]
+    total_duration: float
+    success_count: int
+    failure_count: int
 
-    Example:
-        batcher = APIBatchAction()
 
-        batcher.register_handler(
-            lambda items: [api.process(item) for item in items]
-        )
+class BatchProcessor:
+    """Process API operations in batches with concurrency control.
 
-        await batcher.add("id1", {"data": "value1"})
-        await batcher.add("id2", {"data": "value2"})
-
-        results = await batcher.flush()
+    Attributes:
+        max_concurrency: Maximum concurrent operations.
+        batch_size: Maximum items per batch.
     """
 
     def __init__(
         self,
-        max_batch_size: int = 100,
-        max_wait_ms: float = 100.0,
-        max_concurrency: int = 5,
+        max_concurrency: int = 10,
+        batch_size: int = 100,
     ) -> None:
-        self.max_batch_size = max_batch_size
-        self.max_wait_ms = max_wait_ms
         self.max_concurrency = max_concurrency
+        self.batch_size = batch_size
+        self._semaphore: Optional[asyncio.Semaphore] = None
 
-        self._items: List[BatchItem] = []
-        self._handler: Optional[Callable] = None
-        self._lock = asyncio.Lock()
-        self._results: Dict[str, BatchResult] = {}
-        self._flush_task: Optional[asyncio.Task] = None
-        self._running = False
-
-    def register_handler(
+    async def execute_batch(
         self,
-        handler: Callable[[List[BatchItem]], List[Any]],
-    ) -> None:
-        """Register batch processing handler.
+        items: list[BatchItem],
+    ) -> BatchResponse:
+        """Execute a batch of operations.
 
         Args:
-            handler: Function that receives batch and returns list of results
-        """
-        self._handler = handler
-
-    async def add(
-        self,
-        item_id: str,
-        data: Any,
-        priority: int = 0,
-    ) -> None:
-        """Add item to batch.
-
-        Args:
-            item_id: Unique identifier for item
-            data: Item data
-            priority: Higher = processed sooner
-        """
-        async with self._lock:
-            self._items.append(BatchItem(
-                id=item_id,
-                data=data,
-                priority=priority,
-            ))
-
-            if len(self._items) >= self.max_batch_size:
-                await self._execute_batch()
-
-    async def add_many(
-        self,
-        items: List[Dict[str, Any]],
-    ) -> None:
-        """Add multiple items to batch.
-
-        Args:
-            items: List of dicts with 'id' and 'data' keys
-        """
-        for item in items:
-            await self.add(
-                item["id"],
-                item.get("data"),
-                item.get("priority", 0)
-            )
-
-    async def flush(self) -> List[BatchResult]:
-        """Flush current batch and return results.
+            items: List of BatchItems to execute.
 
         Returns:
-            List of BatchResults
+            BatchResponse with all results.
         """
-        async with self._lock:
-            return await self._execute_batch()
+        if asyncio.get_event_loop().is_running():
+            self._semaphore = asyncio.Semaphore(self.max_concurrency)
+        else:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._semaphore = asyncio.Semaphore(self.max_concurrency)
 
-    async def _execute_batch(self) -> List[BatchResult]:
-        """Execute current batch."""
-        if not self._items:
-            return []
+        start_time = time.time()
+        tasks = [self._execute_item(item) for item in items]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        if not self._handler:
-            logger.error("No handler registered for batch processing")
-            return []
-
-        batch = self._items[:]
-        self._items.clear()
-
-        sorted_batch = sorted(batch, key=lambda x: -x.priority)
-
-        results: List[BatchResult] = []
-
-        try:
-            if asyncio.iscoroutinefunction(self._handler):
-                raw_results = await self._handler(sorted_batch)
+        batch_results: list[BatchResult] = []
+        for item, result in zip(items, results):
+            if isinstance(result, Exception):
+                batch_results.append(BatchResult(
+                    id=item.id,
+                    success=False,
+                    error=str(result),
+                ))
             else:
-                raw_results = self._handler(sorted_batch)
+                batch_results.append(result)
 
-            for item, result in zip(sorted_batch, raw_results):
-                batch_result = BatchResult(
-                    item_id=item.id,
+        total_duration = time.time() - start_time
+        success_count = sum(1 for r in batch_results if r.success)
+        failure_count = len(batch_results) - success_count
+
+        return BatchResponse(
+            results=batch_results,
+            total_duration=total_duration,
+            success_count=success_count,
+            failure_count=failure_count,
+        )
+
+    async def _execute_item(self, item: BatchItem) -> BatchResult:
+        """Execute a single batch item."""
+        if not self._semaphore:
+            self._semaphore = asyncio.Semaphore(self.max_concurrency)
+
+        async with self._semaphore:
+            start_time = time.time()
+            try:
+                if asyncio.iscoroutinefunction(item.operation):
+                    result = await item.operation(*item.args, **item.kwargs)
+                else:
+                    result = item.operation(*item.args, **item.kwargs)
+                duration = time.time() - start_time
+                return BatchResult(
+                    id=item.id,
                     success=True,
-                    result=result,
+                    data=result,
+                    duration=duration,
                 )
-                results.append(batch_result)
-                self._results[item.id] = batch_result
-
-        except Exception as e:
-            logger.error(f"Batch processing error: {e}")
-
-            for item in sorted_batch:
-                batch_result = BatchResult(
-                    item_id=item.id,
+            except Exception as e:
+                duration = time.time() - start_time
+                if item.retries < item.max_retries:
+                    item.retries += 1
+                    logger.info(f"Retrying item {item.id}, attempt {item.retries}")
+                    return await self._execute_item(item)
+                return BatchResult(
+                    id=item.id,
                     success=False,
                     error=str(e),
+                    duration=duration,
                 )
-                results.append(batch_result)
-                self._results[item.id] = batch_result
 
-        return results
+    def split_batches(
+        self,
+        items: list[Any],
+        batch_size: Optional[int] = None,
+    ) -> list[list[Any]]:
+        """Split items into batches.
 
-    async def start(self) -> None:
-        """Start background batch processing."""
-        if self._running:
-            return
+        Args:
+            items: Items to split.
+            batch_size: Optional custom batch size.
 
-        self._running = True
-        self._flush_task = asyncio.create_task(self._background_flush())
+        Returns:
+            List of batches.
+        """
+        size = batch_size or self.batch_size
+        return [items[i:i + size] for i in range(0, len(items), size)]
 
-    async def stop(self) -> None:
-        """Stop background batch processing."""
-        self._running = False
 
-        if self._flush_task:
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
+class BatchQueue:
+    """Queue for managing batch operations with priorities.
 
-        await self.flush()
+    Supports priority-based ordering and batch formation.
+    """
 
-    async def _background_flush(self) -> None:
-        """Background flush loop."""
-        while self._running:
-            try:
-                await asyncio.sleep(self.max_wait_ms / 1000.0)
+    def __init__(self, batch_size: int = 100) -> None:
+        self.batch_size = batch_size
+        self._queue: deque[BatchItem] = deque()
 
-                async with self._lock:
-                    if self._items:
-                        await self._execute_batch()
+    def enqueue(
+        self,
+        id: str,
+        operation: Callable[..., Any],
+        *args: Any,
+        priority: int = 0,
+        **kwargs: Any,
+    ) -> None:
+        """Add an item to the queue.
 
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Background flush error: {e}")
+        Args:
+            id: Unique identifier for the item.
+            operation: The operation to execute.
+            *args: Positional arguments for the operation.
+            priority: Priority (higher = earlier execution).
+            **kwargs: Keyword arguments for the operation.
+        """
+        item = BatchItem(
+            id=id,
+            operation=operation,
+            args=args,
+            kwargs=kwargs,
+            priority=priority,
+        )
+        self._queue.append(item)
+        self._queue = deque(sorted(self._queue, key=lambda x: -x.priority))
 
-    def get_result(self, item_id: str) -> Optional[BatchResult]:
-        """Get result for specific item."""
-        return self._results.get(item_id)
+    def dequeue(self, count: Optional[int] = None) -> list[BatchItem]:
+        """Get items from the queue.
 
-    def get_stats(self) -> Dict[str, Any]:
-        """Get batch statistics."""
-        return {
-            "pending_items": len(self._items),
-            "total_results": len(self._results),
-            "successful": sum(
-                1 for r in self._results.values() if r.success
-            ),
-            "failed": sum(
-                1 for r in self._results.values() if not r.success
-            ),
-        }
+        Args:
+            count: Number of items to get.
+
+        Returns:
+            List of BatchItems.
+        """
+        count = count or self.batch_size
+        items = list(self._queue)[:count]
+        for _ in range(min(count, len(self._queue))):
+            self._queue.popleft()
+        return items
+
+    def size(self) -> int:
+        """Get number of items in queue."""
+        return len(self._queue)
+
+    def clear(self) -> None:
+        """Clear all items from queue."""
+        self._queue.clear()
+
+
+def batch_operation(
+    id: str,
+    operation: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> BatchItem:
+    """Create a batch item from an operation.
+
+    Args:
+        id: Unique identifier.
+        operation: The operation to execute.
+        *args: Positional arguments.
+        **kwargs: Keyword arguments.
+
+    Returns:
+        BatchItem ready for execution.
+    """
+    return BatchItem(id=id, operation=operation, args=args, kwargs=kwargs)
