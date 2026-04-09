@@ -1,271 +1,429 @@
 """
 API Gateway Action Module.
 
-Provides unified API gateway with routing, authentication,
-rate limiting, and request/response transformation.
+Provides API gateway functionality including routing,
+rate limiting, authentication, request/response transformation,
+and upstream management for microservices architectures.
 """
 
-import asyncio
+import time
 import hashlib
 import hmac
-import time
+import json
+import threading
+from typing import Optional, Dict, Any, List, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
-
-from .api_rate_limiter_action import APIRateLimiterAction, RateLimitStrategy
+from collections import defaultdict
 
 
 class AuthType(Enum):
     """Authentication types."""
     NONE = "none"
     API_KEY = "api_key"
-    Bearer = "bearer"
-    HMAC = "hmac"
-    BASIC = "basic"
+    BEARER_TOKEN = "bearer_token"
+    BASIC_AUTH = "basic_auth"
+    HMAC_SIGNATURE = "hmac_signature"
+    JWT = "jwt"
 
 
 @dataclass
 class Route:
     """API route definition."""
     path: str
-    method: str
-    handler: Callable
-    auth_type: AuthType = AuthType.NONE
-    auth_config: dict = field(default_factory=dict)
-    rate_limit: Optional[dict] = None
+    method: str  # GET, POST, etc.
+    upstream: str  # upstream server ID
+    upstream_path: Optional[str] = None  # path on upstream
+    auth: AuthType = AuthType.NONE
+    rate_limit: Optional[int] = None  # requests per minute
     timeout: float = 30.0
-    transforms: dict = field(default_factory=dict)
+    retry_attempts: int = 0
+    transforms: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class UpstreamServer:
+    """Upstream server definition."""
+    id: str
+    host: str
+    port: int
+    weight: int = 1
+    is_healthy: bool = True
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}"
 
 
 @dataclass
 class GatewayConfig:
-    """Gateway configuration."""
-    prefix: str = "/api/v1"
+    """Configuration for API gateway."""
     default_timeout: float = 30.0
-    default_rate_limit: float = 100.0
-    enable_logging: bool = True
-    enable_metrics: bool = True
+    default_rate_limit: int = 100  # per minute
+    max_retries: int = 3
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_timeout: float = 60.0
+    request_buffer_size: int = 1000
+    response_buffer_size: int = 10000
 
 
 @dataclass
-class Request:
-    """API request wrapper."""
-    path: str
+class GatewayRequest:
+    """Incoming gateway request."""
     method: str
-    headers: dict
-    query_params: dict
-    body: Any
-    ip: str = ""
-    user_agent: str = ""
+    path: str
+    headers: Dict[str, str]
+    query_params: Dict[str, str]
+    body: Optional[bytes] = None
+    client_ip: Optional[str] = None
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
-class Response:
-    """API response wrapper."""
+class GatewayResponse:
+    """Outgoing gateway response."""
     status_code: int
-    body: Any
-    headers: dict = field(default_factory=dict)
+    headers: Dict[str, str]
+    body: Optional[bytes] = None
+    upstream: Optional[str] = None
+    duration_ms: float = 0.0
+    error: Optional[str] = None
 
 
 @dataclass
-class GatewayMetrics:
-    """Gateway metrics."""
+class GatewayStats:
+    """Gateway statistics."""
     total_requests: int = 0
     successful_requests: int = 0
     failed_requests: int = 0
-    total_latency: float = 0.0
-
-    @property
-    def avg_latency(self) -> float:
-        return self.total_latency / self.total_requests if self.total_requests else 0.0
-
-
-class APIKeyAuth:
-    """API key authentication handler."""
-
-    def __init__(self, api_keys: dict[str, dict]):
-        self._keys = api_keys
-
-    def validate(self, request: Request) -> Optional[str]:
-        """Validate API key and return user/client ID."""
-        key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
-        if key in self._keys:
-            return self._keys[key].get("client_id")
-        return None
-
-
-class HMACAuth:
-    """HMAC signature authentication handler."""
-
-    def __init__(self, secrets: dict[str, str]):
-        self._secrets = secrets
-
-    def validate(self, request: Request) -> Optional[str]:
-        """Validate HMAC signature."""
-        client_id = request.headers.get("X-Client-ID")
-        signature = request.headers.get("X-Signature")
-        timestamp = request.headers.get("X-Timestamp")
-
-        if not all([client_id, signature, timestamp]):
-            return None
-
-        if client_id not in self._secrets:
-            return None
-
-        secret = self._secrets[client_id]
-        message = f"{request.path}:{timestamp}:{request.body}"
-        expected = hmac.new(
-            secret.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).hexdigest()
-
-        if hmac.compare_digest(signature, expected):
-            return client_id
-        return None
-
-
-class BearerAuth:
-    """Bearer token authentication handler."""
-
-    def __init__(self, tokens: dict[str, dict]):
-        self._tokens = tokens
-
-    def validate(self, request: Request) -> Optional[str]:
-        """Validate bearer token."""
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return None
-
-        token = auth_header[7:]
-        if token in self._tokens:
-            return self._tokens[token].get("client_id")
-        return None
+    rejected_requests: int = 0
+    total_latency_ms: float = 0.0
+    requests_by_route: Dict[str, int] = field(default_factory=dict)
+    requests_by_upstream: Dict[str, int] = field(default_factory=dict)
 
 
 class APIGatewayAction:
     """
-    API Gateway with routing, auth, rate limiting.
+    API Gateway action with routing, authentication, and rate limiting.
 
-    Example:
-        gateway = APIGatewayAction(config=GatewayConfig(prefix="/api/v1"))
-
-        @gateway.route("/users", method="GET")
-        async def get_users(request):
-            return Response(200, {"users": []})
-
-        await gateway.serve()
+    Provides a complete API gateway solution for routing requests
+    to upstream services with authentication, authorization, and monitoring.
     """
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         self.config = config or GatewayConfig()
-        self._routes: list[Route] = []
-        self._auth_handlers: dict[AuthType, Any] = {}
-        self._rate_limiters: dict[str, APIRateLimiterAction] = {}
-        self.metrics = GatewayMetrics()
+        self._routes: Dict[str, Route] = {}  # key: "method:path"
+        self._upstreams: Dict[str, UpstreamServer] = {}
+        self._rate_limiters: Dict[str, List[float]] = defaultdict(list)
+        self._stats = GatewayStats()
+        self._lock = threading.RLock()
+        self._middleware: List[Callable] = []
+        self._auth_handlers: Dict[AuthType, Callable] = {}
+        self._circuit_breakers: Dict[str, int] = defaultdict(int)
+        self._circuit_breaker_last_failure: Dict[str, float] = {}
 
-    def route(
+    def add_upstream(self, upstream: UpstreamServer) -> "APIGatewayAction":
+        """Add an upstream server."""
+        with self._lock:
+            self._upstreams[upstream.id] = upstream
+        return self
+
+    def add_route(self, route: Route) -> "APIGatewayAction":
+        """Add a route."""
+        key = f"{route.method}:{route.path}"
+        with self._lock:
+            self._routes[key] = route
+        return self
+
+    def add_middleware(self, middleware: Callable) -> "APIGatewayAction":
+        """Add middleware function."""
+        self._middleware.append(middleware)
+        return self
+
+    def set_auth_handler(
         self,
-        path: str,
-        method: str = "GET",
-        auth_type: AuthType = AuthType.NONE,
-        auth_config: Optional[dict] = None,
-        rate_limit: Optional[float] = None,
-        timeout: Optional[float] = None
-    ):
-        """Decorator to register route."""
-        def decorator(func: Callable) -> Callable:
-            route = Route(
-                path=path,
-                method=method,
-                handler=func,
-                auth_type=auth_type,
-                auth_config=auth_config or {},
-                rate_limit={"requests_per_second": rate_limit} if rate_limit else None,
-                timeout=timeout or self.config.default_timeout
-            )
-            self._routes.append(route)
-            return func
-        return decorator
-
-    def register_auth(self, auth_type: AuthType, handler: Any) -> None:
-        """Register authentication handler."""
+        auth_type: AuthType,
+        handler: Callable[[GatewayRequest, Route], bool],
+    ) -> "APIGatewayAction":
+        """Set authentication handler for auth type."""
         self._auth_handlers[auth_type] = handler
+        return self
 
-    def _match_route(self, path: str, method: str) -> Optional[Route]:
-        """Match request to route."""
-        for route in self._routes:
-            if route.path == path and route.method.upper() == method.upper():
-                return route
+    def _get_route_key(self, method: str, path: str) -> Optional[str]:
+        """Find matching route key."""
+        # Exact match
+        key = f"{method}:{path}"
+        if key in self._routes:
+            return key
+
+        # Pattern match
+        for route_key in self._routes:
+            route_method, route_path = route_key.split(":", 1)
+            if route_method == method and self._match_path(route_path, path):
+                return route_key
+
         return None
 
-    async def _authenticate(self, route: Route, request: Request) -> bool:
+    def _match_path(self, pattern: str, path: str) -> bool:
+        """Match path against pattern."""
+        import re
+        # Convert pattern like /api/:id to regex
+        regex_pattern = re.sub(r":\w+", r"[^/]+", pattern)
+        regex_pattern = f"^{regex_pattern}$"
+        return bool(re.match(regex_pattern, path))
+
+    def _check_rate_limit(
+        self,
+        key: str,
+        limit: int,
+        window_seconds: float = 60.0,
+    ) -> bool:
+        """Check and update rate limit."""
+        now = time.time()
+        window_start = now - window_seconds
+
+        with self._lock:
+            # Clean old entries
+            self._rate_limiters[key] = [
+                t for t in self._rate_limiters[key] if t > window_start
+            ]
+
+            if len(self._rate_limiters[key]) >= limit:
+                return False
+
+            self._rate_limiters[key].append(now)
+            return True
+
+    def _check_circuit_breaker(self, upstream_id: str) -> bool:
+        """Check if circuit breaker allows requests."""
+        now = time.time()
+        key = upstream_id
+
+        if key in self._circuit_breakers:
+            failures = self._circuit_breakers[key]
+            if failures >= self.config.circuit_breaker_threshold:
+                last_failure = self._circuit_breaker_last_failure.get(key, 0)
+                if now - last_failure < self.config.circuit_breaker_timeout:
+                    return False
+                else:
+                    # Try again
+                    self._circuit_breakers[key] = 0
+        return True
+
+    def _record_upstream_failure(self, upstream_id: str) -> None:
+        """Record upstream failure for circuit breaker."""
+        with self._lock:
+            self._circuit_breakers[upstream_id] += 1
+            self._circuit_breaker_last_failure[upstream_id] = time.time()
+
+    def _record_upstream_success(self, upstream_id: str) -> None:
+        """Record upstream success."""
+        with self._lock:
+            if upstream_id in self._circuit_breakers:
+                self._circuit_breakers[upstream_id] = max(
+                    0, self._circuit_breakers[upstream_id] - 1
+                )
+
+    def _authenticate(self, request: GatewayRequest, route: Route) -> bool:
         """Authenticate request."""
-        if route.auth_type == AuthType.NONE:
+        if route.auth == AuthType.NONE:
             return True
 
-        handler = self._auth_handlers.get(route.auth_type)
-        if handler is None:
-            return False
+        handler = self._auth_handlers.get(route.auth)
+        if handler:
+            return handler(request, route)
 
-        return handler.validate(request) is not None
+        return True
 
-    async def _rate_limit(self, route: Route, client_id: str) -> bool:
-        """Apply rate limiting."""
-        if route.rate_limit is None:
-            return True
+    def _transform_request(
+        self,
+        request: GatewayRequest,
+        route: Route,
+    ) -> GatewayRequest:
+        """Transform request before forwarding."""
+        transforms = route.transforms.get("request", {})
 
-        if client_id not in self._rate_limiters:
-            self._rate_limiters[client_id] = APIRateLimiterAction(
-                requests_per_second=route.rate_limit.get("requests_per_second", 100),
-                burst_size=route.rate_limit.get("burst_size", 200),
-                strategy=RateLimitStrategy.TOKEN_BUCKET
-            )
+        if "headers" in transforms:
+            for key, value in transforms["headers"].items():
+                request.headers[key] = value
 
-        return await self._rate_limiters[client_id].acquire()
+        if "add_headers" in transforms:
+            request.headers.update(transforms["add_headers"])
 
-    async def _transform_request(self, route: Route, request: Request) -> Request:
-        """Transform request."""
+        if "remove_headers" in transforms:
+            for header in transforms["remove_headers"]:
+                request.headers.pop(header, None)
+
         return request
 
-    async def _transform_response(self, route: Route, response: Response) -> Response:
-        """Transform response."""
+    def _transform_response(
+        self,
+        response: GatewayResponse,
+        route: Route,
+    ) -> GatewayResponse:
+        """Transform response before returning."""
+        transforms = route.transforms.get("response", {})
+
+        if "headers" in transforms:
+            response.headers.update(transforms["headers"])
+
+        if "add_headers" in transforms:
+            response.headers.update(transforms["add_headers"])
+
+        if "remove_headers" in transforms:
+            for header in transforms["remove_headers"]:
+                response.headers.pop(header, None)
+
+        if "status_code" in transforms:
+            response.status_code = transforms["status_code"]
+
         return response
 
-    async def handle(self, request: Request) -> Response:
-        """Handle incoming request."""
-        start = time.monotonic()
-        self.metrics.total_requests += 1
+    async def handle_request_async(
+        self,
+        request: GatewayRequest,
+    ) -> GatewayResponse:
+        """
+        Handle incoming gateway request.
 
-        try:
-            route = self._match_route(request.path, request.method)
-            if route is None:
-                return Response(404, {"error": "Not found"})
+        Args:
+            request: Gateway request object
 
-            if not await self._authenticate(route, request):
-                return Response(401, {"error": "Unauthorized"})
+        Returns:
+            Gateway response object
+        """
+        start_time = time.time()
+        route_key = self._get_route_key(request.method, request.path)
 
-            client_id = request.headers.get("X-Client-ID", "anonymous")
-            if not await self._rate_limit(route, client_id):
-                return Response(429, {"error": "Rate limit exceeded"})
+        with self._lock:
+            self._stats.total_requests += 1
 
-            request = await self._transform_request(route, request)
-
-            result = await asyncio.wait_for(
-                route.handler(request),
-                timeout=route.timeout
+        # No route found
+        if route_key is None:
+            return GatewayResponse(
+                status_code=404,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"error": "Not Found"}).encode(),
+                error="No route found",
+                duration_ms=(time.time() - start_time) * 1000,
             )
 
-            response = await self._transform_response(route, result)
-            self.metrics.successful_requests += 1
+        route = self._routes[route_key]
+
+        # Rate limiting
+        if route.rate_limit:
+            rate_key = f"{route.method}:{route.path}"
+            if not self._check_rate_limit(rate_key, route.rate_limit):
+                with self._lock:
+                    self._stats.rejected_requests += 1
+                return GatewayResponse(
+                    status_code=429,
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps({"error": "Too Many Requests"}).encode(),
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+
+        # Authentication
+        if not self._authenticate(request, route):
+            with self._lock:
+                self._stats.rejected_requests += 1
+            return GatewayResponse(
+                status_code=401,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"error": "Unauthorized"}).encode(),
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+
+        # Circuit breaker check
+        if not self._check_circuit_breaker(route.upstream):
+            return GatewayResponse(
+                status_code=503,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"error": "Service Unavailable"}).encode(),
+                upstream=route.upstream,
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+
+        # Transform request
+        request = self._transform_request(request, route)
+
+        # Get upstream
+        upstream = self._upstreams.get(route.upstream)
+        if not upstream:
+            return GatewayResponse(
+                status_code=502,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"error": "Bad Gateway"}).encode(),
+                error="Upstream not found",
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+
+        # Run middleware
+        for middleware in self._middleware:
+            if asyncio.iscoroutinefunction(middleware):
+                request = await middleware(request)
+            else:
+                request = middleware(request)
+
+        # Make upstream request (simplified - actual implementation would use httpx/aiohttp)
+        try:
+            # Simulated upstream call
+            response = GatewayResponse(
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"message": "success"}).encode(),
+                upstream=upstream.id,
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+
+            self._record_upstream_success(upstream.id)
+
+            with self._lock:
+                self._stats.successful_requests += 1
+                self._stats.requests_by_route[route_key] = \
+                    self._stats.requests_by_route.get(route_key, 0) + 1
+                self._stats.requests_by_upstream[upstream.id] = \
+                    self._stats.requests_by_upstream.get(upstream.id, 0) + 1
+
+            # Transform response
+            response = self._transform_response(response, route)
+            response.duration_ms = (time.time() - start_time) * 1000
+
             return response
 
-        except asyncio.TimeoutError:
-            self.metrics.failed_requests += 1
-            return Response(504, {"error": "Gateway timeout"})
         except Exception as e:
-            self.metrics.failed_requests += 1
-            return Response(500, {"error": str(e)})
-        finally:
-            self.metrics.total_latency += time.monotonic() - start
+            self._record_upstream_failure(upstream.id)
+
+            with self._lock:
+                self._stats.failed_requests += 1
+
+            return GatewayResponse(
+                status_code=502,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"error": str(e)}).encode(),
+                upstream=upstream.id,
+                error=str(e),
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+
+    def handle_request(self, request: GatewayRequest) -> GatewayResponse:
+        """Handle request synchronously."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self.handle_request_async(request), loop
+                )
+                return future.result(timeout=request.headers.get("timeout", 30))
+            return asyncio.run(self.handle_request_async(request))
+        except Exception as e:
+            return GatewayResponse(
+                status_code=500,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"error": str(e)}).encode(),
+                error=str(e),
+            )
+
+    def get_stats(self) -> GatewayStats:
+        """Get gateway statistics."""
+        return self._stats
