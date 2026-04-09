@@ -17,7 +17,7 @@ class VisibilityResult:
         is_visible: bool,
         reason: str = "",
         viewport_bounds: Optional[Tuple[int, int, int, int]] = None,
-       遮挡元素: Optional[list] = None,
+       obscruing_elements: Optional[list] = None,
     ):
         """
         Initialize visibility result.
@@ -26,12 +26,12 @@ class VisibilityResult:
             is_visible: Whether element is visible.
             reason: Reason for visibility status.
             viewport_bounds: Visible bounds of element.
-            遮挡元素: List of obscuring elements.
+            obscruing_elements: List of obscuring elements.
         """
         self.is_visible = is_visible
         self.reason = reason
         self.viewport_bounds = viewport_bounds
-        self.obscuring_elements = 遮挡元素 or []
+        self.obscuring_elements = obscruing_elements or []
 
     def __repr__(self) -> str:
         return f"VisibilityResult(visible={self.is_visible}, reason='{self.reason}')"
