@@ -1,147 +1,276 @@
-"""API Throttle Action Module.
+"""API throttling and rate limiting action."""
 
-Implements token bucket and leaky bucket rate limiting algorithms
-for API request throttling with configurable capacities and refill rates.
-"""
+from __future__ import annotations
 
+import asyncio
 import time
-import threading
-import logging
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Optional
 
-logger = logging.getLogger(__name__)
+
+class ThrottleType(str, Enum):
+    """Type of throttling."""
+
+    TOKEN_BUCKET = "token_bucket"
+    SLIDING_WINDOW = "sliding_window"
+    FIXED_WINDOW = "fixed_window"
+    LEAKY_BUCKET = "leaky_bucket"
 
 
 @dataclass
-class TokenBucketConfig:
-    capacity: int = 100
-    refill_rate: float = 10.0
-    refill_interval_sec: float = 1.0
+class ThrottleConfig:
+    """Configuration for throttling."""
+
+    name: str
+    throttle_type: ThrottleType
+    rate: float  # requests per window
+    window_seconds: float
+    burst_size: Optional[float] = None
+    scope: str = "global"  # global, client, endpoint
 
 
 @dataclass
-class LeakyBucketConfig:
-    capacity: int = 100
-    leak_rate: float = 10.0
+class ThrottleResult:
+    """Result of throttle check."""
+
+    allowed: bool
+    wait_time: float = 0
+    current_rate: float = 0
+    remaining: int = 0
 
 
 class APIThrottleAction:
-    """Token bucket and leaky bucket rate limiter for API calls."""
+    """Implements rate limiting and throttling."""
 
-    def __init__(self) -> None:
-        self._buckets: Dict[str, Dict] = {}
-        self._lock = threading.RLock()
-
-    def create_token_bucket(
+    def __init__(
         self,
-        key: str,
-        capacity: int = 100,
-        refill_rate: float = 10.0,
-        refill_interval_sec: float = 1.0,
-    ) -> None:
-        with self._lock:
-            self._buckets[key] = {
-                "type": "token",
-                "tokens": float(capacity),
-                "capacity": capacity,
-                "refill_rate": refill_rate,
-                "refill_interval": refill_interval_sec,
-                "last_refill": time.time(),
+        on_throttled: Optional[Callable[[str, ThrottleResult], None]] = None,
+    ):
+        """Initialize throttler.
+
+        Args:
+            on_throttled: Callback when request is throttled.
+        """
+        self._configs: dict[str, ThrottleConfig] = {}
+        self._buckets: dict[str, dict] = {}
+        self._windows: dict[str, list[float]] = {}
+        self._on_throttled = on_throttled
+
+    def add_throttle(self, config: ThrottleConfig) -> None:
+        """Add a throttle configuration."""
+        self._configs[config.name] = config
+        self._initialize_throttle(config)
+
+    def _initialize_throttle(self, config: ThrottleConfig) -> None:
+        """Initialize throttle state."""
+        if config.throttle_type == ThrottleType.TOKEN_BUCKET:
+            self._buckets[config.name] = {
+                "tokens": config.burst_size or config.rate,
+                "last_update": time.time(),
+            }
+        elif config.throttle_type == ThrottleType.SLIDING_WINDOW:
+            self._windows[config.name] = []
+        elif config.throttle_type == ThrottleType.FIXED_WINDOW:
+            self._windows[config.name] = []
+            self._buckets[config.name] = {
+                "window_start": time.time(),
+                "count": 0,
+            }
+        elif config.throttle_type == ThrottleType.LEAKY_BUCKET:
+            self._buckets[config.name] = {
+                "level": 0.0,
+                "last_update": time.time(),
             }
 
-    def create_leaky_bucket(
-        self,
-        key: str,
-        capacity: int = 100,
-        leak_rate: float = 10.0,
-    ) -> None:
-        with self._lock:
-            self._buckets[key] = {
-                "type": "leaky",
-                "water": 0.0,
-                "capacity": capacity,
-                "leak_rate": leak_rate,
-                "last_leak": time.time(),
-            }
-
-    def acquire(self, key: str, tokens: int = 1) -> bool:
-        with self._lock:
-            bucket = self._buckets.get(key)
-            if not bucket:
-                return True
-            if bucket["type"] == "token":
-                return self._acquire_token_bucket(bucket, tokens)
-            else:
-                return self._acquire_leaky_bucket(bucket, tokens)
-
-    def _acquire_token_bucket(self, bucket: Dict, tokens: int) -> bool:
+    def _refill_token_bucket(self, name: str) -> None:
+        """Refill token bucket."""
+        config = self._configs[name]
+        bucket = self._buckets[name]
         now = time.time()
-        elapsed = now - bucket["last_refill"]
-        refill_count = elapsed / bucket["refill_interval"] * bucket["refill_rate"]
-        bucket["tokens"] = min(bucket["capacity"], bucket["tokens"] + refill_count)
-        bucket["last_refill"] = now
-        if bucket["tokens"] >= tokens:
-            bucket["tokens"] -= tokens
-            return True
-        return False
+        elapsed = now - bucket["last_update"]
 
-    def _acquire_leaky_bucket(self, bucket: Dict, tokens: int) -> bool:
+        refill_rate = config.rate / config.window_seconds
+        tokens_to_add = elapsed * refill_rate
+
+        bucket["tokens"] = min(
+            config.burst_size or config.rate,
+            bucket["tokens"] + tokens_to_add,
+        )
+        bucket["last_update"] = now
+
+    def _check_token_bucket(self, name: str, tokens_needed: float = 1.0) -> ThrottleResult:
+        """Check token bucket throttle."""
+        config = self._configs[name]
+        bucket = self._buckets[name]
+
+        self._refill_token_bucket(name)
+
+        if bucket["tokens"] >= tokens_needed:
+            bucket["tokens"] -= tokens_needed
+            return ThrottleResult(
+                allowed=True,
+                wait_time=0,
+                current_rate=config.rate,
+                remaining=int(bucket["tokens"]),
+            )
+        else:
+            tokens_deficit = tokens_needed - bucket["tokens"]
+            refill_time = tokens_deficit / (config.rate / config.window_seconds)
+            return ThrottleResult(
+                allowed=False,
+                wait_time=refill_time,
+                current_rate=config.rate,
+                remaining=0,
+            )
+
+    def _check_sliding_window(self, name: str) -> ThrottleResult:
+        """Check sliding window throttle."""
+        config = self._configs[name]
         now = time.time()
-        elapsed = now - bucket["last_leak"]
-        leaked = elapsed * bucket["leak_rate"]
-        bucket["water"] = max(0, bucket["water"] - leaked)
-        bucket["last_leak"] = now
-        if bucket["water"] + tokens <= bucket["capacity"]:
-            bucket["water"] += tokens
-            return True
-        return False
+        cutoff = now - config.window_seconds
 
-    def reset(self, key: str) -> bool:
-        with self._lock:
-            bucket = self._buckets.get(key)
-            if not bucket:
-                return False
-            if bucket["type"] == "token":
-                bucket["tokens"] = float(bucket["capacity"])
-                bucket["last_refill"] = time.time()
-            else:
-                bucket["water"] = 0.0
-                bucket["last_leak"] = time.time()
-            return True
+        if name not in self._windows:
+            self._windows[name] = []
 
-    def get_status(self, key: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            bucket = self._buckets.get(key)
-            if not bucket:
-                return None
-            if bucket["type"] == "token":
-                now = time.time()
-                elapsed = now - bucket["last_refill"]
-                refill_count = elapsed / bucket["refill_interval"] * bucket["refill_rate"]
-                current_tokens = min(bucket["capacity"], bucket["tokens"] + refill_count)
-                return {
-                    "key": key,
-                    "type": "token",
-                    "current_tokens": current_tokens,
-                    "capacity": bucket["capacity"],
-                    "refill_rate": bucket["refill_rate"],
-                    "utilization": current_tokens / bucket["capacity"],
-                }
-            else:
-                now = time.time()
-                elapsed = now - bucket["last_leak"]
-                leaked = elapsed * bucket["leak_rate"]
-                current_water = max(0, bucket["water"] - leaked)
-                return {
-                    "key": key,
-                    "type": "leaky",
-                    "current_water": current_water,
-                    "capacity": bucket["capacity"],
-                    "leak_rate": bucket["leak_rate"],
-                    "utilization": current_water / bucket["capacity"],
-                }
+        self._windows[name] = [t for t in self._windows[name] if t > cutoff]
 
-    def list_buckets(self) -> list:
-        with self._lock:
-            return [self.get_status(k) for k in self._buckets if self.get_status(k)]
+        if len(self._windows[name]) < config.rate:
+            self._windows[name].append(now)
+            return ThrottleResult(
+                allowed=True,
+                wait_time=0,
+                current_rate=len(self._windows[name]) / config.window_seconds,
+                remaining=int(config.rate - len(self._windows[name])),
+            )
+        else:
+            oldest = self._windows[name][0]
+            wait_time = oldest - cutoff
+            return ThrottleResult(
+                allowed=False,
+                wait_time=wait_time,
+                current_rate=config.rate / config.window_seconds,
+                remaining=0,
+            )
+
+    def _check_fixed_window(self, name: str) -> ThrottleResult:
+        """Check fixed window throttle."""
+        config = self._configs[name]
+        now = time.time()
+        bucket = self._buckets[name]
+        window_start = bucket["window_start"]
+        window_end = window_start + config.window_seconds
+
+        if now > window_end:
+            bucket["window_start"] = now
+            bucket["count"] = 0
+            self._windows[name] = []
+
+        if bucket["count"] < config.rate:
+            bucket["count"] += 1
+            return ThrottleResult(
+                allowed=True,
+                wait_time=0,
+                current_rate=bucket["count"] / config.window_seconds,
+                remaining=int(config.rate - bucket["count"]),
+            )
+        else:
+            wait_time = window_end - now
+            return ThrottleResult(
+                allowed=False,
+                wait_time=wait_time,
+                current_rate=config.rate / config.window_seconds,
+                remaining=0,
+            )
+
+    def _check_leaky_bucket(self, name: str) -> ThrottleResult:
+        """Check leaky bucket throttle."""
+        config = self._configs[name]
+        bucket = self._buckets[name]
+        now = time.time()
+        elapsed = now - bucket["last_update"]
+
+        leak_rate = config.rate / config.window_seconds
+        bucket["level"] = max(0, bucket["level"] - elapsed * leak_rate)
+        bucket["last_update"] = now
+
+        max_level = config.burst_size or config.rate
+
+        if bucket["level"] < max_level:
+            bucket["level"] += 1
+            return ThrottleResult(
+                allowed=True,
+                wait_time=0,
+                current_rate=config.rate / config.window_seconds,
+                remaining=int(max_level - bucket["level"]),
+            )
+        else:
+            wait_time = 1.0 / leak_rate
+            return ThrottleResult(
+                allowed=False,
+                wait_time=wait_time,
+                current_rate=config.rate / config.window_seconds,
+                remaining=0,
+            )
+
+    async def check(self, name: str) -> ThrottleResult:
+        """Check if request is allowed.
+
+        Args:
+            name: Throttle configuration name.
+
+        Returns:
+            ThrottleResult with decision.
+        """
+        config = self._configs[name]
+        result: ThrottleResult
+
+        if config.throttle_type == ThrottleType.TOKEN_BUCKET:
+            result = self._check_token_bucket(name)
+        elif config.throttle_type == ThrottleType.SLIDING_WINDOW:
+            result = self._check_sliding_window(name)
+        elif config.throttle_type == ThrottleType.FIXED_WINDOW:
+            result = self._check_fixed_window(name)
+        elif config.throttle_type == ThrottleType.LEAKY_BUCKET:
+            result = self._check_leaky_bucket(name)
+        else:
+            result = ThrottleResult(allowed=True)
+
+        if not result.allowed and self._on_throttled:
+            self._on_throttled(name, result)
+
+        return result
+
+    async def wait_if_needed(self, name: str) -> float:
+        """Wait if throttle would block, then return.
+
+        Args:
+            name: Throttle configuration name.
+
+        Returns:
+            Actual wait time.
+        """
+        result = await self.check(name)
+        if not result.allowed:
+            await asyncio.sleep(result.wait_time)
+            return result.wait_time
+        return 0
+
+    def get_remaining(self, name: str) -> int:
+        """Get remaining requests in current window."""
+        config = self._configs[name]
+
+        if config.throttle_type == ThrottleType.TOKEN_BUCKET:
+            bucket = self._buckets.get(name, {})
+            return int(bucket.get("tokens", 0))
+        elif config.throttle_type == ThrottleType.SLIDING_WINDOW:
+            return int(config.rate - len(self._windows.get(name, [])))
+        elif config.throttle_type == ThrottleType.FIXED_WINDOW:
+            bucket = self._buckets.get(name, {})
+            return int(config.rate - bucket.get("count", 0))
+        elif config.throttle_type == ThrottleType.LEAKY_BUCKET:
+            bucket = self._buckets.get(name, {})
+            return int((config.burst_size or config.rate) - bucket.get("level", 0))
+
+        return 0
