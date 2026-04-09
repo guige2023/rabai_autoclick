@@ -1,226 +1,189 @@
+"""Notification action module for sending system notifications.
+
+Handles cross-platform notification delivery with action buttons,
+urgency levels, and notification history tracking.
 """
-Notification Action Module
-
-Manages system and in-app notifications for automation workflows,
-including toast messages, system alerts, and notification queues.
-
-MIT License - Copyright (c) 2025 RabAi Research
-"""
-
-from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class NotificationLevel(Enum):
-    """Notification severity levels."""
-
-    DEBUG = "debug"
-    INFO = "info"
-    SUCCESS = "success"
-    WARNING = "warning"
-    ERROR = "error"
+class UrgencyLevel(Enum):
+    LOW = "low"
+    NORMAL = "normal"
     CRITICAL = "critical"
-
-
-class NotificationType(Enum):
-    """Notification types."""
-
-    TOAST = "toast"
-    SYSTEM = "system"
-    EMAIL = "email"
-    SMS = "sms"
-    PUSH = "push"
-    IN_APP = "in_app"
 
 
 @dataclass
 class Notification:
-    """Represents a notification."""
-
-    id: str
     title: str
-    message: str
-    level: NotificationLevel = NotificationLevel.INFO
-    notification_type: NotificationType = NotificationType.TOAST
-    timestamp: float = field(default_factory=time.time)
-    duration: float = 3.0
-    actions: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    read: bool = False
-    dismissed: bool = False
+    body: str
+    urgency: UrgencyLevel = UrgencyLevel.NORMAL
+    timeout: float = 5.0
+    actions: list[str] = field(default_factory=list)
+    notification_id: Optional[str] = None
 
 
-@dataclass
-class NotificationConfig:
-    """Configuration for notifications."""
+class NotificationAction:
+    """Send system notifications with action support.
 
-    default_duration: float = 3.0
-    max_queue_size: int = 100
-    enable_sound: bool = True
-    enable_logging: bool = True
-    sound_path: Optional[str] = None
-
-
-class NotificationManager:
-    """
-    Manages notifications for automation workflows.
-
-    Supports queuing, batching, sound alerts,
-    and notification action handling.
+    Args:
+        max_history: Maximum notification history size.
+        default_urgency: Default urgency level for notifications.
     """
 
     def __init__(
         self,
-        config: Optional[NotificationConfig] = None,
-        sender: Optional[Callable[[Notification], None]] = None,
-    ):
-        self.config = config or NotificationConfig()
-        self.sender = sender or self._default_sender
-        self._notifications: Dict[str, Notification] = {}
-        self._queue: List[str] = []
-        self._subscribers: List[Callable[[Notification], None]] = []
-
-    def _default_sender(self, notification: Notification) -> None:
-        """Default notification sender."""
-        logger.info(f"[{notification.level.value.upper()}] {notification.title}: {notification.message}")
+        max_history: int = 100,
+        default_urgency: UrgencyLevel = UrgencyLevel.NORMAL,
+    ) -> None:
+        self._history: list[Notification] = []
+        self._max_history = max_history
+        self._default_urgency = default_urgency
+        self._action_handlers: dict[str, Callable[[], None]] = {}
+        self._active_notifications: dict[str, Notification] = {}
 
     def send(
         self,
         title: str,
-        message: str,
-        level: NotificationLevel = NotificationLevel.INFO,
-        notification_type: NotificationType = NotificationType.TOAST,
-        duration: Optional[float] = None,
-        actions: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        body: str,
+        urgency: Optional[UrgencyLevel] = None,
+        timeout: float = 5.0,
+        actions: Optional[list[str]] = None,
     ) -> str:
-        """
-        Send a notification.
+        """Send a notification.
 
         Args:
-            title: Notification title
-            message: Notification message
-            level: Severity level
-            notification_type: Type of notification
-            duration: Display duration in seconds
-            actions: Available action names
-            metadata: Additional metadata
+            title: Notification title.
+            body: Notification body text.
+            urgency: Urgency level (uses default if not specified).
+            timeout: Display timeout in seconds.
+            actions: Optional list of action button labels.
 
         Returns:
-            Notification ID
+            Notification ID.
         """
-        notification_id = f"notif_{time.time()}_{len(self._notifications)}"
-
+        notification_id = f"notif_{int(time.time() * 1000)}"
         notification = Notification(
-            id=notification_id,
             title=title,
-            message=message,
-            level=level,
-            notification_type=notification_type,
-            duration=duration or self.config.default_duration,
+            body=body,
+            urgency=urgency or self._default_urgency,
+            timeout=timeout,
             actions=actions or [],
-            metadata=metadata or {},
+            notification_id=notification_id,
         )
-
-        self._notifications[notification_id] = notification
-        self._queue.append(notification_id)
-
-        if self.config.enable_logging:
-            self._default_sender(notification)
-
-        self.sender(notification)
-
-        for subscriber in self._subscribers:
-            try:
-                subscriber(notification)
-            except Exception as e:
-                logger.error(f"Notification subscriber failed: {e}")
-
+        self._history.append(notification)
+        if len(self._history) > self._max_history:
+            self._history.pop(0)
+        self._active_notifications[notification_id] = notification
+        logger.info(
+            f"Sent notification [{notification_id}]: {title} ({urgency.value})"
+        )
         return notification_id
 
-    def send_batch(
-        self,
-        notifications: List[Dict[str, Any]],
-    ) -> List[str]:
-        """
-        Send multiple notifications.
+    def dismiss(self, notification_id: str) -> bool:
+        """Dismiss an active notification.
 
         Args:
-            notifications: List of notification data dicts
+            notification_id: ID of notification to dismiss.
 
         Returns:
-            List of notification IDs
+            True if notification was found and dismissed.
         """
-        ids = []
-        for notif_data in notifications:
-            notif_id = self.send(**notif_data)
-            ids.append(notif_id)
-        return ids
-
-    def dismiss(self, notification_id: str) -> bool:
-        """Dismiss a notification."""
-        if notification_id in self._notifications:
-            self._notifications[notification_id].dismissed = True
+        if notification_id in self._active_notifications:
+            del self._active_notifications[notification_id]
+            logger.debug(f"Dismissed notification {notification_id}")
             return True
         return False
 
-    def mark_read(self, notification_id: str) -> bool:
-        """Mark notification as read."""
-        if notification_id in self._notifications:
-            self._notifications[notification_id].read = True
+    def handle_action(
+        self,
+        notification_id: str,
+        action: str,
+    ) -> bool:
+        """Handle a notification action callback.
+
+        Args:
+            notification_id: ID of the notification.
+            action: Action identifier that was triggered.
+
+        Returns:
+            True if action handler was found and executed.
+        """
+        handler = self._action_handlers.get(action)
+        if handler:
+            handler()
             return True
+        logger.warning(f"No handler for action '{action}'")
         return False
 
-    def get_notification(self, notification_id: str) -> Optional[Notification]:
-        """Get a notification by ID."""
-        return self._notifications.get(notification_id)
+    def register_action_handler(
+        self,
+        action: str,
+        handler: Callable[[], None],
+    ) -> None:
+        """Register a handler for a notification action.
 
-    def get_unread(self) -> List[Notification]:
-        """Get all unread notifications."""
-        return [n for n in self._notifications.values() if not n.read and not n.dismissed]
+        Args:
+            action: Action identifier.
+            handler: Callback function to execute.
+        """
+        self._action_handlers[action] = handler
 
-    def get_recent(self, limit: int = 10) -> List[Notification]:
-        """Get recent notifications."""
-        sorted_notifs = sorted(
-            self._notifications.values(),
-            key=lambda n: n.timestamp,
-            reverse=True,
-        )
-        return sorted_notifs[:limit]
+    def get_history(
+        self,
+        limit: int = 20,
+        urgency_filter: Optional[UrgencyLevel] = None,
+    ) -> list[Notification]:
+        """Get notification history.
 
-    def subscribe(self, callback: Callable[[Notification], None]) -> None:
-        """Subscribe to notifications."""
-        self._subscribers.append(callback)
+        Args:
+            limit: Maximum number of notifications to return.
+            urgency_filter: Filter by urgency level if specified.
 
-    def unsubscribe(self, callback: Callable[[Notification], None]) -> None:
-        """Unsubscribe from notifications."""
-        if callback in self._subscribers:
-            self._subscribers.remove(callback)
+        Returns:
+            List of notifications in chronological order (newest first).
+        """
+        history = self._history
+        if urgency_filter:
+            history = [n for n in history if n.urgency == urgency_filter]
+        return history[-limit:][::-1]
 
-    def clear_all(self) -> None:
-        """Clear all notifications."""
-        self._notifications.clear()
-        self._queue.clear()
+    def clear_history(self) -> int:
+        """Clear notification history.
 
-    def clear_read(self) -> int:
-        """Clear all read notifications."""
-        to_remove = [nid for nid, n in self._notifications.items() if n.read]
-        for nid in to_remove:
-            del self._notifications[nid]
-            if nid in self._queue:
-                self._queue.remove(nid)
-        return len(to_remove)
+        Returns:
+            Number of notifications cleared.
+        """
+        count = len(self._history)
+        self._history.clear()
+        self._active_notifications.clear()
+        return count
 
+    def get_stats(self) -> dict[str, Any]:
+        """Get notification statistics.
 
-def create_notification_manager(
-    config: Optional[NotificationConfig] = None,
-) -> NotificationManager:
-    """Factory function to create NotificationManager."""
-    return NotificationManager(config=config)
+        Returns:
+            Dictionary with notification stats.
+        """
+        total = len(self._history)
+        by_urgency = {
+            "low": sum(1 for n in self._history if n.urgency == UrgencyLevel.LOW),
+            "normal": sum(
+                1 for n in self._history if n.urgency == UrgencyLevel.NORMAL
+            ),
+            "critical": sum(
+                1 for n in self._history if n.urgency == UrgencyLevel.CRITICAL
+            ),
+        }
+        return {
+            "total": total,
+            "active": len(self._active_notifications),
+            "by_urgency": by_urgency,
+            "max_history": self._max_history,
+        }
