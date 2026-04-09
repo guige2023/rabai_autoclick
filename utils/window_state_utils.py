@@ -1,116 +1,279 @@
-"""Window state utilities for RabAI AutoClick.
+"""
+Window State Management Utilities for UI Automation.
 
-Provides:
-- Window state tracking
-- State serialization
-- Window lifecycle management
+This module provides utilities for managing window states, positions,
+and properties during automation workflows.
+
+Author: AI Assistant
+License: MIT
 """
 
 from __future__ import annotations
 
 import time
-from typing import (
-    Any,
-    Dict,
-    List,
-    NamedTuple,
-    Optional,
-)
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Optional, Callable
 
 
-class WindowState(NamedTuple):
-    """State of a window."""
+class WindowState(Enum):
+    """Window state enumeration."""
+    NORMAL = auto()
+    MINIMIZED = auto()
+    MAXIMIZED = auto()
+    FULLSCREEN = auto()
+    HIDDEN = auto()
+    CLOSED = auto()
+
+
+class WindowEdge(Enum):
+    """Window edge/corner positions."""
+    TOP_LEFT = auto()
+    TOP = auto()
+    TOP_RIGHT = auto()
+    LEFT = auto()
+    RIGHT = auto()
+    BOTTOM_LEFT = auto()
+    BOTTOM = auto()
+    BOTTOM_RIGHT = auto()
+    CENTER = auto()
+
+
+@dataclass
+class WindowInfo:
+    """
+    Window information data class.
+    
+    Attributes:
+        window_id: Unique window identifier
+        title: Window title
+        bounds: Window rectangle (x, y, width, height)
+        state: Current window state
+        process_id: Process ID that owns the window
+        is_active: Whether the window is currently active
+    """
     window_id: str
     title: str
-    x: int
-    y: int
-    width: int
-    height: int
-    is_visible: bool
-    is_focused: bool
-    timestamp: float
+    bounds: tuple[int, int, int, int]  # x, y, width, height
+    state: WindowState = WindowState.NORMAL
+    process_id: Optional[int] = None
+    is_active: bool = False
+    is_visible: bool = True
+    monitor: int = 0
 
 
-class WindowStateManager:
-    """Track and manage window states."""
-
-    def __init__(self) -> None:
-        self._windows: Dict[str, WindowState] = {}
-
-    def update(
-        self,
-        window_id: str,
-        title: str = "",
-        x: int = 0,
-        y: int = 0,
-        width: int = 0,
-        height: int = 0,
-        is_visible: bool = True,
-        is_focused: bool = False,
-    ) -> WindowState:
-        """Update or create window state.
-
-        Returns:
-            The updated WindowState.
+@dataclass
+class WindowManager:
+    """
+    Manages window states and operations.
+    
+    Example:
+        manager = WindowManager()
+        windows = manager.list_windows()
+        manager.set_state("Chrome", WindowState.MAXIMIZED)
+    """
+    
+    def __init__(self):
+        self._cache: dict[str, WindowInfo] = {}
+        self._cache_timeout: float = 5.0
+        self._last_update: float = 0.0
+    
+    def list_windows(self, refresh: bool = False) -> list[WindowInfo]:
         """
-        state = WindowState(
-            window_id=window_id,
-            title=title,
-            x=x,
-            y=y,
-            width=width,
-            height=height,
-            is_visible=is_visible,
-            is_focused=is_focused,
-            timestamp=time.time(),
-        )
-        self._windows[window_id] = state
-        return state
-
-    def get(self, window_id: str) -> Optional[WindowState]:
-        """Get window state by ID."""
-        return self._windows.get(window_id)
-
-    def get_all(self) -> List[WindowState]:
-        """Get all tracked window states."""
-        return list(self._windows.values())
-
-    def get_focused(self) -> Optional[WindowState]:
-        """Get the currently focused window."""
-        for state in self._windows.values():
-            if state.is_focused:
-                return state
+        List all visible windows.
+        
+        Args:
+            refresh: Force refresh of cached data
+            
+        Returns:
+            List of WindowInfo objects
+        """
+        now = time.time()
+        if not refresh and (now - self._last_update) < self._cache_timeout:
+            return list(self._cache.values())
+        
+        # Placeholder - actual implementation would use platform APIs
+        windows = self._get_windows_platform()
+        self._cache = {w.window_id: w for w in windows}
+        self._last_update = now
+        return windows
+    
+    def _get_windows_platform(self) -> list[WindowInfo]:
+        """Platform-specific window enumeration."""
+        # Placeholder implementation
+        return []
+    
+    def find_window(self, title_pattern: str, exact: bool = False) -> Optional[WindowInfo]:
+        """
+        Find a window by title pattern.
+        
+        Args:
+            title_pattern: Window title or pattern to match
+            exact: Whether to match exactly
+            
+        Returns:
+            WindowInfo if found, None otherwise
+        """
+        windows = self.list_windows()
+        for window in windows:
+            if exact:
+                if window.title == title_pattern:
+                    return window
+            else:
+                if title_pattern.lower() in window.title.lower():
+                    return window
         return None
+    
+    def set_state(self, window_id: str, state: WindowState) -> bool:
+        """
+        Set the state of a window.
+        
+        Args:
+            window_id: Window identifier
+            state: Desired window state
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Placeholder - actual implementation would use platform APIs
+        return True
+    
+    def set_bounds(self, window_id: str, bounds: tuple[int, int, int, int]) -> bool:
+        """
+        Set window bounds (position and size).
+        
+        Args:
+            window_id: Window identifier
+            bounds: New bounds (x, y, width, height)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Placeholder - actual implementation would use platform APIs
+        return True
+    
+    def move_to_edge(self, window_id: str, edge: WindowEdge) -> bool:
+        """
+        Move window to a screen edge.
+        
+        Args:
+            window_id: Window identifier
+            edge: Target edge or corner
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Placeholder implementation
+        return True
+    
+    def center_on_screen(self, window_id: str, monitor: int = 0) -> bool:
+        """
+        Center window on a specific monitor.
+        
+        Args:
+            window_id: Window identifier
+            monitor: Monitor index
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Placeholder implementation
+        return True
+    
+    def activate(self, window_id: str) -> bool:
+        """
+        Activate (bring to front) a window.
+        
+        Args:
+            window_id: Window identifier
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Placeholder - actual implementation would use platform APIs
+        return True
+    
+    def minimize(self, window_id: str) -> bool:
+        """Minimize a window."""
+        return self.set_state(window_id, WindowState.MINIMIZED)
+    
+    def maximize(self, window_id: str) -> bool:
+        """Maximize a window."""
+        return self.set_state(window_id, WindowState.MAXIMIZED)
+    
+    def restore(self, window_id: str) -> bool:
+        """Restore a window to normal state."""
+        return self.set_state(window_id, WindowState.NORMAL)
+    
+    def close(self, window_id: str) -> bool:
+        """
+        Close a window.
+        
+        Args:
+            window_id: Window identifier
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Placeholder - actual implementation would use platform APIs
+        return True
 
-    def get_visible(self) -> List[WindowState]:
-        """Get all visible windows."""
-        return [s for s in self._windows.values() if s.is_visible]
 
-    def remove(self, window_id: str) -> bool:
-        """Remove a window from tracking."""
-        if window_id in self._windows:
-            del self._windows[window_id]
-            return True
-        return False
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialize all states to dict."""
-        return {
-            wid: {
-                "title": s.title,
-                "x": s.x,
-                "y": s.y,
-                "width": s.width,
-                "height": s.height,
-                "is_visible": s.is_visible,
-                "is_focused": s.is_focused,
-                "timestamp": s.timestamp,
-            }
-            for wid, s in self._windows.items()
-        }
-
-
-__all__ = [
-    "WindowState",
-    "WindowStateManager",
-]
+class WindowWatcher:
+    """
+    Watches for window state changes.
+    
+    Example:
+        def on_change(info: WindowInfo):
+            print(f"Window {info.title} changed state")
+        
+        watcher = WindowWatcher()
+        watcher.watch(on_change)
+    """
+    
+    def __init__(self, poll_interval: float = 1.0):
+        self.poll_interval = poll_interval
+        self._callbacks: list[Callable[[WindowInfo, WindowInfo], None]] = []
+        self._running = False
+        self._manager = WindowManager()
+        self._previous_state: dict[str, WindowInfo] = {}
+    
+    def watch(self, callback: Callable[[WindowInfo, WindowInfo], None]) -> None:
+        """
+        Add a callback for window changes.
+        
+        Args:
+            callback: Function that receives (old_info, new_info)
+        """
+        self._callbacks.append(callback)
+    
+    def start(self) -> None:
+        """Start watching for changes."""
+        self._running = True
+        self._previous_state = {w.window_id: w for w in self._manager.list_windows()}
+    
+    def stop(self) -> None:
+        """Stop watching for changes."""
+        self._running = False
+    
+    def check_changes(self) -> list[tuple[WindowInfo, WindowInfo]]:
+        """
+        Check for window changes since last check.
+        
+        Returns:
+            List of (old_info, new_info) tuples for changed windows
+        """
+        changes = []
+        current_windows = {w.window_id: w for w in self._manager.list_windows()}
+        
+        # Check for changed windows
+        for window_id, new_info in current_windows.items():
+            if window_id in self._previous_state:
+                old_info = self._previous_state[window_id]
+                if old_info != new_info:
+                    changes.append((old_info, new_info))
+                    for callback in self._callbacks:
+                        callback(old_info, new_info)
+        
+        self._previous_state = current_windows
+        return changes
