@@ -1,215 +1,272 @@
-"""Data Deduplicator Action Module.
-
-Provides record deduplication using multiple strategies:
-exact match, fuzzy match, hash-based, and custom key functions.
 """
+Data Deduplicator Action Module.
+
+Detects and removes duplicate data.
+"""
+
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-import logging
-
-logger = logging.getLogger(__name__)
 
 
-class DedupStrategy(Enum):
-    """Deduplication strategy."""
-    EXACT = "exact"
-    FUZZY = "fuzzy"
-    HASH_BASED = "hash_based"
-    CUSTOM_KEY = "custom_key"
+@dataclass
+class DuplicateGroup:
+    """A group of duplicate records."""
+    canonical_id: str
+    duplicates: List[str] = field(default_factory=list)
+    count: int = 0
 
 
 @dataclass
 class DedupConfig:
-    """Deduplication configuration."""
-    strategy: DedupStrategy = DedupStrategy.EXACT
-    fields: Optional[List[str]] = None
+    """Configuration for deduplication."""
     hash_fields: Optional[List[str]] = None
-    custom_key: Optional[Callable[[Dict], Any]] = None
-    fuzzy_threshold: float = 0.85
-    keep: str = "first"
+    threshold: float = 1.0
+    ignore_fields: Optional[List[str]] = None
 
 
 class DataDeduplicatorAction:
-    """Record deduplicator with multiple strategies.
+    """
+    Deduplicate data using various strategies.
 
-    Example:
-        dedup = DataDeduplicatorAction()
-
-        result = dedup.deduplicate(
-            data=[
-                {"id": 1, "email": "alice@example.com"},
-                {"id": 2, "email": "alice@example.com"},
-                {"id": 3, "email": "bob@example.com"},
-            ],
-            config=DedupConfig(
-                strategy=DedupStrategy.EXACT,
-                fields=["email"],
-                keep="first"
-            )
-        )
+    Supports exact, fuzzy, and probabilistic deduplication.
     """
 
-    def __init__(self) -> None:
-        self._seen: Dict[Any, Any] = {}
+    def __init__(
+        self,
+        config: Optional[DedupConfig] = None,
+    ) -> None:
+        self.config = config or DedupConfig()
+        self._hash_cache: Dict[str, str] = {}
 
     def deduplicate(
         self,
-        data: List[Dict[str, Any]],
-        config: DedupConfig,
-    ) -> List[Dict[str, Any]]:
-        """Deduplicate data.
+        records: List[Dict[str, Any]],
+        key_fields: Optional[List[str]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[DuplicateGroup]]:
+        """
+        Deduplicate records.
 
         Args:
-            data: List of records
-            config: Deduplication configuration
+            records: List of records
+            key_fields: Fields to use for comparison
 
         Returns:
-            Deduplicated list
+            Tuple of (unique_records, duplicate_groups)
         """
-        if not data:
-            return []
+        if key_fields:
+            return self._dedupe_by_key(records, key_fields)
 
-        self._seen.clear()
+        return self._dedupe_by_hash(records)
 
-        if config.strategy == DedupStrategy.EXACT:
-            return self._deduplicate_exact(data, config)
-        elif config.strategy == DedupStrategy.HASH_BASED:
-            return self._deduplicate_hash(data, config)
-        elif config.strategy == DedupStrategy.CUSTOM_KEY:
-            return self._deduplicate_custom_key(data, config)
-        elif config.strategy == DedupStrategy.FUZZY:
-            return self._deduplicate_fuzzy(data, config)
-
-        return data
-
-    def _deduplicate_exact(
+    def _dedupe_by_key(
         self,
-        data: List[Dict[str, Any]],
-        config: DedupConfig,
-    ) -> List[Dict[str, Any]]:
-        """Deduplicate by exact field match."""
-        result: List[Dict[str, Any]] = []
+        records: List[Dict[str, Any]],
+        key_fields: List[str],
+    ) -> Tuple[List[Dict[str, Any]], List[DuplicateGroup]]:
+        """Dedupe by specific key fields."""
+        seen: Dict[str, Dict[str, Any]] = {}
+        groups: Dict[str, DuplicateGroup] = {}
+        unique: List[Dict[str, Any]] = []
 
-        for record in data:
-            key = self._make_key(record, config.fields or [])
+        for record in records:
+            key = self._compute_key(record, key_fields)
 
-            if key not in self._seen:
-                self._seen[key] = record
-                result.append(record)
+            if key not in seen:
+                seen[key] = record
+                unique.append(record)
+                groups[key] = DuplicateGroup(
+                    canonical_id=str(id(record)),
+                    count=1,
+                )
             else:
-                logger.debug(f"Duplicate found: {key}")
+                groups[key].duplicates.append(str(id(record)))
+                groups[key].count += 1
 
-        return result
+        return unique, list(groups.values())
 
-    def _deduplicate_hash(
+    def _dedupe_by_hash(
         self,
-        data: List[Dict[str, Any]],
-        config: DedupConfig,
-    ) -> List[Dict[str, Any]]:
-        """Deduplicate by hash of specified fields."""
-        result: List[Dict[str, Any]] = []
+        records: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], List[DuplicateGroup]]:
+        """Dedupe by hashing all fields."""
+        seen: Dict[str, Dict[str, Any]] = {}
+        groups: Dict[str, DuplicateGroup] = {}
+        unique: List[Dict[str, Any]] = []
 
-        for record in data:
-            hash_value = self._compute_hash(record, config.hash_fields or list(record.keys()))
+        for record in records:
+            record_hash = self._hash_record(record)
 
-            if hash_value not in self._seen:
-                self._seen[hash_value] = record
-                result.append(record)
+            if record_hash not in seen:
+                seen[record_hash] = record
+                unique.append(record)
+                groups[record_hash] = DuplicateGroup(
+                    canonical_id=record_hash,
+                    count=1,
+                )
+            else:
+                groups[record_hash].duplicates.append(record_hash)
+                groups[record_hash].count += 1
 
-        return result
+        return unique, list(groups.values())
 
-    def _deduplicate_custom_key(
+    def _compute_key(
         self,
-        data: List[Dict[str, Any]],
-        config: DedupConfig,
-    ) -> List[Dict[str, Any]]:
-        """Deduplicate using custom key function."""
-        result: List[Dict[str, Any]] = []
+        record: Dict[str, Any],
+        fields: List[str],
+    ) -> str:
+        """Compute key from fields."""
+        values = [str(record.get(f, "")) for f in fields]
+        return "|".join(values)
 
-        for record in data:
-            key = config.custom_key(record) if config.custom_key else record
-
-            if key not in self._seen:
-                self._seen[key] = record
-                result.append(record)
-
-        return result
-
-    def _deduplicate_fuzzy(
+    def _hash_record(
         self,
-        data: List[Dict[str, Any]],
-        config: DedupConfig,
-    ) -> List[Dict[str, Any]]:
-        """Deduplicate using fuzzy matching."""
-        result: List[Dict[str, Any]] = []
-        seen_values: List[Tuple[str, Dict]] = []
+        record: Dict[str, Any],
+    ) -> str:
+        """Hash a record."""
+        ignore = self.config.ignore_fields or []
+        filtered = {k: v for k, v in record.items() if k not in ignore}
 
-        for record in data:
-            key_value = self._make_key(record, config.fields or [])
+        key = str(sorted(filtered.items()))
+        return hashlib.md5(key.encode()).hexdigest()
 
-            is_duplicate = False
-            for seen_value, seen_record in seen_values:
-                similarity = self._calculate_similarity(str(key_value), str(seen_value))
-                if similarity >= config.fuzzy_threshold:
-                    is_duplicate = True
-                    logger.debug(f"Fuzzy duplicate: {key_value} ~ {seen_value}")
-                    break
+    def find_similar(
+        self,
+        records: List[Dict[str, Any]],
+        target: Dict[str, Any],
+        similarity_func: Optional[Callable[[Dict, Dict], float]] = None,
+        threshold: float = 0.8,
+    ) -> List[Tuple[Dict[str, Any], float]]:
+        """
+        Find records similar to target.
 
-            if not is_duplicate:
-                seen_values.append((str(key_value), record))
-                result.append(record)
+        Args:
+            records: List of records
+            target: Target record
+            similarity_func: Custom similarity function
+            threshold: Minimum similarity threshold
 
-        return result
+        Returns:
+            List of (record, similarity) tuples
+        """
+        if similarity_func is None:
+            similarity_func = self._jaccard_similarity
 
-    def _make_key(self, record: Dict, fields: List[str]) -> Tuple:
-        """Make lookup key from fields."""
-        return tuple(record.get(f) for f in fields)
+        results = []
+        for record in records:
+            sim = similarity_func(record, target)
+            if sim >= threshold:
+                results.append((record, sim))
 
-    def _compute_hash(self, record: Dict, fields: List[str]) -> str:
-        """Compute hash of specified fields."""
-        content = "|".join(str(record.get(f, "")) for f in fields)
-        return hashlib.sha256(content.encode()).hexdigest()
+        return sorted(results, key=lambda x: x[1], reverse=True)
 
-    def _calculate_similarity(self, s1: str, s2: str) -> float:
-        """Calculate string similarity (Jaccard)."""
-        set1 = set(s1.lower().split())
-        set2 = set(s2.lower().split())
+    def _jaccard_similarity(
+        self,
+        a: Dict[str, Any],
+        b: Dict[str, Any],
+    ) -> float:
+        """Jaccard similarity between records."""
+        keys_a = set(a.keys())
+        keys_b = set(b.keys())
 
-        if not set1 and not set2:
-            return 1.0
+        if not keys_a or not keys_b:
+            return 0.0
 
-        intersection = len(set1 & set2)
-        union = len(set1 | set2)
+        intersection = len(keys_a & keys_b)
+        union = len(keys_a | keys_b)
 
         return intersection / union if union > 0 else 0.0
 
-    def find_duplicates(
+    def cluster(
         self,
-        data: List[Dict[str, Any]],
-        config: DedupConfig,
+        records: List[Dict[str, Any]],
+        threshold: float = 0.8,
     ) -> List[List[Dict[str, Any]]]:
-        """Find all duplicate groups.
+        """
+        Cluster similar records together.
+
+        Args:
+            records: List of records
+            threshold: Similarity threshold
 
         Returns:
-            List of duplicate groups
+            List of clusters
         """
-        self._seen.clear()
-        groups: List[List[Dict[str, Any]]] = []
+        clusters: List[List[Dict[str, Any]]] = []
+        assigned = set()
 
-        for record in data:
-            if config.strategy == DedupStrategy.EXACT:
-                key = self._make_key(record, config.fields or [])
-            elif config.strategy == DedupStrategy.HASH_BASED:
-                key = self._compute_hash(record, config.hash_fields or list(record.keys()))
+        for i, record in enumerate(records):
+            if i in assigned:
+                continue
+
+            cluster = [record]
+            assigned.add(i)
+
+            for j, other in enumerate(records):
+                if j in assigned:
+                    continue
+
+                if self._jaccard_similarity(record, other) >= threshold:
+                    cluster.append(other)
+                    assigned.add(j)
+
+            clusters.append(cluster)
+
+        return clusters
+
+    def merge_duplicates(
+        self,
+        records: List[Dict[str, Any]],
+        merge_func: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Dedupe and merge duplicates.
+
+        Args:
+            records: List of records
+            merge_func: Function to merge duplicates
+
+        Returns:
+            List of merged records
+        """
+        unique, groups = self.deduplicate(records)
+
+        if merge_func is None:
+            merge_func = self._default_merge
+
+        result = []
+        for group in groups:
+            if group.count > 1:
+                members = [r for r in records if str(id(r)) in [group.canonical_id] + group.duplicates]
+                merged = merge_func(members)
+                result.append(merged)
             else:
-                key = config.custom_key(record) if config.custom_key else record
+                for record in records:
+                    if str(id(record)) == group.canonical_id:
+                        result.append(record)
+                        break
 
-            if key not in self._seen:
-                self._seen[key] = []
-            self._seen[key].append(record)
+        return result
 
-        return [group for group in self._seen.values() if len(group) > 1]
+    def _default_merge(
+        self,
+        records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Default merge strategy - prefer non-null values."""
+        if not records:
+            return {}
+
+        keys = set()
+        for r in records:
+            keys.update(r.keys())
+
+        result = {}
+        for key in keys:
+            values = [r.get(key) for r in records if key in r]
+            non_null = [v for v in values if v is not None]
+            result[key] = non_null[0] if non_null else None
+
+        return result
