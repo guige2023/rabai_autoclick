@@ -1,202 +1,280 @@
-"""State machine utilities.
+"""
+State Machine Utilities for UI Automation.
 
-Provides a flexible state machine implementation for
-managing workflow states and transitions.
+This module provides utilities for implementing state machines to manage
+complex automation workflows with defined states and transitions.
+
+Author: AI Assistant
+License: MIT
 """
 
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Dict, List, Optional, Set, TypeVar
+from typing import Any, Callable, Optional
 
 
-T = TypeVar("T", bound=Enum)
-
-
-class StateMachineError(Exception):
-    """Raised on invalid state machine operations."""
-    pass
-
-
-class Transition:
-    """Represents a state transition."""
-
+class StateTransition:
+    """Represents a transition between states."""
+    
     def __init__(
         self,
         from_state: str,
         to_state: str,
         event: str,
         guard: Optional[Callable[[], bool]] = None,
-        action: Optional[Callable[..., None]] = None,
-    ) -> None:
+        action: Optional[Callable[[], Any]] = None
+    ):
         self.from_state = from_state
         self.to_state = to_state
         self.event = event
         self.guard = guard
         self.action = action
-
+    
     def can_execute(self) -> bool:
-        """Check if transition guard passes."""
+        """Check if transition can execute."""
         if self.guard is None:
             return True
         return self.guard()
-
-    def execute(self, *args: Any, **kwargs: Any) -> None:
-        """Execute transition action."""
+    
+    def execute(self) -> Any:
+        """Execute the transition action."""
         if self.action:
-            self.action(*args, **kwargs)
+            return self.action()
+        return None
 
 
-class StateMachine(Generic[T]):
-    """Generic state machine with event-driven transitions.
+@dataclass
+class StateMachineConfig:
+    """Configuration for a state machine."""
+    initial_state: str
+    states: list[str]
+    final_states: list[str] = field(default_factory=list)
+    on_entry: Optional[Callable[[str], None]] = None
+    on_exit: Optional[Callable[[str], None]] = None
 
-    Example:
-        class TrafficLight(Enum):
-            RED = auto()
-            GREEN = auto()
-            YELLOW = auto()
 
-        sm = StateMachine[TrafficLight](TrafficLight.RED)
-        sm.add_transition(TrafficLight.RED, TrafficLight.GREEN, "go")
-        sm.add_transition(TrafficLight.GREEN, TrafficLight.YELLOW, "slow")
-        sm.add_transition(TrafficLight.YELLOW, TrafficLight.RED, "stop")
-        sm.trigger("go")
-        print(sm.current)  # TrafficLight.GREEN
+class StateMachine:
     """
-
-    def __init__(self, initial_state: T) -> None:
-        self._initial = initial_state
-        self._current: T = initial_state
-        self._transitions: Dict[str, List[Transition]] = {}
-        self._on_enter: Dict[T, Callable[[], None]] = {}
-        self._on_exit: Dict[T, Callable[[], None]] = {}
-        self._history: List[T] = []
-
+    A simple state machine implementation.
+    
+    Example:
+        sm = StateMachine(initial_state="idle")
+        sm.add_state("idle")
+        sm.add_state("running")
+        sm.add_transition("idle", "running", "start")
+        
+        sm.fire("start")  # Transitions from idle to running
+    """
+    
+    def __init__(self, config: Optional[StateMachineConfig] = None):
+        self._config = config
+        self._current_state: str = config.initial_state if config else ""
+        self._states: set[str] = set(config.states) if config else set()
+        self._transitions: dict[tuple[str, str], StateTransition] = {}
+        self._transition_map: dict[tuple[str, str], str] = {}  # (from, event) -> to
+        self._history: list[str] = []
+        
+        if config:
+            for state in config.states:
+                self._states.add(state)
+    
     @property
-    def current(self) -> T:
-        """Get current state."""
-        return self._current
-
+    def current_state(self) -> str:
+        """Get the current state."""
+        return self._current_state
+    
     @property
-    def initial(self) -> T:
-        """Get initial state."""
-        return self._initial
-
-    @property
-    def history(self) -> List[T]:
+    def history(self) -> list[str]:
         """Get state history."""
         return list(self._history)
-
+    
+    def add_state(self, state: str) -> None:
+        """Add a state to the machine."""
+        self._states.add(state)
+    
+    def add_states(self, states: list[str]) -> None:
+        """Add multiple states."""
+        for state in states:
+            self._states.add(state)
+    
     def add_transition(
         self,
-        from_state: T,
-        to_state: T,
+        from_state: str,
+        to_state: str,
         event: str,
         guard: Optional[Callable[[], bool]] = None,
-        action: Optional[Callable[..., None]] = None,
+        action: Optional[Callable[[], Any]] = None
     ) -> None:
-        """Add a transition.
-
-        Args:
-            from_state: Source state.
-            to_state: Target state.
-            event: Event name that triggers transition.
-            guard: Optional guard condition.
-            action: Optional action to execute on transition.
         """
-        key = self._state_key(from_state)
-        if key not in self._transitions:
-            self._transitions[key] = []
-        self._transitions[key].append(Transition(
-            from_state.value,
-            to_state.value,
-            event,
-            guard,
-            action,
-        ))
-
-    def on_enter(self, state: T, handler: Callable[[], None]) -> None:
-        """Register enter handler for state.
-
+        Add a transition.
+        
         Args:
-            state: State to handle.
-            handler: Callback on entering state.
+            from_state: Source state
+            to_state: Target state
+            event: Event that triggers transition
+            guard: Optional guard condition
+            action: Optional action to execute on transition
         """
-        self._on_enter[state] = handler
-
-    def on_exit(self, state: T, handler: Callable[[], None]) -> None:
-        """Register exit handler for state.
-
-        Args:
-            state: State to handle.
-            handler: Callback on exiting state.
+        transition = StateTransition(from_state, to_state, event, guard, action)
+        self._transitions[(from_state, to_state)] = transition
+        self._transition_map[(from_state, event)] = to_state
+    
+    def can_fire(self, event: str) -> bool:
+        """Check if an event can fire in current state."""
+        return (self._current_state, event) in self._transition_map
+    
+    def fire(self, event: str) -> tuple[bool, Optional[str]]:
         """
-        self._on_exit[state] = handler
-
-    def can_transition(self, event: str) -> bool:
-        """Check if event can trigger a transition.
-
+        Fire an event to transition.
+        
         Args:
-            event: Event name.
-
+            event: Event to fire
+            
         Returns:
-            True if transition is possible.
+            Tuple of (transition_succeeded, error_message)
         """
-        key = self._state_key(self._current)
-        for t in self._transitions.get(key, []):
-            if t.event == event and t.can_execute():
-                return True
-        return False
-
-    def trigger(self, event: str, *args: Any, **kwargs: Any) -> bool:
-        """Trigger an event and execute transition.
-
-        Args:
-            event: Event name.
-            *args: Arguments for transition action.
-            **kwargs: Keyword arguments for transition action.
-
-        Returns:
-            True if transition was executed.
-
-        Raises:
-            StateMachineError: If no valid transition exists.
-        """
-        key = self._state_key(self._current)
-        for t in self._transitions.get(key, []):
-            if t.event == event and t.can_execute():
-                return self._execute_transition(t, *args, **kwargs)
-        return False
-
-    def _execute_transition(self, t: Transition, *args: Any, **kwargs: Any) -> bool:
-        old_state = self._current
-
-        if old_state in self._on_exit:
-            self._on_exit[old_state]()
-
-        t.execute(*args, **kwargs)
-
-        self._history.append(self._current)
-        self._current = self._state_from_key(t.to_state)
-
-        if self._current in self._on_enter:
-            self._on_enter[self._current]()
-
-        return True
-
-    def _state_key(self, state: T) -> str:
-        return state.value if isinstance(state, Enum) else str(state)
-
-    def _state_from_key(self, key: str) -> T:
-        for state in self._initial.__class__.__members__.values():
-            if state.value == key:
-                return state  # type: ignore
-        raise StateMachineError(f"Unknown state: {key}")
-
+        key = (self._current_state, event)
+        
+        if key not in self._transition_map:
+            return False, f"No transition for event '{event}' from state '{self._current_state}'"
+        
+        to_state = self._transition_map[key]
+        transition = self._transitions.get((self._current_state, to_state))
+        
+        if transition and not transition.can_execute():
+            return False, "Guard condition failed"
+        
+        # Execute on_exit if configured
+        if self._config and self._config.on_exit:
+            self._config.on_exit(self._current_state)
+        
+        # Execute transition action
+        result = None
+        if transition and transition.action:
+            result = transition.execute()
+        
+        # Record history
+        self._history.append(self._current_state)
+        
+        # Change state
+        self._current_state = to_state
+        
+        # Execute on_entry if configured
+        if self._config and self._config.on_entry:
+            self._config.on_entry(self._current_state)
+        
+        return True, None
+    
+    def get_available_events(self) -> list[str]:
+        """Get events that can be fired from current state."""
+        return [
+            event for (state, event) in self._transition_map.keys()
+            if state == self._current_state
+        ]
+    
+    def is_in_state(self, state: str) -> bool:
+        """Check if currently in a specific state."""
+        return self._current_state == state
+    
+    def is_final_state(self) -> bool:
+        """Check if current state is a final state."""
+        if not self._config:
+            return False
+        return self._current_state in self._config.final_states
+    
     def reset(self) -> None:
         """Reset to initial state."""
-        self._current = self._initial
+        if self._config:
+            self._current_state = self._config.initial_state
         self._history.clear()
 
-    def get_available_events(self) -> List[str]:
-        """Get list of events valid from current state."""
-        key = self._state_key(self._current)
-        return [t.event for t in self._transitions.get(key, []) if t.can_execute()]
+
+class HierarchicalStateMachine(StateMachine):
+    """
+    Hierarchical/nested state machine.
+    
+    Supports states within states for complex workflows.
+    """
+    
+    def __init__(self, config: Optional[StateMachineConfig] = None):
+        super().__init__(config)
+        self._parent_map: dict[str, str] = {}  # child -> parent
+        self._substates: dict[str, set[str]] = {}  # parent -> children
+    
+    def add_substate(self, parent: str, child: str) -> None:
+        """Add a substate to a parent state."""
+        self._parent_map[child] = parent
+        self._substates.setdefault(parent, set()).add(child)
+    
+    def get_parent_state(self, state: str) -> Optional[str]:
+        """Get the parent of a state."""
+        return self._parent_map.get(state)
+    
+    def get_substates(self, state: str) -> set[str]:
+        """Get substates of a state."""
+        return self._substates.get(state, set())
+    
+    def is_substate_of(self, state: str, potential_parent: str) -> bool:
+        """Check if state is a substate of potential parent."""
+        current = self._parent_map.get(state)
+        
+        while current:
+            if current == potential_parent:
+                return True
+            current = self._parent_map.get(current)
+        
+        return False
+
+
+class StateHistory:
+    """
+    Maintains history of state machine states.
+    
+    Useful for debugging and reporting.
+    """
+    
+    def __init__(self, max_history: int = 100):
+        self.max_history = max_history
+        self._entries: list[dict[str, Any]] = []
+    
+    def record(
+        self,
+        from_state: str,
+        to_state: str,
+        event: str,
+        result: Any = None
+    ) -> None:
+        """Record a state transition."""
+        import time
+        import uuid
+        
+        entry = {
+            "id": str(uuid.uuid4()),
+            "timestamp": time.time(),
+            "from_state": from_state,
+            "to_state": to_state,
+            "event": event,
+            "result": result
+        }
+        
+        self._entries.append(entry)
+        
+        if len(self._entries) > self.max_history:
+            self._entries.pop(0)
+    
+    def get_last(self, count: int = 1) -> list[dict[str, Any]]:
+        """Get the last n transitions."""
+        return self._entries[-count:] if self._entries else []
+    
+    def get_by_state(self, state: str) -> list[dict[str, Any]]:
+        """Get all transitions involving a state."""
+        return [
+            e for e in self._entries
+            if e["from_state"] == state or e["to_state"] == state
+        ]
+    
+    def clear(self) -> None:
+        """Clear history."""
+        self._entries.clear()
