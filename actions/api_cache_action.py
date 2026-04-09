@@ -1,220 +1,181 @@
-"""API Cache action module for RabAI AutoClick.
+"""API Cache Action Module.
 
-Caching layer for API responses with TTL, invalidation,
-and stale-while-revalidate support.
+Provides multi-level caching for API responses with TTL, LRU/LFU
+eviction, cache invalidation patterns, and stale-while-revalidate.
 """
 
-import json
 import time
 import hashlib
-import sys
-import os
-from typing import Any, Dict, Optional
+import logging
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ApiCacheAction(BaseAction):
-    """Cache API responses with TTL and invalidation.
+@dataclass
+class CacheEntry:
+    key: str
+    value: Any
+    created_at: float
+    last_accessed: float
+    access_count: int = 0
+    ttl_sec: float = 3600.0
+    tags: List[str] = field(default_factory=list)
+    is_stale: bool = False
 
-    In-memory cache with configurable TTL, key generation,
-    and cache-aside pattern support.
-    """
-    action_type = "api_cache"
-    display_name = "API缓存"
-    description = "带TTL和失效机制的API响应缓存"
 
-    def execute(
+@dataclass
+class CacheConfig:
+    max_size: int = 1000
+    default_ttl_sec: float = 3600.0
+    stale_threshold_sec: float = 300.0
+    eviction_policy: str = "lru"
+    enable_stats: bool = True
+
+
+class APICacheAction:
+    """Multi-level cache for API responses with configurable eviction."""
+
+    def __init__(self, config: Optional[CacheConfig] = None) -> None:
+        self._config = config or CacheConfig()
+        self._cache: Dict[str, CacheEntry] = {}
+        self._lock = threading.RLock()
+        self._stats = {
+            "hits": 0,
+            "misses": 0,
+            "sets": 0,
+            "evictions": 0,
+            "invalidations": 0,
+        }
+
+    def get(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Manage API cache.
+        key: str,
+        allow_stale: bool = True,
+        on_miss: Optional[Callable[[], Any]] = None,
+    ) -> Optional[Any]:
+        with self._lock:
+            entry = self._cache.get(key)
+            if not entry:
+                self._stats["misses"] += 1
+                if on_miss:
+                    value = on_miss()
+                    if value is not None:
+                        self.set(key, value)
+                    return value
+                return None
+            age = time.time() - entry.created_at
+            if age > entry.ttl_sec:
+                if not (allow_stale and age < entry.ttl_sec + self._config.stale_threshold_sec):
+                    self._evict(key)
+                    self._stats["misses"] += 1
+                    return None
+                entry.is_stale = True
+            entry.last_accessed = time.time()
+            entry.access_count += 1
+            self._stats["hits"] += 1
+            return entry.value
 
-        Args:
-            context: Execution context.
-            params: Dict with keys: action (get/set/invalidate/clear),
-                   key, value, ttl_seconds, stale_while_revalidate.
-
-        Returns:
-            ActionResult with cache result.
-        """
-        start_time = time.time()
-        try:
-            action = params.get('action', 'get')
-            key = params.get('key', '')
-            value = params.get('value')
-            ttl_seconds = params.get('ttl_seconds', 300)
-            cache_id = params.get('cache_id', 'default')
-
-            if not hasattr(context, '_api_caches'):
-                context._api_caches = {}
-            caches = context._api_caches
-            if cache_id not in caches:
-                caches[cache_id] = {}
-
-            cache = caches[cache_id]
-
-            if action == 'set':
-                if not key:
-                    return ActionResult(success=False, message="key is required", duration=time.time() - start_time)
-                cache[key] = {
-                    'value': value,
-                    'expires_at': time.time() + ttl_seconds,
-                    'created_at': time.time(),
-                    'hits': 0,
-                }
-                return ActionResult(
-                    success=True,
-                    message=f"Cached key '{key}' for {ttl_seconds}s",
-                    data={'key': key, 'ttl_seconds': ttl_seconds},
-                    duration=time.time() - start_time,
-                )
-
-            elif action == 'get':
-                if not key:
-                    return ActionResult(success=False, message="key is required", duration=time.time() - start_time)
-                entry = cache.get(key)
-                if not entry:
-                    return ActionResult(
-                        success=False,
-                        message=f"Cache miss: {key}",
-                        data={'key': key, 'hit': False},
-                        duration=time.time() - start_time,
-                    )
-                if entry['expires_at'] < time.time():
-                    del cache[key]
-                    return ActionResult(
-                        success=False,
-                        message=f"Cache expired: {key}",
-                        data={'key': key, 'hit': False, 'expired': True},
-                        duration=time.time() - start_time,
-                    )
-                entry['hits'] += 1
-                return ActionResult(
-                    success=True,
-                    message=f"Cache hit: {key}",
-                    data={
-                        'key': key,
-                        'hit': True,
-                        'value': entry['value'],
-                        'hits': entry['hits'],
-                        'age_seconds': time.time() - entry['created_at'],
-                    },
-                    duration=time.time() - start_time,
-                )
-
-            elif action == 'invalidate':
-                if key:
-                    if key in cache:
-                        del cache[key]
-                    return ActionResult(success=True, message=f"Invalidated: {key}", duration=time.time() - start_time)
-                pattern = params.get('pattern', '')
-                if pattern:
-                    import re
-                    regex = pattern.replace('*', '.*')
-                    to_delete = [k for k in cache if re.match(regex, k)]
-                    for k in to_delete:
-                        del cache[k]
-                    return ActionResult(success=True, message=f"Invalidated {len(to_delete)} keys matching {pattern}", data={'count': len(to_delete)}, duration=time.time() - start_time)
-                return ActionResult(success=False, message="key or pattern required", duration=time.time() - start_time)
-
-            elif action == 'clear':
-                count = len(cache)
-                cache.clear()
-                return ActionResult(success=True, message=f"Cleared {count} entries", data={'count': count}, duration=time.time() - start_time)
-
-            elif action == 'stats':
-                total = len(cache)
-                expired = sum(1 for e in cache.values() if e['expires_at'] < time.time())
-                total_hits = sum(e['hits'] for e in cache.values())
-                return ActionResult(success=True, message=f"Cache stats: {total} entries", data={'total': total, 'expired': expired, 'active': total - expired, 'total_hits': total_hits}, duration=time.time() - start_time)
-
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}", duration=time.time() - start_time)
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Cache error: {str(e)}", duration=time.time() - start_time)
-
-
-class ApiStaleCacheAction(BaseAction):
-    """Stale-while-revalidate cache for API responses.
-
-    Serves stale data immediately while fetching
-    fresh data in background.
-    """
-    action_type = "api_stale_cache"
-    display_name = "API过期缓存"
-    description = "过期重验证缓存模式"
-
-    def execute(
+    def set(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Handle stale-while-revalidate.
+        key: str,
+        value: Any,
+        ttl_sec: Optional[float] = None,
+        tags: Optional[List[str]] = None,
+    ) -> None:
+        with self._lock:
+            if len(self._cache) >= self._config.max_size and key not in self._cache:
+                self._evict_one()
+            entry = CacheEntry(
+                key=key,
+                value=value,
+                created_at=time.time(),
+                last_accessed=time.time(),
+                ttl_sec=ttl_sec or self._config.default_ttl_sec,
+                tags=tags or [],
+            )
+            self._cache[key] = entry
+            self._stats["sets"] += 1
 
-        Args:
-            context: Execution context.
-            params: Dict with keys: action (get/set),
-                   key, value, ttl_seconds, stale_ttl_seconds,
-                   fetch_fn.
+    def invalidate(self, key: str) -> bool:
+        with self._lock:
+            if key in self._cache:
+                self._evict(key)
+                self._stats["invalidations"] += 1
+                return True
+            return False
 
-        Returns:
-            ActionResult with cache result.
-        """
-        start_time = time.time()
-        try:
-            action = params.get('action', 'get')
-            key = params.get('key', '')
-            value = params.get('value')
-            ttl = params.get('ttl_seconds', 300)
-            stale_ttl = params.get('stale_ttl_seconds', 600)
-            fetch_fn = params.get('fetch_fn')
-            cache_id = params.get('cache_id', 'stale_default')
+    def invalidate_by_tags(self, tags: List[str]) -> int:
+        with self._lock:
+            to_remove = [
+                key
+                for key, entry in self._cache.items()
+                if any(tag in entry.tags for tag in tags)
+            ]
+            for key in to_remove:
+                self._evict(key)
+            self._stats["invalidations"] += len(to_remove)
+            return len(to_remove)
 
-            if not hasattr(context, '_stale_caches'):
-                context._stale_caches = {}
-            caches = context._stale_caches
-            if cache_id not in caches:
-                caches[cache_id] = {}
-            cache = caches[cache_id]
+    def invalidate_pattern(self, pattern: str) -> int:
+        import fnmatch
+        with self._lock:
+            to_remove = [key for key in self._cache if fnmatch.fnmatch(key, pattern)]
+            for key in to_remove:
+                self._evict(key)
+            self._stats["invalidations"] += len(to_remove)
+            return len(to_remove)
 
+    def _evict(self, key: str) -> None:
+        if key in self._cache:
+            del self._cache[key]
+            self._stats["evictions"] += 1
+
+    def _evict_one(self) -> None:
+        if not self._cache:
+            return
+        policy = self._config.eviction_policy
+        if policy == "lru":
+            key = min(self._cache, key=lambda k: self._cache[k].last_accessed)
+        elif policy == "lfu":
+            key = min(self._cache, key=lambda k: self._cache[k].access_count)
+        else:
+            key = next(iter(self._cache))
+        self._evict(key)
+
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            return count
+
+    def get_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            total = self._stats["hits"] + self._stats["misses"]
+            return {
+                **self._stats,
+                "size": len(self._cache),
+                "max_size": self._config.max_size,
+                "hit_rate": self._stats["hits"] / total if total > 0 else 0,
+            }
+
+    def get_keys(self) -> List[str]:
+        with self._lock:
+            return list(self._cache.keys())
+
+    def has_stale(self) -> bool:
+        with self._lock:
+            return any(e.is_stale for e in self._cache.values())
+
+    def cleanup_stale(self) -> int:
+        with self._lock:
             now = time.time()
-
-            if action == 'set':
-                if not key:
-                    return ActionResult(success=False, message="key is required", duration=time.time() - start_time)
-                cache[key] = {
-                    'value': value,
-                    'fresh_until': now + ttl,
-                    'stale_until': now + stale_ttl,
-                    'revalidating': False,
-                }
-                return ActionResult(success=True, message=f"Set stale cache: {key}", data={'key': key}, duration=time.time() - start_time)
-
-            elif action == 'get':
-                if not key:
-                    return ActionResult(success=False, message="key is required", duration=time.time() - start_time)
-                entry = cache.get(key)
-                if not entry:
-                    if callable(fetch_fn):
-                        fresh = fetch_fn(key, context)
-                        cache[key] = {'value': fresh, 'fresh_until': now + ttl, 'stale_until': now + stale_ttl, 'revalidating': False}
-                        return ActionResult(success=True, message="Fetched fresh data", data={'value': fresh, 'stale': False}, duration=time.time() - start_time)
-                    return ActionResult(success=False, message="Cache miss", data={'key': key, 'hit': False}, duration=time.time() - start_time)
-
-                if now < entry['fresh_until']:
-                    return ActionResult(success=True, message="Fresh cache hit", data={'value': entry['value'], 'stale': False, 'fresh': True}, duration=time.time() - start_time)
-                elif now < entry['stale_until'] and not entry['revalidating']:
-                    entry['revalidating'] = True
-                    return ActionResult(success=True, message="Serving stale, revalidating", data={'value': entry['value'], 'stale': True, 'revalidating': True}, duration=time.time() - start_time)
-                else:
-                    return ActionResult(success=False, message="Cache fully expired", data={'key': key, 'expired': True}, duration=time.time() - start_time)
-
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}", duration=time.time() - start_time)
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"Stale cache error: {str(e)}", duration=time.time() - start_time)
+            to_remove = []
+            for key, entry in self._cache.items():
+                if entry.is_stale and now - entry.created_at > entry.ttl_sec + self._config.stale_threshold_sec:
+                    to_remove.append(key)
+            for key in to_remove:
+                self._evict(key)
+            return len(to_remove)

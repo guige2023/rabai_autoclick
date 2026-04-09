@@ -1,218 +1,253 @@
-"""API batch action module for RabAI AutoClick.
+"""
+API Batch Action Module.
 
-Provides API batch request processing with support for
-request bundling, parallel execution, and result aggregation.
+Provides batch processing for API calls with concurrency control,
+partial failure handling, and result aggregation.
 """
 
-import sys
-import os
-import time
-from typing import Any, Dict, List, Optional, Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-import json
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any, Callable, Generic, Optional, TypeVar
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
+R = TypeVar("R")
 
 
-class ApiBatchAction(BaseAction):
-    """API batch action for processing multiple requests.
-    
-    Supports batch request execution with concurrency control,
-    error handling, and result aggregation.
+@dataclass
+class BatchConfig:
+    """Configuration for batch processing."""
+    batch_size: int = 10
+    max_concurrency: int = 5
+    timeout: float = 30.0
+    stop_on_error: bool = False
+    retry_count: int = 0
+
+
+@dataclass
+class BatchResult(Generic[T]):
+    """Result of batch operation."""
+    successful: list[T] = field(default_factory=list)
+    failed: list[tuple[Any, Exception]] = field(default_factory=list)
+    total: int = 0
+    duration: float = 0.0
+
+    @property
+    def success_count(self) -> int:
+        return len(self.successful)
+
+    @property
+    def failure_count(self) -> int:
+        return len(self.failed)
+
+    @property
+    def all_successful(self) -> bool:
+        return self.failure_count == 0
+
+
+@dataclass
+class BatchItem(Generic[T]):
+    """Single item in batch."""
+    id: str
+    data: T
+    retries: int = 0
+
+
+class APISemaphore:
+    """Semaphore for concurrency control."""
+
+    def __init__(self, max_concurrent: int):
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._max_concurrent = max_concurrent
+        self._initialized = False
+
+    async def _ensure_init(self) -> None:
+        if not self._initialized:
+            self._semaphore = asyncio.Semaphore(self._max_concurrent)
+            self._initialized = True
+
+    async def acquire(self) -> None:
+        await self._ensure_init()
+        await self._semaphore.acquire()
+
+    def release(self) -> None:
+        if self._semaphore:
+            self._semaphore.release()
+
+
+class APIBatchAction:
     """
-    action_type = "api_batch"
-    display_name = "API批量处理"
-    description = "API批量请求处理"
-    
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute batch operation.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                requests: List of request definitions
-                concurrency: Max concurrent requests
-                stop_on_error: Stop on first error
-                continue_on_error: Continue after errors
-                timeout: Per-request timeout.
-        
-        Returns:
-            ActionResult with batch results.
-        """
-        requests = params.get('requests', [])
-        concurrency = params.get('concurrency', 5)
-        stop_on_error = params.get('stop_on_error', False)
-        continue_on_error = params.get('continue_on_error', True)
-        timeout = params.get('timeout', 30)
-        
-        if not requests:
-            return ActionResult(success=False, message="No requests provided")
-        
-        if len(requests) == 1:
-            return self._execute_single(requests[0], timeout)
-        
-        return self._execute_batch(
-            requests, concurrency, stop_on_error, continue_on_error, timeout
+    Batch processor for API calls with concurrency control.
+
+    Example:
+        batcher = APIBatchAction(batch_size=10, max_concurrency=5)
+        results = await batcher.execute(
+            items=url_list,
+            func=lambda url: api.get(url)
         )
-    
-    def _execute_single(
+    """
+
+    def __init__(
         self,
-        request: Dict[str, Any],
-        timeout: int
-    ) -> ActionResult:
-        """Execute a single request."""
-        result = self._do_request(request, timeout)
-        
-        return ActionResult(
-            success=result['success'],
-            message=result.get('error', 'Request completed'),
-            data={
-                'results': [result],
-                'total': 1,
-                'successful': 1 if result['success'] else 0,
-                'failed': 0 if result['success'] else 1
-            }
+        batch_size: int = 10,
+        max_concurrency: int = 5,
+        timeout: float = 30.0,
+        stop_on_error: bool = False
+    ):
+        self.config = BatchConfig(
+            batch_size=batch_size,
+            max_concurrency=max_concurrency,
+            timeout=timeout,
+            stop_on_error=stop_on_error
         )
-    
-    def _execute_batch(
+        self._semaphore = APISemaphore(max_concurrency)
+
+    async def _process_item(
         self,
-        requests: List[Dict[str, Any]],
-        concurrency: int,
-        stop_on_error: bool,
-        continue_on_error: bool,
-        timeout: int
-    ) -> ActionResult:
-        """Execute batch requests with concurrency control."""
-        results = []
-        successful = 0
-        failed = 0
-        errors = []
-        
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {
-                executor.submit(self._do_request, req, timeout): (i, req)
-                for i, req in enumerate(requests)
-            }
-            
-            for future in as_completed(futures):
-                i, req = futures[future]
-                
-                try:
-                    result = future.result()
-                    results.append({**result, 'index': i})
-                    
-                    if result.get('success'):
-                        successful += 1
-                    else:
-                        failed += 1
-                        errors.append({
-                            'index': i,
-                            'error': result.get('error'),
-                            'request': self._summarize_request(req)
-                        })
-                        
-                        if stop_on_error:
-                            for f in futures:
-                                f.cancel()
-                            break
-                except Exception as e:
-                    failed += 1
-                    errors.append({
-                        'index': i,
-                        'error': str(e),
-                        'request': self._summarize_request(req)
-                    })
-                    
-                    if stop_on_error:
-                        for f in futures:
-                            f.cancel()
-                        break
-        
-        success = failed == 0 or continue_on_error
-        
-        return ActionResult(
-            success=success,
-            message=f"Batch completed: {successful}/{len(requests)} successful",
-            data={
-                'results': results,
-                'total': len(requests),
-                'successful': successful,
-                'failed': failed,
-                'errors': errors[:10]
-            }
-        )
-    
-    def _do_request(
-        self,
-        request: Dict[str, Any],
-        timeout: int
-    ) -> Dict[str, Any]:
-        """Execute a single HTTP request."""
-        url = request.get('url', '')
-        method = request.get('method', 'GET')
-        headers = request.get('headers', {})
-        body = request.get('body')
-        
-        if not url:
-            return {'success': False, 'error': 'URL is required'}
-        
-        data = None
-        if body:
-            if isinstance(body, dict):
-                data = json.dumps(body).encode('utf-8')
-                headers = {**headers, 'Content-Type': 'application/json'}
-            elif isinstance(body, str):
-                data = body.encode('utf-8')
-            else:
-                data = body
-        
+        item: BatchItem[T],
+        func: Callable[[T], R],
+        results: BatchResult,
+        stop_event: asyncio.Event
+    ) -> None:
+        """Process single batch item."""
         try:
-            req = Request(url, data=data, headers=headers, method=method)
-            
-            with urlopen(req, timeout=timeout) as response:
-                body_bytes = response.read()
-                
-                try:
-                    body_json = json.loads(body_bytes.decode('utf-8', errors='replace'))
-                    body_result = body_json
-                except json.JSONDecodeError:
-                    body_result = body_bytes.decode('utf-8', errors='replace')
-                
-                return {
-                    'success': True,
-                    'status': response.status,
-                    'body': body_result,
-                    'headers': dict(response.headers)
-                }
-        except HTTPError as e:
-            body = e.read() if e.fp else b''
-            return {
-                'success': False,
-                'error': f"HTTP {e.code}: {e.reason}",
-                'status': e.code,
-                'body': body.decode('utf-8', errors='replace') if body else ''
-            }
-        except URLError as e:
-            return {
-                'success': False,
-                'error': f"URL error: {str(e.reason)}"
-            }
+            await asyncio.wait_for(
+                self._semaphore.acquire(),
+                timeout=self.config.timeout
+            )
+            try:
+                result = func(item.data)
+                results.successful.append(result)
+            finally:
+                self._semaphore.release()
+
         except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def _summarize_request(self, request: Dict) -> Dict:
-        """Summarize request for error reporting."""
-        return {
-            'url': request.get('url', ''),
-            'method': request.get('method', 'GET')
-        }
+            if item.retries < self.config.retry_count:
+                item.retries += 1
+                await self._process_item(item, func, results, stop_event)
+            else:
+                results.failed.append((item.data, e))
+                if self.config.stop_on_error:
+                    stop_event.set()
+
+    async def execute(
+        self,
+        items: list[T],
+        func: Callable[[T], R],
+        id_func: Optional[Callable[[T], str]] = None
+    ) -> BatchResult[R]:
+        """Execute batch operation."""
+        import time
+        start = time.monotonic()
+
+        results: BatchResult[R] = BatchResult()
+        results.total = len(items)
+
+        stop_event = asyncio.Event()
+
+        batch_items = [
+            BatchItem(
+                id=id_func(item) if id_func else str(i),
+                data=item
+            )
+            for i, item in enumerate(items)
+        ]
+
+        tasks = [
+            self._process_item(item, func, results, stop_event)
+            for item in batch_items
+        ]
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=self.config.timeout * len(items) / self.config.max_concurrency
+            )
+        except asyncio.TimeoutError:
+            pass
+
+        results.duration = time.monotonic() - start
+        return results
+
+    async def execute_async(
+        self,
+        items: list[T],
+        func: Callable[[T], R],
+        id_func: Optional[Callable[[T], str]] = None
+    ) -> BatchResult[R]:
+        """Execute async batch operation."""
+        import time
+        start = time.monotonic()
+
+        results: BatchResult[R] = BatchResult()
+        results.total = len(items)
+
+        stop_event = asyncio.Event()
+
+        batch_items = [
+            BatchItem(
+                id=id_func(item) if id_func else str(i),
+                data=item
+            )
+            for i, item in enumerate(items)
+        ]
+
+        async def process_async(item: BatchItem[T]) -> None:
+            try:
+                await asyncio.wait_for(
+                    self._semaphore.acquire(),
+                    timeout=self.config.timeout
+                )
+                try:
+                    result = await func(item.data)
+                    results.successful.append(result)
+                finally:
+                    self._semaphore.release()
+            except Exception as e:
+                if item.retries < self.config.retry_count:
+                    item.retries += 1
+                    await process_async(item)
+                else:
+                    results.failed.append((item.data, e))
+                    if self.config.stop_on_error:
+                        stop_event.set()
+
+        tasks = [process_async(item) for item in batch_items]
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=self.config.timeout * len(items) / self.config.max_concurrency
+            )
+        except asyncio.TimeoutError:
+            pass
+
+        results.duration = time.monotonic() - start
+        return results
+
+    async def execute_batched(
+        self,
+        items: list[T],
+        func: Callable[[list[T]], list[R]]
+    ) -> BatchResult[R]:
+        """Execute in true batches."""
+        import time
+        start = time.monotonic()
+
+        results: BatchResult[R] = BatchResult()
+        results.total = len(items)
+
+        for i in range(0, len(items), self.config.batch_size):
+            batch = items[i:i + self.config.batch_size]
+            try:
+                batch_results = await asyncio.wait_for(
+                    asyncio.to_thread(func, batch),
+                    timeout=self.config.timeout
+                )
+                results.successful.extend(batch_results)
+            except Exception as e:
+                results.failed.append((batch, e))
+                if self.config.stop_on_error:
+                    break
+
+        results.duration = time.monotonic() - start
+        return results

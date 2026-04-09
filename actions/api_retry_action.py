@@ -1,211 +1,236 @@
-"""API retry action module for RabAI AutoClick.
+"""
+API Retry Action Module.
 
-Provides automatic retry logic with exponential backoff and jitter
-for failing API requests with configurable retry conditions.
+Provides configurable retry logic with exponential backoff, circuit breaker,
+and jitter for resilient API calls.
 """
 
-import time
+import asyncio
 import random
-import sys
-import os
-from typing import Any, Callable, Dict, List, Optional, Set, Union
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Optional, TypeVar
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
+
+
+class RetryStrategy(Enum):
+    """Retry strategy types."""
+    EXPONENTIAL = "exponential"
+    LINEAR = "linear"
+    FIBONACCI = "fibonacci"
+
+
+class CircuitState(Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
 
 
 @dataclass
 class RetryConfig:
     """Configuration for retry behavior."""
     max_attempts: int = 3
-    initial_delay: float = 1.0
+    initial_delay: float = 0.5
     max_delay: float = 60.0
     multiplier: float = 2.0
     jitter: bool = True
-    retry_on_status: Set[int] = None
-    
-    def __post_init__(self):
-        if self.retry_on_status is None:
-            self.retry_on_status = {429, 500, 502, 503, 504}
-        else:
-            self.retry_on_status = set(self.retry_on_status)
+    jitter_range: float = 0.3
+    strategy: RetryStrategy = RetryStrategy.EXPONENTIAL
+    retriable_exceptions: tuple = (Exception,)
+    non_retriable: tuple = ()
 
 
-class ApiRetryAction(BaseAction):
-    """API retry action with exponential backoff and jitter.
-    
-    Wraps HTTP requests with automatic retry logic, configurable
-    status code retry conditions, and backoff strategies.
+@dataclass
+class CircuitBreakerConfig:
+    """Configuration for circuit breaker."""
+    failure_threshold: int = 5
+    recovery_timeout: float = 60.0
+    half_open_attempts: int = 3
+    success_threshold: int = 2
+
+
+class CircuitBreaker:
+    """Circuit breaker to prevent cascading failures."""
+
+    def __init__(self, config: Optional[CircuitBreakerConfig] = None):
+        self.config = config or CircuitBreakerConfig()
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time: Optional[float] = None
+        self._lock = asyncio.Lock()
+
+    async def can_execute(self) -> bool:
+        """Check if execution is allowed."""
+        async with self._lock:
+            if self.state == CircuitState.CLOSED:
+                return True
+            if self.state == CircuitState.OPEN:
+                if self._should_attempt_reset():
+                    self.state = CircuitState.HALF_OPEN
+                    return True
+                return False
+            return True
+
+    def _should_attempt_reset(self) -> bool:
+        """Check if enough time has passed to attempt reset."""
+        if self.last_failure_time is None:
+            return True
+        return (time.time() - self.last_failure_time) >= self.config.recovery_timeout
+
+    async def record_success(self) -> None:
+        """Record successful execution."""
+        async with self._lock:
+            self.failure_count = 0
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.config.half_open_attempts:
+                    self.state = CircuitState.CLOSED
+                    self.success_count = 0
+
+    async def record_failure(self) -> None:
+        """Record failed execution."""
+        async with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            if self.state == CircuitState.HALF_OPEN:
+                self.state = CircuitState.OPEN
+            elif self.failure_count >= self.config.failure_threshold:
+                self.state = CircuitState.OPEN
+
+
+def _calculate_delay(
+    attempt: int,
+    config: RetryConfig
+) -> float:
+    """Calculate delay for the given attempt."""
+    if config.strategy == RetryStrategy.EXPONENTIAL:
+        delay = config.initial_delay * (config.multiplier ** (attempt - 1))
+    elif config.strategy == RetryStrategy.LINEAR:
+        delay = config.initial_delay * attempt
+    elif config.strategy == RetryStrategy.FIBONACCI:
+        a, b = 1, 1
+        for _ in range(attempt - 1):
+            a, b = b, a + b
+        delay = config.initial_delay * a
+    else:
+        delay = config.initial_delay
+
+    delay = min(delay, config.max_delay)
+
+    if config.jitter:
+        jitter_range = delay * config.jitter_range
+        delay += random.uniform(-jitter_range, jitter_range)
+
+    return max(0, delay)
+
+
+class APIRetryAction:
     """
-    action_type = "api_retry"
-    display_name = "API重试"
-    description = "带指数退避的API自动重试机制"
-    
-    def __init__(self):
-        super().__init__()
-        self._default_config = RetryConfig()
-    
-    def execute(
+    Retry action with exponential backoff and circuit breaker.
+
+    Example:
+        action = APIRetryAction(
+            max_attempts=5,
+            initial_delay=1.0,
+            multiplier=2.0
+        )
+        result = await action.execute(
+            lambda: api.call(),
+            retriable_exceptions=(TimeoutError, ConnectionError)
+        )
+    """
+
+    def __init__(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute HTTP request with retry logic.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: url, method, headers, body,
-                   max_attempts, initial_delay, max_delay, multiplier,
-                   jitter, retry_on_status, timeout.
-        
-        Returns:
-            ActionResult with response body and attempt count.
-        """
-        config = self._build_config(params)
-        url = params.get('url', '')
-        method = params.get('method', 'GET')
-        headers = params.get('headers', {})
-        body = params.get('body')
-        timeout = params.get('timeout', 30)
-        
-        if not url:
-            return ActionResult(success=False, message="URL is required")
-        
-        last_error = None
-        for attempt in range(1, config.max_attempts + 1):
+        config: Optional[RetryConfig] = None,
+        circuit_config: Optional[CircuitBreakerConfig] = None
+    ):
+        self.config = config or RetryConfig()
+        self.circuit_breaker = CircuitBreaker(circuit_config)
+
+    async def execute(
+        self,
+        func: Callable[[], T],
+        *args: Any,
+        **kwargs: Any
+    ) -> T:
+        """Execute function with retry logic."""
+        last_exception: Optional[Exception] = None
+
+        for attempt in range(1, self.config.max_attempts + 1):
             try:
-                response = self._make_request(
-                    url, method, headers, body, timeout
-                )
-                
-                status = response.get('status', 200)
-                
-                if status < 400:
-                    return ActionResult(
-                        success=True,
-                        message=f"Success on attempt {attempt}",
-                        data={
-                            'body': response.get('body'),
-                            'status': status,
-                            'attempts': attempt
-                        }
+                if not await self.circuit_breaker.can_execute():
+                    raise CircuitOpenError(
+                        "Circuit breaker is open"
                     )
-                
-                if status in config.retry_on_status and attempt < config.max_attempts:
-                    last_error = f"HTTP {status}"
-                    delay = self._calculate_delay(config, attempt)
-                    time.sleep(delay)
-                    continue
-                
-                return ActionResult(
-                    success=False,
-                    message=f"HTTP {status} on attempt {attempt}",
-                    data={
-                        'body': response.get('body'),
-                        'status': status,
-                        'attempts': attempt
-                    }
-                )
-                
-            except HTTPError as e:
-                last_error = f"HTTPError: {e.code} - {e.reason}"
-                if e.code in config.retry_on_status and attempt < config.max_attempts:
-                    delay = self._calculate_delay(config, attempt)
-                    time.sleep(delay)
-                    continue
-                return ActionResult(
-                    success=False,
-                    message=f"HTTPError: {e.code}",
-                    data={'attempts': attempt, 'error': last_error}
-                )
-            except URLError as e:
-                last_error = f"URLError: {str(e.reason)}"
-                if attempt < config.max_attempts:
-                    delay = self._calculate_delay(config, attempt)
-                    time.sleep(delay)
-                    continue
-                return ActionResult(
-                    success=False,
-                    message=f"URLError: {str(e.reason)}",
-                    data={'attempts': attempt, 'error': last_error}
-                )
-            except Exception as e:
-                last_error = str(e)
-                if attempt < config.max_attempts:
-                    delay = self._calculate_delay(config, attempt)
-                    time.sleep(delay)
-                    continue
-                return ActionResult(
-                    success=False,
-                    message=f"Error: {str(e)}",
-                    data={'attempts': attempt, 'error': last_error}
-                )
-        
-        return ActionResult(
-            success=False,
-            message=f"All {config.max_attempts} attempts failed",
-            data={'error': last_error, 'attempts': config.max_attempts}
+
+                result = func(*args, **kwargs)
+                await self.circuit_breaker.record_success()
+                return result
+
+            except self.config.non_retriable as e:
+                raise
+
+            except self.config.retriable_exceptions as e:
+                last_exception = e
+                if attempt < self.config.max_attempts:
+                    delay = _calculate_delay(attempt, self.config)
+                    await asyncio.sleep(delay)
+                await self.circuit_breaker.record_failure()
+
+        raise MaxRetriesExceededError(
+            f"Max retries ({self.config.max_attempts}) exceeded",
+            last_exception
         )
-    
-    def _make_request(
+
+    async def execute_async(
         self,
-        url: str,
-        method: str,
-        headers: Dict[str, str],
-        body: Optional[Union[str, Dict]],
-        timeout: int
-    ) -> Dict[str, Any]:
-        """Make HTTP request and return response."""
-        import json
-        
-        data = None
-        if body:
-            if isinstance(body, dict):
-                data = json.dumps(body).encode('utf-8')
-                headers.setdefault('Content-Type', 'application/json')
-            else:
-                data = body.encode('utf-8') if isinstance(body, str) else body
-        
-        req = Request(url, data=data, headers=headers, method=method)
-        
-        with urlopen(req, timeout=timeout) as response:
-            body_bytes = response.read()
-            return {
-                'status': response.status,
-                'body': body_bytes.decode('utf-8', errors='replace'),
-                'headers': dict(response.headers)
-            }
-    
-    def _build_config(self, params: Dict[str, Any]) -> RetryConfig:
-        """Build retry config from params."""
-        return RetryConfig(
-            max_attempts=params.get('max_attempts', 3),
-            initial_delay=params.get('initial_delay', 1.0),
-            max_delay=params.get('max_delay', 60.0),
-            multiplier=params.get('multiplier', 2.0),
-            jitter=params.get('jitter', True),
-            retry_on_status=params.get('retry_on_status')
+        func: Callable[..., T],
+        *args: Any,
+        **kwargs: Any
+    ) -> T:
+        """Execute async function with retry logic."""
+        last_exception: Optional[Exception] = None
+
+        for attempt in range(1, self.config.max_attempts + 1):
+            try:
+                if not await self.circuit_breaker.can_execute():
+                    raise CircuitOpenError(
+                        "Circuit breaker is open"
+                    )
+
+                result = await func(*args, **kwargs)
+                await self.circuit_breaker.record_success()
+                return result
+
+            except self.config.non_retriable as e:
+                raise
+
+            except self.config.retriable_exceptions as e:
+                last_exception = e
+                if attempt < self.config.max_attempts:
+                    delay = _calculate_delay(attempt, self.config)
+                    await asyncio.sleep(delay)
+                await self.circuit_breaker.record_failure()
+
+        raise MaxRetriesExceededError(
+            f"Max retries ({self.config.max_attempts}) exceeded",
+            last_exception
         )
-    
-    def _calculate_delay(self, config: RetryConfig, attempt: int) -> float:
-        """Calculate delay for given attempt with backoff and jitter.
-        
-        Args:
-            config: Retry configuration.
-            attempt: Current attempt number (1-indexed).
-            
-        Returns:
-            Delay in seconds.
-        """
-        delay = min(
-            config.initial_delay * (config.multiplier ** (attempt - 1)),
-            config.max_delay
-        )
-        
-        if config.jitter:
-            delay = delay * (0.5 + random.random())
-        
-        return delay
+
+
+class CircuitOpenError(Exception):
+    """Raised when circuit breaker is open."""
+    pass
+
+
+class MaxRetriesExceededError(Exception):
+    """Raised when max retries are exceeded."""
+
+    def __init__(self, message: str, last_exception: Optional[Exception] = None):
+        super().__init__(message)
+        self.last_exception = last_exception
