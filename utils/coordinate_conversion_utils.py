@@ -1,226 +1,267 @@
-"""Coordinate system conversion utilities.
+"""Coordinate conversion utilities for multi-display coordinate handling.
 
-This module provides utilities for converting between different
-coordinate systems used in GUI automation.
+This module provides utilities for converting coordinates between different
+display spaces, normalizing coordinates, and handling coordinate transforms
+in multi-monitor setups for UI automation.
+
+Author: AI Assistant
+License: MIT
 """
 
 from __future__ import annotations
 
-from typing import Tuple, Optional
 from dataclasses import dataclass
+from typing import Optional, Tuple, List
 
 
 @dataclass
-class Point:
-    """A 2D point with optional screen identifier."""
-    x: float
-    y: float
-    screen: Optional[str] = None
+class Coordinate2D:
+    """A 2D coordinate point."""
+    x: int
+    y: int
+    
+    def to_tuple(self) -> Tuple[int, int]:
+        return (self.x, self.y)
+    
+    def offset(self, dx: int, dy: int) -> "Coordinate2D":
+        """Return new coordinate offset by dx, dy."""
+        return Coordinate2D(self.x + dx, self.y + dy)
+    
+    def distance_to(self, other: "Coordinate2D") -> float:
+        """Calculate Euclidean distance to another coordinate."""
+        dx = self.x - other.x
+        dy = self.y - other.y
+        return (dx * dx + dy * dy) ** 0.5
 
 
 @dataclass
-class CoordinateSystem:
-    """Describes a coordinate system."""
-    origin: str  # "top_left", "bottom_left", "center"
-    unit: str  # "pixel", "percent", "point"
-    scale: float = 1.0
+class CoordinateTransform:
+    """Transformation between coordinate spaces."""
+    source_display_id: int
+    target_display_id: int
+    offset_x: int
+    offset_y: int
+    scale_x: float = 1.0
+    scale_y: float = 1.0
 
 
-# Screen coordinates (origin: top-left, unit: pixel)
-SCREEN_SYSTEM = CoordinateSystem("top_left", "pixel", 1.0)
-# Fractional coordinates (origin: top-left, unit: percent)
-FRACTIONAL_SYSTEM = CoordinateSystem("top_left", "percent", 100.0)
-
-
-def screen_to_fractional(
+def screen_to_display_coords(
     x: int,
     y: int,
-    screen_width: int,
-    screen_height: int,
+    display_offset_x: int,
+    display_offset_y: int,
+) -> Tuple[int, int]:
+    """Convert screen coordinates to display-local coordinates.
+    
+    Args:
+        x: Screen X coordinate.
+        y: Screen Y coordinate.
+        display_offset_x: Display X offset from screen origin.
+        display_offset_y: Display Y offset from screen origin.
+    
+    Returns:
+        Tuple of (display_x, display_y).
+    """
+    return (x - display_offset_x, y - display_offset_y)
+
+
+def display_to_screen_coords(
+    x: int,
+    y: int,
+    display_offset_x: int,
+    display_offset_y: int,
+) -> Tuple[int, int]:
+    """Convert display-local coordinates to screen coordinates.
+    
+    Args:
+        x: Display X coordinate.
+        y: Display Y coordinate.
+        display_offset_x: Display X offset from screen origin.
+        display_offset_y: Display Y offset from screen origin.
+    
+    Returns:
+        Tuple of (screen_x, screen_y).
+    """
+    return (x + display_offset_x, y + display_offset_y)
+
+
+def normalize_coordinates(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
 ) -> Tuple[float, float]:
-    """Convert screen coordinates to fractional (0-1) coordinates.
-
+    """Normalize coordinates to 0.0-1.0 range.
+    
     Args:
-        x: X coordinate in screen pixels.
-        y: Y coordinate in screen pixels.
-        screen_width: Total screen width.
-        screen_height: Total screen height.
-
+        x: X coordinate.
+        y: Y coordinate.
+        width: Reference width.
+        height: Reference height.
+    
     Returns:
-        Tuple of (fractional_x, fractional_y) in range [0, 1].
+        Tuple of (normalized_x, normalized_y).
     """
-    fx = max(0.0, min(1.0, x / screen_width))
-    fy = max(0.0, min(1.0, y / screen_height))
-    return (fx, fy)
+    norm_x = x / width if width > 0 else 0.0
+    norm_y = y / height if height > 0 else 0.0
+    return (norm_x, norm_y)
 
 
-def fractional_to_screen(
-    fx: float,
-    fy: float,
-    screen_width: int,
-    screen_height: int,
+def denormalize_coordinates(
+    norm_x: float,
+    norm_y: float,
+    width: int,
+    height: int,
 ) -> Tuple[int, int]:
-    """Convert fractional coordinates to screen pixels.
-
+    """Convert normalized coordinates back to pixel coordinates.
+    
     Args:
-        fx: Fractional X in range [0, 1].
-        fy: Fractional Y in range [0, 1].
-        screen_width: Total screen width.
-        screen_height: Total screen height.
-
+        norm_x: Normalized X (0.0-1.0).
+        norm_y: Normalized Y (0.0-1.0).
+        width: Target width.
+        height: Target height.
+    
     Returns:
-        Tuple of (screen_x, screen_y) in pixels.
+        Tuple of (x, y) pixel coordinates.
     """
-    sx = int(max(0, min(screen_width - 1, fx * screen_width)))
-    sy = int(max(0, min(screen_height - 1, fy * screen_height)))
-    return (sx, sy)
+    x = int(norm_x * width)
+    y = int(norm_y * height)
+    return (x, y)
 
 
-def flip_y(y: int, height: int) -> int:
-    """Flip Y coordinate (convert between top-origin and bottom-origin).
-
-    Args:
-        y: Y coordinate in original system.
-        height: Total height of the coordinate space.
-
-    Returns:
-        Flipped Y coordinate.
-    """
-    return height - 1 - y
-
-
-def rotate_point(
+def transform_coordinates(
     x: int,
     y: int,
-    cx: int,
-    cy: int,
-    angle_deg: float,
+    transform: CoordinateTransform,
 ) -> Tuple[int, int]:
-    """Rotate a point around a center.
-
-    Args:
-        x: Point X.
-        y: Point Y.
-        cx: Center X.
-        cy: Center Y.
-        angle_deg: Rotation angle in degrees.
-
-    Returns:
-        Rotated point (rx, ry).
-    """
-    import math
-    rad = math.radians(angle_deg)
-    cos_a = math.cos(rad)
-    sin_a = math.sin(rad)
-    dx = x - cx
-    dy = y - cy
-    rx = int(dx * cos_a - dy * sin_a + cx)
-    ry = int(dx * sin_a + dy * cos_a + cy)
-    return (rx, ry)
-
-
-def scale_point(
-    x: int,
-    y: int,
-    scale_x: float,
-    scale_y: float,
-) -> Tuple[int, int]:
-    """Scale a point by factors.
-
-    Args:
-        x: Point X.
-        y: Point Y.
-        scale_x: Scale factor for X.
-        scale_y: Scale factor for Y.
-
-    Returns:
-        Scaled point (sx, sy).
-    """
-    return (int(x * scale_x), int(y * scale_y))
-
-
-def translate_point(
-    x: int,
-    y: int,
-    dx: int,
-    dy: int,
-) -> Tuple[int, int]:
-    """Translate a point by an offset.
-
-    Args:
-        x: Point X.
-        y: Point Y.
-        dx: Delta X.
-        dy: Delta Y.
-
-    Returns:
-        Translated point (tx, ty).
-    """
-    return (x + dx, y + dy)
-
-
-def convert_between_screens(
-    x: int,
-    y: int,
-    src_width: int,
-    src_height: int,
-    dst_width: int,
-    dst_height: int,
-) -> Tuple[int, int]:
-    """Convert coordinates between screens of different resolutions.
-
+    """Apply coordinate transformation.
+    
     Args:
         x: Source X coordinate.
         y: Source Y coordinate.
-        src_width: Source screen width.
-        src_height: Source screen height.
-        dst_width: Destination screen width.
-        dst_height: Destination screen height.
-
+        transform: Coordinate transformation to apply.
+    
     Returns:
-        Converted coordinates (dx, dy).
+        Tuple of transformed (x, y).
     """
-    fx, fy = screen_to_fractional(x, y, src_width, src_height)
-    return fractional_to_screen(fx, fy, dst_width, dst_height)
+    scaled_x = int(x * transform.scale_x)
+    scaled_y = int(y * transform.scale_y)
+    
+    return (
+        scaled_x + transform.offset_x,
+        scaled_y + transform.offset_y,
+    )
 
 
-def clamp_to_region(
+def clamp_to_bounds(
     x: int,
     y: int,
-    region_x: int,
-    region_y: int,
-    region_width: int,
-    region_height: int,
+    min_x: int,
+    min_y: int,
+    max_x: int,
+    max_y: int,
 ) -> Tuple[int, int]:
-    """Clamp coordinates to be within a region.
-
+    """Clamp coordinates to be within bounds.
+    
     Args:
-        x: Input X.
-        y: Input Y.
-        region_x: Region left edge.
-        region_y: Region top edge.
-        region_width: Region width.
-        region_height: Region height.
-
+        x: X coordinate.
+        y: Y coordinate.
+        min_x: Minimum X.
+        min_y: Minimum Y.
+        max_x: Maximum X.
+        max_y: Maximum Y.
+    
     Returns:
-        Clamped (x, y).
+        Tuple of clamped (x, y).
     """
-    cx = max(region_x, min(x, region_x + region_width - 1))
-    cy = max(region_y, min(y, region_y + region_height - 1))
-    return (cx, cy)
+    clamped_x = max(min_x, min(x, max_x))
+    clamped_y = max(min_y, min(y, max_y))
+    return (clamped_x, clamped_y)
 
 
-__all__ = [
-    "Point",
-    "CoordinateSystem",
-    "SCREEN_SYSTEM",
-    "FRACTIONAL_SYSTEM",
-    "screen_to_fractional",
-    "fractional_to_screen",
-    "flip_y",
-    "rotate_point",
-    "scale_point",
-    "translate_point",
-    "convert_between_screens",
-    "clamp_to_region",
-]
+def get_center_point(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+) -> Tuple[int, int]:
+    """Get center point between two coordinates.
+    
+    Args:
+        x1: First point X.
+        y1: First point Y.
+        x2: Second point X.
+        y2: Second point Y.
+    
+    Returns:
+        Tuple of center (x, y).
+    """
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
+def interpolate_coordinates(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    t: float,
+) -> Tuple[int, int]:
+    """Linearly interpolate between two coordinates.
+    
+    Args:
+        x1: Start X.
+        y1: Start Y.
+        x2: End X.
+        y2: End Y.
+        t: Interpolation factor (0.0 = start, 1.0 = end).
+    
+    Returns:
+        Tuple of interpolated (x, y).
+    """
+    x = int(x1 + (x2 - x1) * t)
+    y = int(y1 + (y2 - y1) * t)
+    return (x, y)
+
+
+def is_within_distance(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    max_distance: float,
+) -> bool:
+    """Check if two points are within specified distance.
+    
+    Args:
+        x1: First point X.
+        y1: First point Y.
+        x2: Second point X.
+        y2: Second point Y.
+        max_distance: Maximum allowed distance.
+    
+    Returns:
+        True if within distance.
+    """
+    dx = x2 - x1
+    dy = y2 - y1
+    return (dx * dx + dy * dy) <= (max_distance * max_distance)
+
+
+def get_bounding_box_center(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+) -> Tuple[int, int]:
+    """Get center point of a bounding box.
+    
+    Args:
+        x: Left edge.
+        y: Top edge.
+        width: Width.
+        height: Height.
+    
+    Returns:
+        Tuple of center (x, y).
+    """
+    return (x + width // 2, y + height // 2)
