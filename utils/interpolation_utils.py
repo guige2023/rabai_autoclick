@@ -1,255 +1,306 @@
+"""Interpolation utilities for RabAI AutoClick.
+
+Provides:
+- Various interpolation methods (linear, cubic, hermite, etc.)
+- Multi-dimensional interpolation
+- Step interpolation variants
+- 2D bilinear and bicubic interpolation
 """
-Interpolation and curve fitting utilities.
 
-Provides linear, polynomial, cubic spline, Lagrange, and bilinear interpolation.
-"""
-
-from __future__ import annotations
-
+from typing import List, Tuple, Callable, Optional, Dict
 import math
-from typing import Callable
 
 
-def linear_interpolate(x: float, x1: float, y1: float, x2: float, y2: float) -> float:
-    """
-    Linear interpolation between two points.
-
-    Args:
-        x: X value to interpolate at
-        x1, y1: First known point
-        x2, y2: Second known point
-
-    Returns:
-        Interpolated y value.
-    """
-    if abs(x2 - x1) < 1e-12:
-        return y1
-    return y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+def lerp(a: float, b: float, t: float) -> float:
+    """Linear interpolation."""
+    return a + (b - a) * t
 
 
-def linear_interpolate_array(
-    xs: list[float], ys: list[float], x_query: list[float]
-) -> list[float]:
-    """
-    Interpolate multiple x values against sorted known data points.
-
-    Args:
-        xs: Sorted list of known x values
-        ys: Known y values (same length as xs)
-        x_query: X values to interpolate
-
-    Returns:
-        Interpolated y values.
-    """
-    result: list[float] = []
-    n = len(xs)
-    for x in x_query:
-        if x <= xs[0]:
-            result.append(ys[0])
-        elif x >= xs[-1]:
-            result.append(ys[-1])
-        else:
-            for i in range(n - 1):
-                if xs[i] <= x <= xs[i + 1]:
-                    result.append(linear_interpolate(x, xs[i], ys[i], xs[i + 1], ys[i + 1]))
-                    break
-    return result
+def inv_lerp(a: float, b: float, v: float) -> float:
+    """Inverse linear interpolation (find t such that lerp(a,b,t) = v)."""
+    if abs(b - a) < 1e-10:
+        return 0.0
+    return (v - a) / (b - a)
 
 
-def lagrange_interpolate(xs: list[float], ys: list[float], x: float) -> float:
-    """
-    Lagrange polynomial interpolation.
-
-    Args:
-        xs: Known x values
-        ys: Known y values
-        x: Value to interpolate at
-
-    Returns:
-        Interpolated y value.
-    """
-    n = len(xs)
-    result = 0.0
-    for i in range(n):
-        term = ys[i]
-        for j in range(n):
-            if i != j:
-                term *= (x - xs[j]) / (xs[i] - xs[j])
-        result += term
-    return result
-
-
-def cubic_spline_interpolate(
-    xs: list[float], ys: list[float], x: float
+def remap(
+    value: float,
+    in_min: float,
+    in_max: float,
+    out_min: float,
+    out_max: float,
 ) -> float:
-    """
-    Cubic spline interpolation using natural boundary conditions.
+    """Remap value from input range to output range."""
+    t = inv_lerp(in_min, in_max, value)
+    return lerp(out_min, out_max, t)
+
+
+def step(t: float) -> float:
+    """Step function: 0 if t < 0.5, 1 otherwise."""
+    return 0.0 if t < 0.5 else 1.0
+
+
+def smoothstep(t: float) -> float:
+    """Smoothstep (Perlin ease)."""
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
+
+
+def smootherstep(t: float) -> float:
+    """Smootherstep (Ken Perlin's improved version)."""
+    t = max(0.0, min(1.0, t))
+    return t * t * t * (t * (t * 6 - 15) + 10)
+
+
+def ease_in_quad(t: float) -> float:
+    """Quadratic ease in."""
+    return t * t
+
+
+def ease_out_quad(t: float) -> float:
+    """Quadratic ease out."""
+    return t * (2 - t)
+
+
+def ease_in_out_quad(t: float) -> float:
+    """Quadratic ease in-out."""
+    return 2 * t * t if t < 0.5 else -1 + (4 - 2 * t) * t
+
+
+def ease_in_cubic(t: float) -> float:
+    """Cubic ease in."""
+    return t * t * t
+
+
+def ease_out_cubic(t: float) -> float:
+    """Cubic ease out."""
+    return (t - 1) ** 3 + 1
+
+
+def ease_in_out_cubic(t: float) -> float:
+    """Cubic ease in-out."""
+    return 4 * t * t * t if t < 0.5 else 1 - (-2 * t + 2) ** 3 / 2
+
+
+def ease_in_out_sine(t: float) -> float:
+    """Sine ease in-out."""
+    return -(math.cos(math.pi * t) - 1) / 2
+
+
+def ease_in_elastic(t: float) -> float:
+    """Elastic ease in."""
+    if t == 0 or t == 1:
+        return t
+    p = 0.3
+    return -2 ** (10 * t - 10) * math.sin((t * 10 - 10.75) * (2 * math.pi) / p)
+
+
+def ease_out_elastic(t: float) -> float:
+    """Elastic ease out."""
+    if t == 0 or t == 1:
+        return t
+    p = 0.3
+    return 2 ** (-10 * t) * math.sin((t * 10 - 0.75) * (2 * math.pi) / p) + 1
+
+
+def ease_out_bounce(t: float) -> float:
+    """Bounce ease out."""
+    n1 = 7.5625
+    d1 = 2.75
+    if t < 1 / d1:
+        return n1 * t * t
+    elif t < 2 / d1:
+        t -= 1.5 / d1
+        return n1 * t * t + 0.75
+    elif t < 2.5 / d1:
+        t -= 2.25 / d1
+        return n1 * t * t + 0.9375
+    else:
+        t -= 2.625 / d1
+        return n1 * t * t + 0.984375
+
+
+def hermite_interpolate(
+    p0: float, p1: float,
+    m0: float, m1: float,
+    t: float,
+) -> float:
+    """Hermite cubic interpolation with tangent control.
 
     Args:
-        xs: Sorted x values
-        ys: Corresponding y values
-        x: Value to interpolate
+        p0: Start value.
+        p1: End value.
+        m0: Tangent at start.
+        m1: Tangent at end.
+        t: Parameter [0, 1].
 
     Returns:
-        Interpolated y value.
+        Interpolated value.
     """
-    n = len(xs)
-    if n < 4:
-        # Fall back to linear for small datasets
-        return linear_interpolate_array(xs, ys, [x])[0]
-
-    # Compute second derivatives
-    h = [xs[i + 1] - xs[i] for i in range(n - 1)]
-
-    # Tridiagonal system
-    A = [0.0] * (n - 2)
-    B = [0.0] * (n - 2)
-    C = [0.0] * (n - 2)
-    D = [0.0] * (n - 2)
-
-    for i in range(n - 2):
-        A[i] = h[i] if i > 0 else 0.0
-        B[i] = 2.0 * (h[i] + h[i + 1])
-        C[i] = h[i + 1]
-        D[i] = 3.0 * ((ys[i + 2] - ys[i + 1]) / h[i + 1] - (ys[i + 1] - ys[i]) / h[i])
-
-    # Thomas algorithm
-    c_prime = [0.0] * (n - 2)
-    d_prime = [0.0] * (n - 2)
-    c_prime[0] = C[0] / B[0]
-    d_prime[0] = D[0] / B[0]
-    for i in range(1, n - 2):
-        denom = B[i] - A[i] * c_prime[i - 1]
-        c_prime[i] = C[i] / denom if i < n - 3 else 0.0
-        d_prime[i] = (D[i] - A[i] * d_prime[i - 1]) / denom
-
-    M = [0.0] * n
-    M[0] = 0.0
-    for i in range(n - 2):
-        idx = n - 3 - i
-        M[idx + 1] = d_prime[idx] - c_prime[idx] * M[idx + 2]
-    M[n - 1] = 0.0
-
-    # Find the interval
-    for i in range(n - 1):
-        if xs[i] <= x <= xs[i + 1]:
-            t = (x - xs[i]) / h[i]
-            a = ys[i]
-            b = (ys[i + 1] - ys[i]) / h[i] - h[i] * (2 * M[i] + M[i + 1]) / 6
-            c = M[i] / 2
-            d = (M[i + 1] - M[i]) / (6 * h[i])
-            return a + b * t + c * t * t + d * t * t * t
-
-    return ys[-1]
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2 * t3 - 3 * t2 + 1
+    h10 = t3 - 2 * t2 + t
+    h01 = -2 * t3 + 3 * t2
+    h11 = t3 - t2
+    return h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1
 
 
-def polynomial_fit(xs: list[float], ys: list[float], degree: int) -> list[float]:
-    """
-    Fit a polynomial of given degree using least squares.
+def cubic_interpolate(
+    points: List[float],
+    t: float,
+) -> float:
+    """Cubic interpolation from 4 control points.
 
     Args:
-        xs: X values
-        ys: Y values
-        degree: Polynomial degree
+        points: 4 values [p0, p1, p2, p3].
+        t: Parameter [0, 1].
 
     Returns:
-        Coefficients [a0, a1, ..., ad] for polynomial a0 + a1*x + ... + ad*x^d.
+        Interpolated value.
     """
-    n = len(xs)
-    m = degree + 1
-    if n < m:
-        m = n
-        degree = m - 1
-
-    # Build normal equations: X^T X c = X^T y
-    XtX: list[list[float]] = [[0.0] * m for _ in range(m)]
-    Xty: list[float] = [0.0] * m
-
-    for x, y in zip(xs, ys):
-        powers = [x ** j for j in range(m)]
-        for i in range(m):
-            Xty[i] += powers[i] * y
-            for j in range(m):
-                XtX[i][j] += powers[i] * powers[j]
-
-    # Gaussian elimination
-    aug = [XtX[i] + [Xty[i]] for i in range(m)]
-    for i in range(m):
-        pivot = aug[i][i]
-        if abs(pivot) < 1e-12:
-            for j in range(i + 1, m):
-                if abs(aug[j][i]) > 1e-12:
-                    aug[i], aug[j] = aug[j], aug[i]
-                    pivot = aug[i][i]
-                    break
-        if abs(pivot) < 1e-12:
-            aug[i][i] = 1.0
-            continue
-        for j in range(i, m + 1):
-            aug[i][j] /= pivot
-        for k in range(m):
-            if k != i:
-                factor = aug[k][i]
-                for j in range(i, m + 1):
-                    aug[k][j] -= factor * aug[i][j]
-
-    return [aug[i][m] for i in range(m)]
+    if len(points) < 4:
+        return lerp(points[0], points[-1], t) if points else 0.0
+    p0, p1, p2, p3 = points[0], points[1], points[2], points[3]
+    a0 = -p0 / 2 + 3 * p1 / 2 - 3 * p2 / 2 + p3 / 2
+    a1 = p0 - 5 * p1 / 2 + 2 * p2 - p3 / 2
+    a2 = -p0 / 2 + p2 / 2
+    a3 = p1
+    t2 = t * t
+    return a0 * t * t2 + a1 * t2 + a2 * t + a3
 
 
-def polynomial_eval(coeffs: list[float], x: float) -> float:
-    """Evaluate a polynomial at x using Horner's method."""
-    result = 0.0
-    for c in reversed(coeffs):
-        result = result * x + c
-    return result
+def bilinear_interpolate(
+    q00: float, q10: float,
+    q01: float, q11: float,
+    tx: float, ty: float,
+) -> float:
+    """Bilinear interpolation on a 2x2 grid.
+
+    Args:
+        q00: Top-left value.
+        q10: Top-right value.
+        q01: Bottom-left value.
+        q11: Bottom-right value.
+        tx: X parameter [0, 1].
+        ty: Y parameter [0, 1].
+
+    Returns:
+        Interpolated value.
+    """
+    x0 = lerp(q00, q10, tx)
+    x1 = lerp(q01, q11, tx)
+    return lerp(x0, x1, ty)
 
 
-class BilinearInterpolator:
-    """2D bilinear interpolation on a rectangular grid."""
+def bicubic_interpolate(
+    grid: List[List[float]],
+    tx: float,
+    ty: float,
+) -> float:
+    """Bicubic interpolation on a 4x4 grid.
 
-    def __init__(self, x_coords: list[float], y_coords: list[float], values: list[list[float]]):
-        """
-        Args:
-            x_coords: Sorted x grid values
-            y_coords: Sorted y grid values
-            values: 2D array of z values (len(y_coords) x len(x_coords))
-        """
-        self.xs = x_coords
-        self.ys = y_coords
-        self.values = values
+    Args:
+        grid: 4x4 values (rows of columns).
+        tx, ty: Parameters [0, 1].
 
-    def interpolate(self, x: float, y: float) -> float:
-        """Interpolate z value at (x, y)."""
-        xs, ys, vals = self.xs, self.ys, self.values
-        nx, ny = len(xs), len(ys)
+    Returns:
+        Interpolated value.
+    """
+    if len(grid) < 4 or len(grid[0]) < 4:
+        return bilinear_interpolate(
+            grid[0][0], grid[0][1] if len(grid[0]) > 1 else grid[0][0],
+            grid[1][0] if len(grid) > 1 else grid[0][0],
+            grid[1][1] if len(grid) > 1 and len(grid[0]) > 1 else grid[0][0],
+            tx, ty
+        )
 
-        if x <= xs[0]:
-            xi, xf = 0, 0.0
-        elif x >= xs[-1]:
-            xi, xf = nx - 2, 1.0
-        else:
-            for i in range(nx - 1):
-                if xs[i] <= x <= xs[i + 1]:
-                    xi = i
-                    xf = (x - xs[i]) / (xs[i + 1] - xs[i])
-                    break
+    # Apply cubic interpolation row-wise, then column-wise
+    row_vals: List[float] = []
+    for row in grid[:4]:
+        row_vals.append(cubic_interpolate(row[:4], tx))
 
-        if y <= ys[0]:
-            yi, yf = 0, 0.0
-        elif y >= ys[-1]:
-            yi, yf = ny - 2, 1.0
-        else:
-            for j in range(ny - 1):
-                if ys[j] <= y <= ys[j + 1]:
-                    yi = j
-                    yf = (y - ys[j]) / (ys[j + 1] - ys[j])
-                    break
+    return cubic_interpolate(row_vals, ty)
 
-        v00 = vals[yi][xi]
-        v10 = vals[yi][xi + 1]
-        v01 = vals[yi + 1][xi]
-        v11 = vals[yi + 1][xi + 1]
 
-        v0 = v00 + (v10 - v00) * xf
-        v1 = v01 + (v11 - v01) * xf
-        return v0 + (v1 - v0) * yf
+def nearest_interpolate(
+    points: List[float],
+    t: float,
+) -> float:
+    """Nearest-neighbor interpolation."""
+    if not points:
+        return 0.0
+    n = len(points)
+    idx = max(0, min(n - 1, int(t * n)))
+    return points[idx]
+
+
+EASING_FUNCTIONS: Dict[str, Callable[[float], float]] = {
+    "linear": lambda t: t,
+    "step": step,
+    "smoothstep": smoothstep,
+    "smootherstep": smootherstep,
+    "ease_in_quad": ease_in_quad,
+    "ease_out_quad": ease_out_quad,
+    "ease_in_out_quad": ease_in_out_quad,
+    "ease_in_cubic": ease_in_cubic,
+    "ease_out_cubic": ease_out_cubic,
+    "ease_in_out_cubic": ease_in_out_cubic,
+    "ease_in_out_sine": ease_in_out_sine,
+    "ease_in_elastic": ease_in_elastic,
+    "ease_out_elastic": ease_out_elastic,
+    "ease_out_bounce": ease_out_bounce,
+}
+
+
+def interpolate_values(
+    values: List[float],
+    t: float,
+    easing: str = "linear",
+) -> float:
+    """Interpolate between values with easing.
+
+    Args:
+        values: List of values to interpolate through.
+        t: Overall parameter [0, 1].
+        easing: Easing function name.
+
+    Returns:
+        Interpolated value.
+    """
+    if len(values) < 2:
+        return values[0] if values else 0.0
+
+    n = len(values)
+    scaled_t = t * (n - 1)
+    index = int(scaled_t)
+    frac = scaled_t - index
+
+    easing_fn = EASING_FUNCTIONS.get(easing, lerp)
+    frac = easing_fn(frac)
+
+    i0 = min(index, n - 1)
+    i1 = min(index + 1, n - 1)
+
+    return lerp(values[i0], values[i1], frac)
+
+
+def multistep_interpolate(
+    values: List[float],
+    t: float,
+    steps: int = 5,
+) -> float:
+    """Multi-step interpolation (quantizes output).
+
+    Args:
+        values: Values to interpolate.
+        t: Parameter [0, 1].
+        steps: Number of discrete output levels.
+
+    Returns:
+        Quantized interpolated value.
+    """
+    if not values:
+        return 0.0
+    scaled = interpolate_values(values, t, "linear")
+    return round(scaled * steps) / steps
