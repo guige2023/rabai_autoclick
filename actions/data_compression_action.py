@@ -1,361 +1,357 @@
-"""Data compression action module for RabAI AutoClick.
+"""Data compression action module.
 
-Provides data compression operations:
-- CompressAction: Compress data using various algorithms
-- DecompressAction: Decompress data
-- CompressionAnalyzerAction: Analyze compression efficiency
-- ArchiveManagerAction: Manage compressed archives
+Provides data compression and decompression functionality
+supporting multiple compression algorithms.
 """
 
-import sys
-import os
-import logging
+from __future__ import annotations
+
+import io
 import gzip
 import zlib
 import bz2
 import lzma
-import tarfile
-import zipfile
-from typing import Any, Dict, List, Optional
+import base64
+import logging
+from typing import Any, Optional, Union, Literal
 from dataclasses import dataclass
-from datetime import datetime
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 
+class CompressionAlgorithm(Enum):
+    """Supported compression algorithms."""
+    GZIP = "gzip"
+    ZLIB = "zlib"
+    BZ2 = "bz2"
+    LZMA = "lzma"
+    DEFLATE = "deflate"
+
+
 @dataclass
 class CompressionResult:
-    """Result of a compression operation."""
+    """Result of compression operation."""
+    data: bytes
     original_size: int
     compressed_size: int
-    ratio: float
     algorithm: str
-    duration_ms: float
+
+    @property
+    def compression_ratio(self) -> float:
+        """Calculate compression ratio."""
+        if self.original_size == 0:
+            return 0.0
+        return 1.0 - (self.compressed_size / self.original_size)
 
 
-class CompressionAnalyzer:
-    """Analyzes compression efficiency."""
-
-    @staticmethod
-    def analyze(data: bytes, algorithms: List[str]) -> List[CompressionResult]:
-        results = []
-        for algo in algorithms:
-            try:
-                import time
-                start = time.time()
-
-                if algo == "gzip":
-                    compressed = gzip.compress(data)
-                elif algo == "zlib":
-                    compressed = zlib.compress(data)
-                elif algo == "bz2":
-                    compressed = bz2.compress(data)
-                elif algo == "lzma":
-                    compressed = lzma.compress(data)
-                else:
-                    continue
-
-                duration = (time.time() - start) * 1000
-                ratio = len(compressed) / len(data) if len(data) > 0 else 0
-
-                results.append(CompressionResult(
-                    original_size=len(data),
-                    compressed_size=len(compressed),
-                    ratio=round(ratio * 100, 2),
-                    algorithm=algo,
-                    duration_ms=round(duration, 4)
-                ))
-            except Exception as e:
-                logger.warning(f"Compression {algo} failed: {e}")
-
-        return sorted(results, key=lambda x: x.ratio)
-
-
-class ArchiveManager:
-    """Manages tar and zip archives."""
+class CompressionUtils:
+    """Compression utility functions."""
 
     @staticmethod
-    def create_tar(files: Dict[str, bytes], output_path: str, compression: str = "") -> bool:
-        mode = "w"
-        if compression == "gz":
-            mode = "w:gz"
-        elif compression == "bz2":
-            mode = "w:bz2"
-        elif compression == "xz":
-            mode = "w:xz"
+    def gzip_compress(data: bytes, level: int = 6) -> bytes:
+        """Compress data using GZIP.
 
-        try:
-            with tarfile.open(output_path, mode) as tar:
-                for name, data in files.items():
-                    import io
-                    info = tarfile.TarInfo(name=name)
-                    info.size = len(data)
-                    tar.addfile(info, io.BytesIO(data))
-            return True
-        except Exception as e:
-            logger.error(f"Failed to create tar: {e}")
-            return False
+        Args:
+            data: Data to compress
+            level: Compression level (1-9)
+
+        Returns:
+            Compressed data
+        """
+        return gzip.compress(data, level)
 
     @staticmethod
-    def extract_tar(input_path: str) -> Dict[str, bytes]:
-        result = {}
-        try:
-            with tarfile.open(input_path, "r:*") as tar:
-                for member in tar.getmembers():
-                    if member.isfile():
-                        f = tar.extractfile(member)
-                        if f:
-                            result[member.name] = f.read()
-        except Exception as e:
-            logger.error(f"Failed to extract tar: {e}")
-        return result
+    def gzip_decompress(data: bytes) -> bytes:
+        """Decompress GZIP data.
+
+        Args:
+            data: Compressed data
+
+        Returns:
+            Decompressed data
+        """
+        return gzip.decompress(data)
 
     @staticmethod
-    def create_zip(files: Dict[str, bytes], output_path: str) -> bool:
-        try:
-            with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for name, data in files.items():
-                    zf.writestr(name, data)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to create zip: {e}")
-            return False
+    def zlib_compress(data: bytes, level: int = 6) -> bytes:
+        """Compress data using ZLIB.
+
+        Args:
+            data: Data to compress
+            level: Compression level (1-9)
+
+        Returns:
+            Compressed data
+        """
+        return zlib.compress(data, level)
 
     @staticmethod
-    def extract_zip(input_path: str) -> Dict[str, bytes]:
-        result = {}
-        try:
-            with zipfile.ZipFile(input_path, "r") as zf:
-                for name in zf.namelist():
-                    result[name] = zf.read(name)
-        except Exception as e:
-            logger.error(f"Failed to extract zip: {e}")
-        return result
+    def zlib_decompress(data: bytes) -> bytes:
+        """Decompress ZLIB data.
+
+        Args:
+            data: Compressed data
+
+        Returns:
+            Decompressed data
+        """
+        return zlib.decompress(data)
+
+    @staticmethod
+    def bz2_compress(data: bytes, level: int = 9) -> bytes:
+        """Compress data using BZ2.
+
+        Args:
+            data: Data to compress
+            level: Compression level (1-9)
+
+        Returns:
+            Compressed data
+        """
+        return bz2.compress(data, level)
+
+    @staticmethod
+    def bz2_decompress(data: bytes) -> bytes:
+        """Decompress BZ2 data.
+
+        Args:
+            data: Compressed data
+
+        Returns:
+            Decompressed data
+        """
+        return bz2.decompress(data)
+
+    @staticmethod
+    def lzma_compress(data: bytes, preset: int = 6) -> bytes:
+        """Compress data using LZMA.
+
+        Args:
+            data: Data to compress
+            preset: Compression preset (0-9)
+
+        Returns:
+            Compressed data
+        """
+        return lzma.compress(data, preset=preset)
+
+    @staticmethod
+    def lzma_decompress(data: bytes) -> bytes:
+        """Decompress LZMA data.
+
+        Args:
+            data: Compressed data
+
+        Returns:
+            Decompressed data
+        """
+        return lzma.decompress(data)
+
+    @staticmethod
+    def deflate_compress(data: bytes, level: int = 6) -> bytes:
+        """Compress data using raw DEFLATE.
+
+        Args:
+            data: Data to compress
+            level: Compression level (1-9)
+
+        Returns:
+            Compressed data
+        """
+        return zlib.compress(data, level)[2:-4]
+
+    @staticmethod
+    def deflate_decompress(data: bytes) -> bytes:
+        """Decompress raw DEFLATE data.
+
+        Args:
+            data: Compressed data
+
+        Returns:
+            Decompressed data
+        """
+        return zlib.decompress(data, -zlib.MAX_WBITS)
 
 
-class CompressAction(BaseAction):
-    """Compress data using various algorithms."""
-    action_type = "data_compress"
-    display_name = "数据压缩"
-    description = "使用各种算法压缩数据"
+class CompressionCodec:
+    """Compression codec for encoding/decoding data."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        data = params.get("data", "")
-        algorithm = params.get("algorithm", "gzip")
-        level = params.get("level", 9)
+    def __init__(self, algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP):
+        """Initialize compression codec.
 
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        elif isinstance(data, dict):
-            import json
-            data = json.dumps(data).encode("utf-8")
+        Args:
+            algorithm: Compression algorithm to use
+        """
+        self.algorithm = algorithm
 
-        if not isinstance(data, bytes):
-            return ActionResult(success=False, message="data必须是字符串或字节")
+    def compress(self, data: bytes, level: int = 6) -> CompressionResult:
+        """Compress data.
 
+        Args:
+            data: Data to compress
+            level: Compression level
+
+        Returns:
+            CompressionResult
+        """
         original_size = len(data)
 
-        try:
-            import time
-            start = time.time()
+        if self.algorithm == CompressionAlgorithm.GZIP:
+            compressed = CompressionUtils.gzip_compress(data, level)
+        elif self.algorithm == CompressionAlgorithm.ZLIB:
+            compressed = CompressionUtils.zlib_compress(data, level)
+        elif self.algorithm == CompressionAlgorithm.BZ2:
+            compressed = CompressionUtils.bz2_compress(data, level)
+        elif self.algorithm == CompressionAlgorithm.LZMA:
+            compressed = CompressionUtils.lzma_compress(data, level)
+        elif self.algorithm == CompressionAlgorithm.DEFLATE:
+            compressed = CompressionUtils.deflate_compress(data, level)
+        else:
+            raise ValueError(f"Unknown algorithm: {self.algorithm}")
 
-            if algorithm == "gzip":
-                compressed = gzip.compress(data, compresslevel=level)
-            elif algorithm == "zlib":
-                compressed = zlib.compress(data, level=level)
-            elif algorithm == "bz2":
-                compressed = bz2.compress(data, compresslevel=level)
-            elif algorithm == "lzma":
-                compressed = lzma.compress(data, preset=level)
-            else:
-                return ActionResult(success=False, message=f"未知算法: {algorithm}")
-
-            duration = (time.time() - start) * 1000
-            ratio = len(compressed) / original_size if original_size > 0 else 0
-
-            import base64
-            compressed_b64 = base64.b64encode(compressed).decode("ascii")
-
-            return ActionResult(
-                success=True,
-                message=f"压缩成功，压缩比: {ratio*100:.2f}%",
-                data={
-                    "algorithm": algorithm,
-                    "original_size": original_size,
-                    "compressed_size": len(compressed),
-                    "ratio_percent": round(ratio * 100, 2),
-                    "duration_ms": round(duration, 4),
-                    "compressed_data": compressed_b64
-                }
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"压缩失败: {e}")
-
-
-class DecompressAction(BaseAction):
-    """Decompress data."""
-    action_type = "data_decompress"
-    display_name = "数据解压缩"
-    description = "解压缩数据"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        data = params.get("data", "")
-        algorithm = params.get("algorithm", "gzip")
-
-        if isinstance(data, str):
-            import base64
-            try:
-                data = base64.b64decode(data)
-            except Exception:
-                data = data.encode("utf-8")
-        elif not isinstance(data, bytes):
-            return ActionResult(success=False, message="data必须是字符串或字节")
-
-        try:
-            import time
-            start = time.time()
-
-            if algorithm == "gzip":
-                decompressed = gzip.decompress(data)
-            elif algorithm == "zlib":
-                decompressed = zlib.decompress(data)
-            elif algorithm == "bz2":
-                decompressed = bz2.decompress(data)
-            elif algorithm == "lzma":
-                decompressed = lzma.decompress(data)
-            else:
-                return ActionResult(success=False, message=f"未知算法: {algorithm}")
-
-            duration = (time.time() - start) * 1000
-
-            try:
-                result_str = decompressed.decode("utf-8")
-                result_type = "string"
-            except UnicodeDecodeError:
-                result_str = decompressed.hex()
-                result_type = "hex"
-
-            return ActionResult(
-                success=True,
-                message=f"解压缩成功，耗时: {duration:.2f}ms",
-                data={
-                    "algorithm": algorithm,
-                    "original_size": len(data),
-                    "decompressed_size": len(decompressed),
-                    "duration_ms": round(duration, 4),
-                    "result": result_str,
-                    "result_type": result_type
-                }
-            )
-
-        except Exception as e:
-            return ActionResult(success=False, message=f"解压缩失败: {e}")
-
-
-class CompressionAnalyzerAction(BaseAction):
-    """Analyze compression efficiency."""
-    action_type = "data_compression_analyzer"
-    display_name = "压缩效率分析"
-    description = "分析不同压缩算法的效率"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        data = params.get("data", "")
-        algorithms = params.get("algorithms", ["gzip", "zlib", "bz2", "lzma"])
-
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        elif not isinstance(data, bytes):
-            return ActionResult(success=False, message="data必须是字符串或字节")
-
-        results = CompressionAnalyzer.analyze(data, algorithms)
-
-        if not results:
-            return ActionResult(success=False, message="所有压缩算法均失败")
-
-        best = results[0]
-
-        return ActionResult(
-            success=True,
-            message=f"最佳算法: {best.algorithm} (压缩比: {best.ratio}%)",
-            data={
-                "results": [
-                    {
-                        "algorithm": r.algorithm,
-                        "original_size": r.original_size,
-                        "compressed_size": r.compressed_size,
-                        "ratio_percent": r.ratio,
-                        "duration_ms": r.duration_ms
-                    }
-                    for r in results
-                ],
-                "best_algorithm": best.algorithm
-            }
+        return CompressionResult(
+            data=compressed,
+            original_size=original_size,
+            compressed_size=len(compressed),
+            algorithm=self.algorithm.value,
         )
 
+    def decompress(self, data: bytes) -> bytes:
+        """Decompress data.
 
-class ArchiveManagerAction(BaseAction):
-    """Manage compressed archives."""
-    action_type = "data_archive_manager"
-    display_name = "归档管理器"
-    description = "管理tar和zip压缩归档"
+        Args:
+            data: Data to decompress
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        operation = params.get("operation", "create")
-        format_type = params.get("format", "tar")
-        files = params.get("files", {})
-        archive_path = params.get("archive_path", "/tmp/archive")
+        Returns:
+            Decompressed data
+        """
+        if self.algorithm == CompressionAlgorithm.GZIP:
+            return CompressionUtils.gzip_decompress(data)
+        elif self.algorithm == CompressionAlgorithm.ZLIB:
+            return CompressionUtils.zlib_decompress(data)
+        elif self.algorithm == CompressionAlgorithm.BZ2:
+            return CompressionUtils.bz2_decompress(data)
+        elif self.algorithm == CompressionAlgorithm.LZMA:
+            return CompressionUtils.lzma_decompress(data)
+        elif self.algorithm == CompressionAlgorithm.DEFLATE:
+            return CompressionUtils.deflate_decompress(data)
+        else:
+            raise ValueError(f"Unknown algorithm: {self.algorithm}")
 
-        if operation == "create":
-            if not files:
-                return ActionResult(success=False, message="files是必需的")
+    def compress_to_base64(self, data: bytes, level: int = 6) -> str:
+        """Compress and encode as base64.
 
-            if format_type == "tar":
-                success = ArchiveManager.create_tar(files, archive_path)
-            elif format_type == "zip":
-                success = ArchiveManager.create_zip(files, archive_path)
-            else:
-                return ActionResult(success=False, message=f"未知格式: {format_type}")
+        Args:
+            data: Data to compress
+            level: Compression level
 
-            if success:
-                return ActionResult(success=True, message=f"归档已创建: {archive_path}")
-            return ActionResult(success=False, message="归档创建失败")
+        Returns:
+            Base64 encoded compressed data
+        """
+        result = self.compress(data, level)
+        return base64.b64encode(result.data).decode("ascii")
 
-        if operation == "extract":
-            if format_type == "tar":
-                extracted = ArchiveManager.extract_tar(archive_path)
-            elif format_type == "zip":
-                extracted = ArchiveManager.extract_zip(archive_path)
-            else:
-                return ActionResult(success=False, message=f"未知格式: {format_type}")
+    def decompress_from_base64(self, encoded: str) -> bytes:
+        """Decompress from base64 encoded data.
 
-            return ActionResult(
-                success=True,
-                message=f"已提取 {len(extracted)} 个文件",
-                data={"files": extracted, "count": len(extracted)}
-            )
+        Args:
+            encoded: Base64 encoded compressed data
 
-        if operation == "list":
-            try:
-                if format_type == "tar":
-                    with tarfile.open(archive_path, "r:*") as tar:
-                        members = tar.getnames()
-                elif format_type == "zip":
-                    with zipfile.ZipFile(archive_path, "r") as zf:
-                        members = zf.namelist()
-                else:
-                    return ActionResult(success=False, message=f"未知格式: {format_type}")
+        Returns:
+            Decompressed data
+        """
+        data = base64.b64decode(encoded.encode("ascii"))
+        return self.decompress(data)
 
-                return ActionResult(
-                    success=True,
-                    message=f"归档包含 {len(members)} 个文件",
-                    data={"members": members, "count": len(members)}
-                )
-            except Exception as e:
-                return ActionResult(success=False, message=f"列出归档失败: {e}")
 
-        return ActionResult(success=False, message=f"未知操作: {operation}")
+class StreamCompressor:
+    """Streaming compressor for large data."""
+
+    def __init__(self, algorithm: CompressionAlgorithm = CompressionAlgorithm.GZIP):
+        """Initialize stream compressor.
+
+        Args:
+            algorithm: Compression algorithm
+        """
+        self.algorithm = algorithm
+        self._gzip_stream: Optional[gzip.GzipFile] = None
+
+    def compress_stream(self, input_stream: io.BytesIO, output_stream: io.BytesIO, chunk_size: int = 8192) -> int:
+        """Compress stream data.
+
+        Args:
+            input_stream: Input data stream
+            output_stream: Output compressed stream
+            chunk_size: Chunk size for streaming
+
+        Returns:
+            Total bytes written
+        """
+        total_written = 0
+
+        if self.algorithm == CompressionAlgorithm.GZIP:
+            with gzip.GzipFile(fileobj=output_stream, mode="wb") as f:
+                while True:
+                    chunk = input_stream.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    total_written += len(chunk)
+
+        return total_written
+
+    def decompress_stream(self, input_stream: io.BytesIO, output_stream: io.BytesIO, chunk_size: int = 8192) -> int:
+        """Decompress stream data.
+
+        Args:
+            input_stream: Input compressed stream
+            output_stream: Output data stream
+            chunk_size: Chunk size for streaming
+
+        Returns:
+            Total bytes written
+        """
+        total_written = 0
+
+        if self.algorithm == CompressionAlgorithm.GZIP:
+            with gzip.GzipFile(fileobj=input_stream, mode="rb") as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    output_stream.write(chunk)
+                    total_written += len(chunk)
+
+        return total_written
+
+
+def create_compression_codec(algorithm: str = "gzip") -> CompressionCodec:
+    """Create compression codec.
+
+    Args:
+        algorithm: Algorithm name
+
+    Returns:
+        CompressionCodec instance
+    """
+    try:
+        algo = CompressionAlgorithm(algorithm.lower())
+    except ValueError:
+        algo = CompressionAlgorithm.GZIP
+    return CompressionCodec(algo)
+
+
+def compress_data(data: bytes, algorithm: str = "gzip", level: int = 6) -> CompressionResult:
+    """Compress data.
+
+    Args:
+        data: Data to compress
+        algorithm: Algorithm name
+        level: Compression level
+
+    Returns:
+        CompressionResult
+    """
+    codec = create_compression_codec(algorithm)
+    return codec.compress(data, level)

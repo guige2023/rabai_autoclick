@@ -1,158 +1,331 @@
-"""Health Check Action Module.
+"""Health check action module.
 
-Comprehensive health checking for services and dependencies.
+Provides health check functionality for monitoring
+service and dependency health status.
 """
 
 from __future__ import annotations
 
-import asyncio
 import time
+import logging
+from typing import Any, Optional, Callable, TypeVar
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from dataclasses import dataclass
+import threading
 
-from .service_discovery_action import ServiceStatus
+logger = logging.getLogger(__name__)
 
 
 class HealthStatus(Enum):
-    """Overall health status."""
+    """Health check status."""
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
-
-
-class CheckType(Enum):
-    """Health check types."""
-    HTTP = "http"
-    TCP = "tcp"
-    PROCESS = "process"
-    DATABASE = "database"
-    CACHE = "cache"
-    CUSTOM = "custom"
+    UNKNOWN = "unknown"
 
 
 @dataclass
 class HealthCheckResult:
-    """Result of a single health check."""
+    """Result of a health check."""
     name: str
-    check_type: CheckType
-    status: ServiceStatus
-    latency_ms: float | None = None
-    message: str | None = None
-    details: dict = field(default_factory=dict)
-    timestamp: float = 0.0
+    status: HealthStatus
+    message: Optional[str] = None
+    duration_ms: float = 0.0
+    timestamp: float = field(default_factory=time.time)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class HealthReport:
-    """Overall health report."""
-    status: HealthStatus
-    checks: list[HealthCheckResult]
-    overall_latency_ms: float
-    timestamp: float
-    version: str = "1.0"
+class HealthCheckConfig:
+    """Configuration for health check."""
+    name: str
+    check_func: Callable[[], bool]
+    timeout: float = 5.0
+    critical: bool = True
+    tags: list[str] = field(default_factory=list)
 
 
-class HealthChecker:
-    """Comprehensive health checker."""
+class HealthCheck:
+    """Individual health check."""
 
-    def __init__(self, service_name: str) -> None:
-        self.service_name = service_name
-        self._checks: dict[str, Callable] = {}
-        self._check_types: dict[str, CheckType] = {}
+    def __init__(self, config: HealthCheckConfig):
+        """Initialize health check.
 
-    def register_check(
-        self,
-        name: str,
-        check_fn: Callable,
-        check_type: CheckType = CheckType.CUSTOM
-    ) -> None:
-        """Register a health check."""
-        self._checks[name] = check_fn
-        self._check_types[name] = check_type
+        Args:
+            config: Health check configuration
+        """
+        self.config = config
+        self._last_result: Optional[HealthCheckResult] = None
+        self._lock = threading.Lock()
 
-    async def check_health(self) -> HealthReport:
-        """Run all health checks."""
-        start = time.monotonic()
-        results = []
-        for name, check_fn in self._checks.items():
-            result = await self._run_check(name, check_fn)
-            results.append(result)
-        overall_status = self._compute_overall_status(results)
-        return HealthReport(
-            status=overall_status,
-            checks=results,
-            overall_latency_ms=(time.monotonic() - start) * 1000,
-            timestamp=time.time()
+    def execute(self) -> HealthCheckResult:
+        """Execute health check.
+
+        Returns:
+            HealthCheckResult
+        """
+        start = time.time()
+        status = HealthStatus.UNHEALTHY
+        message = None
+        details = {}
+
+        try:
+            result = self.config.check_func()
+            if result:
+                status = HealthStatus.HEALTHY
+                message = "OK"
+            else:
+                status = HealthStatus.UNHEALTHY
+                message = "Check failed"
+
+        except Exception as e:
+            status = HealthStatus.UNHEALTHY
+            message = str(e)
+            logger.error(f"Health check {self.config.name} failed: {e}")
+
+        duration = (time.time() - start) * 1000
+        result = HealthCheckResult(
+            name=self.config.name,
+            status=status,
+            message=message,
+            duration_ms=duration,
+            details=details,
         )
 
-    async def _run_check(self, name: str, check_fn: Callable) -> HealthCheckResult:
-        """Run single health check."""
-        start = time.monotonic()
+        with self._lock:
+            self._last_result = result
+
+        return result
+
+    def get_last_result(self) -> Optional[HealthCheckResult]:
+        """Get last check result."""
+        with self._lock:
+            return self._last_result
+
+
+class HealthCheckRegistry:
+    """Registry for health checks."""
+
+    def __init__(self):
+        """Initialize registry."""
+        self._checks: dict[str, HealthCheck] = {}
+        self._lock = threading.Lock()
+
+    def register(self, config: HealthCheckConfig) -> HealthCheck:
+        """Register a health check.
+
+        Args:
+            config: Health check configuration
+
+        Returns:
+            HealthCheck instance
+        """
+        with self._lock:
+            check = HealthCheck(config)
+            self._checks[config.name] = check
+            return check
+
+    def unregister(self, name: str) -> None:
+        """Unregister a health check.
+
+        Args:
+            name: Check name
+        """
+        with self._lock:
+            self._checks.pop(name, None)
+
+    def get_check(self, name: str) -> Optional[HealthCheck]:
+        """Get health check by name."""
+        with self._lock:
+            return self._checks.get(name)
+
+    def list_checks(self) -> list[str]:
+        """List all registered check names."""
+        with self._lock:
+            return list(self._checks.keys())
+
+    def execute_all(self) -> list[HealthCheckResult]:
+        """Execute all health checks.
+
+        Returns:
+            List of results
+        """
+        with self._lock:
+            checks = list(self._checks.values())
+
+        return [check.execute() for check in checks]
+
+
+class HealthMonitor:
+    """Health monitoring service."""
+
+    def __init__(self, registry: HealthCheckRegistry):
+        """Initialize monitor.
+
+        Args:
+            registry: Health check registry
+        """
+        self.registry = registry
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._last_overall_status = HealthStatus.UNKNOWN
+
+    def start(self, interval: float = 30.0) -> None:
+        """Start health monitoring.
+
+        Args:
+            interval: Check interval in seconds
+        """
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+
+        def run():
+            while self._running:
+                try:
+                    self._check_and_alert()
+                except Exception as e:
+                    logger.error(f"Health monitor error: {e}")
+                time.sleep(interval)
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+        logger.info(f"Health monitor started (interval={interval}s)")
+
+    def stop(self) -> None:
+        """Stop health monitoring."""
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+        logger.info("Health monitor stopped")
+
+    def get_status(self) -> dict[str, Any]:
+        """Get overall health status.
+
+        Returns:
+            Dictionary with health status info
+        """
+        results = self.registry.execute_all()
+        healthy = sum(1 for r in results if r.status == HealthStatus.HEALTHY)
+        degraded = sum(1 for r in results if r.status == HealthStatus.DEGRADED)
+        unhealthy = sum(1 for r in results if r.status == HealthStatus.UNHEALTHY)
+
+        if unhealthy > 0:
+            overall = HealthStatus.UNHEALTHY
+        elif degraded > 0:
+            overall = HealthStatus.DEGRADED
+        else:
+            overall = HealthStatus.HEALTHY
+
+        return {
+            "status": overall.value,
+            "healthy_count": healthy,
+            "degraded_count": degraded,
+            "unhealthy_count": unhealthy,
+            "total_count": len(results),
+            "checks": [
+                {
+                    "name": r.name,
+                    "status": r.status.value,
+                    "message": r.message,
+                    "duration_ms": r.duration_ms,
+                }
+                for r in results
+            ],
+        }
+
+    def _check_and_alert(self) -> None:
+        """Check health and send alerts if needed."""
+        results = self.registry.execute_all()
+        unhealthy = [r for r in results if r.status == HealthStatus.UNHEALTHY]
+
+        if unhealthy and self._last_overall_status != HealthStatus.UNHEALTHY:
+            logger.warning(
+                f"Health alert: {len(unhealthy)} unhealthy checks: "
+                f"{[r.name for r in unhealthy]}"
+            )
+
+        critical = [
+            r for r in unhealthy
+            if self.registry.get_check(r.name).config.critical
+        ]
+
+        if critical:
+            logger.error(f"Critical health checks failed: {[r.name for r in critical]}")
+
+        self._last_overall_status = (
+            HealthStatus.UNHEALTHY if unhealthy else HealthStatus.HEALTHY
+        )
+
+
+def create_health_check(
+    name: str,
+    check_func: Callable[[], bool],
+    timeout: float = 5.0,
+    critical: bool = True,
+) -> HealthCheckConfig:
+    """Create health check configuration.
+
+    Args:
+        name: Check name
+        check_func: Check function
+        timeout: Check timeout
+        critical: Is critical check
+
+    Returns:
+        HealthCheckConfig
+    """
+    return HealthCheckConfig(
+        name=name,
+        check_func=check_func,
+        timeout=timeout,
+        critical=critical,
+    )
+
+
+def ping_check(host: str, port: int) -> Callable[[], bool]:
+    """Create ping-based health check.
+
+    Args:
+        host: Host to ping
+        port: Port to check
+
+    Returns:
+        Health check function
+    """
+    def check() -> bool:
         try:
-            result = check_fn()
-            if asyncio.iscoroutine(result):
-                result = await result
-            latency = (time.monotonic() - start) * 1000
-            if isinstance(result, dict):
-                return HealthCheckResult(
-                    name=name,
-                    check_type=self._check_types.get(name, CheckType.CUSTOM),
-                    status=ServiceStatus.HEALTHY if result.get("healthy") else ServiceStatus.UNHEALTHY,
-                    latency_ms=latency,
-                    message=result.get("message"),
-                    details=result.get("details", {}),
-                    timestamp=time.time()
-                )
-            return HealthCheckResult(
-                name=name,
-                check_type=self._check_types.get(name, CheckType.CUSTOM),
-                status=ServiceStatus.HEALTHY,
-                latency_ms=latency,
-                timestamp=time.time()
-            )
-        except Exception as e:
-            return HealthCheckResult(
-                name=name,
-                check_type=self._check_types.get(name, CheckType.CUSTOM),
-                status=ServiceStatus.UNHEALTHY,
-                latency_ms=(time.monotonic() - start) * 1000,
-                message=str(e),
-                timestamp=time.time()
-            )
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+    return check
 
-    def _compute_overall_status(self, results: list[HealthCheckResult]) -> HealthStatus:
-        """Compute overall health status."""
-        if all(r.status == ServiceStatus.HEALTHY for r in results):
-            return HealthStatus.HEALTHY
-        if any(r.status == ServiceStatus.UNHEALTHY for r in results):
-            return HealthStatus.UNHEALTHY
-        return HealthStatus.DEGRADED
 
-    def register_http_check(self, name: str, url: str, expected_status: int = 200) -> None:
-        """Register HTTP health check."""
-        async def check() -> dict:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    return {
-                        "healthy": resp.status == expected_status,
-                        "message": f"HTTP {resp.status}",
-                        "details": {"status_code": resp.status}
-                    }
-        self.register_check(name, check, CheckType.HTTP)
+def http_check(url: str, expected_status: int = 200) -> Callable[[], bool]:
+    """Create HTTP-based health check.
 
-    def register_tcp_check(self, name: str, host: str, port: int) -> None:
-        """Register TCP health check."""
-        async def check() -> dict:
-            try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port),
-                    timeout=5.0
-                )
-                writer.close()
-                await writer.wait_closed()
-                return {"healthy": True, "message": "TCP connection successful"}
-            except Exception as e:
-                return {"healthy": False, "message": str(e)}
-        self.register_check(name, check, CheckType.TCP)
+    Args:
+        url: URL to check
+        expected_status: Expected status code
+
+    Returns:
+        Health check function
+    """
+    def check() -> bool:
+        try:
+            import urllib.request
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status == expected_status
+        except Exception:
+            return False
+    return check

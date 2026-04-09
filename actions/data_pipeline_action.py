@@ -1,161 +1,244 @@
-"""Data Pipeline Action Module.
+"""Data pipeline action module.
 
-Composable data processing pipeline with parallel execution support.
+Provides data pipeline functionality for chaining
+transformation stages with error handling.
 """
 
 from __future__ import annotations
 
-import asyncio
-from abc import ABC, abstractmethod
+import logging
+from typing import Any, Optional, Callable, TypeVar, Generic
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Generic, TypeVar
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 R = TypeVar("R")
 
 
-class PipelineStatus(Enum):
-    """Pipeline execution status."""
-    IDLE = "idle"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-class PipelineStage(ABC, Generic[T, R]):
-    """Abstract base class for pipeline stages."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    @abstractmethod
-    async def process(self, input_data: T) -> R:
-        """Process input and return output."""
-        pass
-
-    async def validate(self, input_data: Any) -> bool:
-        """Validate input data. Override for custom validation."""
-        return input_data is not None
+class PipelineStageType(Enum):
+    """Pipeline stage types."""
+    MAP = "map"
+    FILTER = "filter"
+    REDUCE = "reduce"
+    TAP = "tap"
 
 
 @dataclass
-class PipelineStats:
-    """Statistics for pipeline execution."""
+class PipelineStage:
+    """Single pipeline stage."""
+    name: str
+    stage_type: PipelineStageType
+    func: Callable[..., Any]
+    error_handler: Optional[Callable[[Exception], Any]] = None
+
+
+@dataclass
+class PipelineResult:
+    """Result of pipeline execution."""
+    success: bool
+    data: Any
+    error: Optional[Exception] = None
     stages_executed: int = 0
-    total_processing_time: float = 0.0
-    errors: list[str] = field(default_factory=list)
 
 
-class Pipeline:
+class DataPipeline:
     """Data processing pipeline."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str = "pipeline"):
+        """Initialize pipeline.
+
+        Args:
+            name: Pipeline name
+        """
         self.name = name
-        self.stages: list[PipelineStage] = []
-        self.status = PipelineStatus.IDLE
-        self.stats = PipelineStats()
-        self._cancel_event = asyncio.Event()
+        self._stages: list[PipelineStage] = []
+        self._lock = threading.Lock()
 
-    def add_stage(self, stage: PipelineStage[T, R]) -> Pipeline:
-        """Add a stage to the pipeline. Returns self for chaining."""
-        self.stages.append(stage)
+    def add_stage(
+        self,
+        name: str,
+        stage_type: PipelineStageType,
+        func: Callable[..., Any],
+        error_handler: Optional[Callable[[Exception], Any]] = None,
+    ) -> DataPipeline:
+        """Add stage to pipeline.
+
+        Args:
+            name: Stage name
+            stage_type: Stage type
+            func: Stage function
+            error_handler: Optional error handler
+
+        Returns:
+            Self for chaining
+        """
+        with self._lock:
+            stage = PipelineStage(
+                name=name,
+                stage_type=stage_type,
+                func=func,
+                error_handler=error_handler,
+            )
+            self._stages.append(stage)
         return self
 
-    def add_stage_func(self, name: str, func: Callable[[T], R | asyncio.coroutine]) -> Pipeline:
-        """Add a function as a pipeline stage."""
-        async def wrapper(input_data: T) -> R:
-            if asyncio.iscoroutinefunction(func):
-                return await func(input_data)
-            return func(input_data)
-        wrapper.__name__ = name
-        stage = PipelineStage(name)
-        stage.process = wrapper
-        self.stages.append(stage)
-        return self
+    def map(self, name: str, func: Callable[[T], R]) -> DataPipeline:
+        """Add map stage.
 
-    async def execute(self, input_data: T) -> Any:
-        """Execute pipeline on input data."""
-        self.status = PipelineStatus.RUNNING
-        self.stats = PipelineStats()
-        current = input_data
-        import time
-        start_time = time.monotonic()
-        try:
-            for i, stage in enumerate(self.stages):
-                if self._cancel_event.is_set():
-                    self.status = PipelineStatus.CANCELLED
-                    return None
-                if not await stage.validate(current):
-                    raise ValueError(f"Validation failed at stage {i}: {stage.name}")
-                current = await stage.process(current)
-                self.stats.stages_executed += 1
-            self.status = PipelineStatus.COMPLETED
-            self.stats.total_processing_time = time.monotonic() - start_time
-            return current
-        except Exception as e:
-            self.status = PipelineStatus.FAILED
-            self.stats.errors.append(str(e))
-            self.stats.total_processing_time = time.monotonic() - start_time
-            raise
-        finally:
-            if self.status == PipelineStatus.RUNNING:
-                self.status = PipelineStatus.COMPLETED
+        Args:
+            name: Stage name
+            func: Transform function
 
-    def cancel(self) -> None:
-        """Cancel pipeline execution."""
-        self._cancel_event.set()
+        Returns:
+            Self for chaining
+        """
+        return self.add_stage(name, PipelineStageType.MAP, func)
+
+    def filter(self, name: str, predicate: Callable[[T], bool]) -> DataPipeline:
+        """Add filter stage.
+
+        Args:
+            name: Stage name
+            predicate: Filter predicate
+
+        Returns:
+            Self for chaining
+        """
+        return self.add_stage(name, PipelineStageType.FILTER, predicate)
+
+    def tap(self, name: str, func: Callable[[T], None]) -> DataPipeline:
+        """Add tap stage (side effect).
+
+        Args:
+            name: Stage name
+            func: Side effect function
+
+        Returns:
+            Self for chaining
+        """
+        return self.add_stage(name, PipelineStageType.TAP, func)
+
+    def execute(self, data: Any) -> PipelineResult:
+        """Execute pipeline.
+
+        Args:
+            data: Input data
+
+        Returns:
+            PipelineResult
+        """
+        result = PipelineResult(success=True, data=data)
+        current_data = data
+
+        for i, stage in enumerate(self._stages):
+            try:
+                if stage.stage_type == PipelineStageType.MAP:
+                    current_data = stage.func(current_data)
+                elif stage.stage_type == PipelineStageType.FILTER:
+                    if not stage.func(current_data):
+                        current_data = []
+                    elif isinstance(current_data, list):
+                        current_data = [item for item in current_data if stage.func(item)]
+                elif stage.stage_type == PipelineStageType.TAP:
+                    stage.func(current_data)
+                elif stage.stage_type == PipelineStageType.REDUCE:
+                    current_data = stage.func(current_data)
+
+                result.stages_executed = i + 1
+
+            except Exception as e:
+                logger.error(f"Pipeline stage {stage.name} failed: {e}")
+                result.success = False
+                result.error = e
+
+                if stage.error_handler:
+                    try:
+                        current_data = stage.error_handler(e)
+                        result.success = True
+                        result.error = None
+                    except Exception as handler_error:
+                        result.success = False
+                        result.error = handler_error
+                break
+
+        result.data = current_data
+        return result
+
+    def execute_list(self, data_list: list[Any]) -> list[Any]:
+        """Execute pipeline on list items.
+
+        Args:
+            data_list: List of input data
+
+        Returns:
+            List of results
+        """
+        return [self.execute(item).data for item in data_list]
+
+    def clear(self) -> None:
+        """Clear all stages."""
+        with self._lock:
+            self._stages.clear()
 
 
 class ParallelPipeline:
-    """Pipeline with parallel stage execution branches."""
+    """Pipeline with parallel execution support."""
 
-    def __init__(self, name: str, max_workers: int = 4) -> None:
+    def __init__(self, name: str = "parallel_pipeline", max_workers: int = 4):
+        """Initialize parallel pipeline.
+
+        Args:
+            name: Pipeline name
+            max_workers: Maximum parallel workers
+        """
         self.name = name
-        self.branches: list[Pipeline] = []
         self.max_workers = max_workers
-        self.status = PipelineStatus.IDLE
+        self._pipeline = DataPipeline(name)
+        self._executor: Optional[ThreadPoolExecutor] = None
 
-    def add_branch(self, pipeline: Pipeline) -> ParallelPipeline:
-        """Add a parallel branch."""
-        self.branches.append(pipeline)
+    def add_stage(self, name: str, stage_type: PipelineStageType, func: Callable[..., Any]) -> ParallelPipeline:
+        """Add stage to pipeline.
+
+        Args:
+            name: Stage name
+            stage_type: Stage type
+            func: Stage function
+
+        Returns:
+            Self for chaining
+        """
+        self._pipeline.add_stage(name, stage_type, func)
         return self
 
-    async def execute(self, input_data: Any) -> list[Any]:
-        """Execute all branches in parallel."""
-        self.status = PipelineStatus.RUNNING
-        if not self.branches:
-            return []
-        semaphore = asyncio.Semaphore(self.max_workers)
-        async def run_branch(branch: Pipeline, data: Any) -> Any:
-            async with semaphore:
-                return await branch.execute(data)
-        results = await asyncio.gather(
-            *[run_branch(branch, input_data) for branch in self.branches],
-            return_exceptions=True
-        )
-        self.status = PipelineStatus.COMPLETED
-        return results
+    def map(self, name: str, func: Callable[[T], R]) -> ParallelPipeline:
+        """Add parallel map stage."""
+        return self.add_stage(name, PipelineStageType.MAP, func)
+
+    def execute_parallel(self, data_list: list[Any]) -> list[PipelineResult]:
+        """Execute pipeline in parallel.
+
+        Args:
+            data_list: List of input data
+
+        Returns:
+            List of results
+        """
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [executor.submit(self._pipeline.execute, data) for data in data_list]
+            return [f.result() for f in futures]
 
 
-class DataTransformStage(PipelineStage):
-    """Stage that applies a transformation function."""
+def create_pipeline(name: str = "pipeline") -> DataPipeline:
+    """Create data pipeline.
 
-    def __init__(self, name: str, transform: Callable[[T], R]) -> None:
-        super().__init__(name)
-        self.transform = transform
+    Args:
+        name: Pipeline name
 
-    async def process(self, input_data: T) -> R:
-        return self.transform(input_data)
-
-
-class DataFilterStage(PipelineStage):
-    """Stage that filters data based on predicate."""
-
-    def __init__(self, name: str, predicate: Callable[[T], bool]) -> None:
-        super().__init__(name)
-        self.predicate = predicate
-
-    async def process(self, input_data: list[T]) -> list[T]:
-        return [item for item in input_data if self.predicate(item)]
+    Returns:
+        DataPipeline instance
+    """
+    return DataPipeline(name)

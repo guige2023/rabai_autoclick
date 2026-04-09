@@ -1,116 +1,249 @@
-"""Circuit breaker action module for RabAI AutoClick.
+"""Circuit breaker action module.
 
-Provides circuit breaker pattern:
-- CircuitBreaker: Circuit breaker state machine
-- CircuitBreakerRegistry: Manage multiple breakers
-- CircuitBreakerMetrics: Collect circuit breaker metrics
-- StateTransitions: Track state transitions
+Provides circuit breaker pattern implementation for fault tolerance
+and graceful degradation of services.
 """
 
 from __future__ import annotations
 
 import time
-import sys
-import os
 import threading
-from typing import Any, Callable, Dict, List, Optional
-from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+from dataclasses import dataclass
 from enum import Enum
+import logging
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
 class CircuitState(Enum):
+    """Circuit breaker states."""
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
 
 
 @dataclass
-class CircuitBreakerConfig:
+class CircuitConfig:
+    """Circuit breaker configuration."""
     failure_threshold: int = 5
     success_threshold: int = 2
-    timeout_seconds: float = 60.0
+    timeout: float = 60.0
     half_open_max_calls: int = 3
+    excluded_exceptions: tuple = ()
 
 
-class CircuitBreakerAction(BaseAction):
-    """Circuit breaker pattern implementation."""
-    action_type = "circuit_breaker"
-    display_name = "断路器"
-    description = "实现断路器模式"
+class CircuitBreaker:
+    """Circuit breaker for fault tolerance."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            operation = params.get("operation", "call")
-            breaker_name = params.get("breaker_name", "default")
-            config = params.get("config", {})
+    def __init__(self, name: str, config: Optional[CircuitConfig] = None):
+        """Initialize circuit breaker.
 
-            config_obj = CircuitBreakerConfig(
-                failure_threshold=config.get("failure_threshold", 5),
-                success_threshold=config.get("success_threshold", 2),
-                timeout_seconds=config.get("timeout_seconds", 60.0),
-                half_open_max_calls=config.get("half_open_max_calls", 3),
-            )
+        Args:
+            name: Circuit name
+            config: Circuit configuration
+        """
+        self.name = name
+        self.config = config or CircuitConfig()
+        self._state = CircuitState.CLOSED
+        self._failure_count = 0
+        self._success_count = 0
+        self._last_failure_time: Optional[float] = None
+        self._half_open_calls = 0
+        self._lock = threading.Lock()
 
-            state_file = os.path.join("/tmp/circuit_breakers", f"{breaker_name}.json")
-            os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    @property
+    def state(self) -> CircuitState:
+        """Get current circuit state."""
+        with self._lock:
+            if self._state == CircuitState.OPEN:
+                if self._should_attempt_reset():
+                    self._state = CircuitState.HALF_OPEN
+                    self._half_open_calls = 0
+                    logger.info(f"Circuit {self.name}: OPEN -> HALF_OPEN")
+            return self._state
 
-            state = {"state": CircuitState.CLOSED.value, "failure_count": 0, "success_count": 0, "last_failure_time": None, "opened_at": None}
-            if os.path.exists(state_file):
-                import json as json_module
-                with open(state_file) as f:
-                    state = json_module.load(f)
+    def _should_attempt_reset(self) -> bool:
+        """Check if should attempt reset."""
+        if self._last_failure_time is None:
+            return False
+        return (time.time() - self._last_failure_time) >= self.config.timeout
 
-            if operation == "call":
-                current_state = CircuitState(state["state"])
+    def is_available(self) -> bool:
+        """Check if circuit allows requests."""
+        return self.state != CircuitState.OPEN
 
-                if current_state == CircuitState.OPEN:
-                    if state["opened_at"]:
-                        elapsed = time.time() - state["opened_at"]
-                        if elapsed >= config_obj.timeout_seconds:
-                            state["state"] = CircuitState.HALF_OPEN.value
-                            state["success_count"] = 0
-                            current_state = CircuitState.HALF_OPEN
-                        else:
-                            remaining = config_obj.timeout_seconds - elapsed
-                            return ActionResult(success=False, message=f"Circuit OPEN, retry in {remaining:.1f}s", data={"state": "open", "retry_after": remaining})
+    def record_success(self) -> None:
+        """Record successful call."""
+        with self._lock:
+            if self._state == CircuitState.HALF_OPEN:
+                self._success_count += 1
+                self._half_open_calls += 1
+                if self._success_count >= self.config.success_threshold:
+                    self._reset()
+                    logger.info(f"Circuit {self.name}: HALF_OPEN -> CLOSED")
+            else:
+                self._failure_count = 0
 
-                call_result = params.get("call_result", None)
-                call_success = params.get("call_success", call_result is not None)
+    def record_failure(self, exception: Optional[Exception] = None) -> None:
+        """Record failed call.
 
-                if call_success:
-                    state["failure_count"] = 0
-                    if current_state == CircuitState.HALF_OPEN:
-                        state["success_count"] += 1
-                        if state["success_count"] >= config_obj.success_threshold:
-                            state["state"] = CircuitState.CLOSED.value
-                            state["success_count"] = 0
-                    return ActionResult(success=True, message="Call succeeded", data={"state": state["state"], "call_success": True})
-                else:
-                    state["failure_count"] += 1
-                    if state["failure_count"] >= config_obj.failure_threshold:
-                        state["state"] = CircuitState.OPEN.value
-                        state["opened_at"] = time.time()
-                    return ActionResult(success=False, message=f"Call failed (failures: {state['failure_count']})", data={"state": state["state"], "failure_count": state["failure_count"]})
+        Args:
+            exception: Exception that caused failure
+        """
+        if exception and type(exception) in self.config.excluded_exceptions:
+            return
 
-            elif operation == "get_state":
-                return ActionResult(success=True, message=f"Circuit: {state['state']}", data=state)
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.time()
 
-            elif operation == "reset":
-                state = {"state": CircuitState.CLOSED.value, "failure_count": 0, "success_count": 0, "last_failure_time": None, "opened_at": None}
-                import json as json_module
-                with open(state_file, "w") as f:
-                    json_module.dump(state, f)
-                return ActionResult(success=True, message=f"Breaker reset: {breaker_name}")
+            if self._state == CircuitState.HALF_OPEN:
+                self._trip()
+                logger.warning(f"Circuit {self.name}: HALF_OPEN -> OPEN (failure in half-open)")
 
-            import json as json_module
-            with open(state_file, "w") as f:
-                json_module.dump(state, f)
+            elif self._failure_count >= self.config.failure_threshold:
+                self._trip()
+                logger.warning(f"Circuit {self.name}: CLOSED -> OPEN ({self._failure_count} failures)")
 
-            return ActionResult(success=True, message=f"Circuit: {state['state']}")
+    def _trip(self) -> None:
+        """Trip circuit to OPEN state."""
+        self._state = CircuitState.OPEN
+        self._success_count = 0
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"Error: {str(e)}")
+    def _reset(self) -> None:
+        """Reset circuit to CLOSED state."""
+        self._state = CircuitState.CLOSED
+        self._failure_count = 0
+        self._success_count = 0
+        self._last_failure_time = None
+        self._half_open_calls = 0
+
+    def get_status(self) -> dict[str, Any]:
+        """Get circuit status.
+
+        Returns:
+            Dictionary with status info
+        """
+        with self._lock:
+            return {
+                "name": self.name,
+                "state": self.state.value,
+                "failure_count": self._failure_count,
+                "success_count": self._success_count,
+                "last_failure_time": self._last_failure_time,
+                "config": {
+                    "failure_threshold": self.config.failure_threshold,
+                    "success_threshold": self.config.success_threshold,
+                    "timeout": self.config.timeout,
+                },
+            }
+
+
+class CircuitBreakerRegistry:
+    """Registry for managing multiple circuit breakers."""
+
+    def __init__(self):
+        """Initialize registry."""
+        self._circuits: dict[str, CircuitBreaker] = {}
+        self._lock = threading.Lock()
+
+    def get_circuit(self, name: str) -> Optional[CircuitBreaker]:
+        """Get circuit by name."""
+        with self._lock:
+            return self._circuits.get(name)
+
+    def register_circuit(self, name: str, config: Optional[CircuitConfig] = None) -> CircuitBreaker:
+        """Register new circuit.
+
+        Args:
+            name: Circuit name
+            config: Circuit configuration
+
+        Returns:
+            CircuitBreaker instance
+        """
+        with self._lock:
+            if name not in self._circuits:
+                self._circuits[name] = CircuitBreaker(name, config)
+            return self._circuits[name]
+
+    def unregister_circuit(self, name: str) -> None:
+        """Unregister circuit."""
+        with self._lock:
+            self._circuits.pop(name, None)
+
+    def list_circuits(self) -> list[dict[str, Any]]:
+        """List all circuits."""
+        with self._lock:
+            return [cb.get_status() for cb in self._circuits.values()]
+
+
+def circuit_breaker(
+    name: str,
+    failure_threshold: int = 5,
+    success_threshold: int = 2,
+    timeout: float = 60.0,
+):
+    """Decorator for circuit breaker.
+
+    Args:
+        name: Circuit name
+        failure_threshold: Failures before opening
+        success_threshold: Successes before closing
+        timeout: Timeout before attempting reset
+
+    Returns:
+        Decorated function
+    """
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        config = CircuitConfig(
+            failure_threshold=failure_threshold,
+            success_threshold=success_threshold,
+            timeout=timeout,
+        )
+        breaker = CircuitBreaker(name, config)
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if not breaker.is_available():
+                raise CircuitOpenError(f"Circuit {name} is OPEN")
+
+            try:
+                result = func(*args, **kwargs)
+                breaker.record_success()
+                return result
+            except Exception as e:
+                breaker.record_failure(e)
+                raise
+
+        wrapper._circuit_breaker = breaker
+        return wrapper
+
+    return decorator
+
+
+class CircuitOpenError(Exception):
+    """Exception raised when circuit is open."""
+    pass
+
+
+def create_circuit_breaker(
+    name: str,
+    failure_threshold: int = 5,
+    timeout: float = 60.0,
+) -> CircuitBreaker:
+    """Create circuit breaker instance.
+
+    Args:
+        name: Circuit name
+        failure_threshold: Failures before opening
+        timeout: Timeout before attempting reset
+
+    Returns:
+        CircuitBreaker instance
+    """
+    config = CircuitConfig(
+        failure_threshold=failure_threshold,
+        timeout=timeout,
+    )
+    return CircuitBreaker(name, config)
