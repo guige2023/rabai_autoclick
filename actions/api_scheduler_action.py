@@ -1,255 +1,250 @@
-"""API request scheduler with priority and throttling.
+"""
+API scheduler action for priority queue and scheduled execution.
 
-This module provides request scheduling:
-- Priority queues
-- Rate throttling
-- Delayed execution
-- Request batching
-
-Example:
-    >>> from actions.api_scheduler_action import RequestScheduler
-    >>> scheduler = RequestScheduler(rate_limit=100)
-    >>> scheduler.schedule(make_request, priority=1)
+Provides job scheduling, priority handling, and rate limiting.
 """
 
-from __future__ import annotations
-
+from typing import Any, Callable, Dict, List, Optional
 import time
 import threading
-import logging
-from typing import Any, Callable, Optional
-from dataclasses import dataclass, field
-from collections import deque
-from enum import Enum
-
-logger = logging.getLogger(__name__)
+import heapq
+import uuid
 
 
-class RequestPriority(Enum):
-    """Request priority levels."""
-    LOW = 0
-    NORMAL = 1
-    HIGH = 2
-    CRITICAL = 3
-
-
-@dataclass
-class ScheduledRequest:
-    """A scheduled API request."""
-    id: str
-    func: Callable[..., Any]
-    args: tuple[Any, ...] = field(default_factory=tuple)
-    kwargs: dict[str, Any] = field(default_factory=dict)
-    priority: RequestPriority = RequestPriority.NORMAL
-    scheduled_at: float = field(default_factory=time.time)
-    execute_at: float = field(default_factory=time.time)
-    retries: int = 0
-    max_retries: int = 3
-
-
-@dataclass
-class ScheduleResult:
-    """Result of scheduled request execution."""
-    request_id: str
-    success: bool
-    result: Any = None
-    error: Optional[str] = None
-    executed_at: float = field(default_factory=time.time)
-
-
-class RequestScheduler:
-    """Schedule API requests with priority and rate limiting.
-
-    Example:
-        >>> scheduler = RequestScheduler(rate_limit=100, max_concurrent=5)
-        >>> scheduler.schedule(api_call, priority=RequestPriority.HIGH)
-        >>> scheduler.start()
-    """
+class APISchedulerAction:
+    """API request scheduler with priority queue and scheduling."""
 
     def __init__(
         self,
-        rate_limit: int = 100,
-        window: float = 1.0,
         max_concurrent: int = 10,
+        default_priority: int = 5,
+        enable_rate_limit: bool = True,
+        rate_limit: int = 100,
+        rate_window: float = 60.0,
     ) -> None:
-        self.rate_limit = rate_limit
-        self.window = window
-        self.max_concurrent = max_concurrent
-        self._queue: deque[ScheduledRequest] = deque()
-        self._priority_queues: dict[RequestPriority, deque[ScheduledRequest]] = {
-            p: deque() for p in RequestPriority
-        }
-        self._lock = threading.RLock()
-        self._running = False
-        self._executing: int = 0
-        self._request_times: deque[float] = deque()
-        self._results: dict[str, ScheduleResult] = {}
-
-    def schedule(
-        self,
-        func: Callable[..., Any],
-        *args: Any,
-        priority: RequestPriority = RequestPriority.NORMAL,
-        delay: float = 0.0,
-        max_retries: int = 3,
-        **kwargs: Any,
-    ) -> str:
-        """Schedule a request for execution.
+        """
+        Initialize API scheduler.
 
         Args:
-            func: Function to execute.
-            *args: Positional arguments.
-            priority: Request priority.
-            delay: Delay before execution (seconds).
-            max_retries: Maximum retry attempts.
-            **kwargs: Keyword arguments.
-
-        Returns:
-            Request ID.
+            max_concurrent: Maximum concurrent executions
+            default_priority: Default job priority (1-10)
+            enable_rate_limit: Enable rate limiting
+            rate_limit: Requests per window
+            rate_window: Rate limit window in seconds
         """
-        import uuid
-        request_id = str(uuid.uuid4())[:8]
-        request = ScheduledRequest(
-            id=request_id,
-            func=func,
-            args=args,
-            kwargs=kwargs,
-            priority=priority,
-            execute_at=time.time() + delay,
-            max_retries=max_retries,
-        )
-        with self._lock:
-            self._priority_queues[priority].append(request)
-        logger.debug(f"Scheduled request {request_id} with priority {priority.name}")
-        return request_id
+        self.max_concurrent = max_concurrent
+        self.default_priority = default_priority
+        self.enable_rate_limit = enable_rate_limit
+        self.rate_limit = rate_limit
+        self.rate_window = rate_window
 
-    def start(self) -> None:
-        """Start the scheduler processing loop."""
-        self._running = True
-        self._process_loop()
-
-    def stop(self) -> None:
-        """Stop the scheduler."""
-        self._running = False
-
-    def _process_loop(self) -> None:
-        """Main processing loop."""
-        while self._running:
-            self._process_requests()
-            time.sleep(0.01)
-
-    def _process_requests(self) -> None:
-        """Process ready requests within rate limits."""
-        with self._lock:
-            if self._executing >= self.max_concurrent:
-                return
-            now = time.time()
-            self._clean_request_times()
-            available_capacity = self.max_concurrent - self._executing
-            rate_available = len(self._request_times) < self.rate_limit
-            if not rate_available:
-                return
-            to_execute: list[ScheduledRequest] = []
-            for priority in reversed(RequestPriority):
-                queue = self._priority_queues[priority]
-                while queue and len(to_execute) < available_capacity:
-                    if rate_available:
-                        request = queue[0]
-                        if request.execute_at <= now:
-                            queue.popleft()
-                            to_execute.append(request)
-                            self._request_times.append(now)
-                    else:
-                        break
-            for request in to_execute:
-                self._execute_async(request)
-
-    def _execute_async(self, request: ScheduledRequest) -> None:
-        """Execute a request asynchronously."""
-        self._executing += 1
-
-        def execute() -> None:
-            try:
-                result = request.func(*request.args, **request.kwargs)
-                self._results[request.id] = ScheduleResult(
-                    request_id=request.id,
-                    success=True,
-                    result=result,
-                )
-            except Exception as e:
-                if request.retries < request.max_retries:
-                    request.retries += 1
-                    request.execute_at = time.time() + (2 ** request.retries)
-                    with self._lock:
-                        self._priority_queues[request.priority].append(request)
-                else:
-                    self._results[request.id] = ScheduleResult(
-                        request_id=request.id,
-                        success=False,
-                        error=str(e),
-                    )
-            finally:
-                self._executing -= 1
-        thread = threading.Thread(target=execute)
-        thread.start()
-
-    def _clean_request_times(self) -> None:
-        """Clean old request timestamps from rate tracking."""
-        cutoff = time.time() - self.window
-        while self._request_times and self._request_times[0] < cutoff:
-            self._request_times.popleft()
-
-    def get_result(self, request_id: str) -> Optional[ScheduleResult]:
-        """Get the result of a scheduled request."""
-        return self._results.get(request_id)
-
-    def get_queue_size(self, priority: Optional[RequestPriority] = None) -> int:
-        """Get the current queue size."""
-        with self._lock:
-            if priority:
-                return len(self._priority_queues[priority])
-            return sum(len(q) for q in self._priority_queues.values())
-
-    def cancel(self, request_id: str) -> bool:
-        """Cancel a scheduled request."""
-        with self._lock:
-            for queue in self._priority_queues.values():
-                for i, req in enumerate(queue):
-                    if req.id == request_id:
-                        queue.pop(i)
-                        return True
-        return False
-
-
-class PriorityQueue:
-    """Thread-safe priority queue implementation."""
-
-    def __init__(self) -> None:
-        self._queues: dict[RequestPriority, deque[ScheduledRequest]] = {
-            p: deque() for p in RequestPriority
-        }
+        self._job_queue: List[Dict[str, Any]] = []
+        self._scheduled_jobs: Dict[str, Dict[str, Any]] = {}
+        self._running_jobs: Dict[str, Dict[str, Any]] = {}
+        self._completed_jobs: Dict[str, Dict[str, Any]] = {}
+        self._rate_tracker: List[float] = []
         self._lock = threading.Lock()
 
-    def enqueue(self, request: ScheduledRequest) -> None:
-        """Add a request to the queue."""
-        with self._lock:
-            self._queues[request.priority].append(request)
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
+        """
+        Execute scheduler operation.
 
-    def dequeue(self) -> Optional[ScheduledRequest]:
-        """Get the highest priority request."""
-        with self._lock:
-            for priority in reversed(RequestPriority):
-                if self._queues[priority]:
-                    return self._queues[priority].popleft()
-        return None
+        Args:
+            params: Dictionary containing:
+                - operation: 'schedule', 'execute', 'cancel', 'status', 'list'
+                - job_id: Job identifier
+                - job: Job definition
+                - schedule_time: Time to execute (for schedule)
+                - priority: Job priority (1-10)
 
-    def size(self) -> int:
-        """Get total queue size."""
-        with self._lock:
-            return sum(len(q) for q in self._queues.values())
+        Returns:
+            Dictionary with operation result
+        """
+        operation = params.get("operation", "execute")
 
-    def clear(self) -> None:
-        """Clear all queues."""
+        if operation == "schedule":
+            return self._schedule_job(params)
+        elif operation == "execute":
+            return self._execute_job(params)
+        elif operation == "cancel":
+            return self._cancel_job(params)
+        elif operation == "status":
+            return self._get_status(params)
+        elif operation == "list":
+            return self._list_jobs(params)
+        else:
+            return {"success": False, "error": f"Unknown operation: {operation}"}
+
+    def _schedule_job(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Schedule job for future execution."""
+        job = params.get("job", {})
+        schedule_time = params.get("schedule_time")
+        priority = params.get("priority", self.default_priority)
+        job_id = params.get("job_id", str(uuid.uuid4()))
+
+        if not job:
+            return {"success": False, "error": "Job definition is required"}
+
+        if isinstance(schedule_time, (int, float)):
+            run_at = schedule_time
+        elif isinstance(schedule_time, str):
+            run_at = time.time() + self._parse_duration(schedule_time)
+        else:
+            run_at = time.time()
+
+        scheduled_job = {
+            "job_id": job_id,
+            "job": job,
+            "priority": priority,
+            "schedule_time": run_at,
+            "status": "scheduled",
+            "created_at": time.time(),
+        }
+
         with self._lock:
-            for queue in self._queues.values():
-                queue.clear()
+            self._scheduled_jobs[job_id] = scheduled_job
+            heapq.heappush(
+                self._job_queue,
+                (run_at, priority, job_id),
+            )
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "schedule_time": run_at,
+            "scheduled": True,
+        }
+
+    def _parse_duration(self, duration: str) -> float:
+        """Parse duration string to seconds."""
+        units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+        if duration[-1] in units:
+            return float(duration[:-1]) * units[duration[-1]]
+        return float(duration)
+
+    def _execute_job(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Execute job immediately or when scheduled."""
+        job = params.get("job", {})
+        job_id = params.get("job_id", str(uuid.uuid4()))
+        priority = params.get("priority", self.default_priority)
+        handler = params.get("handler")
+
+        if self.enable_rate_limit and not self._check_rate_limit():
+            return {"success": False, "error": "Rate limit exceeded"}
+
+        if len(self._running_jobs) >= self.max_concurrent:
+            return {
+                "success": False,
+                "error": "Max concurrent jobs reached",
+                "queued": True,
+                "job_id": job_id,
+            }
+
+        running_job = {
+            "job_id": job_id,
+            "job": job,
+            "priority": priority,
+            "status": "running",
+            "started_at": time.time(),
+        }
+
+        with self._lock:
+            self._running_jobs[job_id] = running_job
+
+        try:
+            if callable(handler):
+                result = handler(job)
+            else:
+                result = {"success": True, "message": "Job executed"}
+
+            running_job["status"] = "completed"
+            running_job["completed_at"] = time.time()
+            running_job["result"] = result
+
+            with self._lock:
+                self._completed_jobs[job_id] = running_job
+                if job_id in self._running_jobs:
+                    del self._running_jobs[job_id]
+
+            return {"success": True, "job_id": job_id, "result": result}
+        except Exception as e:
+            running_job["status"] = "failed"
+            running_job["error"] = str(e)
+            running_job["completed_at"] = time.time()
+
+            with self._lock:
+                self._completed_jobs[job_id] = running_job
+                if job_id in self._running_jobs:
+                    del self._running_jobs[job_id]
+
+            return {"success": False, "job_id": job_id, "error": str(e)}
+
+    def _cancel_job(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Cancel scheduled or running job."""
+        job_id = params.get("job_id", "")
+
+        with self._lock:
+            if job_id in self._scheduled_jobs:
+                del self._scheduled_jobs[job_id]
+                self._job_queue = [
+                    (t, p, jid) for t, p, jid in self._job_queue if jid != job_id
+                ]
+                heapq.heapify(self._job_queue)
+                return {"success": True, "job_id": job_id, "cancelled": "scheduled"}
+
+            if job_id in self._running_jobs:
+                self._running_jobs[job_id]["status"] = "cancelled"
+                self._running_jobs[job_id]["completed_at"] = time.time()
+                self._completed_jobs[job_id] = self._running_jobs[job_id]
+                del self._running_jobs[job_id]
+                return {"success": True, "job_id": job_id, "cancelled": "running"}
+
+        return {"success": False, "error": "Job not found"}
+
+    def _check_rate_limit(self) -> bool:
+        """Check if request is within rate limit."""
+        now = time.time()
+        self._rate_tracker = [t for t in self._rate_tracker if now - t < self.rate_window]
+
+        if len(self._rate_tracker) >= self.rate_limit:
+            return False
+
+        self._rate_tracker.append(now)
+        return True
+
+    def _get_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Get scheduler status."""
+        with self._lock:
+            return {
+                "success": True,
+                "queued_jobs": len(self._job_queue),
+                "running_jobs": len(self._running_jobs),
+                "completed_jobs": len(self._completed_jobs),
+                "max_concurrent": self.max_concurrent,
+                "rate_limit": self.rate_limit,
+                "rate_remaining": max(0, self.rate_limit - len(self._rate_tracker)),
+            }
+
+    def _list_jobs(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List jobs by status."""
+        status_filter = params.get("status")
+        limit = params.get("limit", 100)
+
+        all_jobs = {}
+
+        with self._lock:
+            for jid, job in self._scheduled_jobs.items():
+                if status_filter is None or job["status"] == status_filter:
+                    all_jobs[jid] = job
+
+            for jid, job in self._running_jobs.items():
+                if status_filter is None or job["status"] == status_filter:
+                    all_jobs[jid] = job
+
+            for jid, job in self._completed_jobs.items():
+                if status_filter is None or job["status"] == status_filter:
+                    all_jobs[jid] = job
+
+        job_list = list(all_jobs.values())[:limit]
+
+        return {"success": True, "count": len(job_list), "jobs": job_list}

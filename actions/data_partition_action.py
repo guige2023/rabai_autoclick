@@ -1,214 +1,218 @@
-"""Data Partition and Sharding Utility.
+"""
+Data partition action for distributed data processing.
 
-This module provides data partitioning:
-- Range-based partitioning
-- Hash-based partitioning
-- List-based partitioning
-- Partition routing
-
-Example:
-    >>> from actions.data_partition_action import DataPartitioner
-    >>> partitioner = DataPartitioner(strategy="hash")
-    >>> partition_id = partitioner.get_partition(record, num_partitions=10)
+Provides consistent hashing, range partitioning, and key-based sharding.
 """
 
-from __future__ import annotations
-
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import hashlib
-import logging
-import threading
-from typing import Any, Callable, Optional
-
-logger = logging.getLogger(__name__)
+import bisect
 
 
-class DataPartitioner:
-    """Partitions data for distributed processing."""
+class DataPartitionAction:
+    """Data partitioning with multiple strategies."""
 
     def __init__(
         self,
+        num_partitions: int = 16,
         strategy: str = "hash",
-        num_partitions: int = 10,
+        replication_factor: int = 1,
     ) -> None:
-        """Initialize the data partitioner.
-
-        Args:
-            strategy: Partitioning strategy (hash, range, list, round_robin).
-            num_partitions: Number of partitions.
         """
-        self._strategy = strategy
-        self._num_partitions = num_partitions
-        self._lock = threading.Lock()
-        self._stats = {"partitions_assigned": 0}
-
-    def get_partition(
-        self,
-        key: Any,
-        num_partitions: Optional[int] = None,
-    ) -> int:
-        """Get partition number for a key.
+        Initialize data partitioner.
 
         Args:
-            key: Partition key.
-            num_partitions: Override number of partitions.
+            num_partitions: Number of partitions
+            strategy: Partitioning strategy ('hash', 'range', 'list')
+            replication_factor: Number of replicas per partition
+        """
+        self.num_partitions = num_partitions
+        self.strategy = strategy
+        self.replication_factor = replication_factor
+
+        self._partition_map: Dict[int, str] = {}
+        self._range_boundaries: List[Any] = []
+        self._list_partitions: Dict[str, int] = {}
+        self._replica_map: Dict[int, List[int]] = {}
+
+        self._initialize_partitions()
+
+    def _initialize_partitions(self) -> None:
+        """Initialize partition mapping."""
+        for i in range(self.num_partitions):
+            self._partition_map[i] = f"partition_{i}"
+            self._replica_map[i] = self._get_replicas(i)
+
+    def _get_replicas(self, partition_id: int) -> List[int]:
+        """Get replica partition IDs for given partition."""
+        replicas = [partition_id]
+        for _ in range(self.replication_factor - 1):
+            next_replica = (partition_id + len(replicas)) % self.num_partitions
+            if next_replica not in replicas:
+                replicas.append(next_replica)
+        return replicas
+
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
+        """
+        Execute partition operation.
+
+        Args:
+            params: Dictionary containing:
+                - operation: 'partition', 'get', 'add_node', 'remove_node'
+                - key: Partition key
+                - value: Value to partition
+                - node_id: Node identifier
 
         Returns:
-            Partition number (0 to num_partitions-1).
+            Dictionary with partition assignment
         """
-        n = num_partitions or self._num_partitions
+        operation = params.get("operation", "partition")
 
-        with self._lock:
-            self._stats["partitions_assigned"] += 1
-
-        if self._strategy == "hash":
-            return self._hash_partition(key, n)
-        elif self._strategy == "range":
-            return self._range_partition(key, n)
-        elif self._strategy == "round_robin":
-            return self._round_robin_partition(n)
+        if operation == "partition":
+            return self._get_partition(params)
+        elif operation == "get":
+            return self._get_partition_for_key(params)
+        elif operation == "add_node":
+            return self._add_partition(params)
+        elif operation == "remove_node":
+            return self._remove_partition(params)
+        elif operation == "rebalance":
+            return self._rebalance_partitions(params)
         else:
-            return self._hash_partition(key, n)
+            return {"success": False, "error": f"Unknown operation: {operation}"}
 
-    def _hash_partition(self, key: Any, n: int) -> int:
+    def _get_partition(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Get partition assignment for key."""
+        key = params.get("key", "")
+        include_replicas = params.get("include_replicas", False)
+
+        if not key:
+            return {"success": False, "error": "Key is required"}
+
+        if self.strategy == "hash":
+            partition_id = self._hash_partition(key)
+        elif self.strategy == "range":
+            partition_id = self._range_partition(key)
+        elif self.strategy == "list":
+            partition_id = self._list_partition(key)
+        else:
+            partition_id = self._hash_partition(key)
+
+        result = {
+            "success": True,
+            "key": key,
+            "partition_id": partition_id,
+            "partition_name": self._partition_map[partition_id],
+            "strategy": self.strategy,
+        }
+
+        if include_replicas or self.replication_factor > 1:
+            result["replicas"] = self._replica_map[partition_id]
+
+        return result
+
+    def _get_partition_for_key(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Get partition info for existing key."""
+        return self._get_partition(params)
+
+    def _hash_partition(self, key: str) -> int:
         """Hash-based partitioning."""
-        if key is None:
-            return 0
-        key_str = str(key).encode("utf-8")
-        hash_val = int(hashlib.md5(key_str).hexdigest(), 16)
-        return hash_val % n
+        hash_value = int(hashlib.md5(str(key).encode()).hexdigest(), 16)
+        return hash_value % self.num_partitions
 
-    def _range_partition(self, key: Any, n: int) -> int:
+    def _range_partition(self, key: str) -> int:
         """Range-based partitioning."""
-        if isinstance(key, int):
-            if n == 1:
-                return 0
-            return min(int(key / (100 / n)), n - 1)
-        return self._hash_partition(key, n)
+        if not self._range_boundaries:
+            return 0
 
-    def _round_robin_partition(self, n: int) -> int:
-        """Round-robin partitioning."""
-        with self._lock:
-            idx = self._stats["partitions_assigned"] % n
-        return idx
+        key_numeric = self._key_to_numeric(key)
+        idx = bisect.bisect_right(self._range_boundaries, key_numeric)
+        return min(idx, self.num_partitions - 1)
 
-    def partition_records(
-        self,
-        records: list[dict[str, Any]],
-        key_field: str,
-        num_partitions: Optional[int] = None,
-    ) -> list[list[dict[str, Any]]]:
-        """Partition records into buckets.
+    def _list_partition(self, key: str) -> int:
+        """List-based partitioning."""
+        if key in self._list_partitions:
+            return self._list_partitions[key]
 
-        Args:
-            records: List of records.
-            key_field: Field to use as partition key.
-            num_partitions: Number of partitions.
+        hash_value = self._hash_partition(key)
+        self._list_partitions[key] = hash_value
+        return hash_value
 
-        Returns:
-            List of partition buckets.
-        """
-        n = num_partitions or self._num_partitions
-        partitions: list[list] = [[] for _ in range(n)]
+    def _key_to_numeric(self, key: str) -> int:
+        """Convert key to numeric value for range partitioning."""
+        try:
+            return int(key)
+        except (ValueError, TypeError):
+            return int(hashlib.md5(str(key).encode()).hexdigest(), 16) % (10**9)
 
-        for record in records:
-            key = record.get(key_field)
-            part_idx = self.get_partition(key, n)
-            partitions[part_idx].append(record)
+    def _add_partition(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Add new partition."""
+        node_id = params.get("node_id", "")
 
-        return partitions
+        if len(self._partition_map) >= self.num_partitions * 2:
+            return {"success": False, "error": "Cannot add more partitions"}
 
-    def partition_by_range(
-        self,
-        records: list[dict[str, Any]],
-        key_field: str,
-        ranges: list[tuple[Any, Any]],
-    ) -> list[list[dict[str, Any]]]:
-        """Partition records by value ranges.
+        new_partition_id = max(self._partition_map.keys()) + 1
+        partition_name = node_id or f"partition_{new_partition_id}"
 
-        Args:
-            records: List of records.
-            key_field: Field to partition on.
-            ranges: List of (min, max) tuples.
+        self._partition_map[new_partition_id] = partition_name
+        self._replica_map[new_partition_id] = self._get_replicas(new_partition_id)
 
-        Returns:
-            List of partitioned buckets.
-        """
-        partitions: list[list] = [[] for _ in range(len(ranges) + 1)]
+        return {
+            "success": True,
+            "partition_id": new_partition_id,
+            "partition_name": partition_name,
+        }
 
-        for record in records:
-            key = record.get(key_field)
-            placed = False
+    def _remove_partition(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Remove partition."""
+        partition_id = params.get("partition_id")
 
-            for i, (min_val, max_val) in enumerate(ranges):
-                if min_val <= key <= max_val:
-                    partitions[i].append(record)
-                    placed = True
-                    break
+        if partition_id not in self._partition_map:
+            return {"success": False, "error": "Partition not found"}
 
-            if not placed:
-                partitions[-1].append(record)
+        partition_name = self._partition_map[partition_id]
+        del self._partition_map[partition_id]
+        if partition_id in self._replica_map:
+            del self._replica_map[partition_id]
 
-        return partitions
+        return {"success": True, "removed_partition_id": partition_id, "name": partition_name}
 
-    def partition_by_list(
-        self,
-        records: list[dict[str, Any]],
-        key_field: str,
-        partition_values: list[list[Any]],
-    ) -> list[list[dict[str, Any]]]:
-        """Partition records by value lists.
+    def _rebalance_partitions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rebalance partitions across nodes."""
+        nodes = params.get("nodes", [])
 
-        Args:
-            records: List of records.
-            key_field: Field to partition on.
-            partition_values: List of value lists for each partition.
+        if not nodes:
+            return {"success": False, "error": "Nodes list is required"}
 
-        Returns:
-            List of partitioned buckets.
-        """
-        partitions: list[list] = [[] for _ in range(len(partition_values))]
-        value_to_partition = {}
-        for i, values in enumerate(partition_values):
-            for v in values:
-                value_to_partition[v] = i
+        partition_size = len(self._partition_map) // len(nodes)
+        remainder = len(self._partition_map) % len(nodes)
 
-        for record in records:
-            key = record.get(key_field)
-            part_idx = value_to_partition.get(key, -1)
-            if 0 <= part_idx < len(partitions):
-                partitions[part_idx].append(record)
-            else:
-                partitions[-1].append(record)
+        assignments = {}
+        partition_idx = 0
 
-        return partitions
+        for i, node in enumerate(nodes):
+            node_partitions = []
+            for _ in range(partition_size + (1 if i < remainder else 0)):
+                if partition_idx in self._partition_map:
+                    node_partitions.append(partition_idx)
+                partition_idx += 1
+            assignments[node] = node_partitions
 
-    def get_partition_stats(
-        self,
-        records: list[dict[str, Any]],
-        key_field: str,
-        num_partitions: Optional[int] = None,
-    ) -> dict[int, int]:
-        """Get partition statistics.
+        return {"success": True, "assignments": assignments}
 
-        Args:
-            records: List of records.
-            key_field: Partition key field.
-            num_partitions: Number of partitions.
+    def set_range_boundaries(self, boundaries: List[Any]) -> None:
+        """Set range boundaries for range partitioning."""
+        self._range_boundaries = sorted(boundaries)
 
-        Returns:
-            Dict mapping partition ID to record count.
-        """
-        n = num_partitions or self._num_partitions
-        counts = {i: 0 for i in range(n)}
-
-        for record in records:
-            key = record.get(key_field)
-            part_idx = self.get_partition(key, n)
-            counts[part_idx] += 1
-
-        return counts
-
-    def get_stats(self) -> dict[str, int]:
-        """Get partitioner statistics."""
-        with self._lock:
-            return dict(self._stats)
+    def get_partition_stats(self) -> Dict[str, Any]:
+        """Get partition statistics."""
+        return {
+            "num_partitions": len(self._partition_map),
+            "strategy": self.strategy,
+            "replication_factor": self.replication_factor,
+            "partitions": {
+                pid: {"name": name, "replicas": self._replica_map.get(pid, [])}
+                for pid, name in self._partition_map.items()
+            },
+        }

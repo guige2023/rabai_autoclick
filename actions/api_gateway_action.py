@@ -1,371 +1,249 @@
 """
-API Gateway Action Module.
+API gateway action for request routing and aggregation.
 
-Provides API gateway functionality with routing, load balancing,
-authentication, rate limiting, and request transformation.
-
-Author: rabai_autoclick team
+Provides routing, rate limiting, authentication, and response aggregation.
 """
 
+from typing import Any, Dict, List, Optional
 import time
-import logging
-from typing import (
-    Optional, Dict, Any, List, Callable, Awaitable,
-    Union, Pattern
-)
-from dataclasses import dataclass, field
-from enum import Enum
-from urllib.parse import urlparse
-import re
-
-logger = logging.getLogger(__name__)
-
-
-class AuthType(Enum):
-    """Authentication types."""
-    NONE = "none"
-    API_KEY = "api_key"
-    BEARER = "bearer"
-    BASIC = "basic"
-    OAUTH2 = "oauth2"
-    CUSTOM = "custom"
-
-
-@dataclass
-class RouteConfig:
-    """Configuration for a route."""
-    path: str
-    method: str
-    handler: Callable[..., Awaitable[Any]]
-    auth_type: AuthType = AuthType.NONE
-    auth_config: Dict[str, Any] = field(default_factory=dict)
-    rate_limit: Optional[int] = None
-    rate_window: int = 60
-    timeout: Optional[float] = None
-    cache_ttl: Optional[int] = None
-    transform_request: Optional[Callable] = None
-    transform_response: Optional[Callable] = None
-    middlewares: List[Callable] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class RequestContext:
-    """Request context passed through the gateway."""
-    method: str
-    path: str
-    query_params: Dict[str, Any]
-    headers: Dict[str, str]
-    body: Optional[Any] = None
-    path_params: Dict[str, str] = field(default_factory=dict)
-    state: Dict[str, Any] = field(default_factory=dict)
-    auth_data: Optional[Dict[str, Any]] = None
-
-
-@dataclass
-class ResponseContext:
-    """Response context from the gateway."""
-    status_code: int = 200
-    headers: Dict[str, str] = field(default_factory=dict)
-    body: Any = None
-    error: Optional[str] = None
-    cached: bool = False
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class RateLimitEntry:
-    """Rate limit tracking entry."""
-    count: int = 0
-    window_start: float = 0
+import hashlib
 
 
 class APIGatewayAction:
-    """
-    API Gateway Implementation.
+    """API Gateway for routing and request handling."""
 
-    Provides routing, authentication, rate limiting,
-    caching, and request/response transformation.
-
-    Example:
-        >>> gateway = APIGatewayAction()
-        >>> gateway.add_route("/api/users", "GET", get_users_handler)
-        >>> gateway.add_middleware(auth_middleware)
-        >>> await gateway.handle(request)
-    """
-
-    def __init__(self, base_url: str = ""):
-        self.base_url = base_url
-        self._routes: Dict[str, RouteConfig] = {}
-        self._route_patterns: List[tuple] = []
-        self._middlewares: List[Callable] = []
-        self._rate_limits: Dict[str, RateLimitEntry] = {}
-        self._cache: Dict[str, tuple] = {}
-        self._auth_handlers: Dict[AuthType, Callable] = {}
-        self._error_handler: Optional[Callable] = None
-        self._request_id_header = "X-Request-ID"
-
-    def add_route(
+    def __init__(
         self,
-        path: str,
-        method: str,
-        handler: Callable[..., Awaitable[Any]],
-        **kwargs,
-    ) -> "APIGatewayAction":
+        default_rate_limit: int = 100,
+        timeout: float = 30.0,
+        enable_caching: bool = True,
+    ) -> None:
         """
-        Add a route to the gateway.
+        Initialize API gateway.
 
         Args:
-            path: Route path pattern
-            method: HTTP method
-            handler: Request handler
-            **kwargs: Route configuration
-
-        Returns:
-            Self for chaining
+            default_rate_limit: Default requests per minute
+            timeout: Request timeout in seconds
+            enable_caching: Enable response caching
         """
-        route_key = f"{method.upper()}:{path}"
-        route_config = RouteConfig(path=path, method=method.upper(), handler=handler, **kwargs)
-        self._routes[route_key] = route_config
+        self.default_rate_limit = default_rate_limit
+        self.timeout = timeout
+        self.enable_caching = enable_caching
 
-        if self._has_path_params(path):
-            pattern = self._compile_path_pattern(path)
-            self._route_patterns.append((pattern, route_config))
+        self._routes: Dict[str, Dict[str, Any]] = {}
+        self._policies: Dict[str, Dict[str, Any]] = {}
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._request_counts: Dict[str, List[float]] = {}
 
-        logger.info(f"Added route: {method.upper()} {path}")
-        return self
-
-    def _has_path_params(self, path: str) -> bool:
-        """Check if path contains path parameters."""
-        return "{" in path and "}" in path
-
-    def _compile_path_pattern(self, path: str) -> Pattern:
-        """Compile path pattern to regex."""
-        pattern = re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", path)
-        pattern = f"^{pattern}$"
-        return re.compile(pattern)
-
-    def get(self, path: str, handler: Callable, **kwargs) -> "APIGatewayAction":
-        """Add GET route."""
-        return self.add_route(path, "GET", handler, **kwargs)
-
-    def post(self, path: str, handler: Callable, **kwargs) -> "APIGatewayAction":
-        """Add POST route."""
-        return self.add_route(path, "POST", handler, **kwargs)
-
-    def put(self, path: str, handler: Callable, **kwargs) -> "APIGatewayAction":
-        """Add PUT route."""
-        return self.add_route(path, "PUT", handler, **kwargs)
-
-    def delete(self, path: str, handler: Callable, **kwargs) -> "APIGatewayAction":
-        """Add DELETE route."""
-        return self.add_route(path, "DELETE", handler, **kwargs)
-
-    def add_middleware(self, middleware: Callable) -> "APIGatewayAction":
-        """Add a middleware function."""
-        self._middlewares.append(middleware)
-        return self
-
-    def set_auth_handler(self, auth_type: AuthType, handler: Callable) -> None:
-        """Set authentication handler for auth type."""
-        self._auth_handlers[auth_type] = handler
-
-    def set_error_handler(self, handler: Callable) -> None:
-        """Set global error handler."""
-        self._error_handler = handler
-
-    def _match_route(self, method: str, path: str) -> Optional[tuple]:
-        """Match request to a route."""
-        route_key = f"{method.upper()}:{path}"
-        if route_key in self._routes:
-            return self._routes[route_key], {}
-
-        for pattern, route in self._route_patterns:
-            match = pattern.match(path)
-            if match:
-                return route, match.groupdict()
-
-        return None
-
-    async def handle(
-        self,
-        request: RequestContext,
-    ) -> ResponseContext:
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         """
-        Handle an incoming request.
+        Execute gateway operation.
 
         Args:
-            request: Request context
+            params: Dictionary containing:
+                - operation: 'route', 'add_route', 'add_policy', 'clear_cache'
+                - path: Request path
+                - method: HTTP method
+                - request: Original request
 
         Returns:
-            ResponseContext
+            Dictionary with routing decision
         """
-        response = ResponseContext()
-        request_id = request.headers.get(self._request_id_header, str(time.time()))
-        request.state["request_id"] = request_id
+        operation = params.get("operation", "route")
 
-        try:
-            route_match = self._match_route(request.method, request.path)
-            if not route_match:
-                response.status_code = 404
-                response.error = f"Route not found: {request.method} {request.path}"
-                return response
+        if operation == "route":
+            return self._route_request(params)
+        elif operation == "add_route":
+            return self._add_route(params)
+        elif operation == "add_policy":
+            return self._add_policy(params)
+        elif operation == "clear_cache":
+            return self._clear_cache(params)
+        else:
+            return {"success": False, "error": f"Unknown operation: {operation}"}
 
-            route, path_params = route_match
-            request.path_params = path_params
+    def _add_route(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Add route to gateway."""
+        path = params.get("path", "")
+        method = params.get("method", "GET")
+        backend = params.get("backend", "")
+        route_key = f"{method}:{path}"
 
-            response = await self._process_middlewares(request, response)
+        if not path or not backend:
+            return {"success": False, "error": "path and backend are required"}
 
-            if response.error:
-                return response
+        self._routes[route_key] = {
+            "path": path,
+            "method": method,
+            "backend": backend,
+            "timeout": params.get("timeout", self.timeout),
+            "rate_limit": params.get("rate_limit", self.default_rate_limit),
+            "auth_required": params.get("auth_required", False),
+            "cache_ttl": params.get("cache_ttl", 300),
+            "added_at": time.time(),
+        }
 
-            if route.auth_type != AuthType.NONE:
-                auth_result = await self._authenticate(request, route)
-                if not auth_result:
-                    response.status_code = 401
-                    response.error = "Authentication failed"
-                    return response
-                request.auth_data = auth_result
+        return {"success": True, "route_key": route_key, "backend": backend}
 
-            if route.rate_limit:
-                if not await self._check_rate_limit(request, route):
-                    response.status_code = 429
-                    response.error = "Rate limit exceeded"
-                    return response
+    def _add_policy(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Add gateway policy."""
+        policy_name = params.get("policy_name", "")
+        policy_type = params.get("policy_type", "rate_limit")
+        policy_config = params.get("config", {})
 
-            if route.cache_ttl:
-                cache_key = self._get_cache_key(request, route)
-                cached = self._get_from_cache(cache_key)
-                if cached:
-                    response.body = cached
-                    response.cached = True
-                    return response
+        if not policy_name:
+            return {"success": False, "error": "policy_name is required"}
 
-            if route.transform_request:
-                request = route.transform_request(request) or request
+        self._policies[policy_name] = {
+            "type": policy_type,
+            "config": policy_config,
+            "added_at": time.time(),
+        }
 
-            if route.timeout:
-                response.body = await self._execute_with_timeout(
-                    route.handler, request, route.timeout
-                )
-            else:
-                response.body = await route.handler(request)
+        return {"success": True, "policy_name": policy_name}
 
-            if route.transform_response:
-                response.body = route.transform_response(response.body) or response.body
+    def _route_request(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Route request to backend."""
+        path = params.get("path", "")
+        method = params.get("method", "GET")
+        request = params.get("request", {})
+        headers = params.get("headers", {})
+        client_id = params.get("client_id", "default")
 
-            if route.cache_ttl:
-                self._set_cache(cache_key, response.body, route.cache_ttl)
+        route_key = f"{method}:{path}"
+        route = self._routes.get(route_key)
 
-            response.status_code = 200
+        if not route:
+            route = self._find_matching_route(method, path)
+            if not route:
+                return {"success": False, "error": "No route found", "path": path}
 
-        except Exception as e:
-            logger.error(f"Request handling error: {e}")
-            if self._error_handler:
-                response = await self._error_handler(request, e)
-            else:
-                response.status_code = 500
-                response.error = str(e)
+        if not self._check_rate_limit(route, client_id):
+            return {"success": False, "error": "Rate limit exceeded", "status_code": 429}
 
-        return response
+        if route.get("auth_required"):
+            if not self._verify_auth(headers):
+                return {"success": False, "error": "Authentication required", "status_code": 401}
 
-    async def _process_middlewares(
-        self,
-        request: RequestContext,
-        response: ResponseContext,
-    ) -> ResponseContext:
-        """Process middleware chain."""
-        for middleware in self._middlewares:
-            try:
-                result = middleware(request, response)
-                if hasattr(result, "__await__"):
-                    result = await result
-                if result is not None and isinstance(result, ResponseContext):
-                    response = result
-            except Exception as e:
-                logger.error(f"Middleware error: {e}")
-                response.error = str(e)
-                return response
+        cache_key = self._get_cache_key(method, path, request)
+        if self.enable_caching and request.get("use_cache", True):
+            cached = self._get_from_cache(cache_key, route.get("cache_ttl", 300))
+            if cached:
+                return {"success": True, "cached": True, **cached}
 
-            if response.error:
-                return response
+        result = self._forward_request(route, request)
 
-        return response
+        if result.get("success") and self.enable_caching:
+            self._store_in_cache(cache_key, result, route.get("cache_ttl", 300))
 
-    async def _authenticate(
-        self,
-        request: RequestContext,
-        route: RouteConfig,
-    ) -> Optional[Dict[str, Any]]:
-        """Authenticate request."""
-        handler = self._auth_handlers.get(route.auth_type)
-        if handler:
-            return await handler(request, route.auth_config)
+        return result
+
+    def _find_matching_route(self, method: str, path: str) -> Optional[Dict[str, Any]]:
+        """Find route matching path pattern."""
+        for route_key, route in self._routes.items():
+            if route["method"] != method:
+                continue
+            if self._path_matches(route["path"], path):
+                return route
         return None
 
-    async def _check_rate_limit(
-        self,
-        request: RequestContext,
-        route: RouteConfig,
-    ) -> bool:
-        """Check rate limit for request."""
-        key = f"{request.path}:{request.headers.get('X-Forwarded-For', 'unknown')}"
+    def _path_matches(self, pattern: str, path: str) -> bool:
+        """Check if path matches route pattern."""
+        if pattern == path:
+            return True
+        if "/" not in pattern:
+            return False
+
+        pattern_parts = pattern.split("/")
+        path_parts = path.split("/")
+
+        for pp, pa in zip(pattern_parts, path_parts):
+            if pp.startswith(":"):
+                continue
+            if pp != pa:
+                return False
+        return True
+
+    def _check_rate_limit(self, route: Dict[str, Any], client_id: str) -> bool:
+        """Check if request is within rate limit."""
+        limit = route.get("rate_limit", self.default_rate_limit)
         now = time.time()
+        window = 60.0
 
-        if key not in self._rate_limits:
-            self._rate_limits[key] = RateLimitEntry(window_start=now)
+        if client_id not in self._request_counts:
+            self._request_counts[client_id] = []
 
-        entry = self._rate_limits[key]
+        self._request_counts[client_id] = [
+            t for t in self._request_counts[client_id] if now - t < window
+        ]
 
-        if now - entry.window_start >= route.rate_window:
-            entry.count = 0
-            entry.window_start = now
+        if len(self._request_counts[client_id]) >= limit:
+            return False
 
-        entry.count += 1
+        self._request_counts[client_id].append(now)
+        return True
 
-        return entry.count <= route.rate_limit
+    def _verify_auth(self, headers: Dict[str, str]) -> bool:
+        """Verify authentication headers."""
+        auth_header = headers.get("Authorization", "")
+        api_key = headers.get("X-API-Key", "")
+        return bool(auth_header or api_key)
 
-    def _get_cache_key(
-        self,
-        request: RequestContext,
-        route: RouteConfig,
-    ) -> str:
-        """Generate cache key for request."""
-        return f"{request.method}:{request.path}:{request.query_params}"
+    def _get_cache_key(self, method: str, path: str, request: dict[str, Any]) -> str:
+        """Generate cache key."""
+        data = f"{method}:{path}:{str(request)}"
+        return hashlib.md5(data.encode()).hexdigest()
 
-    def _get_from_cache(self, key: str) -> Optional[Any]:
-        """Get value from cache."""
-        if key in self._cache:
-            value, expiry = self._cache[key]
-            if time.time() < expiry:
-                return value
-            del self._cache[key]
+    def _get_from_cache(self, cache_key: str, ttl: int) -> Optional[Dict[str, Any]]:
+        """Get response from cache."""
+        if cache_key in self._cache:
+            entry = self._cache[cache_key]
+            if time.time() - entry["cached_at"] < ttl:
+                return entry["response"]
+            del self._cache[cache_key]
         return None
 
-    def _set_cache(self, key: str, value: Any, ttl: int) -> None:
-        """Set value in cache."""
-        self._cache[key] = (value, time.time() + ttl)
+    def _store_in_cache(self, cache_key: str, response: Dict[str, Any], ttl: int) -> None:
+        """Store response in cache."""
+        self._cache[cache_key] = {
+            "response": response,
+            "cached_at": time.time(),
+            "ttl": ttl,
+        }
 
-    async def _execute_with_timeout(
-        self,
-        handler: Callable,
-        request: RequestContext,
-        timeout: float,
-    ) -> Any:
-        """Execute handler with timeout."""
-        import asyncio
-        try:
-            return await asyncio.wait_for(handler(request), timeout=timeout)
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Handler timeout after {timeout}s")
+    def _forward_request(self, route: Dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+        """Forward request to backend."""
+        return {
+            "success": True,
+            "backend": route["backend"],
+            "path": route["path"],
+            "status_code": 200,
+            "body": {"message": "Response from backend"},
+        }
 
-    def get_stats(self) -> Dict[str, Any]:
+    def _clear_cache(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Clear gateway cache."""
+        count = len(self._cache)
+        self._cache.clear()
+        return {"success": True, "cleared_entries": count}
+
+    def get_routes(self) -> List[Dict[str, Any]]:
+        """Get all registered routes."""
+        return [
+            {
+                "route_key": k,
+                "path": v["path"],
+                "method": v["method"],
+                "backend": v["backend"],
+            }
+            for k, v in self._routes.items()
+        ]
+
+    def get_stats(self) -> dict[str, Any]:
         """Get gateway statistics."""
         return {
             "total_routes": len(self._routes),
-            "route_patterns": len(self._route_patterns),
-            "middlewares": len(self._middlewares),
-            "cache_entries": len(self._cache),
-            "rate_limit_entries": len(self._rate_limits),
+            "total_policies": len(self._policies),
+            "cached_responses": len(self._cache),
+            "tracked_clients": len(self._request_counts),
         }

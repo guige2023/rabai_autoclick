@@ -1,215 +1,201 @@
 """
-Data Compressor Action Module.
+Data compressor action for efficient data storage and transmission.
 
-Compression utilities for API data transmission.
+Provides compression with multiple algorithms and streaming support.
 """
 
-from __future__ import annotations
-
-import gzip
+from typing import Any, BinaryIO, Optional
+import io
 import json
+import base64
 import zlib
-from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Dict, Optional, Union
-
-
-class CompressionType(Enum):
-    """Supported compression types."""
-    NONE = "none"
-    GZIP = "gzip"
-    DEFLATE = "deflate"
-    ZLIB = "zlib"
-
-
-@dataclass
-class CompressionResult:
-    """Result of a compression operation."""
-    compressed: bytes
-    original_size: int
-    compressed_size: int
-    compression_ratio: float
-    algorithm: CompressionType
-
-
-@dataclass
-class CompressionConfig:
-    """Configuration for compression."""
-    algorithm: CompressionType = CompressionType.GZIP
-    level: int = 6
-    min_size_bytes: int = 1024
-    content_type: str = "application/json"
+import gzip
 
 
 class DataCompressorAction:
-    """
-    Data compression for API requests and responses.
+    """Data compression with multiple algorithms."""
 
-    Supports gzip, deflate, and zlib compression.
-    """
+    SUPPORTED_ALGORITHMS = ("gzip", "zlib", "deflate", "lz4", "snappy")
 
     def __init__(
         self,
-        config: Optional[CompressionConfig] = None,
+        default_algorithm: str = "gzip",
+        compression_level: int = 6,
     ) -> None:
-        self.config = config or CompressionConfig()
-
-    def compress(
-        self,
-        data: Union[str, bytes, Dict[str, Any]],
-        algorithm: Optional[CompressionType] = None,
-        level: Optional[int] = None,
-    ) -> CompressionResult:
         """
-        Compress data.
+        Initialize data compressor.
 
         Args:
-            data: Data to compress
-            algorithm: Override compression algorithm
-            level: Override compression level (1-9)
-
-        Returns:
-            CompressionResult with compressed data
+            default_algorithm: Default compression algorithm
+            compression_level: Compression level (1-9)
         """
-        algo = algorithm or self.config.algorithm
-        comp_level = level or self.config.level
+        self.default_algorithm = default_algorithm
+        self.compression_level = compression_level
 
-        if isinstance(data, dict):
-            data = json.dumps(data).encode("utf-8")
-        elif isinstance(data, str):
-            data = data.encode("utf-8")
-
-        original_size = len(data)
-
-        if original_size < self.config.min_size_bytes:
-            return CompressionResult(
-                compressed=data,
-                original_size=original_size,
-                compressed_size=original_size,
-                compression_ratio=1.0,
-                algorithm=CompressionType.NONE,
-            )
-
-        if algo == CompressionType.GZIP:
-            compressed = gzip.compress(data, compresslevel=comp_level)
-        elif algo == CompressionType.DEFLATE:
-            compressed = zlib.compress(data, level=comp_level)
-        elif algo == CompressionType.ZLIB:
-            compressed = zlib.compress(data, level=comp_level)
-        else:
-            compressed = data
-
-        compressed_size = len(compressed)
-        ratio = compressed_size / original_size if original_size > 0 else 1.0
-
-        return CompressionResult(
-            compressed=compressed,
-            original_size=original_size,
-            compressed_size=compressed_size,
-            compression_ratio=ratio,
-            algorithm=algo,
-        )
-
-    def decompress(
-        self,
-        data: bytes,
-        algorithm: CompressionType,
-        encoding: str = "utf-8",
-    ) -> Union[str, bytes]:
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         """
-        Decompress data.
+        Execute compression operation.
 
         Args:
-            data: Compressed data
-            algorithm: Compression algorithm used
-            encoding: Text encoding for string output
+            params: Dictionary containing:
+                - operation: 'compress', 'decompress', 'info'
+                - data: Data to compress/decompress
+                - algorithm: Compression algorithm
+                - is_base64: Input/output is base64 encoded
 
         Returns:
-            Decompressed data
+            Dictionary with compression result
         """
-        if algorithm == CompressionType.GZIP:
-            decompressed = gzip.decompress(data)
-        elif algorithm in (CompressionType.DEFLATE, CompressionType.ZLIB):
-            decompressed = zlib.decompress(data)
+        operation = params.get("operation", "compress")
+
+        if operation == "compress":
+            return self._compress(params)
+        elif operation == "decompress":
+            return self._decompress(params)
+        elif operation == "info":
+            return self._get_info(params)
         else:
-            decompressed = data
+            return {"success": False, "error": f"Unknown operation: {operation}"}
+
+    def _compress(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Compress data."""
+        data = params.get("data", "")
+        algorithm = params.get("algorithm", self.default_algorithm)
+        is_base64 = params.get("is_base64", False)
+
+        if not data:
+            return {"success": False, "error": "Data is required"}
 
         try:
-            return decompressed.decode(encoding)
-        except UnicodeDecodeError:
-            return decompressed
+            if isinstance(data, str):
+                if is_base64:
+                    data = base64.b64decode(data)
+                else:
+                    data = data.encode("utf-8")
 
-    def compress_json(
-        self,
-        data: Dict[str, Any],
-        algorithm: Optional[CompressionType] = None,
-    ) -> tuple[bytes, CompressionType]:
-        """
-        Compress JSON data.
+            original_size = len(data)
 
-        Returns:
-            Tuple of (compressed_bytes, algorithm_used)
-        """
-        algo = algorithm or self.config.algorithm
-        json_bytes = json.dumps(data).encode("utf-8")
+            if algorithm == "gzip":
+                compressed = self._compress_gzip(data)
+            elif algorithm == "zlib":
+                compressed = self._compress_zlib(data)
+            elif algorithm == "deflate":
+                compressed = self._compress_deflate(data)
+            elif algorithm == "lz4":
+                compressed = self._compress_lz4(data)
+            elif algorithm == "snappy":
+                compressed = self._compress_snappy(data)
+            else:
+                return {"success": False, "error": f"Unknown algorithm: {algorithm}"}
 
-        result = self.compress(json_bytes, algorithm=algo)
-        return result.compressed, result.algorithm
+            if is_base64:
+                compressed = base64.b64encode(compressed).decode("ascii")
 
-    def decompress_json(
-        self,
-        data: bytes,
-        algorithm: CompressionType,
-    ) -> Dict[str, Any]:
-        """
-        Decompress JSON data.
+            compression_ratio = original_size / len(compressed) if compressed else 0
 
-        Args:
-            data: Compressed bytes
-            algorithm: Algorithm used
+            return {
+                "success": True,
+                "algorithm": algorithm,
+                "original_size": original_size,
+                "compressed_size": len(compressed),
+                "compression_ratio": round(compression_ratio, 2),
+                "data": compressed if is_base64 else compressed.decode("latin-1"),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Compression failed: {str(e)}"}
 
-        Returns:
-            Parsed JSON as dict
-        """
-        decompressed = self.decompress(data, algorithm)
-        if isinstance(decompressed, bytes):
-            decompressed = decompressed.decode("utf-8")
-        return json.loads(decompressed)
+    def _decompress(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Decompress data."""
+        data = params.get("data", "")
+        algorithm = params.get("algorithm", self.default_algorithm)
+        is_base64 = params.get("is_base64", False)
 
-    def should_compress(
-        self,
-        data_size: int,
-        content_type: Optional[str] = None,
-    ) -> bool:
-        """Determine if data should be compressed."""
-        if data_size < self.config.min_size_bytes:
-            return False
+        if not data:
+            return {"success": False, "error": "Data is required"}
 
-        if content_type is None:
-            content_type = self.config.content_type
+        try:
+            if is_base64:
+                data = base64.b64decode(data)
+            elif isinstance(data, str):
+                data = data.encode("latin-1")
 
-        compressible_types = {
-            "application/json",
-            "text/plain",
-            "text/html",
-            "text/xml",
-            "application/javascript",
+            if algorithm == "gzip":
+                decompressed = self._decompress_gzip(data)
+            elif algorithm == "zlib":
+                decompressed = self._decompress_zlib(data)
+            elif algorithm == "deflate":
+                decompressed = self._decompress_deflate(data)
+            elif algorithm == "lz4":
+                decompressed = self._decompress_lz4(data)
+            elif algorithm == "snappy":
+                decompressed = self._decompress_snappy(data)
+            else:
+                return {"success": False, "error": f"Unknown algorithm: {algorithm}"}
+
+            try:
+                decompressed = decompressed.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+
+            return {
+                "success": True,
+                "algorithm": algorithm,
+                "decompressed_size": len(decompressed),
+                "data": decompressed,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Decompression failed: {str(e)}"}
+
+    def _compress_gzip(self, data: bytes) -> bytes:
+        """Compress using gzip."""
+        buffer = io.BytesIO()
+        with gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=self.compression_level) as f:
+            f.write(data)
+        return buffer.getvalue()
+
+    def _decompress_gzip(self, data: bytes) -> bytes:
+        """Decompress gzip data."""
+        buffer = io.BytesIO(data)
+        with gzip.GzipFile(fileobj=buffer, mode="rb") as f:
+            return f.read()
+
+    def _compress_zlib(self, data: bytes) -> bytes:
+        """Compress using zlib."""
+        return zlib.compress(data, level=self.compression_level)
+
+    def _decompress_zlib(self, data: bytes) -> bytes:
+        """Decompress zlib data."""
+        return zlib.decompress(data)
+
+    def _compress_deflate(self, data: bytes) -> bytes:
+        """Compress using deflate (raw)."""
+        return zlib.compress(data, level=self.compression_level)[2:-4]
+
+    def _decompress_deflate(self, data: bytes) -> bytes:
+        """Decompress deflate data."""
+        return zlib.decompress(data, -zlib.MAX_WBITS)
+
+    def _compress_lz4(self, data: bytes) -> bytes:
+        """Compress using LZ4 (simulated)."""
+        return data
+
+    def _decompress_lz4(self, data: bytes) -> bytes:
+        """Decompress LZ4 data (simulated)."""
+        return data
+
+    def _compress_snappy(self, data: bytes) -> bytes:
+        """Compress using Snappy (simulated)."""
+        return data
+
+    def _decompress_snappy(self, data: bytes) -> bytes:
+        """Decompress Snappy data (simulated)."""
+        return data
+
+    def _get_info(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Get compression information."""
+        return {
+            "success": True,
+            "default_algorithm": self.default_algorithm,
+            "compression_level": self.compression_level,
+            "supported_algorithms": self.SUPPORTED_ALGORITHMS,
         }
-
-        return any(
-            ct in content_type.lower()
-            for ct in compressible_types
-        )
-
-    def get_encoding_header(
-        self,
-        algorithm: CompressionType,
-    ) -> str:
-        """Get HTTP content encoding header value."""
-        mapping = {
-            CompressionType.GZIP: "gzip",
-            CompressionType.DEFLATE: "deflate",
-            CompressionType.ZLIB: "deflate",
-            CompressionType.NONE: "identity",
-        }
-        return mapping.get(algorithm, "identity")
