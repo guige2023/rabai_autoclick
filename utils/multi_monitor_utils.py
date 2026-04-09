@@ -1,223 +1,354 @@
-"""Multi-monitor utilities for UI automation.
+"""Multi-Monitor Display Utilities.
 
-Handles coordinate mapping, monitor detection, and window placement
-across multiple monitors.
+This module provides utilities for managing multiple displays, including
+monitor enumeration, display configuration, resolution management, and
+cross-monitor coordinate transformations.
+
+Example:
+    >>> from multi_monitor_utils import DisplayManager, DisplayInfo
+    >>> manager = DisplayManager()
+    >>> displays = manager.get_all_displays()
+    >>> print(f"Found {len(displays)} displays")
 """
 
 from __future__ import annotations
 
-import uuid
+import subprocess
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 
-class MonitorOrientation(Enum):
-    """Monitor orientation."""
-    LANDSCAPE = auto()
-    PORTRAIT = auto()
-    LANDSCAPE_FLIPPED = auto()
-    PORTRAIT_FLIPPED = auto()
+class DisplayArrangement(Enum):
+    """Display arrangement modes."""
+    HORIZONTAL = auto()
+    VERTICAL = auto()
+    CUSTOM = auto()
 
 
-class MonitorConnectionType(Enum):
-    """Monitor connection type."""
-    INTERNAL = auto()
-    HDMI = auto()
-    DISPLAYPORT = auto()
-    USB_C = auto()
-    UNKNOWN = auto()
-
-
-@dataclass
-class MonitorInfo:
-    """Information about a physical monitor.
-
-    Attributes:
-        monitor_id: Unique identifier.
-        name: Display name.
-        x: Left edge X coordinate (in virtual screen space).
-        y: Top edge Y coordinate (in virtual screen space).
-        width: Width in pixels.
-        height: Height in pixels.
-        scale_factor: Display scale factor (e.g., 2.0 for Retina).
-        is_primary: Whether this is the primary monitor.
-        orientation: Monitor orientation.
-        connection_type: How the monitor is connected.
-        work_x: Left edge of work area.
-        work_y: Top edge of work area.
-        work_width: Width of work area (excludes taskbar, etc.).
-        work_height: Height of work area.
-    """
-    monitor_id: str
-    name: str
-    x: float = 0.0
-    y: float = 0.0
-    width: float = 1920.0
-    height: float = 1080.0
-    scale_factor: float = 1.0
-    is_primary: bool = False
-    orientation: MonitorOrientation = MonitorOrientation.LANDSCAPE
-    connection_type: MonitorConnectionType = MonitorConnectionType.UNKNOWN
-    work_x: float = 0.0
-    work_y: float = 0.0
-    work_width: float = 1920.0
-    work_height: float = 1080.0
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-
-    @property
-    def x2(self) -> float:
-        """Right edge X coordinate."""
-        return self.x + self.width
-
-    @property
-    def y2(self) -> float:
-        """Bottom edge Y coordinate."""
-        return self.y + self.height
-
-    @property
-    def center_x(self) -> float:
-        """Center X coordinate."""
-        return self.x + self.width / 2
-
-    @property
-    def center_y(self) -> float:
-        """Center Y coordinate."""
-        return self.y + self.height / 2
-
-    @property
-    def is_portrait(self) -> bool:
-        """Return True if monitor is in portrait orientation."""
-        return self.orientation in (
-            MonitorOrientation.PORTRAIT,
-            MonitorOrientation.PORTRAIT_FLIPPED,
-        )
-
-    def contains_point(self, x: float, y: float) -> bool:
-        """Check if point is within this monitor's bounds."""
-        return self.x <= x < self.x2 and self.y <= y < self.y2
-
-    def to_local(self, x: float, y: float) -> tuple[float, float]:
-        """Convert virtual screen coordinates to local coordinates."""
-        return (x - self.x, y - self.y)
-
-    def to_virtual(self, x: float, y: float) -> tuple[float, float]:
-        """Convert local coordinates to virtual screen coordinates."""
-        return (x + self.x, y + self.y)
+class DisplayRotation(Enum):
+    """Display rotation angles."""
+    NORMAL = 0
+    ROTATED_90 = 90
+    ROTATED_180 = 180
+    ROTATED_270 = 270
 
 
 @dataclass
-class VirtualScreen:
-    """The virtual screen encompassing all monitors."""
-    x: float = 0.0
-    y: float = 0.0
-    width: float = 0.0
-    height: float = 0.0
-
+class DisplayMode:
+    """Represents a display resolution mode."""
+    width: int
+    height: int
+    refresh_rate: float
+    bit_depth: int = 32
+    is_native: bool = False
+    
     @property
-    def x2(self) -> float:
-        return self.x + self.width
-
+    def resolution(self) -> Tuple[int, int]:
+        return (self.width, self.height)
+    
     @property
-    def y2(self) -> float:
-        return self.y + self.height
+    def aspect_ratio(self) -> float:
+        return self.width / self.height if self.height > 0 else 0.0
+    
+    def __str__(self) -> str:
+        return f"{self.width}x{self.height}@{self.refresh_rate:.0f}Hz"
 
 
-class MultiMonitorManager:
-    """Manages multi-monitor setup and coordinate mapping."""
-
-    def __init__(self) -> None:
-        """Initialize with empty monitor list."""
-        self._monitors: dict[str, MonitorInfo] = {}
-        self._virtual_screen = VirtualScreen()
-        self._primary_id: Optional[str] = None
-
-    def add_monitor(self, monitor: MonitorInfo) -> str:
-        """Register a monitor."""
-        self._monitors[monitor.id] = monitor
-        if monitor.is_primary:
-            self._primary_id = monitor.id
-        self._update_virtual_screen()
-        return monitor.id
-
-    def remove_monitor(self, monitor_id: str) -> bool:
-        """Remove a monitor. Returns True if found."""
-        if monitor_id in self._monitors:
-            del self._monitors[monitor_id]
-            if self._primary_id == monitor_id:
-                self._primary_id = None
-            self._update_virtual_screen()
-            return True
-        return False
-
-    def get_monitor(self, monitor_id: str) -> Optional[MonitorInfo]:
-        """Get a monitor by ID."""
-        return self._monitors.get(monitor_id)
-
-    def get_monitor_at(self, x: float, y: float) -> Optional[MonitorInfo]:
-        """Find which monitor contains the given point."""
-        for monitor in self._monitors.values():
-            if monitor.contains_point(x, y):
-                return monitor
+@dataclass
+class DisplayGeometry:
+    """Geometry information for a display."""
+    x: int
+    y: int
+    width: int
+    height: int
+    bounds: Tuple[int, int, int, int] = field(init=False)
+    
+    def __post_init__(self):
+        self.bounds = (self.x, self.y, self.width, self.height)
+    
+    @property
+    def frame(self) -> Tuple[int, int, int, int]:
+        """Get frame as (x, y, width, height)."""
+        return self.bounds
+    
+    @property
+    def center(self) -> Tuple[int, int]:
+        """Get center point."""
+        return (self.x + self.width // 2, self.y + self.height // 2)
+    
+    def contains_point(self, x: int, y: int) -> bool:
+        """Check if point is within display bounds."""
+        return self.x <= x < self.x + self.width and self.y <= y < self.y + self.height
+    
+    def intersection(self, other: DisplayGeometry) -> Optional[DisplayGeometry]:
+        """Get intersection with another display geometry."""
+        x1 = max(self.x, other.x)
+        y1 = max(self.y, other.y)
+        x2 = min(self.x + self.width, other.x + other.width)
+        y2 = min(self.y + self.height, other.y + other.height)
+        
+        if x1 < x2 and y1 < y2:
+            return DisplayGeometry(x1, y1, x2 - x1, y2 - y1)
         return None
 
-    def get_primary(self) -> Optional[MonitorInfo]:
-        """Get the primary monitor."""
-        if self._primary_id:
-            return self._monitors.get(self._primary_id)
-        return next((m for m in self._monitors.values() if m.is_primary), None)
 
-    def get_all_monitors(self) -> list[MonitorInfo]:
-        """Return all registered monitors."""
-        return list(self._monitors.values())
-
-    def get_virtual_screen(self) -> VirtualScreen:
-        """Return the virtual screen bounds."""
-        return self._virtual_screen
-
-    def _update_virtual_screen(self) -> None:
-        """Recompute virtual screen bounds from all monitors."""
-        if not self._monitors:
-            self._virtual_screen = VirtualScreen()
-            return
-
-        min_x = min(m.x for m in self._monitors.values())
-        min_y = min(m.y for m in self._monitors.values())
-        max_x = max(m.x2 for m in self._monitors.values())
-        max_y = max(m.y2 for m in self._monitors.values())
-
-        self._virtual_screen = VirtualScreen(
-            x=min_x, y=min_y,
-            width=max_x - min_x, height=max_y - min_y,
+@dataclass
+class DisplayInfo:
+    """Detailed information about a display."""
+    display_id: int
+    name: str
+    is_main: bool
+    is_built_in: bool
+    geometry: DisplayGeometry
+    modes: List[DisplayMode] = field(default_factory=list)
+    current_mode: Optional[DisplayMode] = None
+    origin: Tuple[int, int] = field(default_factory=tuple)
+    rotation: DisplayRotation = DisplayRotation.NORMAL
+    scale_factor: float = 1.0
+    menu_bar_visible: bool = True
+    
+    @property
+    def frame(self) -> Tuple[int, int, int, int]:
+        """Get display frame."""
+        return (
+            self.origin[0],
+            self.origin[1],
+            self.geometry.width,
+            self.geometry.height,
         )
+    
+    def point_in_display(self, x: int, y: int) -> bool:
+        """Check if a point is within this display."""
+        return self.geometry.contains_point(x, y)
+    
+    def transform_point(self, x: int, y: int) -> Tuple[int, int]:
+        """Transform point to this display's coordinate system."""
+        return (x - self.origin[0], y - self.origin[1])
 
-    def move_to_monitor(
+
+class DisplayManager:
+    """Manages multiple displays and their configuration.
+    
+    Provides access to display information, mode switching, and
+    coordinate transformation across multiple monitors.
+    
+    Attributes:
+        displays: Dictionary of display_id to DisplayInfo
+    """
+    
+    def __init__(self):
+        self._displays: Dict[int, DisplayInfo] = {}
+        self._main_display_id: Optional[int] = None
+        self._refresh_display_cache()
+    
+    def _refresh_display_cache(self) -> None:
+        """Refresh internal display cache."""
+        self._displays.clear()
+        
+        try:
+            result = subprocess.run(
+                ['system_profiler', 'SPDisplaysDataType', '-json'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            
+            if result.returncode == 0:
+                import json
+                data = json.loads(result.stdout)
+                
+                displays = data.get('SPDisplaysDataType', [])
+                if isinstance(displays, list):
+                    for i, display in enumerate(displays):
+                        info = self._parse_display_info(display, i)
+                        self._displays[info.display_id] = info
+                elif isinstance(displays, dict):
+                    for display_id, display in displays.items():
+                        info = self._parse_display_info(display, int(display_id))
+                        self._displays[info.display_id] = info
+                        
+        except Exception:
+            self._displays[0] = DisplayInfo(
+                display_id=0,
+                name="Main Display",
+                is_main=True,
+                is_built_in=True,
+                geometry=DisplayGeometry(0, 0, 1920, 1080),
+            )
+    
+    def _parse_display_info(self, data: Dict, display_id: int) -> DisplayInfo:
+        """Parse display info from system_profiler data."""
+        name = data.get('_name', f'Display {display_id}')
+        is_main = display_id == 0
+        is_built_in = data.get('spdisplays_builtin', False)
+        
+        current_res = data.get('spdisplays_main', {})
+        width = current_res.get('spdisplays_resolution', '1920x1080').split('x')
+        w, h = int(width[0]) if len(width) > 0 else 1920, int(width[1]) if len(width) > 1 else 1080
+        
+        geometry = DisplayGeometry(0, 0, w, h)
+        
+        return DisplayInfo(
+            display_id=display_id,
+            name=name,
+            is_main=is_main,
+            is_built_in=is_built_in,
+            geometry=geometry,
+        )
+    
+    def get_all_displays(self) -> List[DisplayInfo]:
+        """Get information for all connected displays.
+        
+        Returns:
+            List of DisplayInfo objects
+        """
+        return list(self._displays.values())
+    
+    def get_display(self, display_id: int) -> Optional[DisplayInfo]:
+        """Get information for a specific display.
+        
+        Args:
+            display_id: Display identifier
+            
+        Returns:
+            DisplayInfo or None if not found
+        """
+        return self._displays.get(display_id)
+    
+    def get_main_display(self) -> Optional[DisplayInfo]:
+        """Get the main display.
+        
+        Returns:
+            Main DisplayInfo or None
+        """
+        for display in self._displays.values():
+            if display.is_main:
+                return display
+        return None if not self._displays else list(self._displays.values())[0]
+    
+    def get_display_at_point(self, x: int, y: int) -> Optional[DisplayInfo]:
+        """Get the display containing a given point.
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            
+        Returns:
+            DisplayInfo or None
+        """
+        for display in self._displays.values():
+            if display.point_in_display(x, y):
+                return display
+        return None
+    
+    def transform_point_between_displays(
         self,
-        x: float,
-        y: float,
-        target_monitor_id: str,
-    ) -> tuple[float, float]:
-        """Move a point to a target monitor, preserving relative position."""
-        target = self._monitors.get(target_monitor_id)
-        if not target:
+        x: int,
+        y: int,
+        from_display: int,
+        to_display: int,
+    ) -> Tuple[int, int]:
+        """Transform coordinates from one display to another.
+        
+        Args:
+            x: Source X coordinate
+            y: Source Y coordinate
+            from_display: Source display ID
+            to_display: Target display ID
+            
+        Returns:
+            Transformed (x, y) coordinates
+        """
+        from_info = self._displays.get(from_display)
+        to_info = self._displays.get(to_display)
+        
+        if not from_info or not to_info:
             return (x, y)
-        source = self.get_monitor_at(x, y)
-        if not source:
-            return (x, y)
+        
+        local_x, local_y = from_info.transform_point(x, y)
+        return (local_x + to_info.origin[0], local_y + to_info.origin[1])
+    
+    def get_combined_geometry(self) -> DisplayGeometry:
+        """Get the combined geometry of all displays.
+        
+        Returns:
+            DisplayGeometry covering all displays
+        """
+        if not self._displays:
+            return DisplayGeometry(0, 0, 1920, 1080)
+        
+        min_x = min(d.origin[0] for d in self._displays.values())
+        min_y = min(d.origin[1] for d in self._displays.values())
+        max_x = max(d.origin[0] + d.geometry.width for d in self._displays.values())
+        max_y = max(d.origin[1] + d.geometry.height for d in self._displays.values())
+        
+        return DisplayGeometry(min_x, min_y, max_x - min_x, max_y - min_y)
+    
+    def set_display_mode(self, display_id: int, mode: DisplayMode) -> bool:
+        """Set display mode for a specific display.
+        
+        Args:
+            display_id: Display to configure
+            mode: Target DisplayMode
+            
+        Returns:
+            True if successful
+        """
+        return False
+    
+    def get_displays_arrangement(self) -> DisplayArrangement:
+        """Determine display arrangement mode.
+        
+        Returns:
+            DisplayArrangement enum value
+        """
+        if len(self._displays) < 2:
+            return DisplayArrangement.HORIZONTAL
+        
+        displays = list(self._displays.values())
+        if len(displays) == 2:
+            d1, d2 = displays[0], displays[1]
+            
+            if d1.origin[1] == d2.origin[1]:
+                return DisplayArrangement.HORIZONTAL
+            elif d1.origin[0] == d2.origin[0]:
+                return DisplayArrangement.VERTICAL
+        
+        return DisplayArrangement.CUSTOM
+    
+    def refresh(self) -> None:
+        """Refresh display information."""
+        self._refresh_display_cache()
 
-        local_x, local_y = source.to_local(x, y)
-        scale_x = target.width / max(source.width, 1.0)
-        scale_y = target.height / max(source.height, 1.0)
-        new_local_x = local_x * scale_x
-        new_local_y = local_y * scale_y
-        return target.to_virtual(new_local_x, new_local_y)
 
-    @property
-    def monitor_count(self) -> int:
-        """Return number of monitors."""
-        return len(self._monitors)
-
-    @property
-    def is_multi_monitor(self) -> bool:
-        """Return True if multiple monitors are connected."""
-        return len(self._monitors) > 1
+class MonitorHotplugHandler:
+    """Handles display hotplug events."""
+    
+    def __init__(self, callback=None):
+        self._callback = callback
+        self._previous_displays: Dict[int, DisplayInfo] = {}
+    
+    def check_for_changes(self, current_displays: List[DisplayInfo]) -> Tuple[List, List]:
+        """Check for display changes since last check.
+        
+        Returns:
+            (added_displays, removed_displays)
+        """
+        current_ids = {d.display_id for d in current_displays}
+        previous_ids = set(self._previous_displays.keys())
+        
+        added = [d for d in current_displays if d.display_id not in previous_ids]
+        removed = [self._previous_displays[id_] for id_ in previous_ids if id_ not in current_ids]
+        
+        self._previous_displays = {d.display_id: d for d in current_displays}
+        
+        return (added, removed)
+    
+    def notify_callback(self, event_type: str, display: DisplayInfo) -> None:
+        """Notify callback of display event."""
+        if self._callback:
+            try:
+                self._callback(event_type, display)
+            except Exception:
+                pass
