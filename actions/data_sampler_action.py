@@ -1,253 +1,230 @@
 """
-Data Sampler Action Module.
+Data sampler action for statistical sampling and data reduction.
 
-Statistical and reservoir sampling for large datasets.
+Provides random, stratified, and reservoir sampling algorithms.
 """
 
-from __future__ import annotations
-
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import random
-import math
-from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar
-
-
-T = TypeVar("T")
-
-
-@dataclass
-class SampleStats:
-    """Statistics for a sample."""
-    count: int
-    mean: float
-    variance: float
-    min_val: float
-    max_val: float
+import heapq
+import itertools
 
 
 class DataSamplerAction:
-    """
-    Data sampling with multiple strategies.
+    """Statistical data sampling with multiple algorithms."""
 
-    Supports: random, stratified, reservoir, and weighted sampling.
-    """
-
-    def __init__(self, seed: Optional[int] = None) -> None:
-        self.rng = random.Random(seed)
-
-    def random_sample(
-        self,
-        population: List[T],
-        sample_size: int,
-        replace: bool = False,
-    ) -> List[T]:
+    def __init__(self, random_seed: Optional[int] = None) -> None:
         """
-        Simple random sampling.
+        Initialize data sampler.
 
         Args:
-            population: List to sample from
-            sample_size: Number of items to sample
-            replace: With replacement
-
-        Returns:
-            List of sampled items
+            random_seed: Random seed for reproducibility
         """
-        if sample_size >= len(population) and not replace:
-            return list(population)
+        if random_seed is not None:
+            random.seed(random_seed)
+        self._reservoir_state: Dict[str, List[Any]] = {}
 
-        if replace:
-            return [self.rng.choice(population) for _ in range(sample_size)]
-
-        return self.rng.sample(population, min(sample_size, len(population)))
-
-    def stratified_sample(
-        self,
-        data: Dict[str, List[T]],
-        sample_per_stratum: int,
-    ) -> Dict[str, List[T]]:
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         """
-        Stratified sampling - equal samples per stratum.
+        Execute sampling operation.
 
         Args:
-            data: Dict mapping stratum name to items
-            sample_per_stratum: Items per stratum
+            params: Dictionary containing:
+                - operation: 'random', 'stratified', 'reservoir', 'systematic'
+                - data: Data to sample from
+                - sample_size: Number of samples
+                - population: Population for sampling
+                - strata: Strata definitions (for stratified)
 
         Returns:
-            Dict with sampled items per stratum
+            Dictionary with sampling result
         """
-        result = {}
-        for stratum, items in data.items():
-            result[stratum] = self.random_sample(
-                items,
-                sample_per_stratum,
-                replace=False,
-            )
-        return result
+        operation = params.get("operation", "random")
 
-    def reservoir_sample(
-        self,
-        stream: Iterator[T],
-        reservoir_size: int,
-    ) -> List[T]:
-        """
-        Reservoir sampling for streaming data.
-
-        Uses Algorithm R for equal probability sampling.
-
-        Args:
-            stream: Data stream
-            reservoir_size: Size of reservoir
-
-        Returns:
-            Reservoir containing sample
-        """
-        reservoir: List[T] = []
-
-        for i, item in enumerate(stream):
-            if i < reservoir_size:
-                reservoir.append(item)
-            else:
-                j = self.rng.randint(0, i)
-                if j < reservoir_size:
-                    reservoir[j] = item
-
-        return reservoir
-
-    def weighted_sample(
-        self,
-        items: List[T],
-        weights: List[float],
-        sample_size: int,
-    ) -> List[T]:
-        """
-        Weighted random sampling.
-
-        Args:
-            items: Items to sample from
-            weights: Weights for each item
-            sample_size: Number of items
-
-        Returns:
-            List of sampled items
-        """
-        if len(items) != len(weights):
-            raise ValueError("Items and weights must have same length")
-
-        if not weights:
-            return []
-
-        total_weight = sum(weights)
-        if total_weight <= 0:
-            return self.random_sample(items, sample_size)
-
-        normalized = [w / total_weight for w in weights]
-
-        return self.rng.choices(
-            items,
-            weights=normalized,
-            k=min(sample_size, len(items)),
-        )
-
-    def systematic_sample(
-        self,
-        population: List[T],
-        sample_size: int,
-    ) -> List[T]:
-        """
-        Systematic sampling with random start.
-
-        Args:
-            population: List to sample from
-            sample_size: Number of items
-
-        Returns:
-            Systematically sampled items
-        """
-        if sample_size >= len(population):
-            return list(population)
-
-        interval = len(population) // sample_size
-        start = self.rng.randint(0, interval - 1)
-
-        indices = [start + i * interval for i in range(sample_size)]
-        return [population[i] for i in indices]
-
-    def cluster_sample(
-        self,
-        clusters: List[List[T]],
-        num_clusters: int,
-    ) -> List[T]:
-        """
-        Sample entire clusters.
-
-        Args:
-            clusters: List of clusters
-            num_clusters: Number of clusters to sample
-
-        Returns:
-            All items from sampled clusters
-        """
-        sampled_clusters = self.random_sample(clusters, num_clusters, replace=False)
-        result = []
-        for cluster in sampled_clusters:
-            result.extend(cluster)
-        return result
-
-    def compute_stats(
-        self,
-        values: List[float],
-        weights: Optional[List[float]] = None,
-    ) -> SampleStats:
-        """
-        Compute statistics for a sample.
-
-        Args:
-            values: Numeric values
-            weights: Optional weights
-
-        Returns:
-            Sample statistics
-        """
-        if not values:
-            return SampleStats(0, 0.0, 0.0, 0.0, 0.0)
-
-        if weights is None:
-            mean = sum(values) / len(values)
-            variance = sum((x - mean) ** 2 for x in values) / len(values)
+        if operation == "random":
+            return self._random_sample(params)
+        elif operation == "stratified":
+            return self._stratified_sample(params)
+        elif operation == "reservoir":
+            return self._reservoir_sample(params)
+        elif operation == "systematic":
+            return self._systematic_sample(params)
+        elif operation == "cluster":
+            return self._cluster_sample(params)
         else:
-            weighted_sum = sum(v * w for v, w in zip(values, weights))
-            mean = weighted_sum / sum(weights)
+            return {"success": False, "error": f"Unknown operation: {operation}"}
 
-            weighted_var_sum = sum(w * (v - mean) ** 2 for v, w in zip(values, weights))
-            variance = weighted_var_sum / sum(weights)
+    def _random_sample(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Simple random sampling without replacement."""
+        population = params.get("population", [])
+        sample_size = params.get("sample_size", 10)
+        with_replacement = params.get("with_replacement", False)
 
-        return SampleStats(
-            count=len(values),
-            mean=mean,
-            variance=variance,
-            min_val=min(values),
-            max_val=max(values),
-        )
+        if not population:
+            return {"success": False, "error": "Population is required"}
 
-    def bootstrap(
-        self,
-        data: List[float],
-        num_samples: int,
-        sample_size: int,
-    ) -> List[List[float]]:
-        """
-        Bootstrap sampling for confidence intervals.
+        if sample_size > len(population) and not with_replacement:
+            sample_size = len(population)
 
-        Args:
-            data: Original data
-            num_samples: Number of bootstrap samples
-            sample_size: Size of each sample
+        if with_replacement:
+            sample = [random.choice(population) for _ in range(sample_size)]
+        else:
+            sample = random.sample(population, sample_size)
 
-        Returns:
-            List of bootstrap samples
-        """
-        return [
-            self.random_sample(data, sample_size, replace=True)
-            for _ in range(num_samples)
-        ]
+        return {
+            "success": True,
+            "sample_size": len(sample),
+            "population_size": len(population),
+            "sample": sample,
+            "method": "random",
+        }
+
+    def _stratified_sample(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Stratified sampling with proportional allocation."""
+        population = params.get("population", [])
+        strata = params.get("strata", {})
+        sample_size = params.get("sample_size", 10)
+        proportional = params.get("proportional", True)
+
+        if not population or not strata:
+            return {"success": False, "error": "Population and strata are required"}
+
+        stratified_samples = {}
+        total_allocated = 0
+
+        for stratum_name, stratum_data in strata.items():
+            stratum_size = len(stratum_data)
+            if proportional:
+                allocation = int((stratum_size / len(population)) * sample_size)
+            else:
+                allocation = stratum_data.get("allocation", sample_size // len(strata))
+
+            allocation = min(allocation, stratum_size)
+            samples = random.sample(stratum_data, allocation)
+
+            stratified_samples[stratum_name] = {
+                "samples": samples,
+                "size": allocation,
+                "stratum_size": stratum_size,
+            }
+            total_allocated += allocation
+
+        remaining = sample_size - total_allocated
+        if remaining > 0 and proportional:
+            largest_stratum = max(strata.keys(), key=lambda k: len(strata[k]))
+            additional = random.sample(strata[largest_stratum], min(remaining, len(strata[largest_stratum])))
+            stratified_samples[largest_stratum]["samples"].extend(additional)
+            stratified_samples[largest_stratum]["size"] += len(additional)
+
+        all_samples = []
+        for stratum in stratified_samples.values():
+            all_samples.extend(stratum["samples"])
+
+        return {
+            "success": True,
+            "sample_size": len(all_samples),
+            "strata": stratified_samples,
+            "method": "stratified",
+        }
+
+    def _reservoir_sample(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Reservoir sampling for large streaming data."""
+        stream_id = params.get("stream_id", "default")
+        sample_size = params.get("sample_size", 10)
+        incoming_item = params.get("item")
+
+        if stream_id not in self._reservoir_state:
+            self._reservoir_state[stream_id] = {
+                "reservoir": [],
+                "count": 0,
+            }
+
+        state = self._reservoir_state[stream_id]
+
+        if incoming_item is not None:
+            state["count"] += 1
+            n = state["count"]
+
+            if len(state["reservoir"]) < sample_size:
+                state["reservoir"].append(incoming_item)
+            else:
+                j = random.randint(1, n)
+                if j <= sample_size:
+                    state["reservoir"][j - 1] = incoming_item
+
+            return {
+                "success": True,
+                "reservoir_size": len(state["reservoir"]),
+                "stream_count": state["count"],
+                "method": "reservoir",
+            }
+
+        return {
+            "success": True,
+            "sample": state["reservoir"],
+            "reservoir_size": len(state["reservoir"]),
+            "stream_count": state["count"],
+            "method": "reservoir",
+        }
+
+    def _systematic_sample(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Systematic sampling with fixed interval."""
+        population = params.get("population", [])
+        sample_size = params.get("sample_size", 10)
+
+        if not population:
+            return {"success": False, "error": "Population is required"}
+
+        population_size = len(population)
+        if sample_size >= population_size:
+            return {
+                "success": True,
+                "sample": population,
+                "sample_size": population_size,
+                "method": "systematic",
+            }
+
+        interval = population_size // sample_size
+        start = random.randint(0, interval - 1)
+
+        sample = [population[start + i * interval] for i in range(sample_size)]
+
+        return {
+            "success": True,
+            "sample_size": len(sample),
+            "interval": interval,
+            "sample": sample,
+            "method": "systematic",
+        }
+
+    def _cluster_sample(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Cluster sampling where entire clusters are selected."""
+        population = params.get("population", [])
+        cluster_size = params.get("cluster_size", 10)
+        num_clusters = params.get("num_clusters", 2)
+
+        if not population:
+            return {"success": False, "error": "Population is required"}
+
+        num_items = len(population)
+        num_possible_clusters = num_items // cluster_size
+
+        if num_possible_clusters < num_clusters:
+            num_clusters = num_possible_clusters
+
+        cluster_indices = random.sample(range(num_possible_clusters), num_clusters)
+
+        sample = []
+        for cluster_idx in cluster_indices:
+            start = cluster_idx * cluster_size
+            end = min(start + cluster_size, num_items)
+            sample.extend(population[start:end])
+
+        return {
+            "success": True,
+            "sample_size": len(sample),
+            "clusters_selected": num_clusters,
+            "cluster_size": cluster_size,
+            "sample": sample,
+            "method": "cluster",
+        }

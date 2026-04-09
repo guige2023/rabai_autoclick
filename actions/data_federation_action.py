@@ -1,383 +1,232 @@
-"""Data Federation Action Module.
-
-Provides data federation utilities: multi-source queries, query planning,
-result merging, schema reconciliation, and data virtualization.
-
-Example:
-    result = execute(context, {"action": "federated_query", "sources": [...]})
 """
-from typing import Any, Optional
-from dataclasses import dataclass, field
-from datetime import datetime
-from collections import defaultdict
+Data federation action for querying distributed data sources.
+
+Provides unified query interface across multiple data stores.
+"""
+
+from typing import Any, Dict, List, Optional, Union
+import time
+import json
 
 
-@dataclass
-class DataSource:
-    """A federated data source."""
-    
-    id: str
-    name: str
-    source_type: str
-    connection_info: dict[str, Any]
-    priority: int = 1
-    latency_ms: float = 0.0
-    available: bool = True
-    
-    def __post_init__(self) -> None:
-        """Validate source type."""
-        valid_types = ["database", "api", "file", "cache", "stream"]
-        if self.source_type not in valid_types:
-            raise ValueError(f"Invalid source_type: {self.source_type}")
+class DataFederationAction:
+    """Federated query execution across data sources."""
 
-
-@dataclass
-class FederatedQuery:
-    """A query spanning multiple data sources."""
-    
-    id: str
-    query: str
-    sources: list[str]
-    timeout_seconds: float = 30.0
-    merge_strategy: str = "union"
-    
-    def __post_init__(self) -> None:
-        """Validate merge strategy."""
-        valid_strategies = ["union", "join", "broadcast", "scatter"]
-        if self.merge_strategy not in valid_strategies:
-            raise ValueError(f"Invalid merge_strategy: {self.merge_strategy}")
-
-
-@dataclass
-class QueryResult:
-    """Result from a federated query."""
-    
-    query_id: str
-    source_id: str
-    data: list[dict[str, Any]]
-    row_count: int
-    execution_time_ms: float
-    timestamp: datetime
-    error: Optional[str] = None
-
-
-class SchemaResolver:
-    """Resolves schemas across federated data sources."""
-    
-    def __init__(self) -> None:
-        """Initialize schema resolver."""
-        self._schemas: dict[str, dict[str, Any]] = {}
-    
-    def register_schema(self, source_id: str, schema: dict[str, Any]) -> None:
-        """Register a schema for a source.
-        
-        Args:
-            source_id: Data source identifier
-            schema: Schema definition {table: {columns: [...]}}
-        """
-        self._schemas[source_id] = schema
-    
-    def resolve_field(
+    def __init__(
         self,
-        field_name: str,
-        sources: list[str],
-    ) -> list[tuple[str, str]]:
-        """Resolve a field across sources.
-        
-        Args:
-            field_name: Field to resolve
-            sources: Source IDs to search
-            
-        Returns:
-            List of (source_id, qualified_name) tuples
+        default_timeout: float = 30.0,
+        max_connections: int = 20,
+        enable_query_pushdown: bool = True,
+    ) -> None:
         """
-        matches = []
-        
-        for source_id in sources:
-            schema = self._schemas.get(source_id, {})
-            for table, table_schema in schema.items():
-                columns = table_schema.get("columns", [])
-                for column in columns:
-                    if column.get("name") == field_name:
-                        qualified = f"{table}.{column['name']}"
-                        matches.append((source_id, qualified))
-        
-        return matches
-    
-    def reconcile_schemas(
-        self,
-        schemas: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Reconcile multiple schemas into a unified schema.
-        
-        Args:
-            schemas: List of schemas to reconcile
-            
-        Returns:
-            Unified schema definition
-        """
-        unified: dict[str, set] = defaultdict(set)
-        
-        for schema in schemas:
-            for table, table_schema in schema.items():
-                columns = table_schema.get("columns", [])
-                for column in columns:
-                    unified[table].add(column.get("name", ""))
-        
-        return {
-            table: {"columns": [{"name": col} for col in cols]}
-            for table, cols in unified.items()
-        }
+        Initialize data federation.
 
+        Args:
+            default_timeout: Query timeout in seconds
+            max_connections: Maximum connections per source
+            enable_query_pushdown: Push queries to data sources
+        """
+        self.default_timeout = default_timeout
+        self.max_connections = max_connections
+        self.enable_query_pushdown = enable_query_pushdown
 
-class QueryPlanner:
-    """Plans federated query execution across sources."""
-    
-    def __init__(self) -> None:
-        """Initialize query planner."""
-        self._sources: dict[str, DataSource] = {}
-    
-    def register_source(self, source: DataSource) -> None:
-        """Register a data source.
-        
-        Args:
-            source: Data source to register
+        self._sources: Dict[str, Dict[str, Any]] = {}
+        self._connections: Dict[str, Any] = {}
+        self._query_history: List[Dict[str, Any]] = []
+
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         """
-        self._sources[source.id] = source
-    
-    def plan_query(self, query: FederatedQuery) -> list[dict[str, Any]]:
-        """Create execution plan for federated query.
-        
+        Execute federation operation.
+
         Args:
-            query: Federated query to plan
-            
+            params: Dictionary containing:
+                - operation: 'register', 'query', 'federate', 'sources'
+                - source_name: Data source identifier
+                - source_config: Source configuration
+                - query: Query to execute
+                - sql: SQL query
+
         Returns:
-            List of execution steps
+            Dictionary with operation result
         """
-        plan = []
-        
-        available_sources = [
-            self._sources[sid] for sid in query.sources
-            if sid in self._sources and self._sources[sid].available
-        ]
-        
-        if not available_sources:
-            return [{"error": "No available sources"}]
-        
-        if query.merge_strategy == "scatter":
-            for source in available_sources:
-                plan.append({
-                    "step": "execute",
-                    "source_id": source.id,
-                    "query": query.query,
-                    "priority": source.priority,
-                })
-        
-        elif query.merge_strategy == "broadcast":
-            primary = min(available_sources, key=lambda s: s.priority)
-            plan.append({
-                "step": "execute",
-                "source_id": primary.id,
-                "query": query.query,
-                "priority": primary.priority,
-            })
-            plan.append({"step": "broadcast_results"})
-        
-        elif query.merge_strategy == "join":
-            for i, source in enumerate(available_sources):
-                plan.append({
-                    "step": "execute",
-                    "source_id": source.id,
-                    "query": query.query,
-                    "priority": source.priority,
-                    "order": i,
-                })
-            plan.append({"step": "join_results"})
-        
+        operation = params.get("operation", "query")
+
+        if operation == "register":
+            return self._register_source(params)
+        elif operation == "query":
+            return self._execute_query(params)
+        elif operation == "federate":
+            return self._federate_query(params)
+        elif operation == "sources":
+            return self._list_sources(params)
         else:
-            for source in available_sources:
-                plan.append({
-                    "step": "execute",
-                    "source_id": source.id,
-                    "query": query.query,
-                    "priority": source.priority,
-                })
-            plan.append({"step": "union_results"})
-        
-        return plan
+            return {"success": False, "error": f"Unknown operation: {operation}"}
 
+    def _register_source(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Register data source."""
+        source_name = params.get("source_name", "")
+        source_type = params.get("source_type", "generic")
+        connection_config = params.get("config", {})
 
-class ResultMerger:
-    """Merges results from federated queries."""
-    
-    def __init__(self, strategy: str = "union") -> None:
-        """Initialize result merger.
-        
-        Args:
-            strategy: Merge strategy
-        """
-        self.strategy = strategy
-        self._results: list[QueryResult] = []
-    
-    def add_result(self, result: QueryResult) -> None:
-        """Add a query result.
-        
-        Args:
-            result: Query result to add
-        """
-        self._results.append(result)
-    
-    def merge(self) -> dict[str, Any]:
-        """Merge all results.
-        
-        Returns:
-            Merged result data
-        """
-        if not self._results:
-            return {"data": [], "row_count": 0}
-        
-        if self.strategy == "union":
-            return self._union_merge()
-        elif self.strategy == "join":
-            return self._join_merge()
-        elif self.strategy == "broadcast":
-            return self._broadcast_merge()
+        if not source_name:
+            return {"success": False, "error": "source_name is required"}
+
+        self._sources[source_name] = {
+            "name": source_name,
+            "type": source_type,
+            "config": connection_config,
+            "registered_at": time.time(),
+            "status": "active",
+        }
+
+        return {"success": True, "source_name": source_name, "type": source_type}
+
+    def _execute_query(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Execute query on single source."""
+        source_name = params.get("source_name", "")
+        query = params.get("query", {})
+        sql = params.get("sql", "")
+        timeout = params.get("timeout", self.default_timeout)
+
+        if source_name not in self._sources:
+            return {"success": False, "error": f"Source '{source_name}' not found"}
+
+        source = self._sources[source_name]
+
+        if sql and self.enable_query_pushdown:
+            result = self._execute_sql_pushdown(source, sql)
         else:
-            return self._union_merge()
-    
-    def _union_merge(self) -> dict[str, Any]:
-        """Union all result sets."""
-        all_data: list[dict[str, Any]] = []
-        
-        for result in self._results:
-            if result.error is None:
-                all_data.extend(result.data)
-        
-        return {
-            "data": all_data,
-            "row_count": len(all_data),
-            "source_count": len(self._results),
-        }
-    
-    def _join_merge(self) -> dict[str, Any]:
-        """Join result sets."""
-        if not self._results:
-            return {"data": [], "row_count": 0}
-        
-        joined = self._results[0].data
-        
-        for result in self._results[1:]:
-            if result.error is None and result.data:
-                joined = self._join_two_sets(joined, result.data)
-        
-        return {
-            "data": joined,
-            "row_count": len(joined),
-            "source_count": len(self._results),
-        }
-    
-    def _join_two_sets(
-        self,
-        left: list[dict[str, Any]],
-        right: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Join two result sets."""
-        result = []
-        for l in left:
-            for r in right:
-                merged = {**l, **r}
-                result.append(merged)
+            result = self._execute_generic_query(source, query)
+
+        self._query_history.append(
+            {
+                "source": source_name,
+                "query": query,
+                "sql": sql,
+                "executed_at": time.time(),
+                "duration": result.get("duration", 0),
+            }
+        )
+
         return result
-    
-    def _broadcast_merge(self) -> dict[str, Any]:
-        """Broadcast first result to others."""
-        if not self._results:
-            return {"data": [], "row_count": 0}
-        
+
+    def _execute_sql_pushdown(
+        self, source: Dict[str, Any], sql: str
+    ) -> dict[str, Any]:
+        """Execute SQL with pushdown to source."""
+        start_time = time.time()
+
+        source_type = source["type"]
+        if source_type == "postgresql":
+            simulated_result = self._simulate_postgres_query(sql)
+        elif source_type == "mysql":
+            simulated_result = self._simulate_mysql_query(sql)
+        elif source_type == "mongodb":
+            simulated_result = self._simulate_mongodb_query(sql)
+        elif source_type == "elasticsearch":
+            simulated_result = self._simulate_elasticsearch_query(sql)
+        else:
+            simulated_result = {"rows": [], "columns": []}
+
+        duration = time.time() - start_time
+
         return {
-            "data": self._results[0].data,
-            "row_count": self._results[0].row_count,
-            "source_count": len(self._results),
-            "strategy": "broadcast",
+            "success": True,
+            "source_type": source_type,
+            "data": simulated_result["rows"],
+            "columns": simulated_result["columns"],
+            "row_count": len(simulated_result["rows"]),
+            "duration": round(duration, 3),
+            "pushdown": True,
         }
 
+    def _execute_generic_query(
+        self, source: Dict[str, Any], query: Dict[str, Any]
+    ) -> dict[str, Any]:
+        """Execute generic query."""
+        start_time = time.time()
+        time.sleep(0.01)
+        duration = time.time() - start_time
 
-def execute(context: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
-    """Execute data federation action.
-    
-    Args:
-        context: Execution context
-        params: Parameters including action type
-        
-    Returns:
-        Result dictionary with status and data
-    """
-    action = params.get("action", "status")
-    result: dict[str, Any] = {"status": "success"}
-    
-    if action == "register_source":
-        source = DataSource(
-            id=params.get("id", ""),
-            name=params.get("name", ""),
-            source_type=params.get("source_type", "database"),
-            connection_info=params.get("connection_info", {}),
-            priority=params.get("priority", 1),
-        )
-        result["data"] = {
-            "source_id": source.id,
-            "source_type": source.source_type,
+        return {
+            "success": True,
+            "source_type": source["type"],
+            "data": [],
+            "row_count": 0,
+            "duration": round(duration, 3),
+            "pushdown": False,
         }
-    
-    elif action == "create_query":
-        query = FederatedQuery(
-            id=params.get("id", ""),
-            query=params.get("query", ""),
-            sources=params.get("sources", []),
-            timeout_seconds=params.get("timeout_seconds", 30.0),
-            merge_strategy=params.get("merge_strategy", "union"),
-        )
-        result["data"] = {
-            "query_id": query.id,
-            "source_count": len(query.sources),
+
+    def _simulate_postgres_query(self, sql: str) -> Dict[str, Any]:
+        """Simulate PostgreSQL query result."""
+        return {"rows": [{"id": 1, "name": "test"}], "columns": ["id", "name"]}
+
+    def _simulate_mysql_query(self, sql: str) -> Dict[str, Any]:
+        """Simulate MySQL query result."""
+        return {"rows": [{"id": 1, "value": "test"}], "columns": ["id", "value"]}
+
+    def _simulate_mongodb_query(self, sql: str) -> Dict[str, Any]:
+        """Simulate MongoDB query result."""
+        return {"rows": [{"_id": "1", "data": "test"}], "columns": ["_id", "data"]}
+
+    def _simulate_elasticsearch_query(self, sql: str) -> Dict[str, Any]:
+        """Simulate Elasticsearch query result."""
+        return {"rows": [{"_index": "test", "_id": "1"}], "columns": ["_index", "_id"]}
+
+    def _federate_query(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Execute federated query across multiple sources."""
+        source_names = params.get("sources", [])
+        sql = params.get("sql", "")
+        join_config = params.get("join", {})
+
+        if not source_names:
+            source_names = list(self._sources.keys())
+
+        results = {}
+        for source_name in source_names:
+            if source_name in self._sources:
+                result = self._execute_query(
+                    {"source_name": source_name, "sql": sql}
+                )
+                results[source_name] = result
+
+        if join_config:
+            federated = self._join_results(results, join_config)
+        else:
+            federated = {"combined_rows": sum(r.get("row_count", 0) for r in results.values())}
+
+        return {
+            "success": True,
+            "sources_queried": len(results),
+            "results": results,
+            "federated": federated,
         }
-    
-    elif action == "plan_query":
-        planner = QueryPlanner()
-        query = FederatedQuery(
-            id="temp",
-            query="",
-            sources=params.get("sources", []),
-        )
-        plan = planner.plan_query(query)
-        result["data"] = {"plan": plan}
-    
-    elif action == "merge_results":
-        merger = ResultMerger(strategy=params.get("strategy", "union"))
-        merged = merger.merge()
-        result["data"] = merged
-    
-    elif action == "resolve_schema":
-        resolver = SchemaResolver()
-        field_name = params.get("field_name", "")
-        sources = params.get("sources", [])
-        resolved = resolver.resolve_field(field_name, sources)
-        result["data"] = {"resolved": resolved}
-    
-    elif action == "reconcile_schemas":
-        resolver = SchemaResolver()
-        schemas = params.get("schemas", [])
-        unified = resolver.reconcile_schemas(schemas)
-        result["data"] = {"unified_schema": unified}
-    
-    elif action == "source_status":
-        sources = params.get("sources", [])
-        result["data"] = {
-            "sources": sources,
-            "available_count": len(sources),
+
+    def _join_results(
+        self, results: Dict[str, Dict[str, Any]], join_config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Join results from multiple sources."""
+        join_type = join_config.get("type", "inner")
+        left_key = join_config.get("left_key", "id")
+        right_key = join_config.get("right_key", "id")
+
+        return {
+            "join_type": join_type,
+            "left_key": left_key,
+            "right_key": right_key,
+            "rows_joined": 0,
         }
-    
-    else:
-        result["status"] = "error"
-        result["error"] = f"Unknown action: {action}"
-    
-    return result
+
+    def _list_sources(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List registered data sources."""
+        return {
+            "success": True,
+            "sources": [
+                {
+                    "name": s["name"],
+                    "type": s["type"],
+                    "status": s["status"],
+                }
+                for s in self._sources.values()
+            ],
+        }
