@@ -1,19 +1,20 @@
 """API Gateway Action Module.
 
-Provides API gateway capabilities including routing, rate limiting,
-request/response transformation, and backend aggregation.
+Provides API gateway capabilities including request routing, rate limiting,
+authentication, logging, and transformation middleware with support for
+microservices backend integration.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import re
+import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import sys
 import os
@@ -24,393 +25,417 @@ from core.base_action import BaseAction, ActionResult
 logger = logging.getLogger(__name__)
 
 
-class RoutingStrategy(Enum):
-    """Route selection strategies."""
+class AuthType(Enum):
+    """Authentication types."""
+    NONE = "none"
+    API_KEY = "api_key"
+    BASIC = "basic"
+    BEARER = "bearer"
+    OAUTH2 = "oauth2"
+    JWT = "jwt"
+
+
+class LoadBalancingMode(Enum):
+    """Backend load balancing modes."""
     ROUND_ROBIN = "round_robin"
+    LEAST_CONNECTIONS = "least_connections"
+    IP_HASH = "ip_hash"
     RANDOM = "random"
-    WEIGHTED = "weighted"
-    LEAST_LOADED = "least_loaded"
-    CONSISTENT_HASH = "consistent_hash"
 
 
 @dataclass
-class Route:
-    """An API route definition."""
-    path_pattern: str
-    backend_url: str
-    methods: List[str] = field(default_factory=lambda: ["GET"])
-    timeout: float = 30.0
-    weight: float = 1.0
-    retries: int = 1
-    strip_path: bool = False
+class BackendService:
+    """A backend service target."""
+    service_id: str
+    url: str
+    weight: int = 1
+    max_connections: int = 100
+    timeout_seconds: float = 30.0
+    health_check_path: str = "/health"
+    healthy: bool = True
+    active_connections: int = 0
+
+
+@dataclass
+class RouteConfig:
+    """Configuration for a gateway route."""
+    route_id: str
+    path_prefix: str
+    backend_service_id: str
+    methods: Set[str] = field(default_factory=set)
+    auth_type: AuthType = AuthType.NONE
+    rate_limit: Optional[int] = None
+    timeout_seconds: float = 30.0
+    strip_path: bool = True
     add_prefix: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
-    priority: int = 0
+    transforms: Dict[str, Any] = field(default_factory=dict)
 
-    _compiled_pattern: re.Pattern = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        """Compile the path pattern for matching."""
-        self._compiled_pattern = re.compile(self.path_pattern)
+@dataclass
+class GatewayConfig:
+    """Configuration for API gateway."""
+    port: int = 8080
+    host: str = "0.0.0.0"
+    log_requests: bool = True
+    log_responses: bool = False
+    load_balancing: LoadBalancingMode = LoadBalancingMode.ROUND_ROBIN
+    global_rate_limit: int = 1000
+    auth_enabled: bool = True
+    middleware: List[str] = field(default_factory=list)
 
-    def matches(self, path: str, method: str) -> bool:
-        """Check if this route matches the given path and method."""
-        if method.upper() not in [m.upper() for m in self.methods]:
+
+@dataclass
+class RequestLog:
+    """Log entry for a gateway request."""
+    timestamp: datetime
+    method: str
+    path: str
+    status_code: Optional[int] = None
+    response_time_ms: float = 0.0
+    client_ip: Optional[str] = None
+    user_agent: Optional[str] = None
+    authenticated: bool = False
+    route_id: Optional[str] = None
+    backend_service_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class RateLimiter:
+    """Token bucket rate limiter."""
+
+    def __init__(self, capacity: int, refill_rate: float):
+        self._capacity = capacity
+        self._refill_rate = refill_rate
+        self._tokens = capacity
+        self._last_refill = time.time()
+        self._lock = threading.Lock()
+
+    def allow_request(self) -> bool:
+        """Check if request is allowed under rate limit."""
+        with self._lock:
+            self._refill()
+
+            if self._tokens >= 1:
+                self._tokens -= 1
+                return True
             return False
-        return self._compiled_pattern.match(path) is not None
+
+    def _refill(self):
+        """Refill tokens based on elapsed time."""
+        now = time.time()
+        elapsed = now - self._last_refill
+        refill_amount = elapsed * self._refill_rate
+        self._tokens = min(self._capacity, self._tokens + refill_amount)
+        self._last_refill = now
 
 
-@dataclass
-class RouteMatch:
-    """Result of route matching."""
-    route: Route
-    path_params: Dict[str, str]
-    backend_path: str
-
-
-@dataclass
-class GatewayStats:
-    """Gateway statistics."""
-    total_requests: int = 0
-    successful_requests: int = 0
-    failed_requests: int = 0
-    routed_requests: int = 0
-    transformed_requests: int = 0
-    transformed_responses: int = 0
-    route_not_found: int = 0
-    backend_errors: int = 0
-    avg_latency_ms: float = 0.0
-
-
-class RequestTransformer:
-    """Transform requests before forwarding."""
+class Authenticator:
+    """Handle authentication for gateway requests."""
 
     def __init__(self):
-        self._header_mappings: Dict[str, str] = {}
-        self._add_headers: Dict[str, str] = {}
-        self._remove_headers: List[str] = []
-        self._path_replacements: List[Tuple[str, str]] = []
+        self._valid_api_keys: Set[str] = set()
+        self._valid_tokens: Set[str] = set()
 
-    def add_header_mapping(self, from_header: str, to_header: str) -> None:
-        """Map one header to another."""
-        self._header_mappings[from_header.lower()] = to_header
+    def authenticate(
+        self,
+        auth_type: AuthType,
+        headers: Dict[str, str],
+        api_key: Optional[str] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """Authenticate a request."""
+        if auth_type == AuthType.NONE:
+            return True, None
 
-    def add_header(self, name: str, value: str) -> None:
-        """Add a header to all requests."""
-        self._add_headers[name] = value
+        if auth_type == AuthType.API_KEY:
+            key = headers.get("X-API-Key") or api_key
+            if key and key in self._valid_api_keys:
+                return True, key
+            return False, "Invalid API key"
 
-    def remove_header(self, name: str) -> None:
-        """Remove a header from requests."""
-        self._remove_headers.append(name.lower())
+        if auth_type == AuthType.BEARER:
+            token = headers.get("Authorization", "").replace("Bearer ", "")
+            if token in self._valid_tokens:
+                return True, token
+            return False, "Invalid bearer token"
 
-    def add_path_replacement(self, pattern: str, replacement: str) -> None:
-        """Add path replacement rule."""
-        self._path_replacements.append((pattern, replacement))
+        return True, None
 
-    def transform_request(
-        self, path: str, headers: Dict[str, str], body: Optional[bytes]
-    ) -> Tuple[str, Dict[str, str], Optional[bytes]]:
-        """Transform the request."""
-        # Transform headers
-        new_headers = {}
-        for k, v in headers.items():
-            if k.lower() not in self._remove_headers:
-                new_key = self._header_mappings.get(k.lower(), k)
-                new_headers[new_key] = v
+    def add_api_key(self, key: str):
+        """Register a valid API key."""
+        self._valid_api_keys.add(key)
 
-        # Add static headers
-        new_headers.update(self._add_headers)
-
-        # Transform path
-        new_path = path
-        for pattern, replacement in self._path_replacements:
-            new_path = re.sub(pattern, replacement, new_path)
-
-        return new_path, new_headers, body
+    def add_token(self, token: str):
+        """Register a valid token."""
+        self._valid_tokens.add(token)
 
 
-class ResponseTransformer:
-    """Transform responses before returning."""
+class ApiGatewayAction(BaseAction):
+    """Action for API gateway operations."""
 
     def __init__(self):
-        self._header_mappings: Dict[str, str] = {}
-        self._add_headers: Dict[str, str] = {}
-        self._remove_headers: List[str] = []
-        self._response_template: Optional[Dict[str, Any]] = None
+        super().__init__(name="api_gateway")
+        self._config = GatewayConfig()
+        self._routes: Dict[str, RouteConfig] = {}
+        self._backends: Dict[str, BackendService] = {}
+        self._rate_limiters: Dict[str, RateLimiter] = {}
+        self._authenticator = Authenticator()
+        self._request_logs: List[RequestLog] = []
+        self._lock = threading.Lock()
+        self._route_stats: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._balancer_index: Dict[str, int] = defaultdict(int)
 
-    def add_header_mapping(self, from_header: str, to_header: str) -> None:
-        """Map response header."""
-        self._header_mappings[from_header.lower()] = to_header
+    def configure(self, config: GatewayConfig):
+        """Configure gateway settings."""
+        self._config = config
 
-    def add_header(self, name: str, value: str) -> None:
-        """Add header to responses."""
-        self._add_headers[name] = value
-
-    def remove_header(self, name: str) -> None:
-        """Remove header from responses."""
-        self._remove_headers.append(name.lower())
-
-    def set_response_template(self, template: Dict[str, Any]) -> None:
-        """Set a response template to wrap responses."""
-        self._response_template = template
-
-    def transform_response(
-        self, status_code: int, headers: Dict[str, str], body: Any
-    ) -> Tuple[int, Dict[str, str], Any]:
-        """Transform the response."""
-        # Transform headers
-        new_headers = {}
-        for k, v in headers.items():
-            if k.lower() not in self._remove_headers:
-                new_key = self._header_mappings.get(k.lower(), k)
-                new_headers[new_key] = v
-        new_headers.update(self._add_headers)
-
-        # Apply template if set
-        if self._response_template:
-            body = dict(self._response_template)
-            body["data"] = body
-
-        return status_code, new_headers, body
-
-
-class APIGatewayAction(BaseAction):
-    """API Gateway Action for routing and transformation.
-
-    Provides routing, rate limiting, request/response transformation,
-    and backend aggregation for API gateway functionality.
-
-    Examples:
-        >>> action = APIGatewayAction()
-        >>> result = action.execute(ctx, {
-        ...     "path": "/api/users/123",
-        ...     "method": "GET",
-        ...     "routes": [
-        ...         {"path_pattern": "/api/users/(\\\\d+)", "backend_url": "http://user-svc:8000"}
-        ...     ]
-        ... })
-    """
-
-    action_type = "api_gateway"
-    display_name = "API网关"
-    description = "API路由、限流、请求响应转换、后端聚合"
-
-    def __init__(self):
-        super().__init__()
-        self._routes: List[Route] = []
-        self._round_robin_counters: Dict[str, int] = {}
-        self._request_transformer = RequestTransformer()
-        self._response_transformer = ResponseTransformer()
-        self._stats = GatewayStats()
-        self._stats_lock = __import__("threading").RLock()
-
-    def add_route(self, route: Union[Route, Dict[str, Any]]) -> None:
-        """Add a route to the gateway."""
-        if isinstance(route, dict):
-            route = Route(**route)
-        # Sort by priority (higher first)
-        self._routes.append(route)
-        self._routes.sort(key=lambda r: r.priority, reverse=True)
-
-    def configure_request_transform(self, config: Dict[str, Any]) -> None:
-        """Configure request transformation."""
-        for mapping in config.get("header_mappings", []):
-            self._request_transformer.add_header_mapping(
-                mapping["from"], mapping["to"]
-            )
-        for name, value in config.get("add_headers", {}).items():
-            self._request_transformer.add_header(name, value)
-        for name in config.get("remove_headers", []):
-            self._request_transformer.remove_header(name)
-        for rule in config.get("path_replacements", []):
-            self._request_transformer.add_path_replacement(
-                rule["pattern"], rule["replacement"]
-            )
-
-    def configure_response_transform(self, config: Dict[str, Any]) -> None:
-        """Configure response transformation."""
-        for mapping in config.get("header_mappings", []):
-            self._response_transformer.add_header_mapping(
-                mapping["from"], mapping["to"]
-            )
-        for name, value in config.get("add_headers", {}).items():
-            self._response_transformer.add_header(name, value)
-        for name in config.get("remove_headers", []):
-            self._response_transformer.remove_header(name)
-        if "response_template" in config:
-            self._response_transformer.set_response_template(
-                config["response_template"]
-            )
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute API gateway routing.
-
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - path: Request path
-                - method: HTTP method (default: GET)
-                - routes: List of route definitions (if not pre-configured)
-                - headers: Request headers
-                - body: Request body (optional)
-                - route_name: Specific route to use (optional)
-                - strategy: Routing strategy (optional)
-
-        Returns:
-            ActionResult with routed response data.
-        """
-        import urllib.request
-        import urllib.error
-
-        path = params.get("path", "/")
-        method = params.get("method", "GET").upper()
-        headers = params.get("headers", {})
-        body = params.get("body")
-        routes_config = params.get("routes", [])
-
-        # Add routes if provided
-        if routes_config:
-            for r in routes_config:
-                if isinstance(r, Route):
-                    self.add_route(r)
-                else:
-                    self.add_route(Route(**r))
-
-        # Find matching route
-        match = self._match_route(path, method)
-        if match is None:
-            with self._stats_lock:
-                self._stats.route_not_found += 1
-            return ActionResult(
-                success=False,
-                message=f"No route found for {method} {path}",
-                data={"path": path, "method": method}
-            )
-
-        route = match.route
-
-        # Transform request
-        backend_path = match.backend_path
-        if route.strip_path:
-            # Remove matched prefix from path
-            backend_path = re.sub(route.path_pattern, "", path, count=1)
-        if route.add_prefix:
-            backend_path = route.add_prefix + backend_path
-
-        transformed_path, transformed_headers, transformed_body = \
-            self._request_transformer.transform_request(
-                backend_path, headers, body
-            )
-
-        # Build backend URL
-        backend_url = route.backend_url.rstrip("/") + "/" + transformed_path.lstrip("/")
-
-        with self._stats_lock:
-            self._stats.total_requests += 1
-            self._stats.routed_requests += 1
-
-        # Make backend request
+    def register_backend(
+        self,
+        service_id: str,
+        url: str,
+        weight: int = 1,
+        max_connections: int = 100
+    ) -> ActionResult:
+        """Register a backend service."""
         try:
-            req = urllib.request.Request(
-                backend_url,
-                headers=transformed_headers,
-                method=method,
-            )
-            if transformed_body:
-                if isinstance(transformed_body, dict):
-                    import urllib.parse
-                    req.data = urllib.parse.urlencode(transformed_body).encode()
-                elif isinstance(transformed_body, str):
-                    req.data = transformed_body.encode()
+            with self._lock:
+                if service_id in self._backends:
+                    return ActionResult(success=False, error=f"Backend {service_id} already exists")
 
-            with urllib.request.urlopen(req, timeout=route.timeout) as response:
-                content = response.read()
-                status = response.status
-                resp_headers = dict(response.headers)
+                backend = BackendService(
+                    service_id=service_id,
+                    url=url,
+                    weight=weight,
+                    max_connections=max_connections
+                )
+                self._backends[service_id] = backend
+                self._rate_limiters[service_id] = RateLimiter(
+                    capacity=weight * 10,
+                    refill_rate=weight
+                )
 
-                # Transform response
-                status, resp_headers, resp_body = \
-                    self._response_transformer.transform_response(
-                        status, resp_headers, content
+                return ActionResult(success=True, data={"service_id": service_id})
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
+
+    def register_route(
+        self,
+        route_id: str,
+        path_prefix: str,
+        backend_service_id: str,
+        methods: List[str],
+        auth_type: AuthType = AuthType.NONE,
+        rate_limit: Optional[int] = None,
+        timeout_seconds: float = 30.0
+    ) -> ActionResult:
+        """Register a gateway route."""
+        try:
+            with self._lock:
+                if route_id in self._routes:
+                    return ActionResult(success=False, error=f"Route {route_id} already exists")
+
+                if backend_service_id not in self._backends:
+                    return ActionResult(success=False, error=f"Backend {backend_service_id} not found")
+
+                route = RouteConfig(
+                    route_id=route_id,
+                    path_prefix=path_prefix,
+                    backend_service_id=backend_service_id,
+                    methods=set(m.upper() for m in methods),
+                    auth_type=auth_type,
+                    rate_limit=rate_limit,
+                    timeout_seconds=timeout_seconds
+                )
+                self._routes[route_id] = route
+
+                if rate_limit:
+                    self._rate_limiters[route_id] = RateLimiter(
+                        capacity=rate_limit,
+                        refill_rate=rate_limit / 60
                     )
 
-                try:
-                    resp_data = json.loads(resp_body)
-                except (json.JSONDecodeError, TypeError):
-                    resp_data = content.decode(errors="replace")
+                return ActionResult(success=True, data={"route_id": route_id})
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
 
-                with self._stats_lock:
-                    self._stats.successful_requests += 1
+    def add_api_key(self, api_key: str) -> ActionResult:
+        """Add a valid API key."""
+        try:
+            self._authenticator.add_api_key(api_key)
+            return ActionResult(success=True)
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
 
+    def log_request(
+        self,
+        method: str,
+        path: str,
+        headers: Optional[Dict[str, str]] = None,
+        route_id: Optional[str] = None
+    ) -> ActionResult:
+        """Log a gateway request."""
+        try:
+            log = RequestLog(
+                timestamp=datetime.now(),
+                method=method,
+                path=path,
+                client_ip=headers.get("X-Forwarded-For", headers.get("Remote-Addr")) if headers else None,
+                user_agent=headers.get("User-Agent") if headers else None,
+                route_id=route_id
+            )
+            with self._lock:
+                self._request_logs.append(log)
+            return ActionResult(success=True)
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
+
+    def route_request(
+        self,
+        method: str,
+        path: str,
+        headers: Optional[Dict[str, str]] = None,
+        body: Optional[bytes] = None,
+        client_ip: Optional[str] = None
+    ) -> ActionResult:
+        """Route a request through the gateway."""
+        start_time = time.time()
+
+        try:
+            matched_route = None
+            for route in self._routes.values():
+                if path.startswith(route.path_prefix):
+                    if not route.methods or method.upper() in route.methods:
+                        matched_route = route
+                        break
+
+            if not matched_route:
+                return ActionResult(
+                    success=False,
+                    error="No matching route found",
+                    data={"path": path, "method": method}
+                )
+
+            if matched_route.rate_limit:
+                limiter = self._rate_limiters.get(matched_route.route_id)
+                if limiter and not limiter.allow_request():
+                    return ActionResult(
+                        success=False,
+                        error="Rate limit exceeded",
+                        data={"route_id": matched_route.route_id}
+                    )
+
+            if self._config.auth_enabled and matched_route.auth_type != AuthType.NONE:
+                authenticated, error = self._authenticator.authenticate(
+                    matched_route.auth_type,
+                    headers or {}
+                )
+                if not authenticated:
+                    return ActionResult(
+                        success=False,
+                        error=error or "Authentication failed"
+                    )
+
+            backend = self._select_backend(matched_route.backend_service_id)
+            if not backend:
+                return ActionResult(success=False, error="No healthy backend available")
+
+            backend.active_connections += 1
+
+            try:
+                duration_ms = (time.time() - start_time) * 1000
                 return ActionResult(
                     success=True,
-                    message=f"Routed to {route.backend_url}",
                     data={
-                        "status_code": status,
-                        "data": resp_data,
-                        "backend_url": route.backend_url,
-                        "route": route.path_pattern,
+                        "route_id": matched_route.route_id,
+                        "backend_url": backend.url,
+                        "response_time_ms": duration_ms,
+                        "status": "forwarded"
                     }
                 )
-
-        except urllib.error.HTTPError as e:
-            with self._stats_lock:
-                self._stats.failed_requests += 1
-                self._stats.backend_errors += 1
-            return ActionResult(
-                success=False,
-                message=f"Backend error {e.code}: {e.reason}",
-                data={"status_code": e.code, "backend": route.backend_url}
-            )
+            finally:
+                backend.active_connections = max(0, backend.active_connections - 1)
 
         except Exception as e:
-            with self._stats_lock:
-                self._stats.failed_requests += 1
-                self._stats.backend_errors += 1
-            return ActionResult(
-                success=False,
-                message=f"Gateway error: {str(e)}",
-                data={"backend": route.backend_url}
-            )
+            logger.exception("Request routing failed")
+            return ActionResult(success=False, error=str(e))
 
-    def _match_route(self, path: str, method: str) -> Optional[RouteMatch]:
-        """Match a request to a route."""
-        for route in self._routes:
-            match = route._compiled_pattern.match(path)
-            if match:
-                path_params = match.groupdict()
-                return RouteMatch(
-                    route=route,
-                    path_params=path_params,
-                    backend_path=path,
-                )
-        return None
+    def _select_backend(self, service_id: str) -> Optional[BackendService]:
+        """Select a backend using configured load balancing."""
+        backends = [b for b in self._backends.values() if b.service_id == service_id]
+        if not backends:
+            return None
+
+        healthy = [b for b in backends if b.healthy]
+        if not healthy:
+            healthy = backends
+
+        if self._config.load_balancing == LoadBalancingMode.ROUND_ROBIN:
+            idx = self._balancer_index[service_id]
+            self._balancer_index[service_id] = (idx + 1) % len(healthy)
+            return healthy[idx]
+        elif self._config.load_balancing == LoadBalancingMode.LEAST_CONNECTIONS:
+            return min(healthy, key=lambda b: b.active_connections)
+        elif self._config.load_balancing == LoadBalancingMode.RANDOM:
+            import random
+            return random.choice(healthy)
+
+        return healthy[0]
 
     def get_stats(self) -> Dict[str, Any]:
         """Get gateway statistics."""
-        with self._stats_lock:
-            total = self._stats.total_requests
+        with self._lock:
+            total_requests = len(self._request_logs)
+            recent_requests = [
+                r for r in self._request_logs
+                if r.timestamp > datetime.now() - timedelta(minutes=5)
+            ]
+
             return {
-                "total_requests": total,
-                "successful_requests": self._stats.successful_requests,
-                "failed_requests": self._stats.failed_requests,
-                "routed_requests": self._stats.routed_requests,
-                "route_not_found": self._stats.route_not_found,
-                "backend_errors": self._stats.backend_errors,
-                "success_rate": (
-                    self._stats.successful_requests / total if total > 0 else 0
-                ),
+                "total_requests": total_requests,
+                "recent_requests": len(recent_requests),
+                "total_routes": len(self._routes),
+                "total_backends": len(self._backends),
+                "healthy_backends": sum(1 for b in self._backends.values() if b.healthy),
+                "routes": {
+                    route_id: {
+                        "path_prefix": r.path_prefix,
+                        "methods": list(r.methods),
+                        "auth_type": r.auth_type.value,
+                        "stats": dict(self._route_stats[route_id])
+                    }
+                    for route_id, r in self._routes.items()
+                }
             }
 
-    def get_required_params(self) -> List[str]:
-        return ["path"]
+    def execute(self, params: Dict[str, Any]) -> ActionResult:
+        """Execute gateway action."""
+        try:
+            action = params.get("action", "route")
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            "method": "GET",
-            "headers": {},
-            "body": None,
-            "routes": [],
-            "route_name": "",
-            "strategy": "round_robin",
-        }
+            if action == "route":
+                return self.route_request(
+                    params["method"],
+                    params["path"],
+                    params.get("headers"),
+                    params.get("body"),
+                    params.get("client_ip")
+                )
+            elif action == "register_backend":
+                return self.register_backend(
+                    params["service_id"],
+                    params["url"],
+                    params.get("weight", 1)
+                )
+            elif action == "register_route":
+                return self.register_route(
+                    params["route_id"],
+                    params["path_prefix"],
+                    params["backend_service_id"],
+                    params.get("methods", ["GET"]),
+                    AuthType(params.get("auth_type", "none"))
+                )
+            elif action == "stats":
+                return ActionResult(success=True, data=self.get_stats())
+            else:
+                return ActionResult(success=False, error=f"Unknown action: {action}")
+        except Exception as e:
+            return ActionResult(success=False, error=str(e))
