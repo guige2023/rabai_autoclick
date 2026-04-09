@@ -9,6 +9,7 @@ Provides script execution and control flow actions:
 """
 
 import ast
+import json
 import re
 import time
 import random
@@ -43,7 +44,10 @@ DANGEROUS_BUILTINS: frozenset[str] = frozenset({
 })
 
 # Valid value types for SetVariableAction
-VALID_VALUE_TYPES: List[str] = ['string', 'int', 'float', 'bool', 'expression']
+VALID_VALUE_TYPES: List[str] = ['string', 'int', 'float', 'bool', 'expression', 'list', 'dict', 'tuple', 'none']
+
+# Pattern for human-readable delay format (e.g., "2m", "30s", "1h30m")
+DELAY_PATTERN = re.compile(r'^(\d+)([smh])$')
 
 
 class ScriptAction(BaseAction):

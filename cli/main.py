@@ -12,12 +12,14 @@ Command-line interface for RabAI AutoClick v22 featuring:
 """
 
 import datetime
+import difflib
 import json
+import logging
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import click
 
@@ -35,10 +37,56 @@ from src.screen_recorder import create_screen_recorder
 
 DATA_DIR: Path = Path(__file__).parent.parent / "data"
 
+# Global logging state
+LOG_LEVEL = logging.WARNING  # Default to WARNING
+_log_handler: Optional[logging.Handler] = None
+
+
+def setup_logging(verbose: bool, quiet: bool) -> None:
+    """Configure logging based on verbosity flags."""
+    global LOG_LEVEL, _log_handler
+    
+    if quiet:
+        LOG_LEVEL = logging.ERROR
+    elif verbose:
+        LOG_LEVEL = logging.DEBUG
+    else:
+        LOG_LEVEL = logging.WARNING
+    
+    # Remove existing handler if any
+    if _log_handler:
+        logging.root.removeHandler(_log_handler)
+    
+    _log_handler = logging.StreamHandler()
+    _log_handler.setLevel(LOG_LEVEL)
+    logging.root.setLevel(LOG_LEVEL)
+    logging.root.addHandler(_log_handler)
+
+
+def log_info(msg: str) -> None:
+    """Log info message if verbose mode."""
+    if LOG_LEVEL <= logging.INFO:
+        logging.info(msg)
+
+
+def log_debug(msg: str) -> None:
+    """Log debug message if verbose mode."""
+    if LOG_LEVEL <= logging.DEBUG:
+        logging.debug(msg)
+
+
+# Global context for verbose/quiet
+class GlobalContext:
+    verbose: bool = False
+    quiet: bool = False
+
 
 @click.group()
 @click.version_option(version="22.0.0")
-def cli() -> None:
+@click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
+@click.option("-q", "--quiet", is_flag=True, help="Suppress output")
+@click.pass_context
+def cli(ctx: click.Context, verbose: bool, quiet: bool) -> None:
     """RabAI AutoClick v22 - Intelligent automation tool.
     
     Features:
@@ -49,8 +97,24 @@ def cli() -> None:
     - No-code workflow sharing (v22)
     - CLI pipeline integration (v22)
     - Screen recording to workflow (v22)
+    
+    Shell Completion:
+      This CLI supports shell completion. Enable with:
+      
+      # Bash
+      eval "$(_RABAI_COMPLETE=bash_source rabai)"
+      
+      # Zsh
+      eval "$(_RABAI_COMPLETE=zsh_source rabai)"
+      
+      # Fish
+      eval (env _RABAI_COMPLETE=fish_source rabai)
     """
     DATA_DIR.mkdir(exist_ok=True)
+    ctx.ensure_object(GlobalContext)
+    ctx.obj.verbose = verbose
+    ctx.obj.quiet = quiet
+    setup_logging(verbose, quiet)
 
 
 # ========== Predictive Automation Engine ==========
