@@ -1,141 +1,128 @@
-"""API Request Coalescing Action.
+"""API Request Coalescing Action Module.
 
-Coalesces concurrent duplicate API requests into a single request,
-reducing redundant calls and improving efficiency.
+Coalesces multiple concurrent requests for the same resource
+into a single outbound call, deduplicating redundant requests.
 """
-from typing import Any, Callable, Dict, List, Optional, TypeVar
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from collections import defaultdict
-import asyncio
+
+from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
 import threading
 import time
+import logging
+from concurrent.futures import Future
 
-
-T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PendingRequest:
+    """A pending request awaiting coalescing."""
     key: str
-    future: "asyncio.Future[T]"
-    created_at: datetime
-    callback: Optional[Callable[[], T]] = None
-    waiters: int = 1
-
-
-@dataclass
-class CoalescingStats:
-    total_requests: int = 0
-    coalesced_requests: int = 0
-    active_requests: int = 0
-    cache_hits: int = 0
-
-    def hit_rate(self) -> float:
-        if self.total_requests == 0:
-            return 0.0
-        return self.coalesced_requests / self.total_requests
+    future: Future[Any]
+    created_at: float
+    callback: Optional[Callable[..., Any]] = None
 
 
 class APIRequestCoalescingAction:
-    """Coalesces duplicate concurrent API requests."""
+    """Coalesces concurrent duplicate API requests.
+    
+    When multiple callers request the same resource simultaneously,
+    only one actual API call is made; all callers share the result.
+    """
 
-    def __init__(self, ttl_seconds: float = 5.0) -> None:
-        self.ttl_seconds = ttl_seconds
+    def __init__(self, ttl_sec: float = 5.0) -> None:
+        self.ttl_sec = ttl_sec
         self._pending: Dict[str, PendingRequest] = {}
-        self._lock = threading.RLock()
-        self._stats = CoalescingStats()
-        self._cache: Dict[str, Any] = {}
-        self._cache_timestamps: Dict[str, datetime] = {}
+        self._lock = threading.Lock()
+        self._stats: Dict[str, int] = {
+            "coalesced": 0,
+            "direct": 0,
+            "total": 0,
+        }
 
-    def _make_key(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> str:
-        import json
-        param_str = json.dumps(params, sort_keys=True) if params else ""
-        return f"{endpoint}:{param_str}"
-
-    def _evict_expired(self) -> None:
-        now = datetime.now()
-        expired = [
-            k for k, ts in self._cache_timestamps.items()
-            if (now - ts).total_seconds() > self.ttl_seconds
-        ]
-        for k in expired:
-            self._cache.pop(k, None)
-            self._cache_timestamps.pop(k, None)
-
-    async def request_async(
+    def make_request(
         self,
-        endpoint: str,
-        fetch_fn: Callable[[], T],
-        params: Optional[Dict[str, Any]] = None,
-        cache: bool = True,
-    ) -> T:
-        key = self._make_key(endpoint, params)
-        self._evict_expired()
-        if cache and key in self._cache:
-            self._stats.cache_hits += 1
-            return self._cache[key]
+        key: str,
+        fetcher: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Future[Any]:
+        """Make a coalesced request.
+        
+        Args:
+            key: Unique key identifying this request (shared requests use same key).
+            fetcher: Function that actually fetches data.
+            *args: Args passed to fetcher.
+            **kwargs: Kwargs passed to fetcher.
+        
+        Returns:
+            Future that will contain the result when ready.
+        """
+        self._stats["total"] += 1
         with self._lock:
             if key in self._pending:
-                self._stats.total_requests += 1
-                self._stats.coalesced_requests += 1
-                self._pending[key].waiters += 1
-                try:
-                    return await asyncio.shield(self._pending[key].future)
-                finally:
-                    self._pending[key].waiters -= 1
-                    if self._pending[key].waiters == 0:
-                        self._pending.pop(key, None)
-        self._stats.total_requests += 1
-        self._stats.active_requests += 1
-        loop = asyncio.get_event_loop()
-        future: "asyncio.Future[T]" = loop.create_future()
-        with self._lock:
-            self._pending[key] = PendingRequest(
-                key=key,
-                future=future,
-                created_at=datetime.now(),
-                callback=None,
-                waiters=1,
-            )
-        try:
-            result = await fetch_fn()
-            if cache:
-                self._cache[key] = result
-                self._cache_timestamps[key] = datetime.now()
-            future.set_result(result)
-        except Exception as e:
-            future.set_exception(e)
-            raise
-        finally:
-            self._stats.active_requests -= 1
-            with self._lock:
-                self._pending.pop(key, None)
-        return result
+                self._stats["coalesced"] += 1
+                logger.debug("Coalescing request: %s", key)
+                return self._pending[key].future
 
-    def request_sync(
-        self,
-        endpoint: str,
-        fetch_fn: Callable[[], T],
-        params: Optional[Dict[str, Any]] = None,
-        cache: bool = True,
-    ) -> T:
-        """Synchronous wrapper."""
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(
-            self.request_async(endpoint, fetch_fn, params, cache)
-        )
+            future: Future[Any] = Future()
+            pending = PendingRequest(key=key, future=future, created_at=time.time())
+            self._pending[key] = pending
+
+        def _execute() -> None:
+            try:
+                result = fetcher(*args, **kwargs)
+                future.set_result(result)
+                logger.debug("Request completed: %s", key)
+            except Exception as exc:
+                future.set_exception(exc)
+                logger.warning("Request failed: %s -> %s", key, exc)
+            finally:
+                self._cleanup(key)
+
+        threading.Thread(target=_execute, daemon=True).start()
+        return future
+
+    def _cleanup(self, key: str) -> None:
+        with self._lock:
+            if key in self._pending:
+                del self._pending[key]
+        now = time.time()
+        expired = [
+            k for k, p in list(self._pending.items())
+            if now - p.created_at > self.ttl_sec
+        ]
+        for k in expired:
+            del self._pending[k]
+
+    def cancel_pending(self, key: str) -> bool:
+        """Cancel a pending request if it exists.
+        
+        Args:
+            key: The request key to cancel.
+        
+        Returns:
+            True if a pending request was found and cancelled.
+        """
+        with self._lock:
+            if key in self._pending:
+                self._pending[key].future.cancel()
+                del self._pending[key]
+                return True
+        return False
+
+    def get_pending_count(self) -> int:
+        """Get number of currently pending requests."""
+        with self._lock:
+            return len(self._pending)
 
     def get_stats(self) -> Dict[str, Any]:
+        """Get coalescing statistics."""
+        total = self._stats["total"]
         return {
-            "total_requests": self._stats.total_requests,
-            "coalesced_requests": self._stats.coalesced_requests,
-            "active_requests": self._stats.active_requests,
-            "cache_hits": self._stats.cache_hits,
-            "coalescing_hit_rate": round(self._stats.hit_rate(), 4),
-            "pending_count": len(self._pending),
+            "total_requests": total,
+            "coalesced": self._stats["coalesced"],
+            "direct": self._stats["direct"],
+            "coalescing_rate": round(self._stats["coalesced"] / total, 4) if total > 0 else 0.0,
+            "pending": self.get_pending_count(),
         }
