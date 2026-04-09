@@ -1,405 +1,273 @@
-"""API SLO Tracker Action Module.
+"""API SLO Tracker Action.
 
-Provides SLO (Service Level Objective) and SLI (Service Level Indicator)
-tracking for monitoring API reliability and performance.
+Tracks Service Level Objectives (SLOs) for API endpoints including
+availability, latency, error budget, and alerting thresholds.
 """
+from __future__ import annotations
 
-import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from typing import Any, Dict, List, Optional
 
 
-logger = logging.getLogger(__name__)
-
-
-class WindowType(Enum):
-    """SLO measurement window types."""
-    MINUTE = "minute"
-    HOUR = "hour"
-    DAY = "day"
+class SLOStatus(Enum):
+    """SLO health status."""
+    HEALTHY = "healthy"
+    AT_RISK = "at_risk"
+    BREACHED = "breached"
+    UNKNOWN = "unknown"
 
 
 @dataclass
-class SLOConfig:
-    """SLO configuration."""
+class SLOTarget:
+    """SLO target specification."""
     name: str
-    target: float  # Target percentage (e.g., 99.9 for 99.9%)
-    window: WindowType = WindowType.HOUR
-    sli_type: str = "availability"  # availability, latency, throughput
-    latency_threshold_ms: float = 1000.0  # For latency SLI
+    availability_target: float = 0.995
+    latency_p50_target_ms: float = 100.0
+    latency_p95_target_ms: float = 500.0
+    latency_p99_target_ms: float = 1000.0
+    error_budget_percent: float = 1.0
+    window_days: int = 30
 
 
 @dataclass
-class SLI measurement:
-    """A single SLI measurement."""
-    timestamp: float
-    success: bool
-    latency_ms: float
-    value: float = 1.0  # For throughput SLI
-
-
-@dataclass
-class SLOStatus:
-    """Current SLO status."""
-    name: str
-    current_value: float
-    target: float
-    window: WindowType
-    breaches: int = 0
-    events: int = 0
-    good_events: int = 0
+class SLOsnapshot:
+    """Current SLO snapshot."""
+    sli_name: str
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    error_rate: float = 0.0
+    availability: float = 0.0
+    latency_p50_ms: float = 0.0
+    latency_p95_ms: float = 0.0
+    latency_p99_ms: float = 0.0
     error_budget_remaining: float = 0.0
-    time_remaining: float = 0.0
+    error_budget_used: float = 0.0
+    status: SLOStatus = SLOStatus.UNKNOWN
+    timestamp: float = field(default_factory=time.time)
 
 
-class APISLOTrackerAction(BaseAction):
-    """SLO/SLI tracking action.
+@dataclass
+class ErrorBudgetAlert:
+    """Error budget alert threshold."""
+    name: str
+    threshold_percent: float
+    triggered: bool = False
+    last_triggered: Optional[float] = None
 
-    Tracks API service level objectives and indicators,
-    calculates error budgets, and reports status.
 
-    Args:
-        context: Execution context.
-        params: Dict with keys:
-            - operation: Operation (define_slo, record, get_status, get_budget, report)
-            - slo: SLO definition dict
-            - measurement: Measurement dict {success, latency_ms, value}
-            - slo_name: Name of SLO for status operations
-            - long_window: Whether to use day-long window for SLO
-    """
-    action_type = "api_slo_tracker"
-    display_name = "API SLO追踪"
-    description = "服务等级目标与指标追踪"
-
-    def get_required_params(self) -> List[str]:
-        return ["operation"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {
-            "slo": None,
-            "measurement": None,
-            "slo_name": None,
-            "dataset_id": "default",
-        }
+class APISLOTrackerAction:
+    """Tracks and reports SLO compliance for API endpoints."""
 
     def __init__(self) -> None:
-        super().__init__()
-        self._slos: Dict[str, SLOConfig] = {}
-        self._measurements: Dict[str, deque] = {}
-        self._window_seconds = {
-            WindowType.MINUTE: 60,
-            WindowType.HOUR: 3600,
-            WindowType.DAY: 86400,
+        self._targets: Dict[str, SLOTarget] = {}
+        self._snapshots: Dict[str, deque] = {}
+        self._current_window: Dict[str, Dict[str, Any]] = {}
+        self._alerts: List[ErrorBudgetAlert] = []
+        self._max_window_size = 1000
+
+    def register_slo(
+        self,
+        endpoint: str,
+        availability_target: float = 0.995,
+        latency_p50_target_ms: float = 100.0,
+        latency_p95_target_ms: float = 500.0,
+        latency_p99_target_ms: float = 1000.0,
+        error_budget_percent: float = 1.0,
+        window_days: int = 30,
+    ) -> SLOTarget:
+        """Register an SLO target for an endpoint."""
+        target = SLOTarget(
+            name=endpoint,
+            availability_target=availability_target,
+            latency_p50_target_ms=latency_p50_target_ms,
+            latency_p95_target_ms=latency_p95_target_ms,
+            latency_p99_target_ms=latency_p99_target_ms,
+            error_budget_percent=error_budget_percent,
+            window_days=window_days,
+        )
+        self._targets[endpoint] = target
+        self._snapshots[endpoint] = deque(maxlen=self._max_window_size)
+        self._init_window(endpoint)
+        return target
+
+    def _init_window(self, endpoint: str) -> None:
+        """Initialize a tracking window for an endpoint."""
+        self._current_window[endpoint] = {
+            "requests": 0,
+            "errors": 0,
+            "latencies": [],
+            "window_start": time.time(),
         }
 
-    def _get_window_seconds(self, window: WindowType) -> float:
-        return self._window_seconds.get(window, 3600)
-
-    def execute(
+    def record_request(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute SLO tracking operation."""
-        start_time = time.time()
+        endpoint: str,
+        success: bool,
+        latency_ms: float,
+        timestamp: Optional[float] = None,
+    ) -> None:
+        """Record a request outcome for SLO tracking."""
+        if endpoint not in self._current_window:
+            self._init_window(endpoint)
 
-        operation = params.get("operation", "status")
-        slo = params.get("slo")
-        measurement = params.get("measurement")
-        slo_name = params.get("slo_name")
-        dataset_id = params.get("dataset_id", "default")
+        window = self._current_window[endpoint]
+        window["requests"] += 1
+        if not success:
+            window["errors"] += 1
+        window["latencies"].append(latency_ms)
 
-        if operation == "define_slo":
-            return self._define_slo(slo, start_time)
-        elif operation == "record":
-            return self._record_measurement(measurement, slo_name, dataset_id, start_time)
-        elif operation == "get_status":
-            return self._get_slo_status(slo_name, dataset_id, start_time)
-        elif operation == "get_budget":
-            return self._get_error_budget(slo_name, dataset_id, start_time)
-        elif operation == "burn_rate":
-            return self._get_burn_rate(slo_name, dataset_id, start_time)
-        elif operation == "report":
-            return self._generate_report(dataset_id, start_time)
+    def record_success(
+        self,
+        endpoint: str,
+        latency_ms: float,
+    ) -> None:
+        """Record a successful request."""
+        self.record_request(endpoint, success=True, latency_ms=latency_ms)
+
+    def record_error(
+        self,
+        endpoint: str,
+        latency_ms: float = 0.0,
+    ) -> None:
+        """Record a failed request."""
+        self.record_request(endpoint, success=False, latency_ms=latency_ms)
+
+    def get_snapshot(self, endpoint: str) -> Optional[SLOsnapshot]:
+        """Get current SLO snapshot for an endpoint."""
+        if endpoint not in self._targets:
+            return None
+
+        target = self._targets[endpoint]
+        window = self._current_window.get(endpoint)
+
+        if not window or window["requests"] == 0:
+            return SLOsnapshot(sli_name=endpoint)
+
+        requests = window["requests"]
+        errors = window["errors"]
+        latencies = sorted(window["latencies"])
+
+        error_rate = errors / requests
+        availability = 1.0 - error_rate
+
+        error_budget_total = requests * target.error_budget_percent
+        error_budget_used = errors
+        error_budget_remaining = max(0, error_budget_total - error_budget_used)
+
+        p50_idx = int(len(latencies) * 0.50)
+        p95_idx = int(len(latencies) * 0.95)
+        p99_idx = int(len(latencies) * 0.99)
+
+        status = self._determine_status(availability, target)
+
+        return SLOsnapshot(
+            sli_name=endpoint,
+            total_requests=requests,
+            successful_requests=requests - errors,
+            failed_requests=errors,
+            error_rate=error_rate,
+            availability=availability,
+            latency_p50_ms=latencies[p50_idx] if latencies else 0,
+            latency_p95_ms=latencies[p95_idx] if latencies else 0,
+            latency_p99_ms=latencies[p99_idx] if latencies else 0,
+            error_budget_remaining=error_budget_remaining,
+            error_budget_used=error_budget_used,
+            status=status,
+        )
+
+    def _determine_status(
+        self,
+        availability: float,
+        target: SLOTarget,
+    ) -> SLOStatus:
+        """Determine SLO health status."""
+        if availability >= target.availability_target:
+            return SLOStatus.HEALTHY
+        elif availability >= target.availability_target * 0.95:
+            return SLOStatus.AT_RISK
         else:
-            return ActionResult(
-                success=False,
-                message=f"Unknown operation: {operation}",
-                duration=time.time() - start_time
-            )
+            return SLOStatus.BREACHED
 
-    def _define_slo(self, slo: Optional[Dict], start_time: float) -> ActionResult:
-        """Define a new SLO."""
-        if not slo:
-            return ActionResult(success=False, message="SLO definition required", duration=time.time() - start_time)
+    def get_all_snapshots(self) -> Dict[str, SLOsnapshot]:
+        """Get SLO snapshots for all registered endpoints."""
+        return {
+            endpoint: snapshot
+            for endpoint in self._targets
+            if (snapshot := self.get_snapshot(endpoint)) is not None
+        }
 
-        name = slo.get("name")
-        if not name:
-            return ActionResult(success=False, message="SLO name required", duration=time.time() - start_time)
+    def reset_window(self, endpoint: str) -> None:
+        """Reset the tracking window for an endpoint."""
+        if endpoint in self._current_window:
+            snapshot = self.get_snapshot(endpoint)
+            if snapshot:
+                self._snapshots[endpoint].append(snapshot)
+            self._init_window(endpoint)
 
-        window_str = slo.get("window", "hour")
-        try:
-            window = WindowType(window_str)
-        except ValueError:
-            window = WindowType.HOUR
+    def add_alert(self, name: str, threshold_percent: float) -> None:
+        """Add an error budget alert."""
+        self._alerts.append(ErrorBudgetAlert(name=name, threshold_percent=threshold_percent))
 
-        config = SLOConfig(
-            name=name,
-            target=float(slo.get("target", 99.9)),
-            window=window,
-            sli_type=slo.get("sli_type", "availability"),
-            latency_threshold_ms=float(slo.get("latency_threshold_ms", 1000)),
-        )
+    def check_alerts(self, endpoint: str) -> List[ErrorBudgetAlert]:
+        """Check if any alerts should trigger."""
+        snapshot = self.get_snapshot(endpoint)
+        if not snapshot:
+            return []
 
-        self._slos[name] = config
-        self._measurements[name] = deque(maxlen=10000)
+        triggered = []
+        total_budget = snapshot.total_requests * 0.01
+        if total_budget == 0:
+            return []
 
-        return ActionResult(
-            success=True,
-            message=f"SLO '{name}' defined: {config.target}% {config.sli_type} over {config.window.value}",
-            data={
-                "slo_name": name,
-                "target": config.target,
-                "window": config.window.value,
-                "sli_type": config.sli_type,
+        used_percent = (snapshot.error_budget_used / total_budget) * 100
+
+        for alert in self._alerts:
+            if used_percent >= alert.threshold_percent and not alert.triggered:
+                alert.triggered = True
+                alert.last_triggered = time.time()
+                triggered.append(alert)
+
+        return triggered
+
+    def get_compliance_report(self) -> Dict[str, Any]:
+        """Generate a compliance report for all SLOs."""
+        snapshots = self.get_all_snapshots()
+        healthy = sum(1 for s in snapshots.values() if s.status == SLOStatus.HEALTHY)
+        at_risk = sum(1 for s in snapshots.values() if s.status == SLOStatus.AT_RISK)
+        breached = sum(1 for s in snapshots.values() if s.status == SLOStatus.BREACHED)
+
+        return {
+            "generated_at": datetime.now().isoformat(),
+            "total_slos": len(snapshots),
+            "healthy": healthy,
+            "at_risk": at_risk,
+            "breached": breached,
+            "endpoints": {
+                endpoint: {
+                    "status": s.status.value,
+                    "availability": f"{s.availability * 100:.3f}%",
+                    "error_rate": f"{s.error_rate * 100:.3f}%",
+                    "p95_latency_ms": s.latency_p95_ms,
+                    "error_budget_remaining": s.error_budget_remaining,
+                }
+                for endpoint, s in snapshots.items()
             },
-            duration=time.time() - start_time
-        )
+        }
 
-    def _record_measurement(
-        self,
-        measurement: Optional[Dict],
-        slo_name: Optional[str],
-        dataset_id: str,
-        start_time: float
-    ) -> ActionResult:
-        """Record an SLI measurement."""
-        if not measurement:
-            return ActionResult(success=False, message="measurement required", duration=time.time() - start_time)
-
-        # If slo_name not provided, apply to all SLOS
-        target_slos = [slo_name] if slo_name else list(self._slos.keys())
-        if not target_slos:
-            return ActionResult(success=False, message="No SLO defined", duration=time.time() - start_time)
-
-        success = measurement.get("success", True)
-        latency_ms = float(measurement.get("latency_ms", 0))
-        value = float(measurement.get("value", 1.0))
-        timestamp = measurement.get("timestamp", time.time())
-
-        recorded = 0
-        for name in target_slos:
-            if name in self._slos:
-                meas = SLI measurement(
-                    timestamp=timestamp,
-                    success=success,
-                    latency_ms=latency_ms,
-                    value=value,
-                )
-                self._measurements[name].append(meas)
-                recorded += 1
-
-        return ActionResult(
-            success=True,
-            message=f"Recorded measurement to {recorded} SLO(s)",
-            data={
-                "recorded_count": recorded,
-                "success": success,
-                "latency_ms": latency_ms,
-            },
-            duration=time.time() - start_time
-        )
-
-    def _get_slo_status(
-        self,
-        slo_name: Optional[str],
-        dataset_id: str,
-        start_time: float
-    ) -> ActionResult:
-        """Get current SLO status."""
-        if not slo_name:
-            return ActionResult(success=False, message="slo_name required", duration=time.time() - start_time)
-
-        if slo_name not in self._slos:
-            return ActionResult(success=False, message=f"SLO '{slo_name}' not defined", duration=time.time() - start_time)
-
-        config = self._slos[slo_name]
-        measurements = self._measurements.get(slo_name, deque())
-        window_sec = self._get_window_seconds(config.window)
-
-        now = time.time()
-        cutoff = now - window_sec
-        recent = [m for m in measurements if m.timestamp >= cutoff]
-
-        if not recent:
-            return ActionResult(
-                success=True,
-                message=f"No measurements in window for '{slo_name}'",
-                data={"slo_name": slo_name, "has_data": False},
-                duration=time.time() - start_time
-            )
-
-        total = len(recent)
-        good = sum(1 for m in recent if self._is_good(config, m))
-        current_value = (good / total * 100) if total > 0 else 0.0
-        breached = current_value < config.target
-
-        # Error budget calculation
-        error_budget_pct = 100 - config.target
-        actual_error_pct = 100 - current_value
-        budget_remaining = max(0, error_budget_pct - actual_error_pct)
-        time_remaining = window_sec - (now % window_sec)
-
-        return ActionResult(
-            success=True,
-            message=f"SLO '{slo_name}': {current_value:.3f}% (target: {config.target}%)",
-            data={
-                "slo_name": slo_name,
-                "current_value": current_value,
-                "target": config.target,
-                "window": config.window.value,
-                "breached": breached,
-                "total_events": total,
-                "good_events": good,
-                "bad_events": total - good,
-                "error_budget_remaining_pct": budget_remaining,
-                "time_remaining_sec": time_remaining,
-            },
-            duration=time.time() - start_time
-        )
-
-    def _is_good(self, config: SLOConfig, m: SLI measurement) -> bool:
-        """Determine if a measurement meets the SLO."""
-        if config.sli_type == "availability":
-            return m.success
-        elif config.sli_type == "latency":
-            return m.latency_ms <= config.latency_threshold_ms
-        elif config.sli_type == "throughput":
-            return m.value >= config.latency_threshold_ms  # Using threshold as min throughput
-        return m.success
-
-    def _get_error_budget(
-        self,
-        slo_name: Optional[str],
-        dataset_id: str,
-        start_time: float
-    ) -> ActionResult:
-        """Get error budget status."""
-        if not slo_name or slo_name not in self._slos:
-            return ActionResult(success=False, message=f"SLO '{slo_name}' not found", duration=time.time() - start_time)
-
-        config = self._slos[slo_name]
-        measurements = self._measurements.get(slo_name, deque())
-        window_sec = self._get_window_seconds(config.window)
-
-        cutoff = time.time() - window_sec
-        recent = [m for m in measurements if m.timestamp >= cutoff]
-
-        total = len(recent)
-        good = sum(1 for m in recent if self._is_good(config, m))
-        current_pct = (good / total * 100) if total > 0 else 100.0
-
-        error_budget_total = 100 - config.target
-        error_consumed = 100 - current_pct
-        budget_remaining = max(0, error_budget_total - error_consumed)
-
-        # Calculate burn rate
-        burn_rate = (error_consumed / error_budget_total) if error_budget_total > 0 else 0
-        time_budget_exhausted = (budget_remaining / burn_rate * window_sec) if burn_rate > 0 else float('inf')
-
-        return ActionResult(
-            success=True,
-            message=f"Error budget for '{slo_name}'",
-            data={
-                "slo_name": slo_name,
-                "target": config.target,
-                "error_budget_total_pct": error_budget_total,
-                "error_budget_consumed_pct": error_consumed,
-                "error_budget_remaining_pct": budget_remaining,
-                "burn_rate": burn_rate,
-                "time_until_budget_exhausted_sec": time_budget_exhausted if time_budget_exhausted != float('inf') else -1,
-                "events_in_window": total,
-            },
-            duration=time.time() - start_time
-        )
-
-    def _get_burn_rate(
-        self,
-        slo_name: Optional[str],
-        dataset_id: str,
-        start_time: float
-    ) -> ActionResult:
-        """Get burn rate for an SLO."""
-        if not slo_name or slo_name not in self._slos:
-            return ActionResult(success=False, message=f"SLO '{slo_name}' not found", duration=time.time() - start_time)
-
-        config = self._slos[slo_name]
-        measurements = self._measurements.get(slo_name, deque())
-        window_sec = self._get_window_seconds(config.window)
-
-        cutoff = time.time() - window_sec
-        recent = [m for m in measurements if m.timestamp >= cutoff]
-
-        total = len(recent)
-        good = sum(1 for m in recent if self._is_good(config, m))
-        current_pct = (good / total * 100) if total > 0 else 100.0
-
-        error_budget_total = 100 - config.target
-        error_rate = max(0, 100 - current_pct)
-        burn_rate = error_rate / error_budget_total if error_budget_total > 0 else 0
-
-        return ActionResult(
-            success=True,
-            message=f"Burn rate for '{slo_name}': {burn_rate:.2f}x",
-            data={
-                "slo_name": slo_name,
-                "burn_rate": burn_rate,
-                "window": config.window.value,
-                "events_in_window": total,
-                "current_value": current_pct,
-                "target": config.target,
-            },
-            duration=time.time() - start_time
-        )
-
-    def _generate_report(self, dataset_id: str, start_time: float) -> ActionResult:
-        """Generate SLO report for all SLOS."""
-        report = []
-        for name, config in self._slos.items():
-            measurements = self._measurements.get(name, deque())
-            window_sec = self._get_window_seconds(config.window)
-            cutoff = time.time() - window_sec
-            recent = [m for m in measurements if m.timestamp >= cutoff]
-
-            total = len(recent)
-            good = sum(1 for m in recent if self._is_good(config, m))
-            current = (good / total * 100) if total > 0 else 100.0
-
-            report.append({
-                "slo_name": name,
-                "target": config.target,
-                "current": current,
-                "window": config.window.value,
-                "events": total,
-                "breached": current < config.target,
-            })
-
-        return ActionResult(
-            success=True,
-            message=f"SLO Report: {len(report)} SLOs tracked",
-            data={
-                "report": report,
-                "total_slos": len(report),
-                "slos_met": sum(1 for r in report if not r["breached"]),
-                "slos_breached": sum(1 for r in report if r["breached"]),
-            },
-            duration=time.time() - start_time
-        )
+    def clear(self, endpoint: Optional[str] = None) -> None:
+        """Clear tracking data."""
+        if endpoint:
+            if endpoint in self._current_window:
+                self._init_window(endpoint)
+            if endpoint in self._snapshots:
+                self._snapshots[endpoint].clear()
+        else:
+            for ep in self._current_window:
+                self._init_window(ep)
+            for ep in self._snapshots:
+                self._snapshots[ep].clear()
