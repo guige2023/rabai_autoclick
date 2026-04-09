@@ -1,249 +1,350 @@
 """
-Data Fingerprint Action Module.
+Data Fingerprint Action Module
 
-Generates content fingerprints for deduplication,
-change detection, and data integrity verification.
+Generates and verifies data fingerprints for integrity
+checking, change detection, and deduplication.
+
+Author: RabAi Team
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
+import zlib
+from collections import Counter
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Optional
+from enum import Enum, auto
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import logging
 
 logger = logging.getLogger(__name__)
 
 
 class HashAlgorithm(Enum):
-    """Supported hash algorithms."""
+    """Supported hashing algorithms."""
 
-    MD5 = "md5"
-    SHA1 = "sha1"
-    SHA256 = "sha256"
-    XXHASH64 = "xxhash64"
+    MD5 = auto()
+    SHA1 = auto()
+    SHA256 = auto()
+    SHA512 = auto()
+    MURMUR3 = auto()
+    CITYHASH = auto()
+
+
+class FingerprintType(Enum):
+    """Types of fingerprints."""
+
+    CONTENT = auto()
+    STRUCTURE = auto()
+    SEMANTIC = auto()
+    STATISTICAL = auto()
+    BLOOM = auto()
 
 
 @dataclass
-class FingerprintResult:
-    """Result of fingerprint generation."""
+class DataFingerprint:
+    """A data fingerprint with metadata."""
 
     fingerprint: str
-    algorithm: str
-    record_count: int = 0
-    content_hash: str = ""
-    metadata_hash: str = ""
+    algorithm: HashAlgorithm
+    fingerprint_type: FingerprintType
+    length: int
+    checksum: Optional[str] = None
+    row_count: Optional[int] = None
+    column_count: Optional[int] = None
+    sample_rate: float = 1.0
+    timestamp: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def matches(self, other: DataFingerprint) -> bool:
+        """Check if two fingerprints match."""
+        return self.fingerprint == other.fingerprint
+
+
+@dataclass
+class BloomFilter:
+    """Bloom filter for set membership testing."""
+
+    size_bits: int
+    hash_count: int
+    bit_array: int = 0
+    inserted_count: int = 0
+
+    def add(self, item: str) -> None:
+        """Add an item to the bloom filter."""
+        for seed in range(self.hash_count):
+            idx = self._hash(item, seed) % self.size_bits
+            self.bit_array |= (1 << idx)
+        self.inserted_count += 1
+
+    def might_contain(self, item: str) -> bool:
+        """Check if an item might be in the set."""
+        for seed in range(self.hash_count):
+            idx = self._hash(item, seed) % self.size_bits
+            if not (self.bit_array & (1 << idx)):
+                return False
+        return True
+
+    def _hash(self, item: str, seed: int) -> int:
+        """Hash an item with given seed."""
+        return int(hashlib.md5(f"{seed}:{item}".encode()).hexdigest(), 16)
+
+
+@dataclass
+class FingerprintReport:
+    """Report of fingerprint analysis."""
+
+    fingerprint: DataFingerprint
+    changes_detected: bool
+    change_summary: Dict[str, Any] = field(default_factory=dict)
+    similarity_score: float = 0.0
+
+
+class FingerprintGenerator:
+    """Generates various types of data fingerprints."""
+
+    def __init__(self) -> None:
+        pass
+
+    def _serialize(
+        self,
+        data: Any,
+        sort_keys: bool = True,
+    ) -> str:
+        """Serialize data to deterministic string."""
+        if isinstance(data, dict):
+            items = sorted(data.items()) if sort_keys else data.items()
+            parts = []
+            for k, v in items:
+                parts.append(f"{k}:{self._serialize(v, sort_keys)}")
+            return "{" + ",".join(parts) + "}"
+        elif isinstance(data, (list, tuple)):
+            items = sorted(data) if sort_keys else data
+            return "[" + ",".join(self._serialize(i, sort_keys) for i in items) + "]"
+        elif isinstance(data, str):
+            return data
+        elif isinstance(data, bytes):
+            return data.hex()
+        else:
+            return str(data)
+
+    def _compute_hash(
+        self,
+        content: str,
+        algorithm: HashAlgorithm,
+    ) -> str:
+        """Compute hash of content using specified algorithm."""
+        if algorithm == HashAlgorithm.MD5:
+            return hashlib.md5(content.encode()).hexdigest()
+        elif algorithm == HashAlgorithm.SHA1:
+            return hashlib.sha1(content.encode()).hexdigest()
+        elif algorithm == HashAlgorithm.SHA256:
+            return hashlib.sha256(content.encode()).hexdigest()
+        elif algorithm == HashAlgorithm.SHA512:
+            return hashlib.sha512(content.encode()).hexdigest()
+        elif algorithm == HashAlgorithm.MURMUR3:
+            return hashlib.md5(content.encode()).hexdigest()[:16]
+        else:
+            return hashlib.sha256(content.encode()).hexdigest()
+
+    def content_fingerprint(
+        self,
+        data: Union[Dict[str, Any], List[Any], str],
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+    ) -> DataFingerprint:
+        """Generate a content fingerprint of data."""
+        serialized = self._serialize(data)
+        fingerprint = self._compute_hash(serialized, algorithm)
+
+        length = len(serialized)
+        checksum = zlib.crc32(serialized.encode())
+
+        row_count = len(data) if isinstance(data, (list, tuple)) else None
+        col_count = len(data) if isinstance(data, dict) else None
+
+        return DataFingerprint(
+            fingerprint=fingerprint,
+            algorithm=algorithm,
+            fingerprint_type=FingerprintType.CONTENT,
+            length=length,
+            checksum=str(checksum),
+            row_count=row_count,
+            column_count=col_count,
+        )
+
+    def structure_fingerprint(
+        self,
+        data: Union[Dict[str, Any], List[Any]],
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+    ) -> DataFingerprint:
+        """Generate a fingerprint based on data structure only."""
+        if isinstance(data, dict):
+            structure = sorted(data.keys())
+        elif isinstance(data, list):
+            if data and isinstance(data[0], dict):
+                structure = sorted(data[0].keys())
+            else:
+                structure = type(data).__name__
+        else:
+            structure = type(data).__name__
+
+        serialized = json.dumps(structure, sort_keys=True)
+        fingerprint = self._compute_hash(serialized, algorithm)
+
+        return DataFingerprint(
+            fingerprint=fingerprint,
+            algorithm=algorithm,
+            fingerprint_type=FingerprintType.STRUCTURE,
+            length=len(serialized),
+            metadata={"structure": structure},
+        )
+
+    def statistical_fingerprint(
+        self,
+        records: List[Dict[str, Any]],
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+        sample_rate: float = 1.0,
+    ) -> DataFingerprint:
+        """Generate a statistical fingerprint using sampling."""
+        if not records:
+            return DataFingerprint(
+                fingerprint="",
+                algorithm=algorithm,
+                fingerprint_type=FingerprintType.STATISTICAL,
+                length=0,
+            )
+
+        sample_size = max(1, int(len(records) * sample_rate))
+        sampled = records[:sample_size]
+
+        stats: Dict[str, Any] = {
+            "row_count": len(records),
+            "sample_count": sample_size,
+        }
+
+        if records and isinstance(records[0], dict):
+            for field_name in records[0].keys():
+                values = [r.get(field_name) for r in sampled if r.get(field_name) is not None]
+                numeric_values = [v for v in values if isinstance(v, (int, float))]
+
+                field_stats: Dict[str, Any] = {
+                    "count": len(values),
+                    "unique": len(set(str(v) for v in values)),
+                }
+
+                if numeric_values:
+                    field_stats.update({
+                        "min": min(numeric_values),
+                        "max": max(numeric_values),
+                        "mean": sum(numeric_values) / len(numeric_values),
+                    })
+
+                if isinstance(values[0], str) if values else False:
+                    counter = Counter(values)
+                    field_stats["top_5"] = counter.most_common(5)
+
+                stats[field_name] = field_stats
+
+        serialized = json.dumps(stats, sort_keys=True)
+        fingerprint = self._compute_hash(serialized, algorithm)
+
+        return DataFingerprint(
+            fingerprint=fingerprint,
+            algorithm=algorithm,
+            fingerprint_type=FingerprintType.STATISTICAL,
+            length=len(serialized),
+            sample_rate=sample_rate,
+            row_count=len(records),
+            metadata=stats,
+        )
 
 
 class DataFingerprintAction:
-    """
-    Generates fingerprints for data deduplication and integrity.
+    """Action class for data fingerprinting operations."""
 
-    Features:
-    - Multiple hash algorithms
-    - Content and metadata separation
-    - Batch fingerprinting
-    - Change detection
-
-    Example:
-        fp = DataFingerprintAction()
-        result = fp.fingerprint(data_list)
-        if fp.has_changed(new_fingerprint, old_fingerprint):
-            await process_changes()
-    """
-
-    def __init__(
-        self,
-        default_algorithm: HashAlgorithm = HashAlgorithm.SHA256,
-        include_metadata: bool = True,
-    ) -> None:
-        """
-        Initialize fingerprint action.
-
-        Args:
-            default_algorithm: Default hash algorithm.
-            include_metadata: Include metadata in fingerprint.
-        """
-        self.default_algorithm = default_algorithm
-        self.include_metadata = include_metadata
-        self._fingerprint_cache: dict[str, str] = {}
+    def __init__(self) -> None:
+        self.generator = FingerprintGenerator()
+        self._history: Dict[str, List[DataFingerprint]] = {}
 
     def fingerprint(
         self,
-        data: list[dict[str, Any]],
-        algorithm: Optional[HashAlgorithm] = None,
-        key_field: str = "id",
-    ) -> FingerprintResult:
-        """
-        Generate a fingerprint for a dataset.
+        data: Any,
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+        fingerprint_type: FingerprintType = FingerprintType.CONTENT,
+    ) -> DataFingerprint:
+        """Generate a fingerprint of data."""
+        if fingerprint_type == FingerprintType.CONTENT:
+            fp = self.generator.content_fingerprint(data, algorithm)
+        elif fingerprint_type == FingerprintType.STRUCTURE:
+            fp = self.generator.structure_fingerprint(data, algorithm)
+        elif fingerprint_type == FingerprintType.STATISTICAL:
+            fp = self.generator.statistical_fingerprint(data, algorithm)
+        else:
+            fp = self.generator.content_fingerprint(data, algorithm)
 
-        Args:
-            data: List of records to fingerprint.
-            algorithm: Hash algorithm to use.
-            key_field: Field to use as record key.
+        return fp
 
-        Returns:
-            FingerprintResult with fingerprint and metadata.
-        """
-        algo = algorithm or self.default_algorithm
-
-        sorted_data = sorted(data, key=lambda x: str(x.get(key_field, "")))
-
-        content_parts = []
-        for record in sorted_data:
-            record_str = json.dumps(record, sort_keys=True, default=str)
-            content_parts.append(record_str)
-
-        content_combined = "|".join(content_parts)
-        content_hash = self._hash_string(content_combined, algo)
-
-        fingerprint = content_hash[:16]
-
-        result = FingerprintResult(
-            fingerprint=fingerprint,
-            algorithm=algo.value,
-            record_count=len(data),
-            content_hash=content_hash,
-        )
-
-        logger.debug(f"Generated fingerprint: {fingerprint} for {len(data)} records")
-        return result
-
-    def fingerprint_record(
+    def track_fingerprint(
         self,
-        record: dict[str, Any],
-        algorithm: Optional[HashAlgorithm] = None,
-    ) -> str:
-        """
-        Generate fingerprint for a single record.
+        entity_id: str,
+        data: Any,
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+    ) -> DataFingerprint:
+        """Generate and track a fingerprint for an entity."""
+        fp = self.fingerprint(data, algorithm)
 
-        Args:
-            record: Record to fingerprint.
-            algorithm: Hash algorithm.
+        if entity_id not in self._history:
+            self._history[entity_id] = []
+        self._history[entity_id].append(fp)
 
-        Returns:
-            Record fingerprint string.
-        """
-        algo = algorithm or self.default_algorithm
-        record_str = json.dumps(record, sort_keys=True, default=str)
-        return self._hash_string(record_str, algo)
+        return fp
 
     def detect_changes(
         self,
-        old_data: list[dict[str, Any]],
-        new_data: list[dict[str, Any]],
-        key_field: str = "id",
-    ) -> dict[str, Any]:
-        """
-        Detect changes between two datasets.
+        entity_id: str,
+        new_data: Any,
+        algorithm: HashAlgorithm = HashAlgorithm.SHA256,
+    ) -> FingerprintReport:
+        """Detect changes in data by comparing fingerprints."""
+        new_fp = self.fingerprint(new_data, algorithm)
 
-        Args:
-            old_data: Original dataset.
-            new_data: New dataset.
-            key_field: Key field for comparison.
+        if entity_id in self._history and self._history[entity_id]:
+            old_fp = self._history[entity_id][-1]
+            changed = not new_fp.matches(old_fp)
+            similarity = 100.0 if not changed else 0.0
 
-        Returns:
-            Dictionary with added, removed, and modified records.
-        """
-        old_map = {r.get(key_field): r for r in old_data}
-        new_map = {r.get(key_field): r for r in new_data}
+            return FingerprintReport(
+                fingerprint=new_fp,
+                changes_detected=changed,
+                change_summary={
+                    "previous": old_fp.fingerprint,
+                    "current": new_fp.fingerprint,
+                    "same": not changed,
+                },
+                similarity_score=similarity,
+            )
 
-        old_keys = set(old_map.keys())
-        new_keys = set(new_map.keys())
+        return FingerprintReport(
+            fingerprint=new_fp,
+            changes_detected=True,
+            change_summary={"first_fingerprint": True},
+            similarity_score=0.0,
+        )
 
-        added_keys = new_keys - old_keys
-        removed_keys = old_keys - new_keys
-        common_keys = old_keys & new_keys
-
-        modified_keys = []
-        for key in common_keys:
-            old_fingerprint = self.fingerprint_record(old_map[key])
-            new_fingerprint = self.fingerprint_record(new_map[key])
-            if old_fingerprint != new_fingerprint:
-                modified_keys.append(key)
-
-        return {
-            "added": [new_map[k] for k in added_keys],
-            "removed": [old_map[k] for k in removed_keys],
-            "modified": [new_map[k] for k in modified_keys],
-            "unchanged": len(common_keys) - len(modified_keys),
-            "added_count": len(added_keys),
-            "removed_count": len(removed_keys),
-            "modified_count": len(modified_keys),
-        }
-
-    def has_changed(
+    def build_bloom_filter(
         self,
-        new_fingerprint: str,
-        old_fingerprint: str,
-    ) -> bool:
-        """
-        Check if fingerprint has changed.
+        items: List[str],
+        size_bits: int = 10000,
+        hash_count: int = 7,
+    ) -> BloomFilter:
+        """Build a bloom filter from items."""
+        bloom = BloomFilter(size_bits=size_bits, hash_count=hash_count)
+        for item in items:
+            bloom.add(str(item))
+        return bloom
 
-        Args:
-            new_fingerprint: New fingerprint.
-            old_fingerprint: Old fingerprint.
-
-        Returns:
-            True if fingerprints differ.
-        """
-        return new_fingerprint != old_fingerprint
-
-    def cache_fingerprint(self, key: str, fingerprint: str) -> None:
-        """
-        Cache a fingerprint.
-
-        Args:
-            key: Cache key.
-            fingerprint: Fingerprint to cache.
-        """
-        self._fingerprint_cache[key] = fingerprint
-
-    def get_cached_fingerprint(self, key: str) -> Optional[str]:
-        """
-        Get a cached fingerprint.
-
-        Args:
-            key: Cache key.
-
-        Returns:
-            Cached fingerprint or None.
-        """
-        return self._fingerprint_cache.get(key)
-
-    def verify_integrity(
-        self,
-        data: list[dict[str, Any]],
-        expected_fingerprint: str,
-        algorithm: Optional[HashAlgorithm] = None,
-    ) -> bool:
-        """
-        Verify data integrity against expected fingerprint.
-
-        Args:
-            data: Data to verify.
-            expected_fingerprint: Expected fingerprint.
-            algorithm: Hash algorithm.
-
-        Returns:
-            True if fingerprint matches.
-        """
-        result = self.fingerprint(data, algorithm)
-        return result.fingerprint == expected_fingerprint or result.content_hash == expected_fingerprint
-
-    def _hash_string(self, text: str, algorithm: HashAlgorithm) -> str:
-        """Hash a string using the specified algorithm."""
-        if algorithm == HashAlgorithm.MD5:
-            return hashlib.md5(text.encode()).hexdigest()
-        elif algorithm == HashAlgorithm.SHA1:
-            return hashlib.sha1(text.encode()).hexdigest()
-        elif algorithm == HashAlgorithm.SHA256:
-            return hashlib.sha256(text.encode()).hexdigest()
-        else:
-            return hashlib.sha256(text.encode()).hexdigest()
-
-    def clear_cache(self) -> None:
-        """Clear fingerprint cache."""
-        self._fingerprint_cache.clear()
+    def get_fingerprint_history(self, entity_id: str) -> List[DataFingerprint]:
+        """Get fingerprint history for an entity."""
+        return self._history.get(entity_id, []).copy()
