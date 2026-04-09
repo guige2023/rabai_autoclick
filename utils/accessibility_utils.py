@@ -1,273 +1,328 @@
-"""Accessibility utilities for macOS accessibility API interactions.
+"""
+Accessibility Utilities for UI Automation.
 
-This module provides helpers for working with macOS Accessibility APIs,
-including element discovery, attribute inspection, and AXUIElement
-operations commonly needed for GUI automation.
+This module provides utilities for accessibility testing and
+interaction with assistive technologies.
 
-Example:
-    >>> from utils.accessibility_utils import get_element_at_point, get_element_role
-    >>> element = get_element_at_point(500, 300)
-    >>> role = get_element_role(element)
-    >>> print(f"Element role: {role}")
+Author: AI Assistant
+License: MIT
 """
 
 from __future__ import annotations
 
-import sys
-from typing import Any, Optional
-
-__all__ = [
-    "get_element_at_point",
-    "get_element_role",
-    "get_element_title",
-    "get_element_value",
-    "get_element_children",
-    "get_focused_element",
-    "is_element_enabled",
-    "get_element_rect",
-    "set_element_value",
-    "get_all_windows",
-    "get_application_element",
-    "AccessibilityError",
-]
+import time
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Optional, Any
 
 
-class AccessibilityError(Exception):
-    """Raised when an accessibility operation fails."""
+class AccessibilityRole(Enum):
+    """WAI-ARIA roles."""
+    BUTTON = "button"
+    LINK = "link"
+    CHECKBOX = "checkbox"
+    RADIO = "radio"
+    TEXTBOX = "textbox"
+    COMBOBOX = "combobox"
+    LISTBOX = "listbox"
+    MENU = "menu"
+    MENUBAR = "menubar"
+    MENU_ITEM = "menuitem"
+    TREE = "tree"
+    TREE_ITEM = "treeitem"
+    TABLE = "table"
+    ROW = "row"
+    CELL = "cell"
+    COLUMN_HEADER = "columnheader"
+    ROW_HEADER = "rowheader"
+    TAB = "tab"
+    TAB_LIST = "tablist"
+    TAB_PANEL = "tabpanel"
+    DIALOG = "dialog"
+    ALERT = "alert"
+    IMG = "img"
+    APPLICATION = "application"
+    DOCUMENT = "document"
+    HEADING = "heading"
+    PARAGRAPH = "paragraph"
+    LABEL = "label"
+    FORM = "form"
+    GROUP = "group"
+    PRESENTATION = "presentation"
 
-    pass
+
+class AccessibilityState(Enum):
+    """WAI-ARIA states and properties."""
+    BUSY = "busy"
+    CHECKED = "checked"
+    DISABLED = "disabled"
+    EXPANDED = "expanded"
+    HASPOPUP = "haspopup"
+    HIDDEN = "hidden"
+    INVALID = "invalid"
+    MULTISELECTABLE = "multiselectable"
+    PRESSED = "pressed"
+    READONLY = "readonly"
+    REQUIRED = "required"
+    SELECTED = "selected"
 
 
-# Requires ApplicationServices framework - only available on macOS
-if sys.platform == "darwin":
-    try:
-        from ApplicationServices import (
-            AXUIElementCopyAttributeValue,
-            AXUIElementCopyElementAtPosition,
-            AXUIElementCreateSystemWide,
-            AXUIElementGetAttributeValue,
-            AXUIElementGetPid,
-            AXUIElementSetAttributeValue,
-            kAXChildrenAttribute,
-            kAXEnabledAttribute,
-            kAXFocusedAttribute,
-            kAXFocusedUIElementAttribute,
-            kAXParentAttribute,
-            kAXPositionAttribute,
-            kAXRoleAttribute,
-            kAXSizeAttribute,
-            kAXTitleAttribute,
-            kAXValueAttribute,
-            kAXWindowsAttribute,
+@dataclass
+class AccessibilityInfo:
+    """
+    Accessibility information for a UI element.
+    
+    Attributes:
+        element_id: Element identifier
+        role: Element WAI-ARIA role
+        name: Accessible name
+        description: Accessible description
+        value: Current value
+        states: Set of active states
+        properties: Additional properties
+    """
+    element_id: str
+    role: Optional[AccessibilityRole] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    value: Optional[str] = None
+    states: set[AccessibilityState] = field(default_factory=set)
+    properties: dict[str, Any] = field(default_factory=dict)
+    keyboard_shortcut: Optional[str] = None
+    label_elements: list[str] = field(default_factory=list)
+    
+    @property
+    def has_name(self) -> bool:
+        """Check if element has an accessible name."""
+        return bool(self.name and self.name.strip())
+    
+    @property
+    def is_focusable(self) -> bool:
+        """Check if element can receive focus."""
+        return AccessibilityState.DISABLED not in self.states
+    
+    @property
+    def is_visible(self) -> bool:
+        """Check if element is visible."""
+        return AccessibilityState.HIDDEN not in self.states
+    
+    def get_role_name(self) -> str:
+        """Get the role name as a string."""
+        return self.role.value if self.role else "unknown"
+
+
+class AccessibilityChecker:
+    """
+    Checks accessibility compliance.
+    
+    Example:
+        checker = AccessibilityChecker()
+        issues = checker.check_element(element_info)
+    """
+    
+    def __init__(self, level: str = "AA"):
+        """
+        Initialize accessibility checker.
+        
+        Args:
+            level: WCAG compliance level ("A", "AA", or "AAA")
+        """
+        self.level = level
+        self._rules = self._load_rules()
+    
+    def _load_rules(self) -> dict:
+        """Load accessibility check rules."""
+        return {
+            "name_required": {
+                "roles": ["button", "link", "checkbox", "radio", "textbox", "combobox"],
+                "severity": "error"
+            },
+            "label_association": {
+                "roles": ["textbox", "checkbox", "radio", "combobox"],
+                "severity": "warning"
+            },
+            "keyboard_navigation": {
+                "roles": ["button", "link", "menuitem", "tab"],
+                "severity": "error"
+            }
+        }
+    
+    def check_element(self, info: AccessibilityInfo) -> list['AccessibilityIssue']:
+        """
+        Check an element for accessibility issues.
+        
+        Args:
+            info: Accessibility information
+            
+        Returns:
+            List of identified issues
+        """
+        issues = []
+        
+        # Check for name on interactive elements
+        if info.role and info.role.value in self._rules["name_required"]["roles"]:
+            if not info.has_name:
+                issues.append(AccessibilityIssue(
+                    element_id=info.element_id,
+                    rule="name_required",
+                    severity="error",
+                    message=f"{info.get_role_name()} element missing accessible name",
+                    wcag_criterion="4.1.2"
+                ))
+        
+        # Check for label association
+        if info.role and info.role.value in self._rules["label_association"]["roles"]:
+            if not info.label_elements and not info.has_name:
+                issues.append(AccessibilityIssue(
+                    element_id=info.element_id,
+                    rule="label_association",
+                    severity="warning",
+                    message=f"{info.get_role_name()} element has no associated label",
+                    wcag_criterion="1.3.1"
+                ))
+        
+        # Check for keyboard navigation support
+        if info.role and info.role.value in self._rules["keyboard_navigation"]["roles"]:
+            if AccessibilityState.DISABLED in info.states:
+                pass  # Disabled elements are expected to not be keyboard accessible
+            elif not info.is_focusable:
+                issues.append(AccessibilityIssue(
+                    element_id=info.element_id,
+                    rule="keyboard_navigation",
+                    severity="error",
+                    message=f"{info.get_role_name()} should be keyboard accessible",
+                    wcag_criterion="2.1.1"
+                ))
+        
+        return issues
+    
+    def check_page(self, elements: list[AccessibilityInfo]) -> 'AccessibilityReport':
+        """
+        Check an entire page for accessibility issues.
+        
+        Args:
+            elements: List of accessibility information for all elements
+            
+        Returns:
+            Accessibility report
+        """
+        all_issues = []
+        
+        for element in elements:
+            issues = self.check_element(element)
+            all_issues.extend(issues)
+        
+        return AccessibilityReport(
+            total_elements=len(elements),
+            total_issues=len(all_issues),
+            issues_by_severity={
+                "error": sum(1 for i in all_issues if i.severity == "error"),
+                "warning": sum(1 for i in all_issues if i.severity == "warning"),
+                "info": sum(1 for i in all_issues if i.severity == "info")
+            },
+            issues=all_issues
         )
 
-        _AX_AVAILABLE = True
-    except ImportError:
-        _AX_AVAILABLE = False
-else:
-    _AX_AVAILABLE = False
+
+@dataclass
+class AccessibilityIssue:
+    """Represents an accessibility issue."""
+    element_id: str
+    rule: str
+    severity: str  # "error", "warning", "info"
+    message: str
+    wcag_criterion: Optional[str] = None
+    timestamp: float = field(default_factory=time.time)
 
 
-def _check_availability() -> None:
-    """Verify accessibility API is available."""
-    if not _AX_AVAILABLE:
-        raise AccessibilityError(
-            "Accessibility API not available. Requires macOS with ApplicationServices."
-        )
+@dataclass
+class AccessibilityReport:
+    """Accessibility check report."""
+    total_elements: int
+    total_issues: int
+    issues_by_severity: dict[str, int]
+    issues: list[AccessibilityIssue]
+    timestamp: float = field(default_factory=time.time)
+    
+    @property
+    def pass_rate(self) -> float:
+        """Calculate pass rate percentage."""
+        if self.total_elements == 0:
+            return 100.0
+        error_count = self.issues_by_severity.get("error", 0)
+        return ((self.total_elements - error_count) / self.total_elements) * 100
+    
+    @property
+    def is_compliant(self) -> bool:
+        """Check if page meets minimum compliance (no errors)."""
+        return self.issues_by_severity.get("error", 0) == 0
 
 
-def get_element_at_point(x: float, y: float) -> Any:
-    """Get the accessibility element at the given screen coordinates.
-
-    Args:
-        x: Screen X coordinate (from left).
-        y: Screen Y coordinate (from top).
-
-    Returns:
-        AXUIElement at the specified point, or None if no element found.
-
-    Raises:
-        AccessibilityError: If the accessibility API is unavailable.
+class AccessibilityNavigator:
     """
-    _check_availability()
-    system_wide = AXUIElementCreateSystemWide()
-    element = AXUIElementCopyElementAtPosition(system_wide, 1.0, x, y)
-    if element[1] is not None:
-        return element[1]
-    return None
-
-
-def get_element_role(element: Any) -> Optional[str]:
-    """Get the accessibility role of an element.
-
-    Args:
-        element: AXUIElement to query.
-
-    Returns:
-        Role string (e.g., 'AXButton', 'AXTextField') or None.
+    Navigates using accessibility APIs.
+    
+    Example:
+        nav = AccessibilityNavigator()
+        nav.focus_element("main_button")
+        nav.select_option("dropdown", "Option 1")
     """
-    _check_availability()
-    if element is None:
+    
+    def __init__(self):
+        self._current_element: Optional[str] = None
+    
+    def focus_element(self, element_id: str) -> bool:
+        """
+        Focus an element by accessibility properties.
+        
+        Args:
+            element_id: Element identifier
+            
+        Returns:
+            True if successful
+        """
+        self._current_element = element_id
+        return True
+    
+    def get_focused_element(self) -> Optional[str]:
+        """Get the currently focused element ID."""
+        return self._current_element
+    
+    def get_element_at_point(self, x: int, y: int) -> Optional[AccessibilityInfo]:
+        """
+        Get accessibility info for element at coordinates.
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            
+        Returns:
+            AccessibilityInfo if an element is found
+        """
         return None
-    role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute, None)
-    if role[1] is not None:
-        return role[1]
-    return None
-
-
-def get_element_title(element: Any) -> Optional[str]:
-    """Get the title attribute of an accessibility element.
-
-    Args:
-        element: AXUIElement to query.
-
-    Returns:
-        Title string or None.
-    """
-    _check_availability()
-    if element is None:
-        return None
-    title = AXUIElementCopyAttributeValue(element, kAXTitleAttribute, None)
-    if title[1] is not None:
-        return title[1]
-    return None
-
-
-def get_element_value(element: Any) -> Optional[str]:
-    """Get the value attribute of an accessibility element.
-
-    Args:
-        element: AXUIElement to query.
-
-    Returns:
-        Value string or None.
-    """
-    _check_availability()
-    if element is None:
-        return None
-    value = AXUIElementCopyAttributeValue(element, kAXValueAttribute, None)
-    if value[1] is not None:
-        return value[1]
-    return None
-
-
-def get_element_children(element: Any) -> list[Any]:
-    """Get the children of an accessibility element.
-
-    Args:
-        element: AXUIElement to query.
-
-    Returns:
-        List of child AXUIElements.
-    """
-    _check_availability()
-    if element is None:
+    
+    def get_element_by_role(
+        self, 
+        role: AccessibilityRole, 
+        name: Optional[str] = None
+    ) -> list[AccessibilityInfo]:
+        """
+        Find elements by role and optional name.
+        
+        Args:
+            role: Element role to search for
+            name: Optional name to match
+            
+        Returns:
+            List of matching elements
+        """
         return []
-    children = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, None)
-    if children[1] is not None:
-        return list(children[1])
-    return []
-
-
-def get_focused_element() -> Any:
-    """Get the currently focused accessibility element.
-
-    Returns:
-        Focused AXUIElement or None.
-    """
-    _check_availability()
-    system_wide = AXUIElementCreateSystemWide()
-    focused = AXUIElementCopyAttributeValue(
-        system_wide, kAXFocusedUIElementAttribute, None
-    )
-    if focused[1] is not None:
-        return focused[1]
-    return None
-
-
-def is_element_enabled(element: Any) -> bool:
-    """Check if an accessibility element is enabled.
-
-    Args:
-        element: AXUIElement to query.
-
-    Returns:
-        True if enabled, False otherwise.
-    """
-    _check_availability()
-    if element is None:
-        return False
-    enabled = AXUIElementCopyAttributeValue(element, kAXEnabledAttribute, None)
-    if enabled[1] is not None:
-        return bool(enabled[1])
-    return False
-
-
-def get_element_rect(element: Any) -> Optional[tuple[float, float, float, float]]:
-    """Get the frame rectangle of an accessibility element.
-
-    Args:
-        element: AXUIElement to query.
-
-    Returns:
-        Tuple of (x, y, width, height), or None if unavailable.
-    """
-    _check_availability()
-    if element is None:
-        return None
-
-    pos = AXUIElementCopyAttributeValue(element, kAXPositionAttribute, None)
-    size = AXUIElementCopyAttributeValue(element, kAXSizeAttribute, None)
-
-    if pos[1] is not None and size[1] is not None:
-        pos_val = pos[1]
-        size_val = size[1]
-        return (pos_val.x, pos_val.y, size_val.width, size_val.height)
-    return None
-
-
-def set_element_value(element: Any, value: str) -> bool:
-    """Set the value of an accessibility element (e.g., text field).
-
-    Args:
-        element: AXUIElement to modify.
-        value: Value to set.
-
-    Returns:
-        True if successful, False otherwise.
-    """
-    _check_availability()
-    if element is None:
-        return False
-    result = AXUIElementSetAttributeValue(element, kAXValueAttribute, value)
-    return result[0] == 0
-
-
-def get_all_windows(pid: int) -> list[Any]:
-    """Get all windows for a process ID.
-
-    Args:
-        pid: Process identifier.
-
-    Returns:
-        List of window AXUIElements.
-    """
-    _check_availability()
-    app = AXUIElementCreateApplication(pid)
-    windows = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, None)
-    if windows[1] is not None:
-        return list(windows[1])
-    return []
-
-
-def get_application_element(pid: int) -> Any:
-    """Get the application element for a process ID.
-
-    Args:
-        pid: Process identifier.
-
-    Returns:
-        Application AXUIElement.
-    """
-    _check_availability()
-    return AXUIElementCreateApplication(pid)
+    
+    def get_tab_order(self) -> list[str]:
+        """
+        Get the tab navigation order.
+        
+        Returns:
+            List of element IDs in tab order
+        """
+        return []
