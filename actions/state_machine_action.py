@@ -1,307 +1,343 @@
-"""State machine action module for RabAI AutoClick.
+"""
+State Machine Action Module
 
-Provides state machine functionality for workflow automation
-with transitions, guards, actions, and history tracking.
+State machine implementation for workflow modeling.
+Supports transitions, guards, actions, and history tracking.
+
+MIT License - Copyright (c) 2025 RabAi Research
 """
 
-import sys
-import os
-import time
-from typing import Any, Dict, List, Optional, Callable, Set
-from enum import Enum
+from __future__ import annotations
+
+import logging
 from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class Transition:
-    """State machine transition."""
-    from_state: str
-    to_state: str
-    event: str
-    guard: Optional[str] = None
-    action: Optional[str] = None
-    description: str = ""
+class StateMachineError(Exception):
+    """State machine error."""
+    pass
+
+
+class TransitionError(StateMachineError):
+    """Transition error."""
+    pass
 
 
 @dataclass
 class State:
-    """State machine state."""
+    """A state in the state machine."""
+
     name: str
-    entry_action: Optional[str] = None
-    exit_action: Optional[str] = None
     is_initial: bool = False
     is_final: bool = False
+    entry_action: Optional[Callable] = None
+    exit_action: Optional[Callable] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class StateMachineAction(BaseAction):
-    """Execute a state machine with transitions and guards.
-    
-    Supports hierarchical states, transition guards,
-    entry/exit actions, and state history.
+@dataclass
+class Transition:
+    """A transition between states."""
+
+    source: str
+    target: str
+    event: str
+    guard: Optional[Callable[[Dict], bool]] = None
+    action: Optional[Callable] = None
+    description: str = ""
+
+
+@dataclass
+class StateHistory:
+    """History of state transitions."""
+
+    state: str
+    event: str
+    timestamp: float = field(default_factory=lambda: __import__('time').time())
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class StateMachine:
     """
-    action_type = "state_machine"
-    display_name = "状态机"
-    description = "状态机执行，支持转换守卫和进入/退出动作"
+    State machine implementation.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Run a state machine event.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - machine_id: str
-                - states: list of State dicts
-                - transitions: list of Transition dicts
-                - current_state: str (initial state)
-                - event: str (event to process)
-                - event_data: dict (data to pass with event)
-                - history: list (previous states, for restore)
-                - save_to_var: str
-        
-        Returns:
-            ActionResult with state machine result.
-        """
-        machine_id = params.get('machine_id', f'sm_{int(time.time())}')
-        states_data = params.get('states', [])
-        transitions_data = params.get('transitions', [])
-        current_state = params.get('current_state', '')
-        event = params.get('event', '')
-        event_data = params.get('event_data', {})
-        history = params.get('history', [])
-        save_to_var = params.get('save_to_var', 'state_machine')
+    Supports:
+    - Multiple states with initial/final markers
+    - Event-driven transitions
+    - Guard conditions
+    - Entry/exit actions
+    - Transition actions
+    - History tracking
+    """
 
-        # Parse states
-        states = {}
-        for s in states_data:
-            name = s.get('name', '')
-            states[name] = State(
-                name=name,
-                entry_action=s.get('entry_action'),
-                exit_action=s.get('exit_action'),
-                is_initial=s.get('is_initial', False),
-                is_final=s.get('is_final', False),
-            )
+    def __init__(self, machine_id: str):
+        self.machine_id = machine_id
+        self._states: Dict[str, State] = {}
+        self._transitions: Dict[str, List[Transition]] = {}
+        self._current_state: Optional[str] = None
+        self._history: List[StateHistory] = []
+        self._context: Dict[str, Any] = {}
 
-        # Parse transitions
-        transitions = []
-        for t in transitions_data:
-            transitions.append(Transition(
-                from_state=t.get('from_state', ''),
-                to_state=t.get('to_state', ''),
-                event=t.get('event', ''),
-                guard=t.get('guard'),
-                action=t.get('action'),
-                description=t.get('description', ''),
-            ))
+    def add_state(
+        self,
+        name: str,
+        is_initial: bool = False,
+        is_final: bool = False,
+        entry_action: Optional[Callable] = None,
+        exit_action: Optional[Callable] = None,
+    ) -> "StateMachine":
+        """Add a state."""
+        state = State(
+            name=name,
+            is_initial=is_initial,
+            is_final=is_final,
+            entry_action=entry_action,
+            exit_action=exit_action,
+        )
+        self._states[name] = state
 
-        # Build lookup: state -> event -> transitions
-        transition_map: Dict[str, Dict[str, List[Transition]]] = {}
-        for s in states:
-            transition_map[s] = {}
-        for t in transitions:
-            if t.from_state not in transition_map:
-                transition_map[t.from_state] = {}
-            if t.event not in transition_map[t.from_state]:
-                transition_map[t.from_state][t.event] = []
-            transition_map[t.from_state][t.event].append(t)
+        if is_initial:
+            self._current_state = name
 
-        # Process event
-        result = self._process_event(
-            machine_id, states, transition_map,
-            current_state, event, event_data, history
+        return self
+
+    def add_transition(
+        self,
+        source: str,
+        target: str,
+        event: str,
+        guard: Optional[Callable[[Dict], bool]] = None,
+        action: Optional[Callable] = None,
+    ) -> "StateMachine":
+        """Add a transition."""
+        if source not in self._states:
+            raise StateMachineError(f"Unknown state: {source}")
+        if target not in self._states:
+            raise StateMachineError(f"Unknown state: {target}")
+
+        transition = Transition(
+            source=source,
+            target=target,
+            event=event,
+            guard=guard,
+            action=action,
         )
 
-        if context and save_to_var:
-            context.variables[save_to_var] = result
+        if event not in self._transitions:
+            self._transitions[event] = []
+        self._transitions[event].append(transition)
 
-        return ActionResult(
-            success=result.get('transitioned', False),
-            data=result,
-            message=result.get('message', '')
-        )
+        return self
 
-    def _process_event(self, machine_id: str, states: Dict[str, State],
-                       transition_map: Dict, current_state: str, event: str,
-                       event_data: Dict, history: List) -> Dict:
-        """Process an event against the state machine."""
-        new_history = list(history)
-        new_history.append(current_state)
+    async def send_event(self, event: str, event_data: Optional[Dict] = None) -> bool:
+        """Send an event to the state machine."""
+        event_data = event_data or {}
 
-        # Get current state info
-        state_info = states.get(current_state)
-        if state_info and state_info.is_final:
-            return {
-                'machine_id': machine_id,
-                'current_state': current_state,
-                'event': event,
-                'transitioned': False,
-                'message': f'Already in final state: {current_state}',
-                'history': new_history,
-            }
+        if not self._current_state:
+            raise StateMachineError("State machine not initialized")
 
         # Find matching transitions
-        if current_state not in transition_map:
-            return {
-                'machine_id': machine_id,
-                'current_state': current_state,
-                'event': event,
-                'transitioned': False,
-                'message': f'No transitions from state: {current_state}',
-                'history': new_history,
-            }
+        transitions = self._transitions.get(event, [])
 
-        event_transitions = transition_map.get(current_state, {}).get(event, [])
+        for transition in transitions:
+            if transition.source != self._current_state:
+                continue
 
-        if not event_transitions:
-            return {
-                'machine_id': machine_id,
-                'current_state': current_state,
-                'event': event,
-                'transitioned': False,
-                'message': f'No transition for event "{event}" in state "{current_state}"',
-                'history': new_history,
-            }
+            # Check guard
+            if transition.guard and not transition.guard(self._context):
+                logger.debug(f"Guard failed for transition {transition.source} -> {transition.target}")
+                continue
 
-        # Find first valid transition (guard passes)
-        valid_transition = None
-        for t in event_transitions:
-            if t.guard:
-                # Guard evaluation would check conditions
-                # For now, assume guard passes
-                if not self._eval_guard(t.guard, event_data):
-                    continue
-            valid_transition = t
-            break
+            # Execute transition
+            return await self._execute_transition(transition, event, event_data)
 
-        if not valid_transition:
-            return {
-                'machine_id': machine_id,
-                'current_state': current_state,
-                'event': event,
-                'transitioned': False,
-                'message': f'All transition guards rejected event "{event}"',
-                'history': new_history,
-            }
+        logger.warning(f"No valid transition for event '{event}' from state '{self._current_state}'")
+        return False
 
-        # Execute transition
-        from_state = valid_transition.from_state
-        to_state = valid_transition.to_state
+    async def _execute_transition(
+        self,
+        transition: Transition,
+        event: str,
+        event_data: Dict,
+    ) -> bool:
+        """Execute a transition."""
+        source_state = self._states[self._current_state]
+        target_state = self._states[transition.target]
 
         # Exit action
-        exit_action = states.get(from_state).exit_action if states.get(from_state) else None
-        
-        # Entry action
-        entry_action = states.get(to_state).entry_action if states.get(to_state) else None
-        
-        # Transition action
-        transition_action = valid_transition.action
-
-        return {
-            'machine_id': machine_id,
-            'from_state': from_state,
-            'to_state': to_state,
-            'current_state': to_state,
-            'event': event,
-            'transitioned': True,
-            'transition_action': transition_action,
-            'exit_action': exit_action,
-            'entry_action': entry_action,
-            'message': f'{from_state} --[{event}]--> {to_state}',
-            'history': new_history,
-            'is_final': states.get(to_state, State(to_state)).is_final if to_state in states else False,
-        }
-
-    def _eval_guard(self, guard: str, event_data: Dict) -> bool:
-        """Evaluate a guard condition against event data."""
-        # Simple guard evaluation
-        # Format: var_name == value, var_name != value, var_name (truthy check)
-        g = guard.strip()
-        
-        if g.startswith('$'):
-            var_name = g[1:]
-            if '==' in var_name:
-                parts = var_name.split('==')
-                var_name = parts[0].strip()
-                expected = parts[1].strip().strip('"\'')
-                actual = str(event_data.get(var_name, ''))
-                return actual == expected
-            elif '!=' in var_name:
-                parts = var_name.split('!=')
-                var_name = parts[0].strip()
-                expected = parts[1].strip().strip('"\'')
-                actual = str(event_data.get(var_name, ''))
-                return actual != expected
+        if source_state.exit_action:
+            if source_state.exit_action.__code__.co_await:
+                await source_state.exit_action(self._context, event_data)
             else:
-                return bool(event_data.get(var_name))
-        
+                source_state.exit_action(self._context, event_data)
+
+        # Transition action
+        if transition.action:
+            if transition.action.__code__.co_await:
+                await transition.action(self._context, event_data)
+            else:
+                transition.action(self._context, event_data)
+
+        # Update state
+        old_state = self._current_state
+        self._current_state = transition.target
+
+        # Record history
+        self._history.append(StateHistory(
+            state=self._current_state,
+            event=event,
+            metadata={"from_state": old_state},
+        ))
+
+        # Entry action
+        if target_state.entry_action:
+            if target_state.entry_action.__code__.co_await:
+                await target_state.entry_action(self._context, event_data)
+            else:
+                target_state.entry_action(self._context, event_data)
+
+        logger.info(f"Transition: {old_state} --({event})--> {self._current_state}")
         return True
 
+    def get_state(self) -> Optional[str]:
+        """Get current state."""
+        return self._current_state
 
-class StateHistoryAction(BaseAction):
-    """Query or manipulate state machine history.
-    
-    Supports checking history, restoring previous state,
-    and computing transition paths.
+    def get_history(self) -> List[StateHistory]:
+        """Get transition history."""
+        return list(self._history)
+
+    def is_final_state(self) -> bool:
+        """Check if current state is final."""
+        if not self._current_state:
+            return False
+        return self._states[self._current_state].is_final
+
+    def set_context(self, key: str, value: Any) -> None:
+        """Set context value."""
+        self._context[key] = value
+
+    def get_context(self, key: str) -> Any:
+        """Get context value."""
+        return self._context.get(key)
+
+
+class StateMachineAction:
     """
-    action_type = "state_history"
-    display_name = "状态历史"
-    description = "查询和操作状态机历史，支持状态回溯"
+    Main action class for state machine management.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Query or manipulate state history.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys:
-                - history: list of state names
-                - action: str (get_current/get_previous/get_path/count/restore)
-                - save_to_var: str
-        
-        Returns:
-            ActionResult with history query result.
-        """
-        history = params.get('history', [])
-        action = params.get('action', 'get_current')
-        save_to_var = params.get('save_to_var', 'history_result')
+    Features:
+    - Hierarchical state machines
+    - Parallel states
+    - History tracking
+    - Context management
+    - Async action support
 
-        result = {'action': action}
+    Usage:
+        sm = StateMachineAction("order_processor")
+        sm.add_state("pending", is_initial=True)
+        sm.add_state("processing")
+        sm.add_state("completed", is_final=True)
+        sm.add_transition("pending", "processing", "start")
+        sm.add_transition("processing", "completed", "finish")
+        await sm.send_event("start")
+    """
 
-        if action == 'get_current':
-            result['state'] = history[-1] if history else None
-            result['message'] = f"Current state: {result['state']}"
-        elif action == 'get_previous':
-            result['state'] = history[-2] if len(history) > 1 else None
-            result['message'] = f"Previous state: {result['state']}"
-        elif action == 'get_path':
-            result['path'] = list(history)
-            result['message'] = f"Full path: {' -> '.join(history)}"
-        elif action == 'count':
-            result['count'] = len(history)
-            result['message'] = f"History length: {len(history)}"
-        elif action == 'restore':
-            restore_idx = params.get('restore_index', -1)
-            if 0 <= restore_idx < len(history):
-                result['restored_state'] = history[restore_idx]
-                result['truncated_history'] = history[:restore_idx + 1]
-                result['message'] = f"Restored to state: {result['restored_state']}"
-            else:
-                result['restored_state'] = history[0]
-                result['truncated_history'] = [history[0]]
-                result['message'] = f"Restored to initial state: {result['restored_state']}"
-        elif action == 'last_transition':
-            if len(history) >= 2:
-                result['from_state'] = history[-2]
-                result['to_state'] = history[-1]
-                result['message'] = f"Last transition: {history[-2]} -> {history[-1]}"
-            else:
-                result['message'] = "No transition in history"
-        else:
-            result['message'] = f"Unknown action: {action}"
+    def __init__(self, machine_id: str):
+        self._machine = StateMachine(machine_id)
 
-        if context and save_to_var:
-            context.variables[save_to_var] = result
+    def add_state(
+        self,
+        name: str,
+        is_initial: bool = False,
+        is_final: bool = False,
+        entry_action: Optional[Callable] = None,
+        exit_action: Optional[Callable] = None,
+    ) -> "StateMachineAction":
+        """Add a state."""
+        self._machine.add_state(name, is_initial, is_final, entry_action, exit_action)
+        return self
 
-        return ActionResult(success=True, data=result, message=result.get('message', ''))
+    def add_transition(
+        self,
+        source: str,
+        target: str,
+        event: str,
+        guard: Optional[Callable[[Dict], bool]] = None,
+        action: Optional[Callable] = None,
+    ) -> "StateMachineAction":
+        """Add a transition."""
+        self._machine.add_transition(source, target, event, guard, action)
+        return self
+
+    async def send_event(self, event: str, event_data: Optional[Dict] = None) -> bool:
+        """Send an event to the state machine."""
+        return await self._machine.send_event(event, event_data)
+
+    def get_current_state(self) -> Optional[str]:
+        """Get current state."""
+        return self._machine.get_state()
+
+    def is_final(self) -> bool:
+        """Check if in final state."""
+        return self._machine.is_final_state()
+
+    def get_history(self) -> List[Dict]:
+        """Get transition history."""
+        return [
+            {"state": h.state, "event": h.event, "timestamp": h.timestamp}
+            for h in self._machine.get_history()
+        ]
+
+    def set_context(self, key: str, value: Any) -> None:
+        """Set context value."""
+        self._machine.set_context(key, value)
+
+    def get_context(self, key: str) -> Any:
+        """Get context value."""
+        return self._machine.get_context(key)
+
+
+def demo_state_machine():
+    """Demonstrate state machine."""
+    import asyncio
+
+    async def entry_processing(context, event_data):
+        print("Entering processing state")
+
+    async def exit_processing(context, event_data):
+        print("Exiting processing state")
+
+    async def do_processing(context, event_data):
+        print("Processing order...")
+
+    sm = StateMachineAction("order_processor")
+    sm.add_state("pending", is_initial=True)
+    sm.add_state("processing", entry_action=entry_processing, exit_action=exit_processing)
+    sm.add_state("completed", is_final=True)
+    sm.add_state("cancelled", is_final=True)
+
+    sm.add_transition("pending", "processing", "start", action=do_processing)
+    sm.add_transition("processing", "completed", "complete")
+    sm.add_transition("processing", "cancelled", "cancel")
+
+    async def run():
+        print(f"Initial state: {sm.get_current_state()}")
+
+        await sm.send_event("start")
+        print(f"After start: {sm.get_current_state()}")
+
+        await sm.send_event("complete")
+        print(f"After complete: {sm.get_current_state()}")
+
+        print(f"History: {sm.get_history()}")
+
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    demo_state_machine()
