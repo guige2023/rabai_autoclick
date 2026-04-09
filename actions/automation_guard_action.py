@@ -1,249 +1,220 @@
-"""Automation Guard action module for RabAI AutoClick.
+"""
+Automation Guard Action Module.
 
-Implements circuit breaker, throttle, and quota patterns
-for automation safety.
+Provides pre/post action guards with
+validation and cleanup hooks.
 """
 
-import time
-import sys
-import os
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
-from collections import deque
+import asyncio
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+from .api_retry_action import RetryConfig
 
 
-class AutomationGuardAction(BaseAction):
-    """Guard automation execution with limits and checks.
+class GuardType(Enum):
+    """Guard types."""
+    PRE = "pre"
+    POST = "post"
+    CLEANUP = "cleanup"
+    VALIDATION = "validation"
 
-    Enforces rate limits, quotas, circuit breakers,
-    and precondition checks.
+
+@dataclass
+class Guard:
+    """Action guard."""
+    name: str
+    guard_type: GuardType
+    func: Callable[[Any], bool]
+    required: bool = False
+    timeout: float = 5.0
+
+
+@dataclass
+class GuardResult:
+    """Guard execution result."""
+    success: bool
+    guard_name: str
+    message: str = ""
+    error: Optional[Exception] = None
+
+
+class AutomationGuardAction:
     """
-    action_type = "automation_guard"
-    display_name = "自动化守卫"
-    description = "通过限制和检查保护自动化执行"
+    Pre/post action guards.
 
-    def execute(
+    Example:
+        guard = AutomationGuardAction()
+
+        guard.add_pre_guard("validate_input", validate_func)
+        guard.add_post_guard("log_result", log_func)
+
+        result = await guard.execute_with_guards(action_func, *args)
+    """
+
+    def __init__(self):
+        self._pre_guards: list[Guard] = []
+        self._post_guards: list[Guard] = []
+        self._cleanup_guards: list[Guard] = []
+        self._validation_guards: list[Guard] = []
+
+    def add_pre_guard(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Execute with guard checks.
+        name: str,
+        func: Callable[[Any], bool],
+        required: bool = True
+    ) -> "AutomationGuardAction":
+        """Add pre-execution guard."""
+        guard = Guard(
+            name=name,
+            guard_type=GuardType.PRE,
+            func=func,
+            required=required
+        )
+        self._pre_guards.append(guard)
+        return self
 
-        Args:
-            context: Execution context.
-            params: Dict with keys: action, guard_type,
-                   limit, window_seconds, preconditions.
+    def add_post_guard(
+        self,
+        name: str,
+        func: Callable[[Any], bool],
+        required: bool = False
+    ) -> "AutomationGuardAction":
+        """Add post-execution guard."""
+        guard = Guard(
+            name=name,
+            guard_type=GuardType.POST,
+            func=func,
+            required=required
+        )
+        self._post_guards.append(guard)
+        return self
 
-        Returns:
-            ActionResult with guard status.
-        """
-        start_time = time.time()
-        try:
-            action = params.get('action', 'check')
-            guard_type = params.get('guard_type', 'rate_limit')
-            limit = params.get('limit', 10)
-            window_seconds = params.get('window_seconds', 60)
-            preconditions = params.get('preconditions', [])
-            guard_id = params.get('guard_id', 'default')
+    def add_cleanup_guard(
+        self,
+        name: str,
+        func: Callable
+    ) -> "AutomationGuardAction":
+        """Add cleanup guard."""
+        guard = Guard(
+            name=name,
+            guard_type=GuardType.CLEANUP,
+            func=func,
+            required=False
+        )
+        self._cleanup_guards.append(guard)
+        return self
 
-            # Initialize or get state
-            if not hasattr(context, '_automation_guards'):
-                context._automation_guards = {}
-            guards = context._automation_guards
-            if guard_id not in guards:
-                guards[guard_id] = {'type': guard_type, 'window': window_seconds, 'limit': limit, 'requests': deque()}
+    def add_validation_guard(
+        self,
+        name: str,
+        func: Callable[[Any], bool],
+        required: bool = True
+    ) -> "AutomationGuardAction":
+        """Add validation guard."""
+        guard = Guard(
+            name=name,
+            guard_type=GuardType.VALIDATION,
+            func=func,
+            required=required
+        )
+        self._validation_guards.append(guard)
+        return self
 
-            guard_state = guards[guard_id]
+    async def _run_guards(
+        self,
+        guards: list[Guard],
+        context: Any
+    ) -> list[GuardResult]:
+        """Run guards and collect results."""
+        results = []
 
-            if action == 'check':
-                now = time.time()
-                cutoff = now - window_seconds
-
-                # Clean old requests
-                requests = guard_state['requests']
-                while requests and requests[0] < cutoff:
-                    requests.popleft()
-
-                if len(requests) >= limit:
-                    return ActionResult(
-                        success=False,
-                        message=f"Guard blocked: rate limit {limit}/{window_seconds}s exceeded",
-                        data={
-                            'guard_id': guard_id,
-                            'guard_type': guard_type,
-                            'current_count': len(requests),
-                            'limit': limit,
-                            'window_seconds': window_seconds,
-                            'blocked': True,
-                        },
-                        duration=time.time() - start_time,
+        for guard in guards:
+            try:
+                if asyncio.iscoroutinefunction(guard.func):
+                    result = await asyncio.wait_for(
+                        guard.func(context),
+                        timeout=guard.timeout
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(guard.func, context),
+                        timeout=guard.timeout
                     )
 
-                # Check preconditions
-                for pc in preconditions:
-                    if not self._check_precondition(pc, context):
-                        return ActionResult(
-                            success=False,
-                            message=f"Precondition failed: {pc.get('name', 'unknown')}",
-                            data={'precondition': pc, 'passed': False},
-                            duration=time.time() - start_time,
-                        )
-
-                # Allow
-                requests.append(now)
-                return ActionResult(
-                    success=True,
-                    message="Guard check passed",
-                    data={
-                        'guard_id': guard_id,
-                        'guard_type': guard_type,
-                        'current_count': len(requests),
-                        'limit': limit,
-                        'remaining': limit - len(requests),
-                        'blocked': False,
-                    },
-                    duration=time.time() - start_time,
+                guard_result = GuardResult(
+                    success=bool(result),
+                    guard_name=guard.name,
+                    message="Guard passed" if result else "Guard returned False"
                 )
 
-            elif action == 'reset':
-                guard_state['requests'] = deque()
-                return ActionResult(
-                    success=True,
-                    message=f"Guard {guard_id} reset",
-                    duration=time.time() - start_time,
+            except asyncio.TimeoutError:
+                guard_result = GuardResult(
+                    success=not guard.required,
+                    guard_name=guard.name,
+                    message="Guard timed out",
+                    error=TimeoutError(f"Guard {guard.name} timed out")
                 )
 
-            elif action == 'status':
-                now = time.time()
-                cutoff = now - window_seconds
-                requests = guard_state['requests']
-                while requests and requests[0] < cutoff:
-                    requests.popleft()
-                return ActionResult(
-                    success=True,
-                    message=f"Guard {guard_id}: {len(requests)}/{limit}",
-                    data={
-                        'guard_id': guard_id,
-                        'guard_type': guard_type,
-                        'current_count': len(requests),
-                        'limit': limit,
-                        'remaining': limit - len(requests),
-                    },
-                    duration=time.time() - start_time,
+            except Exception as e:
+                guard_result = GuardResult(
+                    success=not guard.required,
+                    guard_name=guard.name,
+                    message=f"Guard failed: {str(e)}",
+                    error=e
                 )
 
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown action: {action}",
-                    duration=time.time() - start_time,
-                )
+            results.append(guard_result)
 
-        except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Guard error: {str(e)}",
-                duration=duration,
-            )
+            if not guard_result.success and guard.required:
+                break
 
-    def _check_precondition(self, pc: Dict, context: Any) -> bool:
-        """Check a precondition."""
-        pc_type = pc.get('type')
-        if pc_type == 'expression':
-            expr = pc.get('expression', '')
-            try:
-                return eval(expr, {'context': context, 'params': pc})
-            except Exception:
-                return False
-        elif pc_type == 'data_exists':
-            key = pc.get('key')
-            return hasattr(context, key) or (isinstance(context, dict) and key in context)
-        return True
+        return results
 
-
-class AutomationThrottlerAction(BaseAction):
-    """Throttle automation execution speed.
-
-    Limits execution rate to prevent overload
-    and manage resource consumption.
-    """
-    action_type = "automation_throttler"
-    display_name = "自动化节流器"
-    description = "控制自动化执行速度"
-
-    def execute(
+    async def execute_with_guards(
         self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Throttle execution.
+        action_func: Callable,
+        context: Any = None,
+        *args: Any,
+        **kwargs: Any
+    ) -> tuple[Any, list[GuardResult]]:
+        """Execute action with guards."""
+        pre_results = await self._run_guards(self._pre_guards, context)
 
-        Args:
-            context: Execution context.
-            params: Dict with keys: rate_limit, burst_size,
-                   throttle_mode (smooth/burst).
+        for result in pre_results:
+            if not result.success and result.guard_name in [g.name for g in self._pre_guards if g.required]:
+                return None, pre_results
 
-        Returns:
-            ActionResult with throttle status.
-        """
-        start_time = time.time()
+        action_result = None
+        action_error = None
+
         try:
-            rate_limit = params.get('rate_limit', 10)
-            burst_size = params.get('burst_size', 20)
-            throttle_mode = params.get('throttle_mode', 'smooth')
-            throttle_id = params.get('throttle_id', 'default')
-
-            if not hasattr(context, '_automation_throttles'):
-                context._automation_throttles = {}
-            throttles = context._automation_throttles
-
-            if throttle_id not in throttles:
-                throttles[throttle_id] = {
-                    'tokens': burst_size,
-                    'last_refill': time.time(),
-                    'rate': rate_limit,
-                    'burst': burst_size,
-                }
-
-            state = throttles[throttle_id]
-            now = time.time()
-            elapsed = now - state['last_refill']
-
-            if throttle_mode == 'smooth':
-                tokens_to_add = elapsed * state['rate']
-                state['tokens'] = min(state['burst'], state['tokens'] + tokens_to_add)
-
-            state['last_refill'] = now
-
-            if state['tokens'] >= 1:
-                state['tokens'] -= 1
-                allowed = True
-                wait_time = 0
+            if asyncio.iscoroutinefunction(action_func):
+                action_result = await action_func(context, *args, **kwargs)
             else:
-                allowed = False
-                wait_time = (1 - state['tokens']) / state['rate']
-
-            return ActionResult(
-                success=allowed,
-                message=f"Throttle: {'allowed' if allowed else f'wait {wait_time:.2f}s'}",
-                data={
-                    'throttle_id': throttle_id,
-                    'allowed': allowed,
-                    'tokens': state['tokens'],
-                    'wait_time': wait_time,
-                    'rate_limit': rate_limit,
-                },
-                duration=time.time() - start_time,
-            )
-
+                action_result = await asyncio.to_thread(
+                    action_func, context, *args, **kwargs
+                )
         except Exception as e:
-            duration = time.time() - start_time
-            return ActionResult(
-                success=False,
-                message=f"Throttler error: {str(e)}",
-                duration=duration,
-            )
+            action_error = e
+
+        post_results = await self._run_guards(self._post_guards, action_result)
+
+        if action_error:
+            raise action_error
+
+        return action_result, pre_results + post_results
+
+    async def run_cleanup(self, context: Any = None) -> list[GuardResult]:
+        """Run cleanup guards."""
+        return await self._run_guards(self._cleanup_guards, context)
+
+    def get_guard_names(self) -> dict[str, int]:
+        """Get guard counts by type."""
+        return {
+            "pre": len(self._pre_guards),
+            "post": len(self._post_guards),
+            "cleanup": len(self._cleanup_guards),
+            "validation": len(self._validation_guards)
+        }
