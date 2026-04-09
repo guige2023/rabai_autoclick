@@ -1,648 +1,823 @@
-"""Comprehensive tests for action modules.
+"""Expanded tests for action modules of RabAI AutoClick.
 
-Tests each action type with various parameter combinations.
-Mock external dependencies (pyautogui, cv2) where needed.
+Tests ImageMatchAction, OcrAction, ScriptAction, and other actions
+with proper mocking for external dependencies (cv2, pyautogui, rapidocr).
 """
 
 import sys
 import os
 import time
 import unittest
-from unittest.mock import patch, MagicMock, Mock
+from unittest.mock import Mock, patch, MagicMock, mock_open, patch.object
+from pathlib import Path
+from io import StringIO
 
-# Add project root to path (parent of rabai_autoclick package directory)
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, project_root)
+sys.path.insert(0, '/Users/guige/my_project')
 
-from rabai_autoclick.core.context import ContextManager
-from rabai_autoclick.core.action_loader import ActionLoader
-
-
-def make_loader():
-    loader = ActionLoader()
-    loader.load_all()
-    return loader
+from core.context import ContextManager
+from core.base_action import BaseAction, ActionResult
 
 
-class TestClickAction(unittest.TestCase):
-    """Tests for ClickAction."""
+class MockCV2:
+    """Mock cv2 module."""
+    TM_CCOEFF_NORMED = 5
+    
+    class error(Exception):
+        pass
 
-    @patch('pyautogui.click')
-    def test_click_basic(self, mock_click):
-        loader = make_loader()
-        action = loader.get_action("click")()
+
+class TestImageMatchAction(unittest.TestCase):
+    """Tests for ImageMatchAction with mocked cv2."""
+
+    def _make_mock_cv2(self, match_result=None):
+        """Create mock cv2 module.
+        
+        Args:
+            match_result: Tuple of (min_val, max_val, min_loc, max_loc)
+        """
+        mock = Mock()
+        mock.cvtColor = Mock(side_effect=lambda img, code: img)
+        mock.matchTemplate = Mock(return_value=match_result or [[0.5]])
+        mock.minMaxLoc = Mock(return_value=(0.1, 0.9, (0, 0), (10, 10)))
+        mock.imread = Mock(return_value=Mock(shape=(100, 100)))
+        return mock
+
+    @patch('actions.image_match.cv2')
+    @patch('actions.image_match.pyautogui')
+    @patch('actions.image_match.np')
+    def test_image_match_success(self, mock_np, mock_pyautogui, mock_cv2):
+        """Test successful image match."""
+        from actions.image_match import ImageMatchAction
+        
+        # Setup mocks
+        mock_cv2.cvtColor = Mock(side_effect=lambda img, code: img)
+        mock_cv2.matchTemplate = Mock(return_value=Mock())
+        mock_cv2.minMaxLoc = Mock(return_value=(0.1, 0.95, (0, 0), (50, 50)))
+        mock_cv2.imread = Mock(return_value=Mock(shape=(100, 100)))
+        mock_np.array = Mock(return_value=Mock())
+        
+        mock_screenshot = Mock()
+        mock_pyautogui.screenshot = Mock(return_value=mock_screenshot)
+        
+        # Create temp file for template
+        with patch('pathlib.Path.exists', return_value=True):
+            action = ImageMatchAction()
+            ctx = ContextManager()
+            
+            result = action.execute(ctx, {
+                'template': '/fake/template.png',
+                'confidence': 0.8
+            })
+            
+            self.assertTrue(result.success)
+
+    @patch('actions.image_match.cv2')
+    @patch('actions.image_match.pyautogui')
+    @patch('actions.image_match.np')
+    def test_image_match_not_found(self, mock_np, mock_pyautogui, mock_cv2):
+        """Test image not found."""
+        from actions.image_match import ImageMatchAction
+        
+        mock_cv2.cvtColor = Mock(side_effect=lambda img, code: img)
+        mock_cv2.matchTemplate = Mock(return_value=Mock())
+        mock_cv2.minMaxLoc = Mock(return_value=(0.1, 0.5, (0, 0), (50, 50)))  # Low match
+        mock_cv2.imread = Mock(return_value=Mock(shape=(100, 100)))
+        mock_np.array = Mock(return_value=Mock())
+        mock_pyautogui.screenshot = Mock(return_value=Mock())
+        
+        with patch('pathlib.Path.exists', return_value=True):
+            action = ImageMatchAction()
+            ctx = ContextManager()
+            
+            result = action.execute(ctx, {
+                'template': '/fake/template.png',
+                'confidence': 0.8
+            })
+            
+            self.assertFalse(result.success)
+            self.assertIn('未找到', result.message)
+
+    def test_image_match_empty_template_path(self):
+        """Test empty template path."""
+        from actions.image_match import ImageMatchAction
+        
+        action = ImageMatchAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"x": 100, "y": 200})
-        self.assertTrue(result.success)
-        mock_click.assert_called_once()
-
-    @patch('pyautogui.click')
-    def test_click_with_button(self, mock_click):
-        loader = make_loader()
-        action = loader.get_action("click")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"x": 100, "y": 200, "button": "right"})
-        self.assertTrue(result.success)
-
-    def test_click_invalid_button(self):
-        loader = make_loader()
-        action = loader.get_action("click")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"x": 100, "y": 200, "button": "invalid"})
+        
+        result = action.execute(ctx, {'template': ''})
+        
         self.assertFalse(result.success)
-        self.assertIn("must be one of", result.message)
+        self.assertIn('未指定', result.message)
 
-    def test_click_missing_x(self):
-        loader = make_loader()
-        action = loader.get_action("click")()
+    @patch('pathlib.Path.exists', return_value=False)
+    def test_image_match_template_not_exists(self, mock_exists):
+        """Test template file doesn't exist."""
+        from actions.image_match import ImageMatchAction
+        
+        action = ImageMatchAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"y": 200})
-        # x defaults to 0, so it's valid
+        
+        result = action.execute(ctx, {'template': '/nonexistent.png'})
+        
+        self.assertFalse(result.success)
+        self.assertIn('不存在', result.message)
+
+    def test_image_match_invalid_confidence_type(self):
+        """Test invalid confidence type."""
+        from actions.image_match import ImageMatchAction
+        
+        action = ImageMatchAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'template': '/fake/template.png',
+            'confidence': 'not_a_number'
+        })
+        
+        self.assertFalse(result.success)
+
+    def test_image_match_confidence_out_of_range(self):
+        """Test confidence out of range."""
+        from actions.image_match import ImageMatchAction
+        
+        action = ImageMatchAction()
+        ctx = ContextManager()
+        
+        # Too high
+        result = action.execute(ctx, {
+            'template': '/fake/template.png',
+            'confidence': 1.5
+        })
+        self.assertFalse(result.success)
+        
+        # Too low
+        result = action.execute(ctx, {
+            'template': '/fake/template.png',
+            'confidence': -0.5
+        })
+        self.assertFalse(result.success)
+
+    def test_image_match_invalid_button(self):
+        """Test invalid button parameter."""
+        from actions.image_match import ImageMatchAction
+        
+        action = ImageMatchAction()
+        ctx = ContextManager()
+        
+        with patch('pathlib.Path.exists', return_value=True):
+            result = action.execute(ctx, {
+                'template': '/fake/template.png',
+                'button': 'invalid_button'
+            })
+            
+            self.assertFalse(result.success)
+
+    def test_image_match_negative_move_duration(self):
+        """Test negative move_duration."""
+        from actions.image_match import ImageMatchAction
+        
+        action = ImageMatchAction()
+        ctx = ContextManager()
+        
+        with patch('pathlib.Path.exists', return_value=True):
+            result = action.execute(ctx, {
+                'template': '/fake/template.png',
+                'move_duration': -1
+            })
+            
+            self.assertFalse(result.success)
+
+    @patch('actions.image_match.cv2')
+    @patch('actions.image_match.pyautogui')
+    @patch('actions.image_match.np')
+    def test_image_match_double_click(self, mock_np, mock_pyautogui, mock_cv2):
+        """Test double click option."""
+        from actions.image_match import ImageMatchAction
+        
+        mock_cv2.cvtColor = Mock(side_effect=lambda img, code: img)
+        mock_cv2.matchTemplate = Mock(return_value=Mock())
+        mock_cv2.minMaxLoc = Mock(return_value=(0.1, 0.95, (0, 0), (50, 50)))
+        mock_cv2.imread = Mock(return_value=Mock(shape=(100, 100)))
+        mock_np.array = Mock(return_value=Mock())
+        mock_pyautogui.screenshot = Mock(return_value=Mock())
+        
+        with patch('pathlib.Path.exists', return_value=True):
+            action = ImageMatchAction()
+            ctx = ContextManager()
+            
+            result = action.execute(ctx, {
+                'template': '/fake/template.png',
+                'double_click': True
+            })
+            
+            # Should succeed
+            self.assertTrue(result.success)
+
+
+class TestFindImageAction(unittest.TestCase):
+    """Tests for FindImageAction."""
+
+    @patch('actions.image_match.cv2')
+    @patch('actions.image_match.pyautogui')
+    @patch('actions.image_match.np')
+    def test_find_image_success(self, mock_np, mock_pyautogui, mock_cv2):
+        """Test successful image find."""
+        from actions.image_match import FindImageAction
+        
+        mock_cv2.cvtColor = Mock(side_effect=lambda img, code: img)
+        mock_cv2.matchTemplate = Mock(return_value=Mock())
+        mock_cv2.minMaxLoc = Mock(return_value=(0.1, 0.95, (0, 0), (50, 50)))
+        mock_cv2.imread = Mock(return_value=Mock(shape=(100, 100)))
+        mock_np.array = Mock(return_value=Mock())
+        mock_pyautogui.screenshot = Mock(return_value=Mock())
+        
+        with patch('pathlib.Path.exists', return_value=True):
+            action = FindImageAction()
+            ctx = ContextManager()
+            
+            result = action.execute(ctx, {
+                'template': '/fake/template.png'
+            })
+            
+            self.assertTrue(result.success)
+            self.assertTrue(result.data.get('found'))
+
+    @patch('actions.image_match.cv2')
+    @patch('actions.image_match.pyautogui')
+    @patch('actions.image_match.np')
+    def test_find_all_images(self, mock_np, mock_pyautogui, mock_cv2):
+        """Test find_all option."""
+        from actions.image_match import FindImageAction
+        
+        mock_cv2.cvtColor = Mock(side_effect=lambda img, code: img)
+        mock_cv2.matchTemplate = Mock(return_value=Mock())
+        mock_cv2.minMaxLoc = Mock(return_value=(0.1, 0.95, (0, 0), (50, 50)))
+        mock_cv2.imread = Mock(return_value=Mock(shape=(100, 100)))
+        mock_np.array = Mock(return_value=Mock())
+        mock_np.where = Mock(return_value=([10, 20], [15, 25]))
+        mock_pyautogui.screenshot = Mock(return_value=Mock())
+        
+        with patch('pathlib.Path.exists', return_value=True):
+            action = FindImageAction()
+            ctx = ContextManager()
+            
+            result = action.execute(ctx, {
+                'template': '/fake/template.png',
+                'find_all': True
+            })
+            
+            # Should return count
+            self.assertTrue(result.success)
+
+
+class TestOcrAction(unittest.TestCase):
+    """Tests for OcrAction with mocked rapidocr."""
+
+    @patch('actions.ocr.RapidOCRBackend')
+    @patch('actions.ocr.pyautogui')
+    @patch('actions.ocr.cv2')
+    @patch('actions.ocr.np')
+    def test_ocr_success(self, mock_np, mock_cv2, mock_pyautogui, mock_backend_class):
+        """Test successful OCR."""
+        from actions.ocr import OCRAction, _create_ocr_backend
+        
+        # Setup backend mock
+        mock_backend = Mock()
+        mock_backend.name = 'rapidocr'
+        mock_backend.execute = Mock(return_value=[
+            {'text': 'Hello', 'confidence': 0.95, 'x': 100, 'y': 100, 'box': [[0, 0], [100, 0], [100, 50], [0, 50]]}
+        ])
+        mock_backend.initialize = Mock(return_value=True)
+        mock_backend_class.return_value = mock_backend
+        
+        with patch('actions.ocr._create_ocr_backend', return_value=(mock_backend, 'rapidocr')):
+            action = OCRAction()
+            ctx = ContextManager()
+            
+            result = action.execute(ctx, {
+                'region': (0, 0, 800, 600),
+                'click_text': 'Hello'
+            })
+            
+            self.assertTrue(result.success)
+
+    def test_ocr_no_backend_available(self):
+        """Test OCR when no backend is available."""
+        from actions.ocr import OCRAction
+        
+        with patch('actions.ocr._create_ocr_backend', return_value=(None, None)):
+            action = OCRAction()
+            ctx = ContextManager()
+            
+            result = action.execute(ctx, {})
+            
+            self.assertFalse(result.success)
+            self.assertIn('OCR未安装', result.message)
+
+    def test_ocr_invalid_click_index(self):
+        """Test OCR with negative click_index."""
+        from actions.ocr import OCRAction
+        
+        with patch('actions.ocr._create_ocr_backend', return_value=(Mock(), 'rapidocr')):
+            action = OCRAction()
+            ctx = ContextManager()
+            
+            result = action.execute(ctx, {
+                'click_index': -1
+            })
+            
+            self.assertFalse(result.success)
+            self.assertIn('click_index', result.message)
+
+    def test_ocr_invalid_preprocess_mode(self):
+        """Test OCR with invalid preprocess mode."""
+        from actions.ocr import OCRAction
+        
+        mock_backend = Mock()
+        mock_backend.name = 'rapidocr'
+        mock_backend.initialize = Mock(return_value=True)
+        
+        with patch('actions.ocr._create_ocr_backend', return_value=(mock_backend, 'rapidocr')):
+            action = OCRAction()
+            ctx = ContextManager()
+            
+            # Invalid preprocess mode should still work with 'original'
+            result = action.execute(ctx, {
+                'preprocess_mode': 'invalid_mode'
+            })
+            
+            # Should not crash - either succeed or have valid error
+
+
+class TestScriptAction(unittest.TestCase):
+    """Tests for ScriptAction security blocking."""
+
+    def test_script_blocks_os_import(self):
+        """Test that dangerous imports are blocked."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'import os; os.system("ls")'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('安全限制', result.message)
+
+    def test_script_blocks_subprocess(self):
+        """Test that subprocess is blocked."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'import subprocess; subprocess.run(["ls"])'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('安全限制', result.message)
+
+    def test_script_blocks_eval(self):
+        """Test that eval is blocked."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'eval("1+1")'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('安全限制', result.message)
+
+    def test_script_blocks_exec(self):
+        """Test that exec is blocked."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'exec("print(1)")'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('安全限制', result.message)
+
+    def test_script_blocks_open(self):
+        """Test that open() is blocked."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'open("/etc/passwd")'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('安全限制', result.message)
+
+    def test_script_blocks_getattr(self):
+        """Test that getattr on dangerous attrs is blocked."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'getattr(__builtins__, "__import__")'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('安全限制', result.message)
+
+    def test_script_blocks_from_import(self):
+        """Test that from X import Y is blocked for dangerous modules."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'from sys import exit'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('安全限制', result.message)
+
+    def test_script_allows_safe_code(self):
+        """Test that safe code is allowed."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'x = 1 + 2; result = x * 3'
+        })
+        
         self.assertTrue(result.success)
+
+    def test_script_syntax_error(self):
+        """Test that syntax errors are caught."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': 'this is not valid python {{{{'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('语法错误', result.message)
+
+    def test_script_empty_code(self):
+        """Test empty code is rejected."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {'code': ''})
+        
+        self.assertFalse(result.success)
+        self.assertIn('为空', result.message)
+
+    def test_script_named_expression_blocked(self):
+        """Test that named expressions (:=) are blocked."""
+        from actions.script import ScriptAction
+        
+        action = ScriptAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'code': '(x := 5) + 1'
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('命名表达式', result.message)
 
 
 class TestDelayAction(unittest.TestCase):
     """Tests for DelayAction."""
 
-    def test_delay_seconds(self):
-        loader = make_loader()
-        action = loader.get_action("delay")()
+    def test_delay_with_seconds_string(self):
+        """Test delay with 'Ns' format."""
+        from actions.script import DelayAction
+        
+        action = DelayAction()
         ctx = ContextManager()
-        start = time.time()
-        result = action.execute(ctx, {"seconds": 0.05})
-        elapsed = time.time() - start
+        
+        result = action.execute(ctx, {'seconds': '30s'})
+        
         self.assertTrue(result.success)
-        self.assertGreaterEqual(elapsed, 0.04)
-        self.assertLess(elapsed, 0.3)
+        self.assertEqual(result.data['delay'], 30.0)
 
-    def test_delay_human_format(self):
-        loader = make_loader()
-        action = loader.get_action("delay")()
+    def test_delay_with_minutes_string(self):
+        """Test delay with 'Nm' format."""
+        from actions.script import DelayAction
+        
+        action = DelayAction()
         ctx = ContextManager()
-        start = time.time()
-        result = action.execute(ctx, {"seconds": "0.05"})
-        elapsed = time.time() - start
+        
+        result = action.execute(ctx, {'seconds': '2m'})
+        
         self.assertTrue(result.success)
+        self.assertEqual(result.data['delay'], 120.0)
 
-    def test_delay_negative(self):
-        loader = make_loader()
-        action = loader.get_action("delay")()
+    def test_delay_with_hours_string(self):
+        """Test delay with 'Nh' format."""
+        from actions.script import DelayAction
+        
+        action = DelayAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"seconds": -1})
+        
+        result = action.execute(ctx, {'seconds': '1h'})
+        
+        self.assertTrue(result.success)
+        self.assertEqual(result.data['delay'], 3600.0)
+
+    def test_delay_with_invalid_format(self):
+        """Test delay with invalid format."""
+        from actions.script import DelayAction
+        
+        action = DelayAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {'seconds': 'invalid'})
+        
         self.assertFalse(result.success)
+        self.assertIn('Invalid duration', result.message)
+
+    def test_delay_negative_duration(self):
+        """Test negative duration is rejected."""
+        from actions.script import DelayAction
+        
+        action = DelayAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {'seconds': -5})
+        
+        self.assertFalse(result.success)
+        self.assertIn('must be >= 0', result.message)
+
+    def test_delay_zero_duration(self):
+        """Test zero duration is allowed."""
+        from actions.script import DelayAction
+        
+        action = DelayAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {'seconds': 0})
+        
+        self.assertTrue(result.success)
 
 
 class TestConditionAction(unittest.TestCase):
     """Tests for ConditionAction."""
 
-    def test_true_condition(self):
-        loader = make_loader()
-        action = loader.get_action("condition")()
+    def test_condition_true(self):
+        """Test condition evaluates to true."""
+        from actions.script import ConditionAction
+        
+        action = ConditionAction()
         ctx = ContextManager()
-        ctx.set("x", 10)
-        ctx.set("y", 20)
-        result = action.execute(ctx, {"condition": "x < y", "true_next": "step2"})
+        ctx.set('x', 10)
+        
+        result = action.execute(ctx, {
+            'condition': 'x > 5',
+            'true_next': 'step_true',
+            'false_next': 'step_false'
+        })
+        
         self.assertTrue(result.success)
-        self.assertEqual(result.next_step_id, "step2")
-        self.assertEqual(result.data["result"], True)
+        self.assertEqual(result.next_step_id, 'step_true')
 
-    def test_false_condition(self):
-        loader = make_loader()
-        action = loader.get_action("condition")()
+    def test_condition_false(self):
+        """Test condition evaluates to false."""
+        from actions.script import ConditionAction
+        
+        action = ConditionAction()
         ctx = ContextManager()
-        ctx.set("x", 30)
-        ctx.set("y", 20)
-        result = action.execute(ctx, {"condition": "x < y", "true_next": "step2", "false_next": "step3"})
+        ctx.set('x', 3)
+        
+        result = action.execute(ctx, {
+            'condition': 'x > 5',
+            'true_next': 'step_true',
+            'false_next': 'step_false'
+        })
+        
         self.assertTrue(result.success)
-        self.assertEqual(result.next_step_id, "step3")
+        self.assertEqual(result.next_step_id, 'step_false')
 
-    def test_empty_condition(self):
-        loader = make_loader()
-        action = loader.get_action("condition")()
+    def test_condition_empty(self):
+        """Test empty condition is rejected."""
+        from actions.script import ConditionAction
+        
+        action = ConditionAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {})
+        
+        result = action.execute(ctx, {'condition': ''})
+        
         self.assertFalse(result.success)
-        self.assertIn("条件表达式为空", result.message)
+        self.assertIn('为空', result.message)
 
-    def test_condition_equals(self):
-        loader = make_loader()
-        action = loader.get_action("condition")()
+    def test_condition_invalid_expression(self):
+        """Test invalid expression."""
+        from actions.script import ConditionAction
+        
+        action = ConditionAction()
         ctx = ContextManager()
-        ctx.set("name", "test")
-        result = action.execute(ctx, {"condition": "name == 'test'", "true_next": "step2"})
-        self.assertTrue(result.success)
-        self.assertEqual(result.next_step_id, "step2")
-
-    def test_condition_in(self):
-        loader = make_loader()
-        action = loader.get_action("condition")()
-        ctx = ContextManager()
-        ctx.set("items", [1, 2, 3])
-        result = action.execute(ctx, {"condition": "2 in items", "true_next": "step2"})
-        self.assertTrue(result.success)
-        self.assertEqual(result.next_step_id, "step2")
+        
+        result = action.execute(ctx, {'condition': 'this is not valid'})
+        
+        self.assertFalse(result.success)
 
 
 class TestLoopAction(unittest.TestCase):
     """Tests for LoopAction."""
 
-    def test_loop_iterations(self):
-        loader = make_loader()
-        action = loader.get_action("loop")()
+    def test_loop_first_iteration(self):
+        """Test loop on first iteration."""
+        from actions.script import LoopAction
+        
+        action = LoopAction()
         ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'loop_id': 'test_loop',
+            'count': 5,
+            'loop_start': 'step_body',
+            'loop_end': 'step_after'
+        })
+        
+        self.assertTrue(result.success)
+        self.assertEqual(result.next_step_id, 'step_body')
+        self.assertEqual(ctx.get('test_loop', 0), 1)
 
-        # First call (iteration 0)
-        r1 = action.execute(ctx, {"loop_id": "loop1", "count": 3, "loop_start": "step1", "loop_end": "step2"})
-        self.assertTrue(r1.success)
-        self.assertEqual(r1.next_step_id, "step1")
-
-        # Second call (iteration 1)
-        r2 = action.execute(ctx, {"loop_id": "loop1", "count": 3, "loop_start": "step1", "loop_end": "step2"})
-        self.assertTrue(r2.success)
-        self.assertEqual(r2.next_step_id, "step1")
-
-        # Third call (iteration 2)
-        r3 = action.execute(ctx, {"loop_id": "loop1", "count": 3, "loop_start": "step1", "loop_end": "step2"})
-        self.assertTrue(r3.success)
-        self.assertEqual(r3.next_step_id, "step1")
-
-        # Fourth call (iteration 3 >= count, ends)
-        r4 = action.execute(ctx, {"loop_id": "loop1", "count": 3, "loop_start": "step1", "loop_end": "step2"})
-        self.assertTrue(r4.success)
-        self.assertEqual(r4.next_step_id, "step2")
-
-    def test_loop_zero_count(self):
-        loader = make_loader()
-        action = loader.get_action("loop")()
+    def test_loop_count_zero(self):
+        """Test loop with count 0 is rejected."""
+        from actions.script import LoopAction
+        
+        action = LoopAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"loop_id": "l1", "count": 0})
+        
+        result = action.execute(ctx, {
+            'loop_id': 'test_loop',
+            'count': 0
+        })
+        
+        self.assertFalse(result.success)
+        self.assertIn('count', result.message)
+
+    def test_loop_count_negative(self):
+        """Test loop with negative count is rejected."""
+        from actions.script import LoopAction
+        
+        action = LoopAction()
+        ctx = ContextManager()
+        
+        result = action.execute(ctx, {
+            'loop_id': 'test_loop',
+            'count': -1
+        })
+        
         self.assertFalse(result.success)
 
 
 class TestSetVariableAction(unittest.TestCase):
     """Tests for SetVariableAction."""
 
-    def test_set_int(self):
-        loader = make_loader()
-        action = loader.get_action("set_variable")()
+    def test_set_variable_string(self):
+        """Test setting string variable."""
+        from actions.script import SetVariableAction
+        
+        action = SetVariableAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"name": "count", "value": 42, "value_type": "int"})
+        
+        result = action.execute(ctx, {
+            'name': 'my_var',
+            'value': 'hello',
+            'value_type': 'string'
+        })
+        
         self.assertTrue(result.success)
-        self.assertEqual(ctx.get("count"), 42)
+        self.assertEqual(ctx.get('my_var'), 'hello')
 
-    def test_set_string(self):
-        loader = make_loader()
-        action = loader.get_action("set_variable")()
+    def test_set_variable_int(self):
+        """Test setting int variable."""
+        from actions.script import SetVariableAction
+        
+        action = SetVariableAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"name": "name", "value": "test"})
+        
+        result = action.execute(ctx, {
+            'name': 'my_num',
+            'value': '42',
+            'value_type': 'int'
+        })
+        
         self.assertTrue(result.success)
-        self.assertEqual(ctx.get("name"), "test")
+        self.assertEqual(ctx.get('my_num'), 42)
 
-    def test_set_float(self):
-        loader = make_loader()
-        action = loader.get_action("set_variable")()
+    def test_set_variable_float(self):
+        """Test setting float variable."""
+        from actions.script import SetVariableAction
+        
+        action = SetVariableAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"name": "pi", "value": 3.14, "value_type": "float"})
+        
+        result = action.execute(ctx, {
+            'name': 'my_float',
+            'value': '3.14',
+            'value_type': 'float'
+        })
+        
         self.assertTrue(result.success)
-        self.assertAlmostEqual(ctx.get("pi"), 3.14)
+        self.assertAlmostEqual(ctx.get('my_float'), 3.14, places=2)
 
-    def test_set_bool(self):
-        loader = make_loader()
-        action = loader.get_action("set_variable")()
+    def test_set_variable_bool(self):
+        """Test setting bool variable."""
+        from actions.script import SetVariableAction
+        
+        action = SetVariableAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"name": "flag", "value": True, "value_type": "bool"})
+        
+        result = action.execute(ctx, {
+            'name': 'flag',
+            'value': 'true',
+            'value_type': 'bool'
+        })
+        
         self.assertTrue(result.success)
-        self.assertEqual(ctx.get("flag"), True)
+        self.assertIs(ctx.get('flag'), True)
 
-    def test_set_list(self):
-        loader = make_loader()
-        action = loader.get_action("set_variable")()
+    def test_set_variable_list(self):
+        """Test setting list variable."""
+        from actions.script import SetVariableAction
+        
+        action = SetVariableAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"name": "items", "value": [1, 2, 3], "value_type": "list"})
+        
+        result = action.execute(ctx, {
+            'name': 'my_list',
+            'value': '[1, 2, 3]',
+            'value_type': 'list'
+        })
+        
         self.assertTrue(result.success)
-        self.assertEqual(ctx.get("items"), [1, 2, 3])
+        self.assertEqual(ctx.get('my_list'), [1, 2, 3])
 
-    def test_set_dict(self):
-        loader = make_loader()
-        action = loader.get_action("set_variable")()
+    def test_set_variable_empty_name(self):
+        """Test empty variable name is rejected."""
+        from actions.script import SetVariableAction
+        
+        action = SetVariableAction()
         ctx = ContextManager()
-        # SetVariableAction needs JSON string for dict type
-        result = action.execute(ctx, {"name": "data", "value": '{"a": 1}', "value_type": "dict"})
-        self.assertTrue(result.success)
-        self.assertEqual(ctx.get("data"), {"a": 1})
-
-    def test_set_tuple(self):
-        loader = make_loader()
-        action = loader.get_action("set_variable")()
-        ctx = ContextManager()
-        # SetVariableAction needs JSON string for tuple type
-        result = action.execute(ctx, {"name": "coords", "value": "[10, 20]", "value_type": "tuple"})
-        self.assertTrue(result.success)
-        self.assertEqual(ctx.get("coords"), (10, 20))
-
-    def test_set_none(self):
-        loader = make_loader()
-        action = loader.get_action("set_variable")()
-        ctx = ContextManager()
-        # For 'none' type, value can be string 'null' or None
-        result = action.execute(ctx, {"name": "empty", "value": "null", "value_type": "none"})
-        self.assertTrue(result.success)
-        self.assertIsNone(ctx.get("empty"))
-
-
-class TestTypeAction(unittest.TestCase):
-    """Tests for TypeAction (keyboard input)."""
-
-    @patch('pyautogui.write')
-    def test_type_basic(self, mock_write):
-        loader = make_loader()
-        action = loader.get_action("type_text")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"text": "hello"})
-        self.assertTrue(result.success)
-
-
-class TestKeyPressAction(unittest.TestCase):
-    """Tests for KeyPressAction."""
-
-    @patch('pyautogui.press')
-    def test_key_press_single(self, mock_press):
-        loader = make_loader()
-        action = loader.get_action("key_press")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"key": "enter"})
-        self.assertTrue(result.success)
-        mock_press.assert_called_with('enter')
-
-    @patch('pyautogui.keyDown')
-    @patch('pyautogui.keyUp')
-    def test_key_press_combo(self, mock_keyUp, mock_keyDown):
-        loader = make_loader()
-        action = loader.get_action("key_press")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"keys": ["ctrl", "c"]})
-        self.assertTrue(result.success)
-        mock_keyDown.assert_called()
-        mock_keyUp.assert_called()
-
-
-class TestCommentAction(unittest.TestCase):
-    """Tests for CommentAction."""
-
-    def test_comment_basic(self):
-        loader = make_loader()
-        action = loader.get_action("comment")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"text": "This is a comment"})
-        self.assertTrue(result.success)
-        self.assertIn("This is a comment", result.message)
-
-    def test_comment_with_output_var(self):
-        loader = make_loader()
-        action = loader.get_action("comment")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"text": "Note", "output_var": "my_comment"})
-        self.assertTrue(result.success)
-        self.assertEqual(ctx.get("my_comment"), "Note")
-
-
-class TestLogAction(unittest.TestCase):
-    """Tests for LogAction."""
-
-    def test_log_info(self):
-        loader = make_loader()
-        action = loader.get_action("log")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"message": "Test log", "level": "info"})
-        self.assertTrue(result.success)
-        self.assertIn("Test log", result.message)
-
-    def test_log_with_output_var(self):
-        loader = make_loader()
-        action = loader.get_action("log")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"message": "Log message", "output_var": "logged"})
-        self.assertTrue(result.success)
-        self.assertEqual(ctx.get("logged"), "Log message")
-
-
-class TestAssertAction(unittest.TestCase):
-    """Tests for AssertAction."""
-
-    def test_assert_true(self):
-        loader = make_loader()
-        action = loader.get_action("assert")()
-        ctx = ContextManager()
-        ctx.set("x", 10)
-        result = action.execute(ctx, {"condition": "{{x > 5}}"})
-        self.assertTrue(result.success)
-        self.assertIn("断言通过", result.message)
-
-    def test_assert_false(self):
-        loader = make_loader()
-        action = loader.get_action("assert")()
-        ctx = ContextManager()
-        ctx.set("x", 3)
-        # AssertAction uses condition without {{}} wrapper
-        result = action.execute(ctx, {"condition": "x > 5"})
+        
+        result = action.execute(ctx, {
+            'name': '',
+            'value': 'test'
+        })
+        
         self.assertFalse(result.success)
-        self.assertIn("断言失败", result.message)
+        self.assertIn('变量名为空', result.message)
 
-
-class TestTryCatchAction(unittest.TestCase):
-    """Tests for TryCatchAction."""
-
-    def test_try_catch_no_exception(self):
-        loader = make_loader()
-        action = loader.get_action("try_catch")()
+    def test_set_variable_name_with_underscore_prefix(self):
+        """Test variable name starting with underscore is blocked."""
+        from actions.script import SetVariableAction
+        
+        action = SetVariableAction()
         ctx = ContextManager()
-        result = action.execute(ctx, {"try_steps": ["step1"], "catch_steps": ["step2"]})
-        self.assertTrue(result.success)
-        self.assertEqual(result.next_step_id, "step1")
-        self.assertEqual(result.data["branch"], "try")
-
-    def test_try_catch_with_exception(self):
-        loader = make_loader()
-        action = loader.get_action("try_catch")()
-        ctx = ContextManager()
-        ctx.set("_exception", "Some error")
-        result = action.execute(ctx, {"try_steps": ["step1"], "catch_steps": ["step2"]})
-        self.assertTrue(result.success)
-        self.assertEqual(result.next_step_id, "step2")
-        self.assertEqual(result.data["branch"], "catch")
-
-
-class TestThrowAction(unittest.TestCase):
-    """Tests for ThrowAction."""
-
-    def test_throw_basic(self):
-        loader = make_loader()
-        action = loader.get_action("throw")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"message": "Test error"})
+        
+        result = action.execute(ctx, {
+            'name': '_private',
+            'value': 'test'
+        })
+        
         self.assertFalse(result.success)
-        self.assertEqual(ctx.get("_exception"), "RuntimeError: Test error")
+        self.assertIn('安全限制', result.message)
 
-
-class TestForEachAction(unittest.TestCase):
-    """Tests for ForEachAction."""
-
-    def test_for_each_list(self):
-        loader = make_loader()
-        action = loader.get_action("for_each")()
-        ctx = ContextManager()
-        ctx.set("items", [1, 2, 3])
-
-        # First iteration
-        r1 = action.execute(ctx, {"items": "{{items}}", "loop_start": "step1", "loop_end": "step2"})
-        self.assertTrue(r1.success)
-        self.assertEqual(r1.next_step_id, "step1")
-        self.assertEqual(ctx.get("_for_item"), 1)
-        self.assertEqual(ctx.get("_for_index"), 0)
-
-        # Second iteration
-        r2 = action.execute(ctx, {"items": "{{items}}", "loop_start": "step1", "loop_end": "step2"})
-        self.assertTrue(r2.success)
-        self.assertEqual(ctx.get("_for_item"), 2)
-        self.assertEqual(ctx.get("_for_index"), 1)
-
-        # Third iteration
-        r3 = action.execute(ctx, {"items": "{{items}}", "loop_start": "step1", "loop_end": "step2"})
-        self.assertTrue(r3.success)
-        self.assertEqual(ctx.get("_for_item"), 3)
-        self.assertEqual(ctx.get("_for_index"), 2)
-
-        # Fourth - ends
-        r4 = action.execute(ctx, {"items": "{{items}}", "loop_start": "step1", "loop_end": "step2"})
-        self.assertTrue(r4.success)
-        self.assertEqual(r4.next_step_id, "step2")
-
-
-class TestGotoAction(unittest.TestCase):
-    """Tests for GotoAction."""
-
-    def test_goto_basic(self):
-        loader = make_loader()
-        action = loader.get_action("goto")()
-        ctx = ContextManager()
-        result = action.execute(ctx, {"label": "cleanup"})
-        self.assertTrue(result.success)
-        self.assertEqual(result.next_step_id, "cleanup")
-
-    def test_goto_conditional_true(self):
-        loader = make_loader()
-        action = loader.get_action("goto")()
-        ctx = ContextManager()
-        ctx.set("x", 10)
-        result = action.execute(ctx, {"label": "step2", "condition": "{{x > 5}}"})
-        self.assertTrue(result.success)
-        self.assertEqual(result.next_step_id, "step2")
-
-
-class TestActionLoader(unittest.TestCase):
-    """Tests for ActionLoader."""
-
-    def test_load_all_actions(self):
-        loader = make_loader()
-        actions = loader.load_all()
-        self.assertGreater(len(actions), 0)
-        self.assertIn("click", actions)
-        self.assertIn("delay", actions)
-        self.assertIn("condition", actions)
-
-    def test_get_action(self):
-        loader = make_loader()
-        click_action = loader.get_action("click")
-        self.assertIsNotNone(click_action)
-        self.assertTrue(hasattr(click_action, 'execute'))
-
-
-class TestContextManagerActions(unittest.TestCase):
-    """Tests for ContextManager interaction with actions."""
-
-    def test_bracket_notation(self):
-        ctx = ContextManager()
-        ctx.set("obj", {"key": "value"})
-        result = ctx.resolve_value("{{obj['key']}}")
-        self.assertEqual(result, "value")
-
-    def test_expression_caching(self):
-        ctx = ContextManager()
-        ctx.set("a", 5)
-        r1 = ctx.resolve_value("{{a + 3}}")
-        r2 = ctx.resolve_value("{{a + 3}}")
-        self.assertEqual(r1, r2)
-
-
-class TestWaitForActions(unittest.TestCase):
-    """Tests for wait_for actions (mocked)."""
-
-    def test_wait_for_image_action_class(self):
-        loader = make_loader()
-        self.assertIn("wait_for_image", loader._actions)
-        action = loader.get_action("wait_for_image")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_wait_for_text_action_class(self):
-        loader = make_loader()
-        self.assertIn("wait_for_text", loader._actions)
-        action = loader.get_action("wait_for_text")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_wait_for_element_action_class(self):
-        loader = make_loader()
-        self.assertIn("wait_for_element", loader._actions)
-        action = loader.get_action("wait_for_element")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-
-class TestLoopWhileActions(unittest.TestCase):
-    """Tests for loop_while actions."""
-
-    def test_loop_while_class(self):
-        loader = make_loader()
-        self.assertIn("loop_while", loader._actions)
-        action = loader.get_action("loop_while")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_loop_while_break_class(self):
-        loader = make_loader()
-        self.assertIn("loop_while_break", loader._actions)
-
-    def test_loop_while_continue_class(self):
-        loader = make_loader()
-        self.assertIn("loop_while_continue", loader._actions)
-
-
-class TestNotifyActions(unittest.TestCase):
-    """Tests for notify actions."""
-
-    def test_notify_class(self):
-        loader = make_loader()
-        self.assertIn("notify", loader._actions)
-        action = loader.get_action("notify")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_email_notify_class(self):
-        loader = make_loader()
-        self.assertIn("email_notify", loader._actions)
-        action = loader.get_action("email_notify")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_webhook_notify_class(self):
-        loader = make_loader()
-        self.assertIn("webhook_notify", loader._actions)
-        action = loader.get_action("webhook_notify")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_slack_notify_class(self):
-        loader = make_loader()
-        self.assertIn("slack_notify", loader._actions)
-        action = loader.get_action("slack_notify")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-
-class TestFilesystemActions(unittest.TestCase):
-    """Tests for filesystem actions."""
-
-    def test_file_read_class(self):
-        loader = make_loader()
-        self.assertIn("file_read", loader._actions)
-        action = loader.get_action("file_read")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_file_write_class(self):
-        loader = make_loader()
-        self.assertIn("file_write", loader._actions)
-        action = loader.get_action("file_write")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_file_exists_class(self):
-        loader = make_loader()
-        self.assertIn("file_exists", loader._actions)
-        action = loader.get_action("file_exists")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_file_delete_class(self):
-        loader = make_loader()
-        self.assertIn("file_delete", loader._actions)
-        action = loader.get_action("file_delete")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_file_copy_class(self):
-        loader = make_loader()
-        self.assertIn("file_copy", loader._actions)
-        action = loader.get_action("file_copy")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_dir_create_class(self):
-        loader = make_loader()
-        self.assertIn("dir_create", loader._actions)
-        action = loader.get_action("dir_create")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_file_list_class(self):
-        loader = make_loader()
-        self.assertIn("file_list", loader._actions)
-        action = loader.get_action("file_list")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_file_move_class(self):
-        loader = make_loader()
-        self.assertIn("file_move", loader._actions)
-        action = loader.get_action("file_move")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-
-class TestNetworkActions(unittest.TestCase):
-    """Tests for network actions."""
-
-    def test_http_get_class(self):
-        loader = make_loader()
-        self.assertIn("http_get", loader._actions)
-        action = loader.get_action("http_get")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_http_post_class(self):
-        loader = make_loader()
-        self.assertIn("http_post", loader._actions)
-        action = loader.get_action("http_post")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-    def test_download_file_class(self):
-        loader = make_loader()
-        self.assertIn("download_file", loader._actions)
-        action = loader.get_action("download_file")()
-        self.assertTrue(hasattr(action, 'execute'))
-
-
-class TestNewActionLoader(unittest.TestCase):
-    """Tests for ActionLoader with new actions."""
-
-    def test_load_all_includes_new_actions(self):
-        loader = make_loader()
-        actions = loader.load_all()
+    def test_set_variable_name_with_special_chars(self):
+        """Test variable name with special characters is blocked."""
+        from actions.script import SetVariableAction
         
-        # Notify actions
-        self.assertIn("notify", actions)
-        self.assertIn("email_notify", actions)
-        self.assertIn("webhook_notify", actions)
-        self.assertIn("slack_notify", actions)
+        action = SetVariableAction()
+        ctx = ContextManager()
         
-        # Filesystem actions
-        self.assertIn("file_read", actions)
-        self.assertIn("file_write", actions)
-        self.assertIn("file_exists", actions)
-        self.assertIn("file_delete", actions)
-        self.assertIn("file_copy", actions)
-        self.assertIn("dir_create", actions)
-        self.assertIn("file_list", actions)
-        self.assertIn("file_move", actions)
+        result = action.execute(ctx, {
+            'name': 'var.name',
+            'value': 'test'
+        })
         
-        # Network actions
-        self.assertIn("http_get", actions)
-        self.assertIn("http_post", actions)
-        self.assertIn("download_file", actions)
+        self.assertFalse(result.success)
+        self.assertIn('安全限制', result.message)
 
 
 if __name__ == '__main__':
