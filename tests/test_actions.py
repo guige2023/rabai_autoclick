@@ -8,7 +8,7 @@ import sys
 import os
 import time
 import unittest
-from unittest.mock import Mock, patch, MagicMock, mock_open, patch.object
+from unittest.mock import Mock, patch, MagicMock, mock_open
 from pathlib import Path
 from io import StringIO
 
