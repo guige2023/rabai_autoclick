@@ -1,271 +1,301 @@
+"""Event bus action for publish-subscribe messaging.
+
+Provides event publishing, subscribing, and filtering
+with support for wildcards and patterns.
 """
-Event Bus and Pub-Sub Messaging Module.
 
-Provides asynchronous event-driven communication between
-automation components with filtering, routing, and delivery guarantees.
-
-Author: AutoGen
-"""
-from __future__ import annotations
-
-import asyncio
-import json
 import logging
+import re
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum, auto
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
+from enum import Enum
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class EventPriority(Enum):
-    LOW = auto()
-    NORMAL = auto()
-    HIGH = auto()
-    CRITICAL = auto()
-
-
-@dataclass(frozen=True)
+@dataclass
 class Event:
     event_type: str
-    topic: str
-    data: Tuple[Tuple[str, Any], ...] = field(default_factory=tuple)
-    priority: EventPriority = EventPriority.NORMAL
+    payload: dict[str, Any]
     timestamp: float = field(default_factory=time.time)
-    event_id: str = ""
-    source: str = ""
-    reply_to: Optional[str] = None
-
-    def data_dict(self) -> Dict[str, Any]:
-        return dict(self.data)
-
-    def __hash__(self) -> int:
-        return hash(self.event_id or f"{self.topic}:{self.timestamp}")
+    source: str = "unknown"
+    correlation_id: Optional[str] = None
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class Subscription:
     subscriber_id: str
-    topic_pattern: str
-    handler: Callable
-    filter_func: Optional[Callable[[Event], bool]] = None
-    priority: EventPriority = EventPriority.NORMAL
-    oneshot: bool = False
-    metadata: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
+    event_pattern: str
+    handler: Callable[[Event], None]
+    created_at: float = field(default_factory=time.time)
+    is_active: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class DeliveryResult:
-    event_id: str
-    subscriber_id: str
-    delivered: bool
-    latency_ms: float = 0.0
-    error: Optional[str] = None
+class EventBusAction:
+    """Publish-subscribe event bus with pattern matching.
 
-
-class TopicMatcher:
-    """Matches events to subscriptions using glob patterns."""
-
-    @classmethod
-    def matches(cls, pattern: str, topic: str) -> bool:
-        if pattern == "*" or pattern == topic:
-            return True
-        if "*" in pattern:
-            import fnmatch
-            return fnmatch.fnmatch(topic, pattern)
-        if "#" in pattern:
-            parts = pattern.split(".")
-            topic_parts = topic.split(".")
-            return cls._match_hierarchy(parts, topic_parts)
-        return False
-
-    @classmethod
-    def _match_hierarchy(cls, pattern_parts: List[str], topic_parts: List[str]) -> bool:
-        if not pattern_parts:
-            return not topic_parts
-        if not topic_parts:
-            return pattern_parts == ["#"]
-        p, *rest_p = pattern_parts
-        t, *rest_t = topic_parts
-        if p == "#":
-            return True
-        if p == t or p == "*":
-            return cls._match_hierarchy(rest_p, rest_t)
-        return False
-
-
-class EventBus:
-    """
-    Asynchronous event bus for publish-subscribe messaging.
+    Args:
+        enable_wildcards: Enable wildcard pattern matching.
+        max_queue_size: Maximum queue size per subscriber.
+        enable_dead_letter: Enable dead letter queue for failed events.
     """
 
-    def __init__(self, max_queue_size: int = 10000):
-        self.max_queue_size = max_queue_size
-        self._subscriptions: Dict[str, List[Subscription]] = defaultdict(list)
-        self._event_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=max_queue_size)
-        self._subscriber_counter: int = 0
-        self._running: bool = False
-        self._processor_task: Optional[asyncio.Task] = None
-        self._delivery_results: Dict[str, List[DeliveryResult]] = {}
-        self._handlers: Dict[str, Callable] = {}
+    def __init__(
+        self,
+        enable_wildcards: bool = True,
+        max_queue_size: int = 1000,
+        enable_dead_letter: bool = True,
+    ) -> None:
+        self._subscriptions: dict[str, list[Subscription]] = {}
+        self._enable_wildcards = enable_wildcards
+        self._max_queue_size = max_queue_size
+        self._enable_dead_letter = enable_dead_letter
+        self._dead_letter_queue: list[Event] = []
+        self._event_history: list[Event] = []
+        self._max_history = 10000
+        self._compiled_patterns: dict[str, re.Pattern] = {}
 
     def subscribe(
         self,
-        topic_pattern: str,
-        handler: Callable[[Event], Any],
-        filter_func: Optional[Callable[[Event], bool]] = None,
-        oneshot: bool = False,
-    ) -> str:
-        self._subscriber_counter += 1
-        sub_id = f"sub_{self._subscriber_counter}"
-        sub = Subscription(
-            subscriber_id=sub_id,
-            topic_pattern=topic_pattern,
-            handler=handler,
-            filter_func=filter_func,
-            oneshot=oneshot,
-        )
-        self._subscriptions[topic_pattern].append(sub)
-        logger.info("Subscribed %s to topic '%s'", sub_id, topic_pattern)
-        return sub_id
+        subscriber_id: str,
+        event_pattern: str,
+        handler: Callable[[Event], None],
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Subscribe to events matching a pattern.
 
-    def unsubscribe(self, subscriber_id: str) -> bool:
-        for pattern, subs in self._subscriptions.items():
-            for i, sub in enumerate(subs):
-                if sub.subscriber_id == subscriber_id:
-                    subs.pop(i)
-                    logger.info("Unsubscribed %s from '%s'", subscriber_id, pattern)
-                    return True
+        Args:
+            subscriber_id: Unique subscriber ID.
+            event_pattern: Event type pattern (supports * wildcards).
+            handler: Event handler function.
+            metadata: Optional subscriber metadata.
+
+        Returns:
+            True if subscribed successfully.
+        """
+        subscription = Subscription(
+            subscriber_id=subscriber_id,
+            event_pattern=event_pattern,
+            handler=handler,
+            metadata=metadata or {},
+        )
+
+        if event_pattern not in self._subscriptions:
+            self._subscriptions[event_pattern] = []
+        self._subscriptions[event_pattern].append(subscription)
+
+        logger.debug(f"Subscribed {subscriber_id} to pattern: {event_pattern}")
+        return True
+
+    def unsubscribe(self, subscriber_id: str, event_pattern: str) -> bool:
+        """Unsubscribe from an event pattern.
+
+        Args:
+            subscriber_id: Subscriber ID.
+            event_pattern: Event pattern.
+
+        Returns:
+            True if unsubscribed.
+        """
+        subscriptions = self._subscriptions.get(event_pattern, [])
+        for sub in subscriptions:
+            if sub.subscriber_id == subscriber_id:
+                sub.is_active = False
+                return True
         return False
 
     def publish(
         self,
-        topic: str,
-        data: Optional[Dict[str, Any]] = None,
-        priority: EventPriority = EventPriority.NORMAL,
-        source: str = "",
-    ) -> str:
-        import uuid
-        event_id = str(uuid.uuid4())[:8]
+        event_type: str,
+        payload: dict[str, Any],
+        source: str = "unknown",
+        correlation_id: Optional[str] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> int:
+        """Publish an event to all matching subscribers.
+
+        Args:
+            event_type: Type of event.
+            payload: Event payload.
+            source: Event source.
+            correlation_id: Optional correlation ID.
+            headers: Optional event headers.
+
+        Returns:
+            Number of subscribers that received the event.
+        """
         event = Event(
-            event_type="message",
-            topic=topic,
-            data=tuple((k, v) for k, v in (data or {}).items()),
-            priority=priority,
-            event_id=event_id,
+            event_type=event_type,
+            payload=payload,
+            timestamp=time.time(),
             source=source,
+            correlation_id=correlation_id,
+            headers=headers or {},
         )
-        priority_val = self._priority_to_int(priority)
-        self._event_queue.put_nowait((priority_val, event))
-        logger.debug("Published event %s to topic '%s'", event_id, topic)
-        return event_id
 
-    def _priority_to_int(self, priority: EventPriority) -> int:
-        return {
-            EventPriority.LOW: 3,
-            EventPriority.NORMAL: 2,
-            EventPriority.HIGH: 1,
-            EventPriority.CRITICAL: 0,
-        }.get(priority, 2)
+        self._event_history.append(event)
+        if len(self._event_history) > self._max_history:
+            self._event_history.pop(0)
 
-    async def start(self) -> None:
-        self._running = True
-        self._processor_task = asyncio.create_task(self._process_events())
-        logger.info("Event bus started")
+        delivered_count = 0
+        matched_patterns = self._get_matching_patterns(event_type)
 
-    async def stop(self) -> None:
-        self._running = False
-        if self._processor_task:
-            self._processor_task.cancel()
-            try:
-                await self._processor_task
-            except asyncio.CancelledError:
-                pass
-        logger.info("Event bus stopped")
+        for pattern in matched_patterns:
+            subscriptions = self._subscriptions.get(pattern, [])
+            for subscription in subscriptions:
+                if not subscription.is_active:
+                    continue
 
-    async def _process_events(self) -> None:
-        while self._running:
-            try:
-                _, event = await asyncio.wait_for(
-                    self._event_queue.get(), timeout=1.0
-                )
-                await self._dispatch_event(event)
-            except asyncio.TimeoutError:
-                continue
-            except Exception as exc:
-                logger.error("Event processing error: %s", exc)
+                try:
+                    subscription.handler(event)
+                    delivered_count += 1
+                except Exception as e:
+                    logger.error(f"Handler error for {subscription.subscriber_id}: {e}")
+                    if self._enable_dead_letter:
+                        self._dead_letter_queue.append(event)
 
-    async def _dispatch_event(self, event: Event) -> None:
-        results: List[DeliveryResult] = []
-        for pattern, subs in self._subscriptions.items():
-            if TopicMatcher.matches(pattern, event.topic):
-                for sub in list(subs):
-                    if sub.filter_func and not sub.filter_func(event):
-                        continue
-                    start = time.time()
-                    try:
-                        if asyncio.iscoroutinefunction(sub.handler):
-                            await sub.handler(event)
-                        else:
-                            sub.handler(event)
-                        latency = (time.time() - start) * 1000
-                        results.append(DeliveryResult(
-                            event_id=event.event_id,
-                            subscriber_id=sub.subscriber_id,
-                            delivered=True,
-                            latency_ms=latency,
-                        ))
-                    except Exception as exc:
-                        results.append(DeliveryResult(
-                            event_id=event.event_id,
-                            subscriber_id=sub.subscriber_id,
-                            delivered=False,
-                            latency_ms=(time.time() - start) * 1000,
-                            error=str(exc),
-                        ))
-                    if sub.oneshot:
-                        subs.remove(sub)
+        logger.debug(f"Published {event_type} to {delivered_count} subscribers")
+        return delivered_count
 
-        self._delivery_results[event.event_id] = results
+    def _get_matching_patterns(self, event_type: str) -> list[str]:
+        """Get all patterns that match an event type.
 
-    def get_delivery_results(self, event_id: str) -> List[DeliveryResult]:
-        return self._delivery_results.get(event_id, [])
+        Args:
+            event_type: Event type.
 
-    def clear_results(self, event_id: Optional[str] = None) -> None:
-        if event_id:
-            self._delivery_results.pop(event_id, None)
-        else:
-            self._delivery_results.clear()
+        Returns:
+            List of matching patterns.
+        """
+        if not self._enable_wildcards:
+            if event_type in self._subscriptions:
+                return [event_type]
+            return []
 
-    def register_handler(
-        self, event_type: str, handler: Callable[[Event], Any]
-    ) -> None:
-        self._handlers[event_type] = handler
+        matches = []
+        for pattern in self._subscriptions.keys():
+            if self._matches_pattern(event_type, pattern):
+                matches.append(pattern)
+        return matches
 
-    async def request_reply(
-        self,
-        topic: str,
-        data: Optional[Dict[str, Any]] = None,
-        timeout: float = 5.0,
-    ) -> Optional[Event]:
-        import uuid
-        reply_id = str(uuid.uuid4())[:8]
-        reply_received = asyncio.Event()
+    def _matches_pattern(self, event_type: str, pattern: str) -> bool:
+        """Check if event type matches a pattern.
 
-        async def reply_handler(event: Event) -> None:
-            self._handlers["_reply_handler"] = None
-            reply_received.set()
+        Args:
+            event_type: Event type.
+            pattern: Pattern with optional wildcards.
 
-        reply_topic = f"_reply.{reply_id}"
-        self.subscribe(reply_topic, reply_handler, oneshot=True)
-        event_data = dict(data or {})
-        event_data["_reply_to"] = reply_topic
-        self.publish(topic, event_data, source=reply_id)
+        Returns:
+            True if matches.
+        """
+        if not self._enable_wildcards:
+            return event_type == pattern
+
+        regex_pattern = pattern.replace("*", ".*").replace(".", "\\.")
+        if regex_pattern not in self._compiled_patterns:
+            self._compiled_patterns[regex_pattern] = re.compile(f"^{regex_pattern}$")
+
+        return bool(self._compiled_patterns[regex_pattern].match(event_type))
+
+    def get_subscriptions(self, subscriber_id: Optional[str] = None) -> list[Subscription]:
+        """Get subscriptions.
+
+        Args:
+            subscriber_id: Optional filter by subscriber ID.
+
+        Returns:
+            List of subscriptions.
+        """
+        all_subs = []
+        for subs in self._subscriptions.values():
+            all_subs.extend(subs)
+
+        if subscriber_id:
+            all_subs = [s for s in all_subs if s.subscriber_id == subscriber_id]
+
+        return all_subs
+
+    def get_dead_letter_queue(self, limit: int = 100) -> list[Event]:
+        """Get dead letter queue events.
+
+        Args:
+            limit: Maximum events to return.
+
+        Returns:
+            List of dead letter events.
+        """
+        return self._dead_letter_queue[-limit:][::-1]
+
+    def retry_dead_letter(self, event: Event) -> bool:
+        """Retry a dead letter event.
+
+        Args:
+            event: Event to retry.
+
+        Returns:
+            True if retried successfully.
+        """
         try:
-            await asyncio.wait_for(reply_received.wait(), timeout=timeout)
-            return None
-        except asyncio.TimeoutError:
-            return None
+            self._dead_letter_queue.remove(event)
+            self.publish(
+                event.event_type,
+                event.payload,
+                event.source,
+                event.correlation_id,
+                event.headers,
+            )
+            return True
+        except ValueError:
+            return False
+
+    def clear_dead_letter_queue(self) -> int:
+        """Clear the dead letter queue.
+
+        Returns:
+            Number of events cleared.
+        """
+        count = len(self._dead_letter_queue)
+        self._dead_letter_queue.clear()
+        return count
+
+    def get_event_history(
+        self,
+        event_type_filter: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[Event]:
+        """Get event history.
+
+        Args:
+            event_type_filter: Filter by event type.
+            limit: Maximum events to return.
+
+        Returns:
+            List of events (newest first).
+        """
+        events = self._event_history
+        if event_type_filter:
+            events = [e for e in events if e.event_type == event_type_filter]
+        return events[-limit:][::-1]
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get event bus statistics.
+
+        Returns:
+            Dictionary with stats.
+        """
+        total_subs = sum(len(subs) for subs in self._subscriptions.values())
+        active_subs = sum(
+            1 for subs in self._subscriptions.values()
+            for s in subs if s.is_active
+        )
+
+        return {
+            "total_patterns": len(self._subscriptions),
+            "total_subscriptions": total_subs,
+            "active_subscriptions": active_subs,
+            "event_history_size": len(self._event_history),
+            "dead_letter_size": len(self._dead_letter_queue),
+            "wildcards_enabled": self._enable_wildcards,
+        }
