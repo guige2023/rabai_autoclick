@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from collections import defaultdict
+from collections import defaultdict, Counter
 import logging
 
 
@@ -459,9 +459,6 @@ class SelfHealingSystem:
             if time.time() - cached["timestamp"] < 3600:
                 return cached["location"]
         return None
-
-
-from collections import Counter
 
 
 def create_self_healing_system(data_dir: str = "./data") -> SelfHealingSystem:
