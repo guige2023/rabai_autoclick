@@ -1,302 +1,167 @@
-"""Rate limit bucket action module.
+"""
+Token bucket rate limiter action.
 
-Provides token bucket and leaky bucket rate limiting algorithms
-for API throttling and request rate control.
+Provides distributed rate limiting with configurable bucket parameters.
 """
 
-from __future__ import annotations
-
+from typing import Any, Optional
 import time
 import threading
-from typing import Any, Optional
-from dataclasses import dataclass
-from enum import Enum
-import logging
-
-logger = logging.getLogger(__name__)
 
 
-class BucketType(Enum):
-    """Bucket algorithm types."""
-    TOKEN_BUCKET = "token_bucket"
-    LEAKY_BUCKET = "leaky_bucket"
+class TokenBucketRateLimiterAction:
+    """Token bucket algorithm for rate limiting."""
 
-
-@dataclass
-class BucketConfig:
-    """Rate limit bucket configuration."""
-    bucket_type: BucketType = BucketType.TOKEN_BUCKET
-    capacity: int = 100
-    refill_rate: float = 10.0
-    tokens: Optional[float] = None
-
-
-class TokenBucket:
-    """Token bucket rate limiter."""
-
-    def __init__(self, capacity: int, refill_rate: float, tokens: Optional[float] = None):
-        """Initialize token bucket.
+    def __init__(
+        self,
+        capacity: int = 100,
+        refill_rate: float = 10.0,
+        tokens: Optional[float] = None,
+    ) -> None:
+        """
+        Initialize token bucket rate limiter.
 
         Args:
-            capacity: Maximum tokens
-            refill_rate: Tokens per second
-            tokens: Initial tokens (default: capacity)
+            capacity: Maximum bucket capacity (tokens)
+            refill_rate: Tokens added per second
+            tokens: Initial token count (defaults to capacity)
         """
         self.capacity = capacity
         self.refill_rate = refill_rate
-        self.tokens = tokens if tokens is not None else float(capacity)
-        self.last_refill = time.time()
+        self._tokens = tokens if tokens is not None else float(capacity)
+        self._last_refill = time.time()
         self._lock = threading.Lock()
 
-    def consume(self, tokens: int = 1) -> bool:
-        """Try to consume tokens.
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
+        """
+        Check if request is allowed under rate limit.
 
         Args:
-            tokens: Number of tokens to consume
+            params: Dictionary containing:
+                - tokens_required: Number of tokens to consume (default 1)
+                - client_id: Optional client identifier for tracking
 
         Returns:
-            True if tokens consumed, False if insufficient
+            Dictionary with:
+                - allowed: Boolean indicating if request is permitted
+                - remaining_tokens: Tokens left in bucket
+                - retry_after: Seconds to wait if not allowed
         """
+        tokens_required = params.get("tokens_required", 1)
+        client_id = params.get("client_id", "default")
+
+        allowed, remaining, retry_after = self._consume(tokens_required)
+
+        return {
+            "allowed": allowed,
+            "remaining_tokens": remaining,
+            "retry_after": retry_after,
+            "client_id": client_id,
+            "timestamp": time.time(),
+        }
+
+    def _consume(self, tokens: float) -> tuple[bool, float, float]:
+        """Consume tokens from bucket."""
         with self._lock:
             self._refill()
 
-            if self.tokens >= tokens:
-                self.tokens -= tokens
-                return True
-            return False
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                return True, self._tokens, 0.0
+            else:
+                deficit = tokens - self._tokens
+                retry_after = deficit / self.refill_rate
+                return False, self._tokens, retry_after
 
     def _refill(self) -> None:
         """Refill tokens based on elapsed time."""
         now = time.time()
-        elapsed = now - self.last_refill
+        elapsed = now - self._last_refill
         new_tokens = elapsed * self.refill_rate
-        self.tokens = min(self.capacity, self.tokens + new_tokens)
-        self.last_refill = now
+        self._tokens = min(self.capacity, self._tokens + new_tokens)
+        self._last_refill = now
 
-    def get_available_tokens(self) -> float:
-        """Get current available tokens."""
+    def get_bucket_status(self) -> dict[str, Any]:
+        """Get current bucket status."""
         with self._lock:
             self._refill()
-            return self.tokens
-
-
-class LeakyBucket:
-    """Leaky bucket rate limiter."""
-
-    def __init__(self, capacity: int, leak_rate: float):
-        """Initialize leaky bucket.
-
-        Args:
-            capacity: Maximum bucket size
-            leak_rate: Units leaked per second
-        """
-        self.capacity = capacity
-        self.leak_rate = leak_rate
-        self.water_level = 0.0
-        self.last_leak = time.time()
-        self._lock = threading.Lock()
-
-    def add(self, units: int = 1) -> bool:
-        """Try to add units to bucket.
-
-        Args:
-            units: Number of units to add
-
-        Returns:
-            True if added, False if bucket would overflow
-        """
-        with self._lock:
-            self._leak()
-
-            if self.water_level + units <= self.capacity:
-                self.water_level += units
-                return True
-            return False
-
-    def _leak(self) -> None:
-        """Leak water based on elapsed time."""
-        now = time.time()
-        elapsed = now - self.last_leak
-        leaked = elapsed * self.leak_rate
-        self.water_level = max(0, self.water_level - leaked)
-        self.last_leak = now
-
-    def get_water_level(self) -> float:
-        """Get current water level."""
-        with self._lock:
-            self._leak()
-            return self.water_level
-
-
-class RateLimiter:
-    """Multi-bucket rate limiter."""
-
-    def __init__(self, config: BucketConfig):
-        """Initialize rate limiter.
-
-        Args:
-            config: Bucket configuration
-        """
-        self.config = config
-        if config.bucket_type == BucketType.TOKEN_BUCKET:
-            self._bucket = TokenBucket(
-                capacity=config.capacity,
-                refill_rate=config.refill_rate,
-                tokens=config.tokens,
-            )
-        else:
-            self._bucket = LeakyBucket(
-                capacity=config.capacity,
-                leak_rate=config.refill_rate,
-            )
-
-    def allow(self, tokens: int = 1) -> bool:
-        """Check if request is allowed.
-
-        Args:
-            tokens: Number of tokens/units
-
-        Returns:
-            True if allowed
-        """
-        if self.config.bucket_type == BucketType.TOKEN_BUCKET:
-            return self._bucket.consume(tokens)
-        else:
-            return self._bucket.add(tokens)
-
-    def get_limit(self) -> dict[str, Any]:
-        """Get rate limit information.
-
-        Returns:
-            Dictionary with limit info
-        """
-        if self.config.bucket_type == BucketType.TOKEN_BUCKET:
             return {
-                "type": "token_bucket",
-                "capacity": self.config.capacity,
-                "refill_rate": self.config.refill_rate,
-                "available": self._bucket.get_available_tokens(),
-            }
-        else:
-            return {
-                "type": "leaky_bucket",
-                "capacity": self.config.capacity,
-                "leak_rate": self.config.refill_rate,
-                "water_level": self._bucket.get_water_level(),
+                "capacity": self.capacity,
+                "tokens": self._tokens,
+                "refill_rate": self.refill_rate,
+                "last_refill": self._last_refill,
             }
 
+    def reset(self) -> None:
+        """Reset bucket to full capacity."""
+        with self._lock:
+            self._tokens = float(self.capacity)
+            self._last_refill = time.time()
 
-class SlidingWindowLimiter:
-    """Sliding window rate limiter."""
 
-    def __init__(self, max_requests: int, window_seconds: float):
-        """Initialize sliding window limiter.
+class SlidingWindowRateLimiterAction:
+    """Sliding window rate limiter for smoother rate limiting."""
+
+    def __init__(self, max_requests: int = 100, window_size: float = 60.0) -> None:
+        """
+        Initialize sliding window rate limiter.
 
         Args:
-            max_requests: Maximum requests in window
-            window_seconds: Window size in seconds
+            max_requests: Maximum requests allowed in window
+            window_size: Window size in seconds
         """
         self.max_requests = max_requests
-        self.window_seconds = window_seconds
+        self.window_size = window_size
         self._requests: list[float] = []
         self._lock = threading.Lock()
 
-    def allow(self) -> bool:
-        """Check if request is allowed.
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
+        """
+        Check if request is allowed.
+
+        Args:
+            params: Dictionary containing:
+                - client_id: Client identifier
 
         Returns:
-            True if allowed
+            Dictionary with allowed status and remaining requests
         """
-        with self._lock:
-            now = time.time()
-            cutoff = now - self.window_seconds
+        client_id = params.get("client_id", "default")
+        now = time.time()
 
-            self._requests = [t for t in self._requests if t > cutoff]
+        allowed, remaining, reset_time = self._check_request(now)
+
+        return {
+            "allowed": allowed,
+            "remaining": remaining,
+            "reset_after": reset_time - now,
+            "client_id": client_id,
+        }
+
+    def _check_request(self, timestamp: float) -> tuple[bool, int, float]:
+        """Check if request is allowed."""
+        with self._lock:
+            cutoff = timestamp - self.window_size
+            self._requests = [r for r in self._requests if r > cutoff]
 
             if len(self._requests) < self.max_requests:
-                self._requests.append(now)
-                return True
-            return False
+                self._requests.append(timestamp)
+                reset_time = timestamp + self.window_size
+                return True, self.max_requests - len(self._requests), reset_time
+            else:
+                oldest = min(self._requests)
+                reset_time = oldest + self.window_size
+                return False, 0, reset_time
 
-    def get_remaining(self) -> int:
-        """Get remaining requests in window."""
+    def get_status(self) -> dict[str, Any]:
+        """Get current rate limiter status."""
         with self._lock:
             now = time.time()
-            cutoff = now - self.window_seconds
-            self._requests = [t for t in self._requests if t > cutoff]
-            return max(0, self.max_requests - len(self._requests))
-
-
-class MultiLimiter:
-    """Rate limiter with multiple buckets per client."""
-
-    def __init__(self, limiters: dict[str, RateLimiter]):
-        """Initialize multi-limiter.
-
-        Args:
-            limiters: Dict of client_id -> RateLimiter
-        """
-        self.limiters = limiters
-        self._lock = threading.Lock()
-
-    def allow(self, client_id: str, tokens: int = 1) -> bool:
-        """Check if client request is allowed.
-
-        Args:
-            client_id: Client identifier
-            tokens: Number of tokens
-
-        Returns:
-            True if allowed
-        """
-        limiter = self.limiters.get(client_id)
-        if not limiter:
-            return True
-        return limiter.allow(tokens)
-
-    def add_limiter(self, client_id: str, limiter: RateLimiter) -> None:
-        """Add limiter for client."""
-        with self._lock:
-            self.limiters[client_id] = limiter
-
-    def remove_limiter(self, client_id: str) -> None:
-        """Remove limiter for client."""
-        with self._lock:
-            self.limiters.pop(client_id, None)
-
-
-def create_token_bucket_limiter(
-    capacity: int = 100,
-    refill_rate: float = 10.0,
-) -> RateLimiter:
-    """Create token bucket rate limiter.
-
-    Args:
-        capacity: Maximum tokens
-        refill_rate: Tokens per second
-
-    Returns:
-        RateLimiter instance
-    """
-    config = BucketConfig(
-        bucket_type=BucketType.TOKEN_BUCKET,
-        capacity=capacity,
-        refill_rate=refill_rate,
-    )
-    return RateLimiter(config)
-
-
-def create_sliding_window_limiter(
-    max_requests: int,
-    window_seconds: float,
-) -> SlidingWindowLimiter:
-    """Create sliding window rate limiter.
-
-    Args:
-        max_requests: Maximum requests in window
-        window_seconds: Window size in seconds
-
-    Returns:
-        SlidingWindowLimiter instance
-    """
-    return SlidingWindowLimiter(max_requests, window_seconds)
+            cutoff = now - self.window_size
+            active_requests = [r for r in self._requests if r > cutoff]
+            return {
+                "max_requests": self.max_requests,
+                "window_size": self.window_size,
+                "active_requests": len(active_requests),
+                "remaining": self.max_requests - len(active_requests),
+            }
