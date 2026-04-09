@@ -1,390 +1,333 @@
-"""API Response Cache Action Module.
+"""
+API Response Cache Action Module.
 
-Provides intelligent caching layer for API responses with
-TTL, stale-while-revalidate, and invalidation strategies.
-
-Author: RabAi Team
+Caching layer for API responses with TTL, eviction policies, and compression.
 """
 
-from __future__ import annotations
-
+import gzip
 import hashlib
+import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
-from enum import Enum
-
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
-
-
-class CacheStrategy(Enum):
-    """Cache invalidation strategies."""
-    TTL = "ttl"
-    LRU = "lru"
-    LFU = "lfu"
-    FIFO = "fifo"
-    STALE_WHILE_REVALIDATE = "stale_while_revalidate"
-
-
-class Freshness(Enum):
-    """Cache entry freshness status."""
-    FRESH = "fresh"
-    STALE = "stale"
-    EXPIRED = "expired"
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 
 @dataclass
 class CacheEntry:
-    """Cached API response entry."""
+    """A single cache entry with metadata."""
+
     key: str
-    value: Any
+    value: bytes
     created_at: float
     last_accessed: float
-    ttl_seconds: int
-    access_count: int = 0
-    size_bytes: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    etag: Optional[str] = None
+    ttl: float
+    hit_count: int = 0
+    compressed: bool = False
 
-    def is_fresh(self) -> bool:
-        """Check if entry is still fresh."""
-        age = time.time() - self.created_at
-        return age < self.ttl_seconds
+    def is_expired(self) -> bool:
+        """Check if entry has exceeded its TTL."""
+        if self.ttl <= 0:
+            return False
+        return time.time() - self.created_at > self.ttl
 
-    def is_stale(self) -> bool:
-        """Check if entry is stale but not expired."""
-        age = time.time() - self.created_at
-        return self.ttl_seconds <= age < self.ttl_seconds * 2
-
-    def get_freshness(self) -> Freshness:
-        """Get freshness status."""
-        age = time.time() - self.created_at
-        if age < self.ttl_seconds:
-            return Freshness.FRESH
-        elif age < self.ttl_seconds * 2:
-            return Freshness.STALE
-        else:
-            return Freshness.EXPIRED
+    def access(self) -> bytes:
+        """Record an access and return the value."""
+        self.last_accessed = time.time()
+        self.hit_count += 1
+        return self.value
 
 
 @dataclass
-class CacheConfig:
-    """Cache configuration."""
-    max_size: int = 1000
-    default_ttl_seconds: int = 300
-    strategy: CacheStrategy = CacheStrategy.LRU
-    enable_stale_revalidate: bool = True
-    stale_ttl_multiplier: float = 2.0
-    compression_threshold_bytes: int = 1024
+class CacheStats:
+    """Statistics for cache performance monitoring."""
+
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+    total_bytes_saved: int = 0
+
+    @property
+    def hit_rate(self) -> float:
+        """Calculate cache hit rate."""
+        total = self.hits + self.misses
+        return self.hits / total if total > 0 else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Export stats as dictionary."""
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "evictions": self.evictions,
+            "expirations": self.expirations,
+            "hit_rate": round(self.hit_rate, 4),
+            "total_bytes_saved": self.total_bytes_saved,
+        }
 
 
-class ResponseCache:
-    """In-memory response cache with multiple eviction strategies."""
+class APICache:
+    """
+    In-memory cache with optional disk persistence.
 
-    def __init__(self, config: CacheConfig):
-        self.config = config
-        self._cache: Dict[str, CacheEntry] = {}
-        self._access_order: List[str] = []
-        self._hit_count = 0
-        self._miss_count = 0
+    Supports TTL, LRU eviction, compression, and statistics tracking.
+    """
 
-    def _generate_key(
+    def __init__(
         self,
-        url: str,
-        method: str,
-        params: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Generate cache key from request details."""
-        components = [method.upper(), url]
+        max_entries: int = 1000,
+        default_ttl: float = 3600.0,
+        compress_threshold: int = 1024,
+        persistence_path: Optional[Path] = None,
+    ) -> None:
+        """
+        Initialize the API cache.
 
-        if params:
-            sorted_params = sorted(params.items())
-            param_str = "&".join(f"{k}={v}" for k, v in sorted_params)
-            components.append(param_str)
+        Args:
+            max_entries: Maximum number of entries before eviction.
+            default_ttl: Default time-to-live in seconds.
+            compress_threshold: Min size in bytes to trigger compression.
+            persistence_path: Optional path for disk persistence.
+        """
+        self._cache: dict[str, CacheEntry] = {}
+        self._max_entries = max_entries
+        self._default_ttl = default_ttl
+        self._compress_threshold = compress_threshold
+        self._persistence_path = persistence_path
+        self._stats = CacheStats()
+        self._access_order: list[str] = []
 
-        key_str = "|".join(str(c) for c in components)
-        return hashlib.sha256(key_str.encode()).hexdigest()
+    def _make_key(self, prefix: str, *args: Any, **kwargs: Any) -> str:
+        """Generate a cache key from arguments."""
+        data = json.dumps({"args": args, "kwargs": kwargs}, sort_keys=True, default=str)
+        digest = hashlib.sha256(data.encode()).hexdigest()[:16]
+        return f"{prefix}:{digest}"
 
-    def _evict_if_needed(self) -> None:
-        """Evict entries if cache is full."""
-        while len(self._cache) >= self.config.max_size:
-            if self.config.strategy == CacheStrategy.LRU:
-                self._evict_lru()
-            elif self.config.strategy == CacheStrategy.LFU:
-                self._evict_lfu()
-            elif self.config.strategy == CacheStrategy.FIFO:
-                self._evict_fifo()
-            else:
-                self._evict_lru()
+    def _compress(self, data: bytes) -> bytes:
+        """Compress data using gzip."""
+        return gzip.compress(data, compresslevel=6)
+
+    def _decompress(self, data: bytes) -> bytes:
+        """Decompress gzip data."""
+        return gzip.decompress(data)
+
+    def _evict_expired(self) -> int:
+        """Remove all expired entries. Returns count of removed entries."""
+        expired_keys = [
+            k for k, v in self._cache.items() if v.is_expired()
+        ]
+        for key in expired_keys:
+            self._evict(key)
+            self._stats.expirations += 1
+        return len(expired_keys)
 
     def _evict_lru(self) -> None:
-        """Evict least recently used entry."""
-        if not self._cache:
+        """Evict least recently used entry if over capacity."""
+        if len(self._cache) < self._max_entries:
             return
-
-        oldest_key = min(
-            self._cache.keys(),
-            key=lambda k: self._cache[k].last_accessed
-        )
-        del self._cache[oldest_key]
-
-    def _evict_lfu(self) -> None:
-        """Evict least frequently used entry."""
-        if not self._cache:
+        if not self._access_order:
             return
+        lru_key = self._access_order.pop(0)
+        if lru_key in self._cache:
+            self._evict(lru_key)
+            self._stats.evictions += 1
 
-        least_used_key = min(
-            self._cache.keys(),
-            key=lambda k: self._cache[k].access_count
-        )
-        del self._cache[least_used_key]
+    def _evict(self, key: str) -> None:
+        """Remove a specific key from cache."""
+        if key in self._cache:
+            del self._cache[key]
+        if key in self._access_order:
+            self._access_order.remove(key)
 
-    def _evict_fifo(self) -> None:
-        """Evict oldest entry by creation time."""
-        if not self._cache:
-            return
+    def get(self, key: str) -> Optional[bytes]:
+        """
+        Retrieve a cached value.
 
-        oldest_key = min(
-            self._cache.keys(),
-            key=lambda k: self._cache[k].created_at
-        )
-        del self._cache[oldest_key]
+        Args:
+            key: Cache key to look up.
 
-    def get(
-        self,
-        url: str,
-        method: str = "GET",
-        params: Optional[Dict[str, Any]] = None
-    ) -> Tuple[Optional[Any], Freshness]:
-        """Get cached response."""
-        key = self._generate_key(url, method, params)
-
+        Returns:
+            Cached bytes or None if not found/expired.
+        """
         if key not in self._cache:
-            self._miss_count += 1
-            return None, Freshness.EXPIRED
-
+            self._stats.misses += 1
+            return None
         entry = self._cache[key]
-        entry.last_accessed = time.time()
-        entry.access_count += 1
-
-        freshness = entry.get_freshness()
-
-        if freshness == Freshness.FRESH:
-            self._hit_count += 1
-        elif freshness == Freshness.STALE:
-            pass
-        else:
-            self._miss_count += 1
-
-        return entry.value, freshness
+        if entry.is_expired():
+            self._evict(key)
+            self._stats.expirations += 1
+            self._stats.misses += 1
+            return None
+        value = entry.access()
+        if entry.compressed:
+            value = self._decompress(value)
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
+        self._stats.hits += 1
+        return value
 
     def set(
         self,
-        url: str,
-        value: Any,
-        method: str = "GET",
-        params: Optional[Dict[str, Any]] = None,
-        ttl_seconds: Optional[int] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        key: str,
+        value: bytes,
+        ttl: Optional[float] = None,
     ) -> None:
-        """Cache a response."""
-        key = self._generate_key(url, method, params)
+        """
+        Store a value in the cache.
 
-        self._evict_if_needed()
-
-        entry = CacheEntry(
+        Args:
+            key: Cache key.
+            value: Bytes to store.
+            ttl: Optional custom TTL (overrides default).
+        """
+        self._evict_lru()
+        entry_ttl = ttl if ttl is not None else self._default_ttl
+        compressed = len(value) >= self._compress_threshold
+        if compressed:
+            value = self._compress(value)
+        self._cache[key] = CacheEntry(
             key=key,
             value=value,
             created_at=time.time(),
             last_accessed=time.time(),
-            ttl_seconds=ttl_seconds or self.config.default_ttl_seconds,
-            metadata=metadata or {}
+            ttl=entry_ttl,
+            compressed=compressed,
         )
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
 
-        self._cache[key] = entry
+    def invalidate(self, key: str) -> bool:
+        """
+        Remove a specific key from cache.
 
-    def invalidate(
+        Returns:
+            True if key was present.
+        """
+        if key in self._cache:
+            self._evict(key)
+            return True
+        return False
+
+    def clear(self) -> int:
+        """
+        Clear all cached entries.
+
+        Returns:
+            Number of entries cleared.
+        """
+        count = len(self._cache)
+        self._cache.clear()
+        self._access_order.clear()
+        return count
+
+    def cached_call(
         self,
-        url: Optional[str] = None,
-        pattern: Optional[str] = None
-    ) -> int:
-        """Invalidate cached entries."""
-        removed = 0
+        func: Callable[..., bytes],
+        *args: Any,
+        cache_key: Optional[str] = None,
+        ttl: Optional[float] = None,
+        **kwargs: Any,
+    ) -> bytes:
+        """
+       Execute a function with caching.
 
-        if url:
-            for key in list(self._cache.keys()):
-                if url in key:
-                    del self._cache[key]
-                    removed += 1
+        Args:
+            func: Function to call (should return bytes).
+            *args: Positional arguments for func.
+            cache_key: Optional explicit cache key.
+            ttl: Optional TTL override.
+            **kwargs: Keyword arguments for func.
 
-        elif pattern:
-            import re
-            regex = re.compile(pattern)
-            for key in list(self._cache.keys()):
-                if regex.search(key):
-                    del self._cache[key]
-                    removed += 1
-
-        else:
-            removed = len(self._cache)
-            self._cache.clear()
-
-        return removed
-
-    def get_or_compute(
-        self,
-        url: str,
-        compute_fn: Callable[[], Any],
-        method: str = "GET",
-        params: Optional[Dict[str, Any]] = None,
-        ttl_seconds: Optional[int] = None
-    ) -> Any:
-        """Get from cache or compute and cache."""
-        cached, freshness = self.get(url, method, params)
-
+        Returns:
+            Bytes result from cache or fresh execution.
+        """
+        key = cache_key or self._make_key(func.__name__, *args, **kwargs)
+        cached = self.get(key)
         if cached is not None:
-            if freshness == Freshness.FRESH:
-                return cached
-            elif (freshness == Freshness.STALE and
-                  self.config.enable_stale_revalidate):
-                return cached
-
-        result = compute_fn()
-        self.set(url, result, method, params, ttl_seconds)
+            return cached
+        result = func(*args, **kwargs)
+        if isinstance(result, str):
+            result = result.encode("utf-8")
+        self.set(key, result, ttl=ttl)
         return result
 
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get cache statistics."""
-        total_requests = self._hit_count + self._miss_count
-        hit_rate = self._hit_count / total_requests if total_requests > 0 else 0.0
+    def stats(self) -> CacheStats:
+        """Return current cache statistics."""
+        return self._stats
 
-        fresh_count = sum(
-            1 for e in self._cache.values()
-            if e.get_freshness() == Freshness.FRESH
-        )
-        stale_count = sum(
-            1 for e in self._cache.values()
-            if e.get_freshness() == Freshness.STALE
-        )
-
-        return {
-            "size": len(self._cache),
-            "max_size": self.config.max_size,
-            "hit_count": self._hit_count,
-            "miss_count": self._miss_count,
-            "hit_rate": hit_rate,
-            "fresh_entries": fresh_count,
-            "stale_entries": stale_count,
-            "strategy": self.config.strategy.value,
-            "default_ttl_seconds": self.config.default_ttl_seconds
+    def save_to_disk(self) -> None:
+        """Persist cache contents to disk."""
+        if not self._persistence_path:
+            return
+        self._persistence_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "saved_at": time.time(),
+            "entries": [
+                {
+                    "key": k,
+                    "value": v.value.decode("latin-1"),
+                    "created_at": v.created_at,
+                    "last_accessed": v.last_accessed,
+                    "ttl": v.ttl,
+                    "compressed": v.compressed,
+                }
+                for k, v in self._cache.items()
+            ],
         }
+        with gzip.open(self._persistence_path, "wt", encoding="utf-8") as f:
+            json.dump(data, f)
 
-    def clear(self) -> None:
-        """Clear all cached entries."""
-        self._cache.clear()
-        self._hit_count = 0
-        self._miss_count = 0
+    def load_from_disk(self) -> int:
+        """
+        Load cache contents from disk.
 
-
-class APIResponseCacheAction(BaseAction):
-    """Action for API response caching operations."""
-
-    def __init__(self):
-        super().__init__("api_response_cache")
-        self._cache = ResponseCache(CacheConfig())
-
-    def execute(self, params: Dict[str, Any]) -> ActionResult:
-        """Execute cache action."""
+        Returns:
+            Number of entries loaded.
+        """
+        if not self._persistence_path or not self._persistence_path.exists():
+            return 0
         try:
-            operation = params.get("operation", "get")
-
-            if operation == "get":
-                return self._get(params)
-            elif operation == "set":
-                return self._set(params)
-            elif operation == "invalidate":
-                return self._invalidate(params)
-            elif operation == "stats":
-                return self._get_stats(params)
-            elif operation == "clear":
-                return self._clear(params)
-            elif operation == "configure":
-                return self._configure(params)
-            else:
-                return ActionResult(
-                    success=False,
-                    message=f"Unknown operation: {operation}"
+            with gzip.open(self._persistence_path, "rt", encoding="utf-8") as f:
+                data = json.load(f)
+            entries = data.get("entries", [])
+            for entry in entries:
+                value = entry["value"].encode("latin-1")
+                self._cache[entry["key"]] = CacheEntry(
+                    key=entry["key"],
+                    value=value,
+                    created_at=entry["created_at"],
+                    last_accessed=entry["last_accessed"],
+                    ttl=entry["ttl"],
+                    compressed=entry.get("compressed", False),
                 )
+                self._access_order.append(entry["key"])
+            return len(entries)
+        except (json.JSONDecodeError, KeyError, gzip.BadGzipFile):
+            return 0
 
-        except Exception as e:
-            return ActionResult(success=False, message=str(e))
 
-    def _get(self, params: Dict[str, Any]) -> ActionResult:
-        """Get cached response."""
-        url = params.get("url", "")
-        method = params.get("method", "GET")
-        params_dict = params.get("params")
+def create_api_cache(
+    max_entries: int = 1000,
+    default_ttl: float = 3600.0,
+    persistence_path: Optional[str] = None,
+) -> APICache:
+    """
+    Factory function to create a configured API cache.
 
-        cached, freshness = self._cache.get(url, method, params_dict)
+    Args:
+        max_entries: Maximum cached entries.
+        default_ttl: Default TTL in seconds.
+        persistence_path: Optional path string for persistence.
 
-        return ActionResult(
-            success=cached is not None,
-            data={
-                "cached": cached is not None,
-                "freshness": freshness.value,
-                "value": cached
-            }
-        )
-
-    def _set(self, params: Dict[str, Any]) -> ActionResult:
-        """Cache a response."""
-        url = params.get("url", "")
-        value = params.get("value")
-        method = params.get("method", "GET")
-        params_dict = params.get("params")
-        ttl = params.get("ttl_seconds")
-
-        self._cache.set(url, value, method, params_dict, ttl)
-
-        return ActionResult(success=True)
-
-    def _invalidate(self, params: Dict[str, Any]) -> ActionResult:
-        """Invalidate cached entries."""
-        url = params.get("url")
-        pattern = params.get("pattern")
-
-        removed = self._cache.invalidate(url, pattern)
-
-        return ActionResult(
-            success=True,
-            data={"removed": removed}
-        )
-
-    def _get_stats(self, params: Dict[str, Any]) -> ActionResult:
-        """Get cache statistics."""
-        stats = self._cache.get_statistics()
-        return ActionResult(success=True, data=stats)
-
-    def _clear(self, params: Dict[str, Any]) -> ActionResult:
-        """Clear cache."""
-        self._cache.clear()
-        return ActionResult(success=True, message="Cache cleared")
-
-    def _configure(self, params: Dict[str, Any]) -> ActionResult:
-        """Configure cache settings."""
-        config = CacheConfig(
-            max_size=params.get("max_size", 1000),
-            default_ttl_seconds=params.get("default_ttl_seconds", 300),
-            strategy=CacheStrategy(params.get("strategy", "lru")),
-            enable_stale_revalidate=params.get(
-                "enable_stale_revalidate", True
-            )
-        )
-
-        self._cache = ResponseCache(config)
-
-        return ActionResult(success=True, message="Cache configured")
+    Returns:
+        Configured APICache instance.
+    """
+    path = Path(persistence_path) if persistence_path else None
+    cache = APICache(
+        max_entries=max_entries,
+        default_ttl=default_ttl,
+        persistence_path=path,
+    )
+    return cache

@@ -1,325 +1,295 @@
-"""
-Data Catalog Action Module.
+"""Data Catalog Action Module.
 
-Manages a data catalog with schema registry,
-lineage tracking, and metadata management.
+Provides data cataloging and discovery capabilities.
 """
 
-from __future__ import annotations
-
-import logging
 import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Optional
+import traceback
+import sys
+import os
+from typing import Any, Dict, List, Optional, Set
 
-logger = logging.getLogger(__name__)
-
-
-class DataType(Enum):
-    """Supported data types."""
-
-    STRING = "string"
-    INTEGER = "integer"
-    FLOAT = "float"
-    BOOLEAN = "boolean"
-    TIMESTAMP = "timestamp"
-    ARRAY = "array"
-    OBJECT = "object"
-    UNKNOWN = "unknown"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-@dataclass
-class SchemaField:
-    """Represents a schema field."""
-
-    name: str
-    data_type: DataType
-    nullable: bool = True
-    description: str = ""
-    default_value: Any = None
-
-
-@dataclass
-class DataSchema:
-    """Represents a data schema."""
-
-    name: str
-    version: str = "1.0"
-    fields: list[SchemaField] = field(default_factory=list)
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-
-
-@dataclass
-class DataAsset:
-    """Represents a data asset in the catalog."""
-
-    name: str
-    asset_type: str
-    schema: Optional[DataSchema] = None
-    location: str = ""
-    owner: str = ""
-    description: str = ""
-    tags: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-
-
-@dataclass
-class LineageNode:
-    """Represents a lineage node."""
-
-    asset_name: str
-    operation: str
-    inputs: list[str] = field(default_factory=list)
-    outputs: list[str] = field(default_factory=list)
-    timestamp: float = field(default_factory=time.time)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class DataCatalogAction:
+class DataCatalogAction(BaseAction):
+    """Catalog data sources and schemas.
+    
+    Maintains a catalog of available data and their metadata.
     """
-    Manages data catalog with schema and lineage tracking.
-
-    Features:
-    - Schema registration and versioning
-    - Asset metadata management
-    - Data lineage tracking
-    - Tag-based classification
-    - Search and discovery
-
-    Example:
-        catalog = DataCatalogAction()
-        catalog.register_schema("user_events", user_schema)
-        catalog.register_asset("events.parquet", asset)
-        catalog.add_lineage("process", inputs=["raw"], outputs=["processed"])
-    """
-
-    def __init__(self) -> None:
-        """Initialize data catalog action."""
-        self._schemas: dict[str, DataSchema] = {}
-        self._assets: dict[str, DataAsset] = {}
-        self._lineage: list[LineageNode] = []
-        self._stats = {
-            "total_schemas": 0,
-            "total_assets": 0,
-            "total_lineage_nodes": 0,
+    action_type = "data_catalog"
+    display_name = "数据目录"
+    description = "管理数据源和模式目录"
+    
+    def __init__(self):
+        super().__init__()
+        self._catalog: Dict[str, Dict] = {}
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute catalog operation.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: action, data_source, metadata.
+        
+        Returns:
+            ActionResult with catalog result.
+        """
+        action = params.get('action', 'register')
+        data_source = params.get('data_source', '')
+        
+        if not data_source and action != 'list':
+            return ActionResult(
+                success=False,
+                data=None,
+                error="Data source name required"
+            )
+        
+        if action == 'register':
+            return self._register(data_source, params)
+        elif action == 'update':
+            return self._update(data_source, params)
+        elif action == 'get':
+            return self._get(data_source)
+        elif action == 'list':
+            return self._list_sources()
+        elif action == 'search':
+            return self._search(params)
+        elif action == 'unregister':
+            return self._unregister(data_source)
+        else:
+            return ActionResult(
+                success=False,
+                data=None,
+                error=f"Unknown action: {action}"
+            )
+    
+    def _register(self, data_source: str, params: Dict) -> ActionResult:
+        """Register a data source."""
+        metadata = params.get('metadata', {})
+        
+        self._catalog[data_source] = {
+            'name': data_source,
+            'metadata': metadata,
+            'registered_at': time.time(),
+            'schema': metadata.get('schema', {}),
+            'tags': metadata.get('tags', [])
         }
-
-    def register_schema(
-        self,
-        name: str,
-        fields: list[SchemaField],
-        version: str = "1.0",
-    ) -> DataSchema:
-        """
-        Register a data schema.
-
-        Args:
-            name: Schema name.
-            fields: List of schema fields.
-            version: Schema version.
-
-        Returns:
-            Created DataSchema.
-        """
-        schema = DataSchema(name=name, version=version, fields=fields)
-        self._schemas[name] = schema
-        self._stats["total_schemas"] += 1
-
-        logger.info(f"Registered schema: {name} v{version}")
-        return schema
-
-    def get_schema(self, name: str) -> Optional[DataSchema]:
-        """
-        Get a schema by name.
-
-        Args:
-            name: Schema name.
-
-        Returns:
-            DataSchema or None.
-        """
-        return self._schemas.get(name)
-
-    def register_asset(
-        self,
-        name: str,
-        asset_type: str,
-        schema: Optional[DataSchema] = None,
-        location: str = "",
-        owner: str = "",
-        description: str = "",
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> DataAsset:
-        """
-        Register a data asset.
-
-        Args:
-            name: Asset name.
-            asset_type: Type of asset (table, file, stream, etc.).
-            schema: Associated schema.
-            location: Storage location.
-            owner: Asset owner.
-            description: Asset description.
-            tags: Classification tags.
-            metadata: Additional metadata.
-
-        Returns:
-            Created DataAsset.
-        """
-        asset = DataAsset(
-            name=name,
-            asset_type=asset_type,
-            schema=schema,
-            location=location,
-            owner=owner,
-            description=description,
-            tags=tags or [],
-            metadata=metadata or {},
+        
+        return ActionResult(
+            success=True,
+            data={
+                'data_source': data_source,
+                'registered': True
+            },
+            error=None
         )
-        self._assets[name] = asset
-        self._stats["total_assets"] += 1
-
-        logger.info(f"Registered asset: {name}")
-        return asset
-
-    def get_asset(self, name: str) -> Optional[DataAsset]:
-        """
-        Get an asset by name.
-
-        Args:
-            name: Asset name.
-
-        Returns:
-            DataAsset or None.
-        """
-        return self._assets.get(name)
-
-    def update_asset(
-        self,
-        name: str,
-        **updates: Any,
-    ) -> Optional[DataAsset]:
-        """
-        Update an asset's metadata.
-
-        Args:
-            name: Asset name.
-            **updates: Fields to update.
-
-        Returns:
-            Updated DataAsset or None.
-        """
-        if name not in self._assets:
-            return None
-
-        asset = self._assets[name]
-        for key, value in updates.items():
-            if hasattr(asset, key):
-                setattr(asset, key, value)
-        asset.updated_at = time.time()
-
-        return asset
-
-    def add_lineage(
-        self,
-        operation: str,
-        inputs: Optional[list[str]] = None,
-        outputs: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> LineageNode:
-        """
-        Add a lineage node.
-
-        Args:
-            operation: Operation name.
-            inputs: Input asset names.
-            outputs: Output asset names.
-            metadata: Additional metadata.
-
-        Returns:
-            Created LineageNode.
-        """
-        node = LineageNode(
-            asset_name="",
-            operation=operation,
-            inputs=inputs or [],
-            outputs=outputs or [],
-            metadata=metadata or {},
+    
+    def _update(self, data_source: str, params: Dict) -> ActionResult:
+        """Update data source metadata."""
+        if data_source not in self._catalog:
+            return ActionResult(
+                success=False,
+                data=None,
+                error=f"Data source {data_source} not found"
+            )
+        
+        metadata = params.get('metadata', {})
+        self._catalog[data_source]['metadata'].update(metadata)
+        self._catalog[data_source]['updated_at'] = time.time()
+        
+        return ActionResult(
+            success=True,
+            data={
+                'data_source': data_source,
+                'updated': True
+            },
+            error=None
         )
-        self._lineage.append(node)
-        self._stats["total_lineage_nodes"] += 1
-
-        logger.info(f"Added lineage: {operation}")
-        return node
-
-    def get_lineage(
-        self,
-        asset_name: Optional[str] = None,
-        depth: int = 10,
-    ) -> list[LineageNode]:
-        """
-        Get lineage for an asset.
-
-        Args:
-            asset_name: Optional asset name filter.
-            depth: Maximum lineage depth.
-
-        Returns:
-            List of lineage nodes.
-        """
-        if asset_name:
-            return [
-                n for n in self._lineage
-                if asset_name in n.inputs or asset_name in n.outputs
-            ][:depth]
-        return self._lineage[:depth]
-
-    def search_assets(
-        self,
-        query: str,
-        tags: Optional[list[str]] = None,
-        asset_type: Optional[str] = None,
-    ) -> list[DataAsset]:
-        """
-        Search for assets.
-
-        Args:
-            query: Search query.
-            tags: Filter by tags.
-            asset_type: Filter by asset type.
-
-        Returns:
-            List of matching assets.
-        """
+    
+    def _get(self, data_source: str) -> ActionResult:
+        """Get data source info."""
+        if data_source not in self._catalog:
+            return ActionResult(
+                success=False,
+                data=None,
+                error=f"Data source {data_source} not found"
+            )
+        
+        return ActionResult(
+            success=True,
+            data=self._catalog[data_source],
+            error=None
+        )
+    
+    def _list_sources(self) -> ActionResult:
+        """List all registered data sources."""
+        sources = [
+            {
+                'name': name,
+                'tags': info.get('tags', []),
+                'registered_at': info.get('registered_at')
+            }
+            for name, info in self._catalog.items()
+        ]
+        
+        return ActionResult(
+            success=True,
+            data={
+                'sources': sources,
+                'count': len(sources)
+            },
+            error=None
+        )
+    
+    def _search(self, params: Dict) -> ActionResult:
+        """Search data sources by tags or metadata."""
+        query = params.get('query', '')
+        tags = params.get('tags', [])
+        
         results = []
+        for name, info in self._catalog.items():
+            source_tags = info.get('tags', [])
+            metadata = info.get('metadata', {})
+            
+            matches = False
+            
+            # Match by query in name or description
+            if query:
+                if query.lower() in name.lower():
+                    matches = True
+                elif query.lower() in metadata.get('description', '').lower():
+                    matches = True
+            
+            # Match by tags
+            if tags:
+                if any(tag in source_tags for tag in tags):
+                    matches = True
+            
+            if matches:
+                results.append(info)
+        
+        return ActionResult(
+            success=True,
+            data={
+                'results': results,
+                'count': len(results)
+            },
+            error=None
+        )
+    
+    def _unregister(self, data_source: str) -> ActionResult:
+        """Unregister a data source."""
+        if data_source in self._catalog:
+            del self._catalog[data_source]
+        
+        return ActionResult(
+            success=True,
+            data={'data_source': data_source, 'unregistered': True},
+            error=None
+        )
 
-        for asset in self._assets.values():
-            if asset_type and asset.asset_type != asset_type:
-                continue
 
-            if tags and not any(t in asset.tags for t in tags):
-                continue
-
-            if query.lower() in asset.name.lower() or query.lower() in asset.description.lower():
-                results.append(asset)
-
-        return results
-
-    def get_stats(self) -> dict[str, Any]:
-        """
-        Get catalog statistics.
-
+class DataDiscoveryAction(BaseAction):
+    """Discover available data and schemas.
+    
+    Helps find data based on content patterns and metadata.
+    """
+    action_type = "data_discovery"
+    display_name: "数据发现"
+    description = "根据内容模式发现可用数据"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data discovery.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: pattern, search_type.
+        
         Returns:
-            Statistics dictionary.
+            ActionResult with discovery results.
         """
-        return {
-            **self._stats,
-            "schemas": list(self._schemas.keys()),
-            "asset_types": list(set(a.asset_type for a in self._assets.values())),
-            "all_tags": list(set(tag for a in self._assets.values() for tag in a.tags)),
-        }
+        pattern = params.get('pattern', '')
+        search_type = params.get('search_type', 'schema')
+        
+        if search_type == 'schema':
+            return self._discover_by_schema(pattern)
+        elif search_type == 'content':
+            return self._discover_by_content(pattern, params)
+        elif search_type == 'metadata':
+            return self._discover_by_metadata(pattern)
+        else:
+            return ActionResult(
+                success=False,
+                data=None,
+                error=f"Unknown search type: {search_type}"
+            )
+    
+    def _discover_by_schema(self, pattern: str) -> ActionResult:
+        """Discover data by schema pattern."""
+        # Simulate schema discovery
+        results = [
+            {'source': 'db1', 'table': 'users', 'schema_match': 'id, name, email'},
+            {'source': 'db2', 'table': 'orders', 'schema_match': 'id, user_id, total'}
+        ]
+        
+        return ActionResult(
+            success=True,
+            data={
+                'results': results,
+                'count': len(results)
+            },
+            error=None
+        )
+    
+    def _discover_by_content(self, pattern: str, params: Dict) -> ActionResult:
+        """Discover data by content pattern."""
+        sample_size = params.get('sample_size', 100)
+        
+        results = [
+            {'source': 'api1', 'endpoint': '/users', 'matches': 42},
+            {'source': 'api2', 'endpoint': '/products', 'matches': 17}
+        ]
+        
+        return ActionResult(
+            success=True,
+            data={
+                'results': results,
+                'count': len(results),
+                'pattern': pattern
+            },
+            error=None
+        )
+    
+    def _discover_by_metadata(self, pattern: str) -> ActionResult:
+        """Discover data by metadata."""
+        results = [
+            {'source': 'file1', 'format': 'csv', 'tags': ['sales', '2024']},
+            {'source': 'file2', 'format': 'json', 'tags': ['inventory']}
+        ]
+        
+        return ActionResult(
+            success=True,
+            data={
+                'results': results,
+                'count': len(results)
+            },
+            error=None
+        )
+
+
+def register_actions():
+    """Register all Data Catalog actions."""
+    return [
+        DataCatalogAction,
+        DataDiscoveryAction,
+    ]
