@@ -1,274 +1,214 @@
-"""
-Data Partition Action Module.
+"""Data Partition and Sharding Utility.
 
-Provides data partitioning strategies for distributed
-processing including range, hash, and list partitioning.
+This module provides data partitioning:
+- Range-based partitioning
+- Hash-based partitioning
+- List-based partitioning
+- Partition routing
+
+Example:
+    >>> from actions.data_partition_action import DataPartitioner
+    >>> partitioner = DataPartitioner(strategy="hash")
+    >>> partition_id = partitioner.get_partition(record, num_partitions=10)
 """
 
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-import asyncio
+from __future__ import annotations
+
 import hashlib
 import logging
+import threading
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class PartitionStrategy(Enum):
-    """Partition strategies."""
-    RANGE = "range"
-    HASH = "hash"
-    LIST = "list"
-    ROUND_ROBIN = "round_robin"
-    COMPOSITE = "composite"
-
-
-@dataclass
-class Partition:
-    """Data partition."""
-    partition_id: str
-    strategy: PartitionStrategy
-    name: str
-    data: List[Any] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-
-@dataclass
-class PartitionConfig:
-    """Configuration for partitioning."""
-    strategy: PartitionStrategy
-    num_partitions: int = 4
-    partition_keys: List[str] = field(default_factory=list)
-    custom_ranges: Optional[List[Any]] = None
-    hash_modulo: int = 256
-
-
 class DataPartitioner:
-    """Partitions data using various strategies."""
+    """Partitions data for distributed processing."""
 
-    def __init__(self, config: PartitionConfig):
-        self.config = config
-        self.partitions: Dict[str, Partition] = {}
-        self._round_robin_index = 0
+    def __init__(
+        self,
+        strategy: str = "hash",
+        num_partitions: int = 10,
+    ) -> None:
+        """Initialize the data partitioner.
 
-    def partition(self, data: List[Any], key_extractor: Callable[[Any], Any]) -> Dict[str, Partition]:
-        """Partition data according to strategy."""
-        if self.config.strategy == PartitionStrategy.RANGE:
-            return self._partition_by_range(data, key_extractor)
-        elif self.config.strategy == PartitionStrategy.HASH:
-            return self._partition_by_hash(data, key_extractor)
-        elif self.config.strategy == PartitionStrategy.LIST:
-            return self._partition_by_list(data, key_extractor)
-        elif self.config.strategy == PartitionStrategy.ROUND_ROBIN:
-            return self._partition_by_round_robin(data)
+        Args:
+            strategy: Partitioning strategy (hash, range, list, round_robin).
+            num_partitions: Number of partitions.
+        """
+        self._strategy = strategy
+        self._num_partitions = num_partitions
+        self._lock = threading.Lock()
+        self._stats = {"partitions_assigned": 0}
+
+    def get_partition(
+        self,
+        key: Any,
+        num_partitions: Optional[int] = None,
+    ) -> int:
+        """Get partition number for a key.
+
+        Args:
+            key: Partition key.
+            num_partitions: Override number of partitions.
+
+        Returns:
+            Partition number (0 to num_partitions-1).
+        """
+        n = num_partitions or self._num_partitions
+
+        with self._lock:
+            self._stats["partitions_assigned"] += 1
+
+        if self._strategy == "hash":
+            return self._hash_partition(key, n)
+        elif self._strategy == "range":
+            return self._range_partition(key, n)
+        elif self._strategy == "round_robin":
+            return self._round_robin_partition(n)
         else:
-            return self._partition_by_hash(data, key_extractor)
+            return self._hash_partition(key, n)
 
-    def _partition_by_range(
+    def _hash_partition(self, key: Any, n: int) -> int:
+        """Hash-based partitioning."""
+        if key is None:
+            return 0
+        key_str = str(key).encode("utf-8")
+        hash_val = int(hashlib.md5(key_str).hexdigest(), 16)
+        return hash_val % n
+
+    def _range_partition(self, key: Any, n: int) -> int:
+        """Range-based partitioning."""
+        if isinstance(key, int):
+            if n == 1:
+                return 0
+            return min(int(key / (100 / n)), n - 1)
+        return self._hash_partition(key, n)
+
+    def _round_robin_partition(self, n: int) -> int:
+        """Round-robin partitioning."""
+        with self._lock:
+            idx = self._stats["partitions_assigned"] % n
+        return idx
+
+    def partition_records(
         self,
-        data: List[Any],
-        key_extractor: Callable[[Any], Any]
-    ) -> Dict[str, Partition]:
-        """Partition by range of keys."""
-        keys = [key_extractor(item) for item in data]
-        sorted_keys = sorted(keys)
+        records: list[dict[str, Any]],
+        key_field: str,
+        num_partitions: Optional[int] = None,
+    ) -> list[list[dict[str, Any]]]:
+        """Partition records into buckets.
 
-        if not sorted_keys:
-            return {}
+        Args:
+            records: List of records.
+            key_field: Field to use as partition key.
+            num_partitions: Number of partitions.
 
-        min_val, max_val = sorted_keys[0], sorted_keys[-1]
-        range_size = (max_val - min_val) / self.config.num_partitions
+        Returns:
+            List of partition buckets.
+        """
+        n = num_partitions or self._num_partitions
+        partitions: list[list] = [[] for _ in range(n)]
 
-        partitions = {}
-        for i in range(self.config.num_partitions):
-            pid = f"range_{i}"
-            partitions[pid] = Partition(
-                partition_id=pid,
-                strategy=PartitionStrategy.RANGE,
-                name=f"Range Partition {i}",
-                metadata={
-                    "start": min_val + i * range_size,
-                    "end": min_val + (i + 1) * range_size
-                }
-            )
+        for record in records:
+            key = record.get(key_field)
+            part_idx = self.get_partition(key, n)
+            partitions[part_idx].append(record)
 
-        for item in data:
-            key = key_extractor(item)
-            partition_idx = min(
-                int((key - min_val) / range_size),
-                self.config.num_partitions - 1
-            ) if range_size > 0 else 0
-            pid = f"range_{partition_idx}"
-            partitions[pid].data.append(item)
-
-        self.partitions = partitions
         return partitions
 
-    def _partition_by_hash(
+    def partition_by_range(
         self,
-        data: List[Any],
-        key_extractor: Callable[[Any], Any]
-    ) -> Dict[str, Partition]:
-        """Partition by hash of keys."""
-        partitions = {}
+        records: list[dict[str, Any]],
+        key_field: str,
+        ranges: list[tuple[Any, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        """Partition records by value ranges.
 
-        for i in range(self.config.num_partitions):
-            pid = f"hash_{i}"
-            partitions[pid] = Partition(
-                partition_id=pid,
-                strategy=PartitionStrategy.HASH,
-                name=f"Hash Partition {i}"
-            )
+        Args:
+            records: List of records.
+            key_field: Field to partition on.
+            ranges: List of (min, max) tuples.
 
-        for item in data:
-            key = key_extractor(item)
-            key_str = str(key)
-            hash_val = int(hashlib.md5(key_str.encode()).hexdigest(), 16)
-            partition_idx = hash_val % self.config.num_partitions
+        Returns:
+            List of partitioned buckets.
+        """
+        partitions: list[list] = [[] for _ in range(len(ranges) + 1)]
 
-            pid = f"hash_{partition_idx}"
-            partitions[pid].data.append(item)
+        for record in records:
+            key = record.get(key_field)
+            placed = False
 
-        self.partitions = partitions
-        return partitions
-
-    def _partition_by_list(
-        self,
-        data: List[Any],
-        key_extractor: Callable[[Any], Any]
-    ) -> Dict[str, Partition]:
-        """Partition by list of values."""
-        partitions = {}
-        ranges = self.config.custom_ranges or []
-
-        for i, value_range in enumerate(ranges):
-            pid = f"list_{i}"
-            partitions[pid] = Partition(
-                partition_id=pid,
-                strategy=PartitionStrategy.LIST,
-                name=f"List Partition {i}",
-                metadata={"range": value_range}
-            )
-
-        for item in data:
-            key = key_extractor(item)
-            matched = False
-
-            for i, value_range in enumerate(ranges):
-                if key in value_range:
-                    pid = f"list_{i}"
-                    partitions[pid].data.append(item)
-                    matched = True
+            for i, (min_val, max_val) in enumerate(ranges):
+                if min_val <= key <= max_val:
+                    partitions[i].append(record)
+                    placed = True
                     break
 
-            if not matched:
-                pid = f"list_unmatched"
-                if pid not in partitions:
-                    partitions[pid] = Partition(
-                        partition_id=pid,
-                        strategy=PartitionStrategy.LIST,
-                        name="Unmatched"
-                    )
-                partitions[pid].data.append(item)
+            if not placed:
+                partitions[-1].append(record)
 
-        self.partitions = partitions
         return partitions
 
-    def _partition_by_round_robin(self, data: List[Any]) -> Dict[str, Partition]:
-        """Partition using round-robin."""
-        partitions = {}
-
-        for i in range(self.config.num_partitions):
-            pid = f"rr_{i}"
-            partitions[pid] = Partition(
-                partition_id=pid,
-                strategy=PartitionStrategy.ROUND_ROBIN,
-                name=f"Round Robin Partition {i}"
-            )
-
-        for item in data:
-            pid = f"rr_{self._round_robin_index}"
-            partitions[pid].data.append(item)
-            self._round_robin_index = (self._round_robin_index + 1) % self.config.num_partitions
-
-        self.partitions = partitions
-        return partitions
-
-    def get_partition(self, partition_id: str) -> Optional[Partition]:
-        """Get partition by ID."""
-        return self.partitions.get(partition_id)
-
-    def get_all_partitions(self) -> List[Partition]:
-        """Get all partitions."""
-        return list(self.partitions.values())
-
-
-class PartitionProcessor:
-    """Processes data in partitions."""
-
-    def __init__(self, partitioner: DataPartitioner):
-        self.partitioner = partitioner
-
-    async def process_partitions(
+    def partition_by_list(
         self,
-        processor: Callable[[Partition], Any],
-        parallel: bool = True
-    ) -> Dict[str, Any]:
-        """Process all partitions."""
-        results = {}
+        records: list[dict[str, Any]],
+        key_field: str,
+        partition_values: list[list[Any]],
+    ) -> list[list[dict[str, Any]]]:
+        """Partition records by value lists.
 
-        if parallel:
-            tasks = [
-                self._process_single(processor, pid, partition)
-                for pid, partition in self.partitioner.partitions.items()
-            ]
-            completed = await asyncio.gather(*tasks)
-            for pid, result in zip(self.partitioner.partitions.keys(), completed):
-                results[pid] = result
-        else:
-            for pid, partition in self.partitioner.partitions.items():
-                result = await self._process_single(processor, pid, partition)
-                results[pid] = result
+        Args:
+            records: List of records.
+            key_field: Field to partition on.
+            partition_values: List of value lists for each partition.
 
-        return results
+        Returns:
+            List of partitioned buckets.
+        """
+        partitions: list[list] = [[] for _ in range(len(partition_values))]
+        value_to_partition = {}
+        for i, values in enumerate(partition_values):
+            for v in values:
+                value_to_partition[v] = i
 
-    async def _process_single(
-        self,
-        processor: Callable[[Partition], Any],
-        partition_id: str,
-        partition: Partition
-    ) -> Any:
-        """Process single partition."""
-        try:
-            if asyncio.iscoroutinefunction(processor):
-                return await processor(partition)
+        for record in records:
+            key = record.get(key_field)
+            part_idx = value_to_partition.get(key, -1)
+            if 0 <= part_idx < len(partitions):
+                partitions[part_idx].append(record)
             else:
-                return processor(partition)
-        except Exception as e:
-            logger.error(f"Partition {partition_id} processing error: {e}")
-            return None
+                partitions[-1].append(record)
 
+        return partitions
 
-def main():
-    """Demonstrate partitioning."""
-    data = [{"id": i, "value": i * 10} for i in range(100)]
+    def get_partition_stats(
+        self,
+        records: list[dict[str, Any]],
+        key_field: str,
+        num_partitions: Optional[int] = None,
+    ) -> dict[int, int]:
+        """Get partition statistics.
 
-    config = PartitionConfig(
-        strategy=PartitionStrategy.HASH,
-        num_partitions=4
-    )
+        Args:
+            records: List of records.
+            key_field: Partition key field.
+            num_partitions: Number of partitions.
 
-    partitioner = DataPartitioner(config)
-    partitions = partitioner.partition(data, lambda x: x["id"])
+        Returns:
+            Dict mapping partition ID to record count.
+        """
+        n = num_partitions or self._num_partitions
+        counts = {i: 0 for i in range(n)}
 
-    for pid, partition in partitions.items():
-        print(f"{pid}: {len(partition)} items")
+        for record in records:
+            key = record.get(key_field)
+            part_idx = self.get_partition(key, n)
+            counts[part_idx] += 1
 
+        return counts
 
-if __name__ == "__main__":
-    main()
+    def get_stats(self) -> dict[str, int]:
+        """Get partitioner statistics."""
+        with self._lock:
+            return dict(self._stats)
