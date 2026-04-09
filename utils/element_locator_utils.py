@@ -1,306 +1,345 @@
 """
-Element Locator Utilities for UI Automation.
+Element Locator Utilities for UI Automation
 
-This module provides utilities for finding and matching UI elements
-using various strategies including XPath, CSS selectors, and visual matching.
-
-Author: AI Assistant
-License: MIT
+Provides flexible element location strategies including
+CSS selectors, XPath, and accessibility tree traversal.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 
-class LocatorType(Enum):
-    """Types of element locators supported."""
-    XPATH = auto()
-    CSS_SELECTOR = auto()
+class LocatorStrategy(Enum):
+    """Element location strategies."""
     ID = auto()
-    NAME = auto()
-    CLASS_NAME = auto()
-    TAG_NAME = auto()
-    LINK_TEXT = auto()
-    PARTIAL_LINK_TEXT = auto()
-    TEXT = auto()
-    VISUAL = auto()
+    CSS_SELECTOR = auto()
+    XPATH = auto()
     ACCESSIBILITY = auto()
+    IMAGE = auto()
+    TEXT = auto()
+
+
+from enum import Enum, auto
 
 
 @dataclass
 class Locator:
-    """
-    Represents a locator strategy for finding UI elements.
-    
-    Attributes:
-        locator_type: Type of locator
-        value: Locator value (XPath expression, CSS selector, etc.)
-        timeout: Maximum wait time in seconds
-        parent: Optional parent locator for nested searches
-    """
-    locator_type: LocatorType
+    """Element locator definition."""
+    strategy: LocatorStrategy
     value: str
     timeout: float = 10.0
+    index: int = 0
     parent: Optional[Locator] = None
-    index: int = 0  # For selecting among multiple matches
-    
-    def to_dict(self) -> dict[str, Any]:
-        """Convert locator to dictionary format."""
-        return {
-            "type": self.locator_type.name.lower(),
-            "value": self.value,
-            "timeout": self.timeout,
-            "index": self.index
-        }
 
 
 @dataclass
-class LocatorResult:
-    """Result of a locator search operation."""
+class LocateResult:
+    """Result of an element location attempt."""
     found: bool
-    element: Optional[Any] = None
-    matched_count: int = 0
-    search_time_ms: float = 0.0
-    error: Optional[str] = None
+    element: Optional[dict] = None
+    confidence: float = 0.0
+    metadata: dict = None
 
 
 class ElementLocator:
     """
-    Main element locator class supporting multiple strategies.
-    
-    Example:
-        locator = ElementLocator()
-        element = locator.find(
-            Locator(LocatorType.XPATH, "//button[@id='submit']")
-        )
+    Locates UI elements using multiple strategies.
+
+    Supports CSS selectors, XPath, accessibility attributes,
+    image-based matching, and text content.
     """
-    
-    def __init__(self):
-        self._registry: dict[str, Callable] = {}
-        self._cache_enabled = True
-        self._cache: dict[str, Any] = {}
-    
-    def register_strategy(
-        self, 
-        name: str, 
-        func: Callable[[Locator], Any]
-    ) -> None:
-        """Register a custom locator strategy."""
-        self._registry[name] = func
-    
-    def find(self, locator: Locator, context: Optional[Any] = None) -> LocatorResult:
+
+    def __init__(self) -> None:
+        self._cache: dict[str, dict] = {}
+        self._cache_enabled: bool = True
+        self._cache_ttl: float = 60.0
+
+    def by_id(self, element_id: str) -> Locator:
         """
-        Find an element using the given locator.
-        
+        Create a locator by element ID.
+
         Args:
-            locator: The locator to use
-            context: Optional context (driver/page) to search within
-            
+            element_id: HTML element ID
+
         Returns:
-            LocatorResult with found status and element
+            Locator object
         """
-        import time
-        start_time = time.time()
-        
-        try:
-            if self._cache_enabled:
-                cache_key = self._get_cache_key(locator)
-                if cache_key in self._cache:
-                    return self._cache[cache_key]
-            
-            strategy_func = self._get_strategy_function(locator.locator_type)
-            element = strategy_func(locator, context)
-            matched_count = self._count_matches(element)
-            
-            result = LocatorResult(
-                found=element is not None,
-                element=element,
-                matched_count=matched_count,
-                search_time_ms=(time.time() - start_time) * 1000
+        return Locator(
+            strategy=LocatorStrategy.ID,
+            value=element_id,
+        )
+
+    def by_css(self, selector: str, timeout: float = 10.0) -> Locator:
+        """
+        Create a locator by CSS selector.
+
+        Args:
+            selector: CSS selector string
+            timeout: Search timeout in seconds
+
+        Returns:
+            Locator object
+        """
+        return Locator(
+            strategy=LocatorStrategy.CSS_SELECTOR,
+            value=selector,
+            timeout=timeout,
+        )
+
+    def by_xpath(self, xpath: str, timeout: float = 10.0) -> Locator:
+        """
+        Create a locator by XPath expression.
+
+        Args:
+            xpath: XPath expression
+            timeout: Search timeout in seconds
+
+        Returns:
+            Locator object
+        """
+        return Locator(
+            strategy=LocatorStrategy.XPATH,
+            value=xpath,
+            timeout=timeout,
+        )
+
+    def by_accessibility(
+        self,
+        role: Optional[str] = None,
+        name: Optional[str] = None,
+        **attributes,
+    ) -> Locator:
+        """
+        Create a locator by accessibility attributes.
+
+        Args:
+            role: Accessibility role (e.g., 'button', 'link')
+            name: Accessibility name/label
+            **attributes: Additional accessibility attributes
+
+        Returns:
+            Locator object
+        """
+        value = self._build_accessibility_query(role, name, **attributes)
+        return Locator(
+            strategy=LocatorStrategy.ACCESSIBILITY,
+            value=value,
+        )
+
+    def by_text(self, text: str, exact: bool = False) -> Locator:
+        """
+        Create a locator by text content.
+
+        Args:
+            text: Text to search for
+            exact: Whether to match exactly
+
+        Returns:
+            Locator object
+        """
+        prefix = "exact:" if exact else "partial:"
+        return Locator(
+            strategy=LocatorStrategy.TEXT,
+            value=f"{prefix}{text}",
+        )
+
+    def by_image(self, image_path: str, confidence: float = 0.8) -> Locator:
+        """
+        Create a locator by template image.
+
+        Args:
+            image_path: Path to template image file
+            confidence: Minimum confidence threshold
+
+        Returns:
+            Locator object
+        """
+        return Locator(
+            strategy=LocatorStrategy.IMAGE,
+            value=image_path,
+        )
+
+    def with_parent(self, locator: Locator, parent: Locator) -> Locator:
+        """
+        Create a locator that is a child of another locator.
+
+        Args:
+            locator: Child locator
+            parent: Parent locator
+
+        Returns:
+            New locator with parent set
+        """
+        locator.parent = parent
+        return locator
+
+    def _build_accessibility_query(
+        self,
+        role: Optional[str] = None,
+        name: Optional[str] = None,
+        **attributes,
+    ) -> str:
+        """Build accessibility query string from parameters."""
+        parts = []
+        if role:
+            parts.append(f"role={role}")
+        if name:
+            parts.append(f"name={name}")
+        for key, value in attributes.items():
+            parts.append(f"{key}={value}")
+        return ";".join(parts)
+
+    def locate(self, locator: Locator) -> LocateResult:
+        """
+        Locate an element using the given locator.
+
+        Args:
+            locator: Locator to use
+
+        Returns:
+            LocateResult with found status and element info
+        """
+        cache_key = f"{locator.strategy.name}:{locator.value}"
+
+        if self._cache_enabled and cache_key in self._cache:
+            cached = self._cache[cache_key]
+            return LocateResult(
+                found=True,
+                element=cached,
+                confidence=1.0,
             )
-            
-            if self._cache_enabled:
-                self._cache[self._get_cache_key(locator)] = result
-                
-            return result
-            
-        except Exception as e:
-            return LocatorResult(
-                found=False,
-                error=str(e),
-                search_time_ms=(time.time() - start_time) * 1000
-            )
-    
-    def find_all(self, locator: Locator, context: Optional[Any] = None) -> list[Any]:
-        """Find all elements matching the locator."""
-        try:
-            strategy_func = self._get_strategy_function(locator.locator_type)
-            elements = strategy_func(locator, context)
-            return elements if isinstance(elements, list) else [elements]
-        except Exception:
-            return []
-    
-    def _get_strategy_function(self, locator_type: LocatorType) -> Callable:
-        """Get the strategy function for the locator type."""
-        strategies = {
-            LocatorType.XPATH: self._xpath_strategy,
-            LocatorType.CSS_SELECTOR: self._css_strategy,
-            LocatorType.ID: self._id_strategy,
-            LocatorType.NAME: self._name_strategy,
-            LocatorType.CLASS_NAME: self._class_name_strategy,
-            LocatorType.TAG_NAME: self._tag_name_strategy,
-            LocatorType.LINK_TEXT: self._link_text_strategy,
-            LocatorType.PARTIAL_LINK_TEXT: self._partial_link_text_strategy,
-            LocatorType.TEXT: self._text_strategy,
-            LocatorType.ACCESSIBILITY: self._accessibility_strategy,
-        }
-        return strategies.get(locator_type, self._xpath_strategy)
-    
-    def _xpath_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """XPath locator strategy."""
-        # Placeholder - actual implementation would use WebDriver
-        return None
-    
-    def _css_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """CSS selector locator strategy."""
-        return None
-    
-    def _id_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """ID-based locator strategy."""
-        return None
-    
-    def _name_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """Name-based locator strategy."""
-        return None
-    
-    def _class_name_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """Class name locator strategy."""
-        return None
-    
-    def _tag_name_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """Tag name locator strategy."""
-        return None
-    
-    def _link_text_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """Link text locator strategy."""
-        return None
-    
-    def _partial_link_text_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """Partial link text locator strategy."""
-        return None
-    
-    def _text_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """Text content locator strategy."""
-        return None
-    
-    def _accessibility_strategy(self, locator: Locator, context: Optional[Any]) -> Any:
-        """Accessibility-based locator strategy."""
-        return None
-    
-    def _count_matches(self, element: Any) -> int:
-        """Count how many elements match."""
-        if element is None:
-            return 0
-        try:
-            return len(element) if hasattr(element, '__len__') else 1
-        except Exception:
-            return 1
-    
-    def _get_cache_key(self, locator: Locator) -> str:
-        """Generate a cache key for the locator."""
-        return f"{locator.locator_type.name}:{locator.value}:{locator.index}"
-    
+
+        if locator.strategy == LocatorStrategy.ID:
+            return self._locate_by_id(locator)
+        elif locator.strategy == LocatorStrategy.CSS_SELECTOR:
+            return self._locate_by_css(locator)
+        elif locator.strategy == LocatorStrategy.XPATH:
+            return self._locate_by_xpath(locator)
+        elif locator.strategy == LocatorStrategy.ACCESSIBILITY:
+            return self._locate_by_accessibility(locator)
+        elif locator.strategy == LocatorStrategy.TEXT:
+            return self._locate_by_text(locator)
+        elif locator.strategy == LocatorStrategy.IMAGE:
+            return self._locate_by_image(locator)
+
+        return LocateResult(found=False)
+
+    def _locate_by_id(self, locator: Locator) -> LocateResult:
+        """Locate element by ID."""
+        # Placeholder - would integrate with actual UI framework
+        return LocateResult(found=False)
+
+    def _locate_by_css(self, locator: Locator) -> LocateResult:
+        """Locate element by CSS selector."""
+        return LocateResult(found=False)
+
+    def _locate_by_xpath(self, locator: Locator) -> LocateResult:
+        """Locate element by XPath."""
+        return LocateResult(found=False)
+
+    def _locate_by_accessibility(self, locator: Locator) -> LocateResult:
+        """Locate element by accessibility attributes."""
+        return LocateResult(found=False)
+
+    def _locate_by_text(self, locator: Locator) -> LocateResult:
+        """Locate element by text content."""
+        return LocateResult(found=False)
+
+    def _locate_by_image(self, locator: Locator) -> LocateResult:
+        """Locate element by template image."""
+        return LocateResult(found=False)
+
     def clear_cache(self) -> None:
         """Clear the locator cache."""
-        self._cache.clear()
+        self._cache = {}
+
+    def enable_cache(self, enabled: bool) -> None:
+        """Enable or disable caching."""
+        self._cache_enabled = enabled
 
 
-def xpath(expr: str, timeout: float = 10.0) -> Locator:
-    """Create an XPath locator."""
-    return Locator(LocatorType.XPATH, expr, timeout)
-
-
-def css(selector: str, timeout: float = 10.0) -> Locator:
-    """Create a CSS selector locator."""
-    return Locator(LocatorType.CSS_SELECTOR, selector, timeout)
-
-
-def id_(value: str, timeout: float = 10.0) -> Locator:
-    """Create an ID-based locator."""
-    return Locator(LocatorType.ID, value, timeout)
-
-
-def name(value: str, timeout: float = 10.0) -> Locator:
-    """Create a name-based locator."""
-    return Locator(LocatorType.NAME, value, timeout)
-
-
-def class_name(value: str, timeout: float = 10.0) -> Locator:
-    """Create a class name locator."""
-    return Locator(LocatorType.CLASS_NAME, value, timeout)
-
-
-def tag_name(value: str, timeout: float = 10.0) -> Locator:
-    """Create a tag name locator."""
-    return Locator(LocatorType.TAG_NAME, value, timeout)
-
-
-def link_text(text: str, timeout: float = 10.0) -> Locator:
-    """Create a link text locator."""
-    return Locator(LocatorType.LINK_TEXT, text, timeout)
-
-
-def partial_link_text(text: str, timeout: float = 10.0) -> Locator:
-    """Create a partial link text locator."""
-    return Locator(LocatorType.PARTIAL_LINK_TEXT, text, timeout)
-
-
-def text(content: str, timeout: float = 10.0) -> Locator:
-    """Create a text-based locator."""
-    return Locator(LocatorType.TEXT, content, timeout)
-
-
-class LocatorChain:
-    """Chain multiple locators together for complex element finding."""
-    
-    def __init__(self):
-        self._locators: list[Locator] = []
-    
-    def add(self, locator: Locator) -> 'LocatorChain':
-        """Add a locator to the chain."""
-        self._locators.append(locator)
-        return self
-    
-    def find(self, context: Any) -> LocatorResult:
-        """Execute the locator chain."""
-        if not self._locators:
-            return LocatorResult(found=False, error="No locators in chain")
-        
-        element = context
-        for locator in self._locators:
-            result = ElementLocator().find(locator, element)
-            if not result.found:
-                return result
-            element = result.element
-            
-        return LocatorResult(found=True, element=element)
-
-
-def smart_locator(text: str, element_type: Optional[str] = None) -> Locator:
+def parse_css_selector(selector: str) -> dict[str, list[str]]:
     """
-    Create a smart locator that tries multiple strategies.
-    
+    Parse a CSS selector into its component parts.
+
     Args:
-        text: Text to search for
-        element_type: Optional element type hint (button, input, etc.)
-        
+        selector: CSS selector string
+
     Returns:
-        Locator with multiple strategies
+        Dictionary with selector components
     """
-    if element_type:
-        return xpath(f"//{element_type}[contains(text(),'{text}')]")
-    return xpath(f"//*[contains(text(),'{text}')]")
+    result: dict[str, list[str]] = {
+        "tag": [],
+        "class": [],
+        "id": [],
+        "attribute": [],
+    }
+
+    # Simple parser for common patterns
+    tag_match = re.match(r"^([a-zA-Z0-9]+)", selector)
+    if tag_match:
+        result["tag"].append(tag_match.group(1))
+
+    # Extract classes
+    class_matches = re.findall(r"\.([a-zA-Z_-][a-zA-Z0-9_-]*)", selector)
+    result["class"].extend(class_matches)
+
+    # Extract ID
+    id_match = re.search(r"#([a-zA-Z_-][a-zA-Z0-9_-]*)", selector)
+    if id_match:
+        result["id"].append(id_match.group(1))
+
+    # Extract attribute selectors
+    attr_matches = re.findall(r"\[([^\]]+)\]", selector)
+    result["attribute"].extend(attr_matches)
+
+    return result
+
+
+def xpath_contains_text(element: str, text: str, exact: bool = False) -> str:
+    """
+    Generate XPath for element containing specific text.
+
+    Args:
+        element: Element tag name
+        text: Text to search for
+        exact: Whether to match exactly
+
+    Returns:
+        XPath expression string
+    """
+    if exact:
+        return f"//{element}[text()='{text}']"
+    else:
+        return f"//{element}[contains(text(),'{text}')]"
+
+
+def xpath_with_attribute(
+    element: str,
+    attribute: str,
+    value: str,
+    operator: str = "=",
+) -> str:
+    """
+    Generate XPath for element with specific attribute value.
+
+    Args:
+        element: Element tag name
+        attribute: Attribute name
+        value: Attribute value
+        operator: Comparison operator (=, !=, contains, starts-with, etc.)
+
+    Returns:
+        XPath expression string
+    """
+    if operator == "=":
+        return f"//{element}[@{attribute}='{value}']"
+    elif operator == "contains":
+        return f"//{element}[contains(@{attribute},'{value}')]"
+    elif operator == "starts-with":
+        return f"//{element}[starts-with(@{attribute},'{value}')]"
+    else:
+        return f"//{element}[@{attribute}{operator}'{value}']"
