@@ -1,341 +1,404 @@
-"""
-API Event Sourcing Action Module.
+"""API Event Sourcing Action Module.
 
-Event sourcing pattern implementation with event store,
-snapshot support, and event replay capabilities.
+Provides event sourcing infrastructure for API operations
+with event store, snapshots, and replay capabilities.
+
+Author: RabAi Team
 """
+
+from __future__ import annotations
 
 import json
 import time
+import uuid
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 from enum import Enum
-import logging
 
-logger = logging.getLogger(__name__)
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
 class EventType(Enum):
-    """Base event types."""
-    UNKNOWN = "unknown"
+    """Event types in the system."""
+    CREATED = "created"
+    UPDATED = "updated"
+    DELETED = "deleted"
+    STATE_CHANGED = "state_changed"
+    COMMAND_EXECUTED = "command_executed"
+    QUERY_EXECUTED = "query_executed"
 
 
 @dataclass
 class Event:
-    """
-    Event sourcing event.
-
-    Attributes:
-        event_id: Unique event identifier.
-        event_type: Type of event.
-        aggregate_id: ID of aggregate this event belongs to.
-        data: Event payload.
-        metadata: Event metadata.
-        timestamp: When event occurred.
-        version: Event version for ordering.
-    """
+    """Base event structure."""
     event_id: str
-    event_type: str
+    event_type: EventType
     aggregate_id: str
-    data: Any = None
-    metadata: dict = field(default_factory=dict)
-    timestamp: float = field(default_factory=time.time, init=False)
-    version: int = 1
+    timestamp: float
+    version: int
+    data: Dict[str, Any]
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert event to dictionary."""
+        return {
+            "event_id": self.event_id,
+            "event_type": self.event_type.value,
+            "aggregate_id": self.aggregate_id,
+            "timestamp": self.timestamp,
+            "version": self.version,
+            "data": self.data,
+            "metadata": self.metadata
+        }
 
 
 @dataclass
 class Snapshot:
-    """Snapshot of aggregate state."""
+    """Aggregate state snapshot."""
     aggregate_id: str
     version: int
-    state: Any
     timestamp: float
+    state: Dict[str, Any]
 
 
-class APIEventSourcingAction:
-    """
-    Event sourcing implementation for API state management.
+class EventHandler:
+    """Handler for processing events."""
 
-    Example:
-        event_store = APIEventSourcingAction()
-        event_store.record_event("order-123", OrderCreatedEvent(data))
-        events = event_store.get_events("order-123")
-        state = event_store.rebuild_state("order-123", OrderAggregate())
-    """
+    def __init__(self):
+        self._handlers: Dict[EventType, List[Callable]] = {}
 
-    def __init__(self, snapshot_threshold: int = 100):
-        """
-        Initialize event sourcing.
-
-        Args:
-            snapshot_threshold: Events before creating snapshot.
-        """
-        self.snapshot_threshold = snapshot_threshold
-        self._events: list[Event] = []
-        self._snapshots: dict[str, Snapshot] = {}
-        self._handlers: dict[str, Callable] = {}
-
-    def register_event_type(
+    def register(
         self,
-        event_type: str,
-        handler: Callable[[Any, Event], Any]
+        event_type: EventType,
+        handler: Callable[[Event], None]
     ) -> None:
-        """
-        Register event handler.
+        """Register event handler."""
+        if event_type not in self._handlers:
+            self._handlers[event_type] = []
+        self._handlers[event_type].append(handler)
 
-        Args:
-            event_type: Event type name.
-            handler: Function to apply event to state.
-        """
-        self._handlers[event_type] = handler
-        logger.debug(f"Registered handler for event type: {event_type}")
+    def handle(self, event: Event) -> None:
+        """Handle an event."""
+        handlers = self._handlers.get(event.event_type, [])
+        for handler in handlers:
+            handler(event)
 
-    def record_event(
-        self,
-        aggregate_id: str,
-        event_type: str,
-        data: Any,
-        metadata: Optional[dict] = None
-    ) -> Event:
-        """
-        Record a new event.
 
-        Args:
-            aggregate_id: Aggregate identifier.
-            event_type: Type of event.
-            data: Event payload.
-            metadata: Optional metadata.
+class EventStore:
+    """Event store for persisting and retrieving events."""
 
-        Returns:
-            Created Event.
-        """
-        import uuid
+    def __init__(self, max_events: int = 100000):
+        self._events: Deque[Event] = deque(maxlen=max_events)
+        self._by_aggregate: Dict[str, Deque[Event]] = {}
+        self._snapshots: Dict[str, Snapshot] = {}
+        self._snapshot_interval: int = 100
 
-        aggregate_events = [e for e in self._events if e.aggregate_id == aggregate_id]
-        version = max([e.version for e in aggregate_events], default=0) + 1
-
-        event = Event(
-            event_id=str(uuid.uuid4())[:12],
-            event_type=event_type,
-            aggregate_id=aggregate_id,
-            data=data,
-            metadata=metadata or {},
-            version=version
-        )
-
+    def append(self, event: Event) -> None:
+        """Append event to store."""
         self._events.append(event)
 
-        if len(aggregate_events) >= self.snapshot_threshold:
-            self._create_snapshot(aggregate_id)
+        if event.aggregate_id not in self._by_aggregate:
+            self._by_aggregate[event.aggregate_id] = deque(maxlen=self._events.maxlen or 10000)
 
-        logger.debug(f"Recorded event: {event_type} for {aggregate_id} v{version}")
-        return event
+        self._by_aggregate[event.aggregate_id].append(event)
 
-    def get_events(
-        self,
-        aggregate_id: str,
-        from_version: int = 0
-    ) -> list[Event]:
-        """
-        Get events for an aggregate.
+        if event.version % self._snapshot_interval == 0:
+            self._take_snapshot(event.aggregate_id)
 
-        Args:
-            aggregate_id: Aggregate identifier.
-            from_version: Get events from this version onward.
-
-        Returns:
-            List of events.
-        """
-        return [
-            e for e in self._events
-            if e.aggregate_id == aggregate_id and e.version > from_version
-        ]
-
-    def rebuild_state(
-        self,
-        aggregate_id: str,
-        initial_state: Any,
-        until_version: Optional[int] = None
-    ) -> Any:
-        """
-        Rebuild aggregate state from events.
-
-        Args:
-            aggregate_id: Aggregate identifier.
-            initial_state: Initial state object.
-            until_version: Rebuild until this version.
-
-        Returns:
-            Reconstructed state.
-        """
-        events = self.get_events(aggregate_id)
-
-        if until_version:
-            events = [e for e in events if e.version <= until_version]
-
-        state = initial_state
-
-        for event in events:
-            handler = self._handlers.get(event.event_type)
-
-            if handler:
-                try:
-                    state = handler(state, event)
-                except Exception as e:
-                    logger.error(f"Event handler failed for {event.event_type}: {e}")
-                    raise
-            else:
-                logger.warning(f"No handler for event type: {event.event_type}")
-
-        return state
-
-    def _create_snapshot(self, aggregate_id: str) -> None:
-        """Create snapshot for aggregate."""
-        events = self.get_events(aggregate_id)
-
+    def _take_snapshot(self, aggregate_id: str) -> None:
+        """Take snapshot of aggregate state."""
+        events = self._by_aggregate.get(aggregate_id, [])
         if not events:
             return
 
-        latest_version = max(e.version for e in events)
-        latest_event = max(events, key=lambda e: e.version)
+        latest = events[-1]
+        state = latest.data.copy()
+        state["_version"] = latest.version
+        state["_last_modified"] = latest.timestamp
 
         snapshot = Snapshot(
             aggregate_id=aggregate_id,
-            version=latest_version,
-            state=latest_event.data,
-            timestamp=time.time()
+            version=latest.version,
+            timestamp=time.time(),
+            state=state
         )
 
         self._snapshots[aggregate_id] = snapshot
-        logger.debug(f"Created snapshot for {aggregate_id} at v{latest_version}")
+
+    def get_events(
+        self,
+        aggregate_id: Optional[str] = None,
+        event_type: Optional[EventType] = None,
+        since_version: Optional[int] = None,
+        limit: int = 1000
+    ) -> List[Event]:
+        """Get events from store."""
+        events = list(self._events)
+
+        if aggregate_id:
+            events = [e for e in events if e.aggregate_id == aggregate_id]
+
+        if event_type:
+            events = [e for e in events if e.event_type == event_type]
+
+        if since_version is not None:
+            events = [e for e in events if e.version > since_version]
+
+        return events[-limit:]
 
     def get_snapshot(self, aggregate_id: str) -> Optional[Snapshot]:
         """Get latest snapshot for aggregate."""
         return self._snapshots.get(aggregate_id)
 
-    def replay_events(
+    def rebuild_state(
         self,
         aggregate_id: str,
-        from_version: int = 0,
-        to_version: Optional[int] = None
-    ) -> list[Event]:
-        """
-        Get events for replay (with optional version range).
+        apply_fn: Callable[[Dict[str, Any], Event], Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Rebuild aggregate state from events."""
+        snapshot = self.get_snapshot(aggregate_id)
 
-        Args:
-            aggregate_id: Aggregate identifier.
-            from_version: Start from this version.
-            to_version: End at this version.
+        if snapshot:
+            state = snapshot.state.copy()
+            start_version = snapshot.version + 1
+        else:
+            state = {}
+            start_version = 0
 
-        Returns:
-            List of events to replay.
-        """
-        events = self.get_events(aggregate_id, from_version)
+        events = [
+            e for e in self._by_aggregate.get(aggregate_id, [])
+            if e.version > start_version
+        ]
 
-        if to_version:
-            events = [e for e in events if e.version <= to_version]
+        for event in events:
+            state = apply_fn(state, event)
 
-        return events
+        return state
 
-    def get_event_statistics(self) -> dict:
+    def get_statistics(self) -> Dict[str, Any]:
         """Get event store statistics."""
-        aggregates = set(e.aggregate_id for e in self._events)
-        by_type: dict[str, int] = {}
-
+        events_by_type: Dict[str, int] = {}
         for event in self._events:
-            by_type[event.event_type] = by_type.get(event.event_type, 0) + 1
+            key = event.event_type.value
+            events_by_type[key] = events_by_type.get(key, 0) + 1
 
         return {
             "total_events": len(self._events),
-            "aggregates": len(aggregates),
+            "aggregates": len(self._by_aggregate),
             "snapshots": len(self._snapshots),
-            "by_type": by_type
+            "events_by_type": events_by_type
         }
 
-    def export_events(
+    def clear(self) -> None:
+        """Clear event store."""
+        self._events.clear()
+        self._by_aggregate.clear()
+        self._snapshots.clear()
+
+
+class Aggregate:
+    """Base aggregate with event sourcing support."""
+
+    def __init__(self, aggregate_id: str):
+        self.aggregate_id = aggregate_id
+        self.version = 0
+        self._pending_events: Deque[Event] = deque()
+
+    def _apply(self, event: Event) -> None:
+        """Apply event to aggregate state."""
+        self.version = event.version
+
+    def _add_event(
         self,
-        aggregate_id: Optional[str] = None
-    ) -> list[dict]:
-        """
-        Export events to serializable format.
+        event_type: EventType,
+        data: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Event:
+        """Create and add pending event."""
+        self.version += 1
 
-        Args:
-            aggregate_id: Export specific aggregate or all.
+        event = Event(
+            event_id=str(uuid.uuid4()),
+            event_type=event_type,
+            aggregate_id=self.aggregate_id,
+            timestamp=time.time(),
+            version=self.version,
+            data=data,
+            metadata=metadata or {}
+        )
 
-        Returns:
-            List of event dictionaries.
-        """
-        events = self._events
+        self._pending_events.append(event)
+        return event
 
-        if aggregate_id:
-            events = [e for e in events if e.aggregate_id == aggregate_id]
+    def commit(self, event_store: EventStore) -> List[Event]:
+        """Commit pending events to store."""
+        committed = []
 
-        return [
-            {
-                "event_id": e.event_id,
-                "event_type": e.event_type,
-                "aggregate_id": e.aggregate_id,
-                "data": e.data,
-                "metadata": e.metadata,
-                "timestamp": e.timestamp,
-                "version": e.version
-            }
-            for e in events
-        ]
+        while self._pending_events:
+            event = self._pending_events.popleft()
+            event_store.append(event)
+            self._apply(event)
+            committed.append(event)
 
-    def import_events(self, events_data: list[dict]) -> int:
-        """
-        Import events from serializable format.
+        return committed
 
-        Args:
-            events_data: List of event dictionaries.
 
-        Returns:
-            Number of events imported.
-        """
-        imported = 0
+class APIEventSourcingAction(BaseAction):
+    """Action for event sourcing operations."""
 
-        for data in events_data:
-            try:
-                event = Event(
-                    event_id=data["event_id"],
-                    event_type=data["event_type"],
-                    aggregate_id=data["aggregate_id"],
-                    data=data.get("data"),
-                    metadata=data.get("metadata", {}),
-                    timestamp=data.get("timestamp", time.time()),
-                    version=data.get("version", 1)
+    def __init__(self):
+        super().__init__("api_event_sourcing")
+        self._store = EventStore()
+        self._handler = EventHandler()
+
+    def execute(self, params: Dict[str, Any]) -> ActionResult:
+        """Execute event sourcing action."""
+        try:
+            operation = params.get("operation", "append")
+
+            if operation == "append":
+                return self._append(params)
+            elif operation == "get_events":
+                return self._get_events(params)
+            elif operation == "get_snapshot":
+                return self._get_snapshot(params)
+            elif operation == "rebuild":
+                return self._rebuild(params)
+            elif operation == "stats":
+                return self._get_stats(params)
+            elif operation == "clear":
+                return self._clear(params)
+            else:
+                return ActionResult(
+                    success=False,
+                    message=f"Unknown operation: {operation}"
                 )
 
-                self._events.append(event)
-                imported += 1
+        except Exception as e:
+            return ActionResult(success=False, message=str(e))
 
-            except Exception as e:
-                logger.error(f"Failed to import event: {e}")
+    def _append(self, params: Dict[str, Any]) -> ActionResult:
+        """Append event to store."""
+        event_type_str = params.get("event_type", "state_changed")
+        aggregate_id = params.get("aggregate_id", str(uuid.uuid4()))
+        data = params.get("data", {})
+        metadata = params.get("metadata", {})
 
-        return imported
+        try:
+            event_type = EventType(event_type_str)
+        except ValueError:
+            return ActionResult(
+                success=False,
+                message=f"Invalid event type: {event_type_str}"
+            )
 
-    def clear(self, before_timestamp: Optional[float] = None) -> int:
-        """
-        Clear events, optionally before timestamp.
+        existing_events = self._store.get_events(aggregate_id)
+        version = len(existing_events) + 1
 
-        Args:
-            before_timestamp: Clear events before this time.
+        event = Event(
+            event_id=str(uuid.uuid4()),
+            event_type=event_type,
+            aggregate_id=aggregate_id,
+            timestamp=time.time(),
+            version=version,
+            data=data,
+            metadata=metadata
+        )
 
-        Returns:
-            Number of events cleared.
-        """
-        if before_timestamp is None:
-            cleared = len(self._events)
-            self._events.clear()
-            self._snapshots.clear()
-        else:
-            to_keep = [e for e in self._events if e.timestamp >= before_timestamp]
-            cleared = len(self._events) - len(to_keep)
-            self._events = to_keep
+        self._store.append(event)
 
-            to_keep_snaps = {k: v for k, v in self._snapshots.items() if v.timestamp >= before_timestamp}
-            self._snapshots = to_keep_snaps
+        return ActionResult(
+            success=True,
+            data={
+                "event_id": event.event_id,
+                "aggregate_id": aggregate_id,
+                "version": version
+            }
+        )
 
-        logger.info(f"Cleared {cleared} events")
-        return cleared
+    def _get_events(self, params: Dict[str, Any]) -> ActionResult:
+        """Get events from store."""
+        aggregate_id = params.get("aggregate_id")
+        event_type_str = params.get("event_type")
+        since_version = params.get("since_version")
+        limit = params.get("limit", 1000)
+
+        event_type = None
+        if event_type_str:
+            try:
+                event_type = EventType(event_type_str)
+            except ValueError:
+                return ActionResult(
+                    success=False,
+                    message=f"Invalid event type: {event_type_str}"
+                )
+
+        events = self._store.get_events(
+            aggregate_id=aggregate_id,
+            event_type=event_type,
+            since_version=since_version,
+            limit=limit
+        )
+
+        return ActionResult(
+            success=True,
+            data={
+                "events": [e.to_dict() for e in events],
+                "count": len(events)
+            }
+        )
+
+    def _get_snapshot(self, params: Dict[str, Any]) -> ActionResult:
+        """Get snapshot for aggregate."""
+        aggregate_id = params.get("aggregate_id", "")
+
+        snapshot = self._store.get_snapshot(aggregate_id)
+
+        if not snapshot:
+            return ActionResult(
+                success=True,
+                data={"snapshot": None}
+            )
+
+        return ActionResult(
+            success=True,
+            data={
+                "snapshot": {
+                    "aggregate_id": snapshot.aggregate_id,
+                    "version": snapshot.version,
+                    "timestamp": snapshot.timestamp,
+                    "state": snapshot.state
+                }
+            }
+        )
+
+    def _rebuild(self, params: Dict[str, Any]) -> ActionResult:
+        """Rebuild aggregate state."""
+        aggregate_id = params.get("aggregate_id", "")
+
+        def apply_fn(state: Dict[str, Any], event: Event) -> Dict[str, Any]:
+            new_state = state.copy()
+            new_state.update(event.data)
+            return new_state
+
+        state = self._store.rebuild_state(aggregate_id, apply_fn)
+
+        return ActionResult(
+            success=True,
+            data={"state": state}
+        )
+
+    def _get_stats(self, params: Dict[str, Any]) -> ActionResult:
+        """Get event store statistics."""
+        stats = self._store.get_statistics()
+        return ActionResult(success=True, data=stats)
+
+    def _clear(self, params: Dict[str, Any]) -> ActionResult:
+        """Clear event store."""
+        self._store.clear()
+        return ActionResult(success=True, message="Event store cleared")
