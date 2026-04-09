@@ -1,265 +1,416 @@
-"""
-API Gateway Action Module.
+"""API Gateway Action Module.
 
-Provides API gateway functionality with routing, load balancing,
-rate limiting, and request/response transformation.
-
-Author: RabAi Team
+Provides API gateway capabilities including routing, rate limiting,
+request/response transformation, and backend aggregation.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
+import json
+import logging
+import re
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-class LoadBalancingStrategy(Enum):
-    """Load balancing strategies."""
+logger = logging.getLogger(__name__)
+
+
+class RoutingStrategy(Enum):
+    """Route selection strategies."""
     ROUND_ROBIN = "round_robin"
-    LEAST_CONNECTIONS = "least_connections"
-    WEIGHTED = "weighted"
     RANDOM = "random"
-    IP_HASH = "ip_hash"
-
-
-@dataclass
-class Backend:
-    """Backend server definition."""
-    url: str
-    weight: int = 1
-    max_connections: int = 100
-    timeout: float = 30.0
-    healthy: bool = True
-    current_connections: int = 0
+    WEIGHTED = "weighted"
+    LEAST_LOADED = "least_loaded"
+    CONSISTENT_HASH = "consistent_hash"
 
 
 @dataclass
 class Route:
-    """API route definition."""
-    path: str
-    methods: List[str]
-    backend: str
-    auth_required: bool = False
-    rate_limit: Optional[Tuple[int, float]] = None  # (requests, window_seconds)
-    transforms: Dict[str, Any] = field(default_factory=dict)
+    """An API route definition."""
+    path_pattern: str
+    backend_url: str
+    methods: List[str] = field(default_factory=lambda: ["GET"])
+    timeout: float = 30.0
+    weight: float = 1.0
+    retries: int = 1
+    strip_path: bool = False
+    add_prefix: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
+    priority: int = 0
+
+    _compiled_pattern: re.Pattern = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Compile the path pattern for matching."""
+        self._compiled_pattern = re.compile(self.path_pattern)
+
+    def matches(self, path: str, method: str) -> bool:
+        """Check if this route matches the given path and method."""
+        if method.upper() not in [m.upper() for m in self.methods]:
+            return False
+        return self._compiled_pattern.match(path) is not None
 
 
 @dataclass
-class GatewayConfig:
-    """Gateway configuration."""
-    host: str = "0.0.0.0"
-    port: int = 8080
-    backends: Dict[str, List[Backend]] = field(default_factory=dict)
-    routes: List[Route] = field(default_factory=list)
-    default_timeout: float = 30.0
-    enable_logging: bool = True
-
-
-class LoadBalancer:
-    """Load balancer for backend servers."""
-
-    def __init__(self, strategy: LoadBalancingStrategy) -> None:
-        self.strategy = strategy
-        self.round_robin_index: Dict[str, int] = defaultdict(int)
-        self.connection_counts: Dict[str, int] = defaultdict(int)
-
-    def select_backend(
-        self,
-        backends: List[Backend],
-        key: Optional[str] = None,
-    ) -> Optional[Backend]:
-        """Select a backend based on strategy."""
-        healthy = [b for b in backends if b.healthy]
-        if not healthy:
-            return None
-
-        if self.strategy == LoadBalancingStrategy.ROUND_ROBIN:
-            idx = self.round_robin_index[id(backends)]
-            self.round_robin_index[id(backends)] = (idx + 1) % len(healthy)
-            return healthy[idx % len(healthy)]
-
-        elif self.strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
-            return min(healthy, key=lambda b: b.current_connections)
-
-        elif self.strategy == LoadBalancingStrategy.WEIGHTED:
-            total_weight = sum(b.weight for b in healthy)
-            r = hash(str(time.time()).encode()) % total_weight
-            cumsum = 0
-            for b in healthy:
-                cumsum += b.weight
-                if r < cumsum:
-                    return b
-            return healthy[-1]
-
-        elif self.strategy == LoadBalancingStrategy.IP_HASH:
-            if key:
-                hash_val = int(hashlib.md5(key.encode()).hexdigest(), 16)
-                return healthy[hash_val % len(healthy)]
-            return healthy[0]
-
-        else:  # RANDOM
-            import random
-            return healthy[int(random.random() * len(healthy))]
+class RouteMatch:
+    """Result of route matching."""
+    route: Route
+    path_params: Dict[str, str]
+    backend_path: str
 
 
 @dataclass
-class RequestMetrics:
-    """Metrics for a request."""
-    path: str
-    method: str
-    backend: str
-    status_code: int
-    response_time: float
-    timestamp: float
+class GatewayStats:
+    """Gateway statistics."""
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    routed_requests: int = 0
+    transformed_requests: int = 0
+    transformed_responses: int = 0
+    route_not_found: int = 0
+    backend_errors: int = 0
+    avg_latency_ms: float = 0.0
 
 
-class APIGateway:
-    """Main API Gateway class."""
+class RequestTransformer:
+    """Transform requests before forwarding."""
 
-    def __init__(self, config: GatewayConfig) -> None:
-        self.config = config
-        self.load_balancers: Dict[str, LoadBalancer] = {}
-        self.metrics: List[RequestMetrics] = []
-        self.request_counts: Dict[str, Dict[str, List[float]]] = defaultdict(
-            lambda: defaultdict(list)
-        )
+    def __init__(self):
+        self._header_mappings: Dict[str, str] = {}
+        self._add_headers: Dict[str, str] = {}
+        self._remove_headers: List[str] = []
+        self._path_replacements: List[Tuple[str, str]] = []
 
-        for backend_name in config.backends:
-            self.load_balancers[backend_name] = LoadBalancer(
-                LoadBalancingStrategy.ROUND_ROBIN
+    def add_header_mapping(self, from_header: str, to_header: str) -> None:
+        """Map one header to another."""
+        self._header_mappings[from_header.lower()] = to_header
+
+    def add_header(self, name: str, value: str) -> None:
+        """Add a header to all requests."""
+        self._add_headers[name] = value
+
+    def remove_header(self, name: str) -> None:
+        """Remove a header from requests."""
+        self._remove_headers.append(name.lower())
+
+    def add_path_replacement(self, pattern: str, replacement: str) -> None:
+        """Add path replacement rule."""
+        self._path_replacements.append((pattern, replacement))
+
+    def transform_request(
+        self, path: str, headers: Dict[str, str], body: Optional[bytes]
+    ) -> Tuple[str, Dict[str, str], Optional[bytes]]:
+        """Transform the request."""
+        # Transform headers
+        new_headers = {}
+        for k, v in headers.items():
+            if k.lower() not in self._remove_headers:
+                new_key = self._header_mappings.get(k.lower(), k)
+                new_headers[new_key] = v
+
+        # Add static headers
+        new_headers.update(self._add_headers)
+
+        # Transform path
+        new_path = path
+        for pattern, replacement in self._path_replacements:
+            new_path = re.sub(pattern, replacement, new_path)
+
+        return new_path, new_headers, body
+
+
+class ResponseTransformer:
+    """Transform responses before returning."""
+
+    def __init__(self):
+        self._header_mappings: Dict[str, str] = {}
+        self._add_headers: Dict[str, str] = {}
+        self._remove_headers: List[str] = []
+        self._response_template: Optional[Dict[str, Any]] = None
+
+    def add_header_mapping(self, from_header: str, to_header: str) -> None:
+        """Map response header."""
+        self._header_mappings[from_header.lower()] = to_header
+
+    def add_header(self, name: str, value: str) -> None:
+        """Add header to responses."""
+        self._add_headers[name] = value
+
+    def remove_header(self, name: str) -> None:
+        """Remove header from responses."""
+        self._remove_headers.append(name.lower())
+
+    def set_response_template(self, template: Dict[str, Any]) -> None:
+        """Set a response template to wrap responses."""
+        self._response_template = template
+
+    def transform_response(
+        self, status_code: int, headers: Dict[str, str], body: Any
+    ) -> Tuple[int, Dict[str, str], Any]:
+        """Transform the response."""
+        # Transform headers
+        new_headers = {}
+        for k, v in headers.items():
+            if k.lower() not in self._remove_headers:
+                new_key = self._header_mappings.get(k.lower(), k)
+                new_headers[new_key] = v
+        new_headers.update(self._add_headers)
+
+        # Apply template if set
+        if self._response_template:
+            body = dict(self._response_template)
+            body["data"] = body
+
+        return status_code, new_headers, body
+
+
+class APIGatewayAction(BaseAction):
+    """API Gateway Action for routing and transformation.
+
+    Provides routing, rate limiting, request/response transformation,
+    and backend aggregation for API gateway functionality.
+
+    Examples:
+        >>> action = APIGatewayAction()
+        >>> result = action.execute(ctx, {
+        ...     "path": "/api/users/123",
+        ...     "method": "GET",
+        ...     "routes": [
+        ...         {"path_pattern": "/api/users/(\\\\d+)", "backend_url": "http://user-svc:8000"}
+        ...     ]
+        ... })
+    """
+
+    action_type = "api_gateway"
+    display_name = "API网关"
+    description = "API路由、限流、请求响应转换、后端聚合"
+
+    def __init__(self):
+        super().__init__()
+        self._routes: List[Route] = []
+        self._round_robin_counters: Dict[str, int] = {}
+        self._request_transformer = RequestTransformer()
+        self._response_transformer = ResponseTransformer()
+        self._stats = GatewayStats()
+        self._stats_lock = __import__("threading").RLock()
+
+    def add_route(self, route: Union[Route, Dict[str, Any]]) -> None:
+        """Add a route to the gateway."""
+        if isinstance(route, dict):
+            route = Route(**route)
+        # Sort by priority (higher first)
+        self._routes.append(route)
+        self._routes.sort(key=lambda r: r.priority, reverse=True)
+
+    def configure_request_transform(self, config: Dict[str, Any]) -> None:
+        """Configure request transformation."""
+        for mapping in config.get("header_mappings", []):
+            self._request_transformer.add_header_mapping(
+                mapping["from"], mapping["to"]
+            )
+        for name, value in config.get("add_headers", {}).items():
+            self._request_transformer.add_header(name, value)
+        for name in config.get("remove_headers", []):
+            self._request_transformer.remove_header(name)
+        for rule in config.get("path_replacements", []):
+            self._request_transformer.add_path_replacement(
+                rule["pattern"], rule["replacement"]
             )
 
-    def add_route(self, route: Route) -> None:
-        """Add a route to the gateway."""
-        self.config.routes.append(route)
+    def configure_response_transform(self, config: Dict[str, Any]) -> None:
+        """Configure response transformation."""
+        for mapping in config.get("header_mappings", []):
+            self._response_transformer.add_header_mapping(
+                mapping["from"], mapping["to"]
+            )
+        for name, value in config.get("add_headers", {}).items():
+            self._response_transformer.add_header(name, value)
+        for name in config.get("remove_headers", []):
+            self._response_transformer.remove_header(name)
+        if "response_template" in config:
+            self._response_transformer.set_response_template(
+                config["response_template"]
+            )
 
-    def match_route(
-        self,
-        path: str,
-        method: str,
-    ) -> Optional[Route]:
-        """Find matching route for path and method."""
-        for route in self.config.routes:
-            if self._path_matches(route.path, path) and method in route.methods:
-                return route
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute API gateway routing.
+
+        Args:
+            context: Execution context.
+            params: Dict with keys:
+                - path: Request path
+                - method: HTTP method (default: GET)
+                - routes: List of route definitions (if not pre-configured)
+                - headers: Request headers
+                - body: Request body (optional)
+                - route_name: Specific route to use (optional)
+                - strategy: Routing strategy (optional)
+
+        Returns:
+            ActionResult with routed response data.
+        """
+        import urllib.request
+        import urllib.error
+
+        path = params.get("path", "/")
+        method = params.get("method", "GET").upper()
+        headers = params.get("headers", {})
+        body = params.get("body")
+        routes_config = params.get("routes", [])
+
+        # Add routes if provided
+        if routes_config:
+            for r in routes_config:
+                if isinstance(r, Route):
+                    self.add_route(r)
+                else:
+                    self.add_route(Route(**r))
+
+        # Find matching route
+        match = self._match_route(path, method)
+        if match is None:
+            with self._stats_lock:
+                self._stats.route_not_found += 1
+            return ActionResult(
+                success=False,
+                message=f"No route found for {method} {path}",
+                data={"path": path, "method": method}
+            )
+
+        route = match.route
+
+        # Transform request
+        backend_path = match.backend_path
+        if route.strip_path:
+            # Remove matched prefix from path
+            backend_path = re.sub(route.path_pattern, "", path, count=1)
+        if route.add_prefix:
+            backend_path = route.add_prefix + backend_path
+
+        transformed_path, transformed_headers, transformed_body = \
+            self._request_transformer.transform_request(
+                backend_path, headers, body
+            )
+
+        # Build backend URL
+        backend_url = route.backend_url.rstrip("/") + "/" + transformed_path.lstrip("/")
+
+        with self._stats_lock:
+            self._stats.total_requests += 1
+            self._stats.routed_requests += 1
+
+        # Make backend request
+        try:
+            req = urllib.request.Request(
+                backend_url,
+                headers=transformed_headers,
+                method=method,
+            )
+            if transformed_body:
+                if isinstance(transformed_body, dict):
+                    import urllib.parse
+                    req.data = urllib.parse.urlencode(transformed_body).encode()
+                elif isinstance(transformed_body, str):
+                    req.data = transformed_body.encode()
+
+            with urllib.request.urlopen(req, timeout=route.timeout) as response:
+                content = response.read()
+                status = response.status
+                resp_headers = dict(response.headers)
+
+                # Transform response
+                status, resp_headers, resp_body = \
+                    self._response_transformer.transform_response(
+                        status, resp_headers, content
+                    )
+
+                try:
+                    resp_data = json.loads(resp_body)
+                except (json.JSONDecodeError, TypeError):
+                    resp_data = content.decode(errors="replace")
+
+                with self._stats_lock:
+                    self._stats.successful_requests += 1
+
+                return ActionResult(
+                    success=True,
+                    message=f"Routed to {route.backend_url}",
+                    data={
+                        "status_code": status,
+                        "data": resp_data,
+                        "backend_url": route.backend_url,
+                        "route": route.path_pattern,
+                    }
+                )
+
+        except urllib.error.HTTPError as e:
+            with self._stats_lock:
+                self._stats.failed_requests += 1
+                self._stats.backend_errors += 1
+            return ActionResult(
+                success=False,
+                message=f"Backend error {e.code}: {e.reason}",
+                data={"status_code": e.code, "backend": route.backend_url}
+            )
+
+        except Exception as e:
+            with self._stats_lock:
+                self._stats.failed_requests += 1
+                self._stats.backend_errors += 1
+            return ActionResult(
+                success=False,
+                message=f"Gateway error: {str(e)}",
+                data={"backend": route.backend_url}
+            )
+
+    def _match_route(self, path: str, method: str) -> Optional[RouteMatch]:
+        """Match a request to a route."""
+        for route in self._routes:
+            match = route._compiled_pattern.match(path)
+            if match:
+                path_params = match.groupdict()
+                return RouteMatch(
+                    route=route,
+                    path_params=path_params,
+                    backend_path=path,
+                )
         return None
 
-    def _path_matches(self, pattern: str, path: str) -> bool:
-        """Simple path pattern matching."""
-        pattern_parts = pattern.strip("/").split("/")
-        path_parts = path.strip("/").split("/")
+    def get_stats(self) -> Dict[str, Any]:
+        """Get gateway statistics."""
+        with self._stats_lock:
+            total = self._stats.total_requests
+            return {
+                "total_requests": total,
+                "successful_requests": self._stats.successful_requests,
+                "failed_requests": self._stats.failed_requests,
+                "routed_requests": self._stats.routed_requests,
+                "route_not_found": self._stats.route_not_found,
+                "backend_errors": self._stats.backend_errors,
+                "success_rate": (
+                    self._stats.successful_requests / total if total > 0 else 0
+                ),
+            }
 
-        if len(pattern_parts) != len(path_parts):
-            return False
+    def get_required_params(self) -> List[str]:
+        return ["path"]
 
-        for p, part in zip(pattern_parts, path_parts):
-            if p.startswith("{") and p.endswith("}"):
-                continue
-            if p != part:
-                return False
-
-        return True
-
-    def check_rate_limit(
-        self,
-        client_id: str,
-        limit: Tuple[int, float],
-    ) -> bool:
-        """Check if request is within rate limit."""
-        requests, window_seconds = limit
-        now = time.time()
-        cutoff = now - window_seconds
-
-        client_requests = self.request_counts[client_id]
-        # Clean old entries
-        for endpoint in list(client_requests):
-            client_requests[endpoint] = [
-                t for t in client_requests[endpoint] if t > cutoff
-            ]
-
-        total_requests = sum(len(v) for v in client_requests.values())
-        return total_requests < requests
-
-    def record_request(self, metrics: RequestMetrics) -> None:
-        """Record request metrics."""
-        self.metrics.append(metrics)
-        if len(self.metrics) > 10000:
-            self.metrics = self.metrics[-5000:]
-
-    async def forward_request(
-        self,
-        route: Route,
-        path: str,
-        method: str,
-        headers: Dict[str, str],
-        body: Optional[bytes],
-    ) -> Tuple[int, Dict[str, str], bytes]:
-        """Forward request to backend."""
-        import aiohttp
-
-        backends = self.config.backends.get(route.backend, [])
-        if not backends:
-            return 502, {}, b"Bad Gateway: No backends available"
-
-        balancer = self.load_balancers.get(route.backend)
-        if not balancer:
-            return 502, {}, b"Bad Gateway: No load balancer"
-
-        backend = balancer.select_backend(backends, key=headers.get("X-Forwarded-For"))
-        if not backend:
-            return 503, {}, b"Service Unavailable: No healthy backends"
-
-        backend.current_connections += 1
-        start_time = time.time()
-
-        try:
-            url = f"{backend.url}{path}"
-            async with aiohttp.ClientSession() as session:
-                async with session.request(
-                    method,
-                    url,
-                    headers=headers,
-                    data=body,
-                    timeout=aiohttp.ClientTimeout(total=backend.timeout),
-                ) as response:
-                    response_body = await response.read()
-                    status = response.status
-                    response_headers = dict(response.headers)
-                    return status, response_headers, response_body
-        except asyncio.TimeoutError:
-            return 504, {}, b"Gateway Timeout"
-        except Exception as e:
-            return 502, {}, f"Bad Gateway: {str(e)}".encode()
-        finally:
-            backend.current_connections -= 1
-            elapsed = time.time() - start_time
-            self.record_request(RequestMetrics(
-                path=path,
-                method=method,
-                backend=backend.url,
-                status_code=200,
-                response_time=elapsed,
-                timestamp=time.time(),
-            ))
-
-    def get_metrics_summary(self) -> Dict[str, Any]:
-        """Get summary of gateway metrics."""
-        if not self.metrics:
-            return {}
-
-        total_requests = len(self.metrics)
-        avg_response_time = sum(m.response_time for m in self.metrics) / total_requests
-        status_counts: Dict[int, int] = defaultdict(int)
-        for m in self.metrics:
-            status_counts[m.status_code] += 1
-
+    def get_optional_params(self) -> Dict[str, Any]:
         return {
-            "total_requests": total_requests,
-            "avg_response_time": avg_response_time,
-            "status_codes": dict(status_counts),
+            "method": "GET",
+            "headers": {},
+            "body": None,
+            "routes": [],
+            "route_name": "",
+            "strategy": "round_robin",
         }
