@@ -1,533 +1,469 @@
-"""
-Automation Recovery Module.
+"""Automation Recovery Action Module.
 
-Provides automatic recovery strategies, state rollback,
-checkpoint management, and fault tolerance for workflows.
+Provides recovery mechanisms for automation workflows including:
+- Checkpoint management
+- State recovery
+- Transaction rollback
+- Retry with state restoration
+
+Author: rabai_autoclick team
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Generic
-from collections import deque
 import logging
-import hashlib
+import os
+import shutil
+import tempfile
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum, auto
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
 
-
-class RecoveryStrategy(Enum):
-    """Recovery strategy types."""
-    RETRY = "retry"
-    ROLLBACK = "rollback"
-    CHECKPOINT = "checkpoint"
-    FALLBACK = "fallback"
-    CIRCUIT_BREAKER = "circuit_breaker"
-    STATEFUL_RETRY = "stateful_retry"
-
-
-class CheckpointStatus(Enum):
-    """Checkpoint status."""
-    PENDING = "pending"
-    COMMITTED = "committed"
-    FAILED = "failed"
-    ROLLED_BACK = "rolled_back"
+class RecoveryPointType(Enum):
+    """Types of recovery points."""
+    CHECKPOINT = auto()
+    SNAPSHOT = auto()
+    TRANSACTION = auto()
 
 
 @dataclass
-class Checkpoint:
-    """Workflow checkpoint for recovery."""
-    checkpoint_id: str
-    workflow_id: str
-    step: int
+class RecoveryPoint:
+    """Represents a recovery point in the workflow."""
+    id: str
+    name: str
+    type: RecoveryPointType
+    created_at: str
     state: Dict[str, Any]
-    created_at: float
-    status: CheckpointStatus
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    
-@dataclass
-class RecoveryConfig:
-    """Configuration for recovery mechanisms."""
-    max_retries: int = 3
-    retry_delay: float = 1.0
-    exponential_backoff: bool = True
-    max_backoff: float = 60.0
-    enable_checkpoints: bool = True
-    checkpoint_interval: int = 10
-    enable_rollback: bool = True
-    fallback_enabled: bool = True
-    checkpoint_storage: str = "memory"  # memory, file, redis
-    
+    file_path: Optional[str] = None
+
 
 @dataclass
-class RecoveryResult:
-    """Result of a recovery operation."""
-    success: bool
-    recovered: bool
-    strategy_used: RecoveryStrategy
-    attempts: int
-    final_error: Optional[str] = None
-    restored_state: Optional[Dict[str, Any]] = None
+class TransactionContext:
+    """Transaction context for atomic operations."""
+    id: str
+    started_at: str
+    operations: List[Dict[str, Any]] = field(default_factory=list)
+    checkpoints: List[str] = field(default_factory=list)
+    committed: bool = False
+    rolled_back: bool = False
 
 
 class CheckpointManager:
-    """
-    Manages workflow checkpoints for recovery.
+    """Manages workflow checkpoints for recovery.
     
-    Example:
-        manager = CheckpointManager()
-        
-        # Create checkpoint
-        await manager.create(
-            workflow_id="wf_123",
-            step=5,
-            state={"counter": 10, "data": [...]}
-        )
-        
-        # Restore from checkpoint
-        state = await manager.restore("wf_123", step=5)
+    Provides persistent storage and retrieval of workflow state,
+    enabling recovery from failures without losing progress.
     """
     
-    def __init__(
-        self,
-        storage: str = "memory",
-        storage_path: Optional[str] = None,
-    ) -> None:
-        """
-        Initialize checkpoint manager.
+    def __init__(self, storage_dir: Optional[str] = None, max_checkpoints: int = 50):
+        if storage_dir:
+            self.storage_dir = Path(storage_dir)
+        else:
+            self.storage_dir = Path(tempfile.mkdtemp(prefix="autoclick_checkpoints_"))
         
-        Args:
-            storage: Storage backend (memory, file, redis).
-            storage_path: Path for file storage.
-        """
-        self.storage = storage
-        self.storage_path = storage_path
-        self._checkpoints: Dict[str, List[Checkpoint]] = {}
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.max_checkpoints = max_checkpoints
+        self._checkpoints: Dict[str, RecoveryPoint] = {}
         self._lock = asyncio.Lock()
-        
-    async def create(
+    
+    async def create_checkpoint(
         self,
         workflow_id: str,
-        step: int,
+        name: str,
         state: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None,
-    ) -> Checkpoint:
-        """
-        Create a checkpoint.
+        checkpoint_type: RecoveryPointType = RecoveryPointType.CHECKPOINT
+    ) -> RecoveryPoint:
+        """Create a new checkpoint.
         
         Args:
-            workflow_id: Workflow identifier.
-            step: Current step number.
-            state: Current workflow state.
-            metadata: Optional metadata.
+            workflow_id: Workflow identifier
+            name: Checkpoint name
+            state: Current workflow state
+            metadata: Optional metadata
+            checkpoint_type: Type of recovery point
             
         Returns:
-            Created checkpoint.
+            Created recovery point
         """
-        checkpoint_id = self._generate_id(workflow_id, step)
-        
-        checkpoint = Checkpoint(
-            checkpoint_id=checkpoint_id,
-            workflow_id=workflow_id,
-            step=step,
-            state=state,
-            created_at=time.time(),
-            status=CheckpointStatus.COMMITTED,
-            metadata=metadata or {},
-        )
-        
         async with self._lock:
-            if workflow_id not in self._checkpoints:
-                self._checkpoints[workflow_id] = []
-            self._checkpoints[workflow_id].append(checkpoint)
+            checkpoint_id = f"{workflow_id}_{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             
-        # Persist if using file storage
-        if self.storage == "file":
-            await self._persist_checkpoint(checkpoint)
+            checkpoint = RecoveryPoint(
+                id=checkpoint_id,
+                name=name,
+                type=checkpoint_type,
+                created_at=datetime.now().isoformat(),
+                state=state,
+                metadata=metadata or {}
+            )
             
-        logger.info(f"Created checkpoint: {checkpoint_id}")
-        return checkpoint
-        
-    async def restore(
-        self,
-        workflow_id: str,
-        step: Optional[int] = None,
-        checkpoint_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Restore state from a checkpoint.
+            file_path = self.storage_dir / f"{checkpoint_id}.json"
+            async with asyncio.Lock():
+                with open(file_path, 'w') as f:
+                    json.dump({
+                        "id": checkpoint.id,
+                        "name": checkpoint.name,
+                        "type": checkpoint.type.name,
+                        "created_at": checkpoint.created_at,
+                        "state": checkpoint.state,
+                        "metadata": checkpoint.metadata
+                    }, f, indent=2, default=str)
+            
+            checkpoint.file_path = str(file_path)
+            self._checkpoints[checkpoint_id] = checkpoint
+            
+            await self._prune_old_checkpoints(workflow_id)
+            
+            logger.info(f"Created checkpoint {checkpoint_id} for workflow {workflow_id}")
+            return checkpoint
+    
+    async def get_checkpoint(self, checkpoint_id: str) -> Optional[RecoveryPoint]:
+        """Retrieve a checkpoint by ID.
         
         Args:
-            workflow_id: Workflow identifier.
-            step: Step number (restores latest if None).
-            checkpoint_id: Specific checkpoint ID.
+            checkpoint_id: Checkpoint identifier
             
         Returns:
-            Restored state or None.
+            Recovery point if found, None otherwise
         """
-        async with self._lock:
-            checkpoints = self._checkpoints.get(workflow_id, [])
+        if checkpoint_id in self._checkpoints:
+            return self._checkpoints[checkpoint_id]
+        
+        file_path = self.storage_dir / f"{checkpoint_id}.json"
+        if file_path.exists():
+            with open(file_path) as f:
+                data = json.load(f)
+            return RecoveryPoint(
+                id=data["id"],
+                name=data["name"],
+                type=RecoveryPointType[data["type"]],
+                created_at=data["created_at"],
+                state=data["state"],
+                metadata=data.get("metadata", {}),
+                file_path=str(file_path)
+            )
+        
+        return None
+    
+    async def get_latest_checkpoint(self, workflow_id: str) -> Optional[RecoveryPoint]:
+        """Get the most recent checkpoint for a workflow.
+        
+        Args:
+            workflow_id: Workflow identifier
             
+        Returns:
+            Most recent recovery point
+        """
+        checkpoints = [
+            cp for cp in self._checkpoints.values()
+            if cp.id.startswith(workflow_id)
+        ]
+        
         if not checkpoints:
-            return None
-            
-        if checkpoint_id:
-            target = next((cp for cp in checkpoints if cp.checkpoint_id == checkpoint_id), None)
-        elif step is not None:
-            # Find latest checkpoint at or before step
-            valid = [cp for cp in checkpoints if cp.step <= step]
-            target = max(valid, key=lambda cp: cp.step) if valid else None
-        else:
-            # Get latest
-            target = max(checkpoints, key=lambda cp: cp.step)
-            
-        if target:
-            logger.info(f"Restored checkpoint: {target.checkpoint_id}")
-            return target.state
-            
-        return None
+            matching = [
+                p for p in self.storage_dir.glob(f"{workflow_id}_*.json")
+            ]
+            if matching:
+                latest = max(matching, key=lambda p: p.stat().st_mtime)
+                return await self.get_checkpoint(latest.stem)
         
-    async def get_latest(self, workflow_id: str) -> Optional[Checkpoint]:
-        """Get latest checkpoint for workflow."""
-        async with self._lock:
-            checkpoints = self._checkpoints.get(workflow_id, [])
-            
-        if checkpoints:
-            return max(checkpoints, key=lambda cp: cp.step)
-        return None
-        
-    async def delete(self, workflow_id: str, step: Optional[int] = None) -> bool:
-        """Delete checkpoints."""
-        async with self._lock:
-            if step is not None:
-                self._checkpoints[workflow_id] = [
-                    cp for cp in self._checkpoints.get(workflow_id, [])
-                    if cp.step != step
-                ]
-            else:
-                if workflow_id in self._checkpoints:
-                    del self._checkpoints[workflow_id]
-                    return True
-        return False
-        
-    def _generate_id(self, workflow_id: str, step: int) -> str:
-        """Generate unique checkpoint ID."""
-        data = f"{workflow_id}:{step}:{time.time()}"
-        return hashlib.sha256(data.encode()).hexdigest()[:16]
-        
-    async def _persist_checkpoint(self, checkpoint: Checkpoint) -> None:
-        """Persist checkpoint to file."""
-        import aiofiles
-        
-        if not self.storage_path:
-            return
-            
-        path = f"{self.storage_path}/{checkpoint.workflow_id}.json"
-        
-        async with aiofiles.open(path, "w") as f:
-            await f.write(json.dumps({
-                "checkpoint_id": checkpoint.checkpoint_id,
-                "step": checkpoint.step,
-                "state": checkpoint.state,
-                "created_at": checkpoint.created_at,
-            }))
-
-
-class RecoveryManager:
-    """
-    Manages recovery strategies for failed workflows.
+        return max(checkpoints, key=lambda cp: cp.created_at) if checkpoints else None
     
-    Example:
-        manager = RecoveryManager(RecoveryConfig(
-            max_retries=3,
-            enable_checkpoints=True
-        ))
-        
-        result = await manager.execute_with_recovery(
-            workflow_id="wf_123",
-            func=run_workflow_step,
-            rollback_func=rollback_workflow_step,
-            state={"step": 5}
-        )
-    """
-    
-    def __init__(self, config: Optional[RecoveryConfig] = None) -> None:
-        """
-        Initialize recovery manager.
+    async def delete_checkpoint(self, checkpoint_id: str) -> bool:
+        """Delete a checkpoint.
         
         Args:
-            config: Recovery configuration.
-        """
-        self.config = config or RecoveryConfig()
-        self.checkpoint_manager = CheckpointManager()
-        self._recovery_history: deque = deque(maxlen=1000)
-        
-    async def execute_with_recovery(
-        self,
-        workflow_id: str,
-        func: Callable[..., Any],
-        rollback_func: Optional[Callable[..., Any]] = None,
-        state: Optional[Dict[str, Any]] = None,
-        args: tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-    ) -> RecoveryResult:
-        """
-        Execute function with recovery support.
-        
-        Args:
-            workflow_id: Workflow identifier.
-            func: Function to execute.
-            rollback_func: Optional rollback function.
-            state: Current workflow state.
-            args: Function arguments.
-            kwargs: Function keyword arguments.
+            checkpoint_id: Checkpoint identifier
             
         Returns:
-            RecoveryResult with outcome.
+            True if deleted, False if not found
         """
-        kwargs = kwargs or {}
-        last_error = None
+        async with self._lock:
+            if checkpoint_id in self._checkpoints:
+                cp = self._checkpoints.pop(checkpoint_id)
+                if cp.file_path and os.path.exists(cp.file_path):
+                    os.remove(cp.file_path)
+                return True
+            return False
+    
+    async def _prune_old_checkpoints(self, workflow_id: str) -> None:
+        """Remove old checkpoints beyond max_checkpoints limit."""
+        checkpoints = [
+            cp for cp in self._checkpoints.values()
+            if cp.id.startswith(workflow_id)
+        ]
         
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                # Create checkpoint before execution
-                if self.config.enable_checkpoints and state:
-                    step = state.get("step", 0)
-                    await self.checkpoint_manager.create(
-                        workflow_id=workflow_id,
-                        step=step,
-                        state=state,
-                    )
-                    
-                # Execute
-                result = await func(*args, **kwargs)
-                
-                # Record success
-                self._record_recovery(workflow_id, RecoveryStrategy.RETRY, True, attempt)
-                
-                return RecoveryResult(
-                    success=True,
-                    recovered=attempt > 0,
-                    strategy_used=RecoveryStrategy.RETRY if attempt > 0 else RecoveryStrategy.RETRY,
-                    attempts=attempt + 1,
-                    restored_state=state,
-                )
-                
-            except Exception as e:
-                last_error = str(e)
-                logger.warning(
-                    f"Recovery attempt {attempt + 1} failed for {workflow_id}: {e}"
-                )
-                
-                # Rollback if enabled
-                if self.config.enable_rollback and rollback_func:
+        if len(checkpoints) > self.max_checkpoints:
+            checkpoints.sort(key=lambda cp: cp.created_at)
+            to_delete = checkpoints[:-self.max_checkpoints]
+            
+            for cp in to_delete:
+                await self.delete_checkpoint(cp.id)
+    
+    async def list_checkpoints(self, workflow_id: str) -> List[RecoveryPoint]:
+        """List all checkpoints for a workflow.
+        
+        Args:
+            workflow_id: Workflow identifier
+            
+        Returns:
+            List of recovery points
+        """
+        return [
+            cp for cp in self._checkpoints.values()
+            if cp.id.startswith(workflow_id)
+        ]
+
+
+class TransactionManager:
+    """Manages transactional operations with rollback support.
+    
+    Provides atomic operation grouping with automatic rollback
+    on failure, enabling reliable state transitions.
+    """
+    
+    def __init__(self, checkpoint_manager: Optional[CheckpointManager] = None):
+        self.checkpoint_manager = checkpoint_manager or CheckpointManager()
+        self._transactions: Dict[str, TransactionContext] = {}
+        self._lock = asyncio.Lock()
+        self._rollback_handlers: Dict[str, List[Callable]] = {}
+    
+    async def begin_transaction(self, transaction_id: Optional[str] = None) -> TransactionContext:
+        """Begin a new transaction.
+        
+        Args:
+            transaction_id: Optional transaction ID
+            
+        Returns:
+            Transaction context
+        """
+        async with self._lock:
+            tid = transaction_id or f"txn_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+            
+            ctx = TransactionContext(
+                id=tid,
+                started_at=datetime.now().isoformat()
+            )
+            
+            self._transactions[tid] = ctx
+            self._rollback_handlers[tid] = []
+            
+            logger.info(f"Began transaction {tid}")
+            return ctx
+    
+    async def add_operation(self, transaction_id: str, operation: Dict[str, Any]) -> None:
+        """Add an operation to the transaction.
+        
+        Args:
+            transaction_id: Transaction identifier
+            operation: Operation details
+        """
+        if transaction_id not in self._transactions:
+            raise ValueError(f"Transaction {transaction_id} not found")
+        
+        self._transactions[transaction_id].operations.append(operation)
+    
+    async def add_checkpoint(self, transaction_id: str, checkpoint_id: str) -> None:
+        """Add a checkpoint to the transaction.
+        
+        Args:
+            transaction_id: Transaction identifier
+            checkpoint_id: Checkpoint identifier
+        """
+        if transaction_id not in self._transactions:
+            raise ValueError(f"Transaction {transaction_id} not found")
+        
+        self._transactions[transaction_id].checkpoints.append(checkpoint_id)
+    
+    def register_rollback_handler(self, transaction_id: str, handler: Callable) -> None:
+        """Register a rollback handler for the transaction.
+        
+        Args:
+            transaction_id: Transaction identifier
+            handler: Async function to call on rollback
+        """
+        if transaction_id not in self._rollback_handlers:
+            self._rollback_handlers[transaction_id] = []
+        self._rollback_handlers[transaction_id].append(handler)
+    
+    async def commit_transaction(self, transaction_id: str) -> bool:
+        """Commit a transaction.
+        
+        Args:
+            transaction_id: Transaction identifier
+            
+        Returns:
+            True if committed successfully
+        """
+        async with self._lock:
+            if transaction_id not in self._transactions:
+                raise ValueError(f"Transaction {transaction_id} not found")
+            
+            ctx = self._transactions[transaction_id]
+            ctx.committed = True
+            
+            logger.info(f"Committed transaction {transaction_id} with {len(ctx.operations)} operations")
+            
+            del self._transactions[transaction_id]
+            if transaction_id in self._rollback_handlers:
+                del self._rollback_handlers[transaction_id]
+            
+            return True
+    
+    async def rollback_transaction(self, transaction_id: str, reason: Optional[str] = None) -> None:
+        """Rollback a transaction.
+        
+        Args:
+            transaction_id: Transaction identifier
+            reason: Optional rollback reason
+        """
+        async with self._lock:
+            if transaction_id not in self._transactions:
+                logger.warning(f"Transaction {transaction_id} not found for rollback")
+                return
+            
+            ctx = self._transactions[transaction_id]
+            ctx.rolled_back = True
+            
+            logger.warning(f"Rolling back transaction {transaction_id}: {reason}")
+            
+            if transaction_id in self._rollback_handlers:
+                for handler in reversed(self._rollback_handlers[transaction_id]):
                     try:
-                        await rollback_func(state)
-                    except Exception as rb_error:
-                        logger.error(f"Rollback failed: {rb_error}")
-                        
-                # Exponential backoff
-                if self.config.exponential_backoff:
-                    delay = min(
-                        self.config.retry_delay * (2 ** attempt),
-                        self.config.max_backoff
-                    )
-                    await asyncio.sleep(delay)
-                    
-        # All retries failed
-        return RecoveryResult(
-            success=False,
-            recovered=False,
-            strategy_used=RecoveryStrategy.RETRY,
-            attempts=self.config.max_retries + 1,
-            final_error=last_error,
-            restored_state=state,
-        )
-        
-    async def execute_with_checkpoint(
-        self,
-        workflow_id: str,
-        steps: List[Callable[[Dict[str, Any]], Any]],
-        initial_state: Dict[str, Any],
-    ) -> RecoveryResult:
-        """
-        Execute multi-step workflow with checkpoint recovery.
-        
-        Args:
-            workflow_id: Workflow identifier.
-            steps: List of step functions.
-            initial_state: Initial workflow state.
+                        await handler()
+                    except Exception as e:
+                        logger.error(f"Rollback handler error: {e}")
             
-        Returns:
-            RecoveryResult with outcome.
-        """
-        state = initial_state.copy()
-        last_successful_step = 0
-        
-        # Try to restore from checkpoint
-        restored_state = await self.checkpoint_manager.restore(workflow_id)
-        if restored_state:
-            state = restored_state
-            last_successful_step = state.get("step", 0)
-            logger.info(f"Restored workflow {workflow_id} from step {last_successful_step}")
+            for checkpoint_id in reversed(ctx.checkpoints):
+                cp = await self.checkpoint_manager.get_checkpoint(checkpoint_id)
+                if cp:
+                    logger.info(f"Restored checkpoint {checkpoint_id} during rollback")
             
-        # Execute remaining steps
-        for i, step_func in enumerate(steps):
-            if i < last_successful_step:
-                continue
-                
-            step_num = i + 1
-            state["step"] = step_num
-            
-            try:
-                # Create checkpoint before step
-                if self.config.enable_checkpoints and i % self.config.checkpoint_interval == 0:
-                    await self.checkpoint_manager.create(
-                        workflow_id=workflow_id,
-                        step=step_num,
-                        state=state,
-                    )
-                    
-                # Execute step
-                result = await step_func(state)
-                state["last_result"] = result
-                
-            except Exception as e:
-                logger.error(f"Step {step_num} failed: {e}")
-                
-                # Try to restore to last checkpoint
-                checkpoint = await self.checkpoint_manager.get_latest(workflow_id)
-                if checkpoint:
-                    state = checkpoint.state
-                    return RecoveryResult(
-                        success=False,
-                        recovered=True,
-                        strategy_used=RecoveryStrategy.CHECKPOINT,
-                        attempts=1,
-                        final_error=str(e),
-                        restored_state=state,
-                    )
-                    
-                return RecoveryResult(
-                    success=False,
-                    recovered=False,
-                    strategy_used=RecoveryStrategy.CHECKPOINT,
-                    attempts=1,
-                    final_error=str(e),
-                    restored_state=state,
-                )
-                
-        # Cleanup checkpoints on success
-        await self.checkpoint_manager.delete(workflow_id)
-        
-        return RecoveryResult(
-            success=True,
-            recovered=False,
-            strategy_used=RecoveryStrategy.CHECKPOINT,
-            attempts=1,
-            restored_state=state,
-        )
-        
-    def _record_recovery(
-        self,
-        workflow_id: str,
-        strategy: RecoveryStrategy,
-        success: bool,
-        attempts: int,
-    ) -> None:
-        """Record recovery attempt in history."""
-        self._recovery_history.append({
-            "workflow_id": workflow_id,
-            "strategy": strategy.value,
-            "success": success,
-            "attempts": attempts,
-            "timestamp": time.time(),
-        })
-        
-    def get_history(
-        self,
-        workflow_id: Optional[str] = None,
-        limit: int = 100,
-    ) -> List[Dict[str, Any]]:
-        """Get recovery history."""
-        history = list(self._recovery_history)
-        
-        if workflow_id:
-            history = [h for h in history if h["workflow_id"] == workflow_id]
-            
-        return history[-limit:]
+            del self._transactions[transaction_id]
+            if transaction_id in self._rollback_handlers:
+                del self._rollback_handlers[transaction_id]
 
 
-class StatefulRetry:
-    """
-    Stateful retry with state preservation.
+class WorkflowRecovery:
+    """High-level workflow recovery orchestration.
     
-    Example:
-        retry = StatefulRetry(max_attempts=5)
-        
-        async for attempt in retry.execute(
-            func=unreliable_operation,
-            state={"counter": 0}
-        ):
-            print(f"Attempt {attempt.number}, state: {attempt.state}")
+    Combines checkpoint and transaction management for
+    comprehensive workflow reliability.
     """
     
     def __init__(
         self,
-        max_attempts: int = 3,
-        delay: float = 1.0,
-        exponential_backoff: bool = True,
-    ) -> None:
-        """
-        Initialize stateful retry.
-        
-        Args:
-            max_attempts: Maximum retry attempts.
-            delay: Base delay between retries.
-            exponential_backoff: Use exponential backoff.
-        """
-        self.max_attempts = max_attempts
-        self.delay = delay
-        self.exponential_backoff = exponential_backoff
-        
-    async def execute(
+        workflow_id: str,
+        storage_dir: Optional[str] = None
+    ):
+        self.workflow_id = workflow_id
+        self.checkpoint_manager = CheckpointManager(storage_dir)
+        self.transaction_manager = TransactionManager(self.checkpoint_manager)
+        self._current_state: Dict[str, Any] = {}
+        self._lock = asyncio.Lock()
+    
+    async def save_checkpoint(
         self,
-        func: Callable[..., Any],
-        state: Dict[str, Any],
-    ) -> Any:
-        """
-        Execute with stateful retries.
+        name: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> RecoveryPoint:
+        """Save a checkpoint of current workflow state.
         
         Args:
-            func: Async function to retry.
-            state: Initial state (modified in place).
+            name: Checkpoint name
+            metadata: Optional metadata
             
         Returns:
-            Final result after retries.
+            Created recovery point
         """
-        last_error = None
+        async with self._lock:
+            return await self.checkpoint_manager.create_checkpoint(
+                workflow_id=self.workflow_id,
+                name=name,
+                state=self._current_state.copy(),
+                metadata=metadata
+            )
+    
+    async def restore_checkpoint(self, checkpoint_id: str) -> Dict[str, Any]:
+        """Restore workflow state from a checkpoint.
         
-        for attempt in range(self.max_attempts):
-            try:
-                state["attempt"] = attempt
-                result = await func(state)
-                return result
-                
-            except Exception as e:
-                last_error = e
-                state["last_error"] = str(e)
-                
-                if attempt < self.max_attempts - 1:
-                    delay = self.delay
-                    if self.exponential_backoff:
-                        delay = self.delay * (2 ** attempt)
-                    await asyncio.sleep(delay)
-                    
-        raise last_error
+        Args:
+            checkpoint_id: Checkpoint to restore
+            
+        Returns:
+            Restored state dictionary
+        """
+        checkpoint = await self.checkpoint_manager.get_checkpoint(checkpoint_id)
+        if not checkpoint:
+            raise ValueError(f"Checkpoint {checkpoint_id} not found")
+        
+        async with self._lock:
+            self._current_state = checkpoint.state.copy()
+            return self._current_state.copy()
+    
+    async def execute_with_recovery(
+        self,
+        operation: Callable,
+        checkpoint_name: str,
+        *args,
+        **kwargs
+    ) -> Any:
+        """Execute operation with automatic checkpointing and recovery.
+        
+        Args:
+            operation: Async operation to execute
+            checkpoint_name: Name for auto-created checkpoint
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+            
+        Returns:
+            Operation result
+        """
+        checkpoint = await self.save_checkpoint(checkpoint_name)
+        
+        try:
+            result = await operation(*args, **kwargs)
+            return result
+        except Exception as e:
+            logger.error(f"Operation failed, restoring checkpoint {checkpoint.id}: {e}")
+            await self.restore_checkpoint(checkpoint.id)
+            raise
+    
+    async def execute_transactional(
+        self,
+        operations: List[Callable],
+        transaction_id: Optional[str] = None
+    ) -> List[Any]:
+        """Execute operations as an atomic transaction.
+        
+        Args:
+            operations: List of async operations
+            transaction_id: Optional transaction ID
+            
+        Returns:
+            List of operation results
+        """
+        txn = await self.transaction_manager.begin_transaction(transaction_id)
+        
+        results = []
+        try:
+            for op in operations:
+                result = await op()
+                results.append(result)
+            
+            await self.transaction_manager.commit_transaction(txn.id)
+            return results
+            
+        except Exception as e:
+            logger.error(f"Transaction failed, rolling back: {e}")
+            await self.transaction_manager.rollback_transaction(txn.id, str(e))
+            raise
