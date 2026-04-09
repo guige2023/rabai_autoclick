@@ -1,373 +1,320 @@
-"""Automation condition action module for RabAI AutoClick.
+"""Automation Condition Evaluator.
 
-Provides conditional automation logic:
-- ConditionEvaluatorAction: Evaluate conditions for automation
-- BranchConditionAction: Execute branches based on conditions
-- SwitchConditionAction: Multi-way branching
-- GuardConditionAction: Guard conditions for action execution
-- ConditionalLoopAction: Loop based on condition
+This module provides conditional execution logic:
+- Multiple condition types
+- Logical operators (AND, OR, NOT)
+- Condition chaining
+- Dynamic condition evaluation
+
+Example:
+    >>> from actions.automation_condition_action import ConditionEvaluator
+    >>> evaluator = ConditionEvaluator()
+    >>> evaluator.add_condition("is_peak_hours", lambda ctx: ctx["hour"] > 9)
+    >>> result = evaluator.evaluate("is_peak_hours", {"hour": 15})
 """
 
-from typing import Any, Dict, List, Optional, Union
-from datetime import datetime
+from __future__ import annotations
 
-import sys
-import os
+import logging
+import threading
+import operator
+from typing import Any, Callable, Optional
+from enum import Enum
+from dataclasses import dataclass
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class ConditionEvaluatorAction(BaseAction):
-    """Evaluate conditions for automation."""
-    action_type = "automation_condition_evaluator"
-    display_name = "条件评估器"
-    description = "评估自动化条件"
+class ConditionType(Enum):
+    """Types of conditions."""
+    BOOLEAN = "boolean"
+    COMPARISON = "comparison"
+    RANGE = "range"
+    PATTERN = "pattern"
+    CUSTOM = "custom"
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+
+@dataclass
+class Condition:
+    """A named condition with evaluation logic."""
+    name: str
+    condition_type: ConditionType
+    evaluate: Callable[[Any], bool]
+    description: str = ""
+
+
+@dataclass
+class ConditionResult:
+    """Result of condition evaluation."""
+    condition_name: str
+    passed: bool
+    context: dict[str, Any]
+    message: str = ""
+
+
+class ConditionEvaluator:
+    """Evaluates conditions for automation workflows."""
+
+    COMPARISON_OPS = {
+        "==": operator.eq,
+        "!=": operator.ne,
+        ">": operator.gt,
+        ">=": operator.ge,
+        "<": operator.lt,
+        "<=": operator.le,
+        "in": lambda a, b: a in b,
+        "not in": lambda a, b: a not in b,
+        "contains": lambda a, b: b in a,
+    }
+
+    def __init__(self) -> None:
+        """Initialize the condition evaluator."""
+        self._conditions: dict[str, Condition] = {}
+        self._lock = threading.RLock()
+        self._stats = {"evaluations": 0, "passed": 0, "failed": 0}
+
+    def add_condition(
+        self,
+        name: str,
+        condition_type: ConditionType,
+        evaluate: Callable[[Any], bool],
+        description: str = "",
+    ) -> None:
+        """Add a named condition.
+
+        Args:
+            name: Condition name.
+            condition_type: Type of condition.
+            evaluate: Evaluation function.
+            description: Human-readable description.
+        """
+        with self._lock:
+            self._conditions[name] = Condition(
+                name=name,
+                condition_type=condition_type,
+                evaluate=evaluate,
+                description=description,
+            )
+            logger.info("Added condition: %s", name)
+
+    def add_boolean_condition(
+        self,
+        name: str,
+        expression: Callable[[dict[str, Any]], bool],
+        description: str = "",
+    ) -> None:
+        """Add a boolean expression condition.
+
+        Args:
+            name: Condition name.
+            expression: Lambda that takes context and returns bool.
+            description: Human-readable description.
+        """
+        self.add_condition(
+            name=name,
+            condition_type=ConditionType.BOOLEAN,
+            evaluate=expression,
+            description=description,
+        )
+
+    def add_comparison_condition(
+        self,
+        name: str,
+        field: str,
+        op: str,
+        value: Any,
+        description: str = "",
+    ) -> None:
+        """Add a comparison condition.
+
+        Args:
+            name: Condition name.
+            field: Field name in context.
+            op: Comparison operator (==, !=, >, <, >=, <=, in, not in, contains).
+            value: Value to compare against.
+            description: Human-readable description.
+        """
+        op_func = self.COMPARISON_OPS.get(op)
+        if op_func is None:
+            raise ValueError(f"Unknown operator: {op}")
+
+        def evaluate(ctx: dict[str, Any]) -> bool:
+            field_value = ctx.get(field)
+            try:
+                return op_func(field_value, value)
+            except (TypeError, ValueError):
+                return False
+
+        self.add_condition(
+            name=name,
+            condition_type=ConditionType.COMPARISON,
+            evaluate=evaluate,
+            description=description or f"{field} {op} {value}",
+        )
+
+    def add_range_condition(
+        self,
+        name: str,
+        field: str,
+        min_val: Optional[float] = None,
+        max_val: Optional[float] = None,
+        description: str = "",
+    ) -> None:
+        """Add a range condition.
+
+        Args:
+            name: Condition name.
+            field: Field name in context.
+            min_val: Minimum value (inclusive).
+            max_val: Maximum value (inclusive).
+            description: Human-readable description.
+        """
+        def evaluate(ctx: dict[str, Any]) -> bool:
+            try:
+                val = float(ctx.get(field, 0))
+                if min_val is not None and val < min_val:
+                    return False
+                if max_val is not None and val > max_val:
+                    return False
+                return True
+            except (ValueError, TypeError):
+                return False
+
+        self.add_condition(
+            name=name,
+            condition_type=ConditionType.RANGE,
+            evaluate=evaluate,
+            description=description or f"{field} in [{min_val}, {max_val}]",
+        )
+
+    def evaluate(
+        self,
+        name: str,
+        context: Optional[dict[str, Any]] = None,
+    ) -> ConditionResult:
+        """Evaluate a condition.
+
+        Args:
+            name: Condition name.
+            context: Evaluation context.
+
+        Returns:
+            ConditionResult with pass/fail status.
+        """
+        with self._lock:
+            condition = self._conditions.get(name)
+            ctx = context or {}
+
+        if condition is None:
+            return ConditionResult(
+                condition_name=name,
+                passed=False,
+                context=ctx,
+                message=f"Condition not found: {name}",
+            )
+
         try:
-            conditions = params.get("conditions", [])
-            data = params.get("data", {})
-            logical_op = params.get("logical_op", "and")
-            case_sensitive = params.get("case_sensitive", False)
+            passed = condition.evaluate(ctx)
+        except Exception as e:
+            passed = False
+            logger.error("Condition %s evaluation error: %s", name, e)
 
-            if not conditions:
-                return ActionResult(success=False, message="No conditions to evaluate")
-
-            results = []
-            for condition in conditions:
-                result = self._evaluate_single(condition, data, case_sensitive)
-                results.append(result)
-
-            if logical_op == "and":
-                overall = all(results)
-            elif logical_op == "or":
-                overall = any(results)
-            elif logical_op == "nor":
-                overall = not any(results)
-            elif logical_op == "nand":
-                overall = not all(results)
+        with self._lock:
+            self._stats["evaluations"] += 1
+            if passed:
+                self._stats["passed"] += 1
             else:
-                overall = all(results)
+                self._stats["failed"] += 1
 
-            return ActionResult(
-                success=True,
-                data={
-                    "condition_met": overall,
-                    "individual_results": results,
-                    "logical_op": logical_op,
-                    "conditions_checked": len(conditions)
-                },
-                message=f"Conditions evaluated: {'met' if overall else 'not met'}"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Condition evaluator error: {str(e)}")
+        return ConditionResult(
+            condition_name=name,
+            passed=passed,
+            context=ctx,
+            message="Passed" if passed else "Failed",
+        )
 
-    def _evaluate_single(self, condition: Dict, data: Dict, case_sensitive: bool) -> bool:
-        field = condition.get("field", "")
-        operator = condition.get("operator", "eq")
-        value = condition.get("value")
-        value2 = condition.get("value2")
+    def evaluate_all(
+        self,
+        condition_names: list[str],
+        context: Optional[dict[str, Any]] = None,
+        mode: str = "AND",
+    ) -> tuple[bool, list[ConditionResult]]:
+        """Evaluate multiple conditions.
 
-        data_value = data.get(field) if field else None
+        Args:
+            condition_names: List of condition names.
+            context: Evaluation context.
+            mode: "AND", "OR", or "ALL".
 
-        if operator == "eq":
-            if not case_sensitive and isinstance(data_value, str) and isinstance(value, str):
-                return data_value.lower() == value.lower()
-            return data_value == value
-        elif operator == "ne":
-            if not case_sensitive and isinstance(data_value, str) and isinstance(value, str):
-                return data_value.lower() != value.lower()
-            return data_value != value
-        elif operator == "gt":
-            return data_value is not None and data_value > value
-        elif operator == "gte":
-            return data_value is not None and data_value >= value
-        elif operator == "lt":
-            return data_value is not None and data_value < value
-        elif operator == "lte":
-            return data_value is not None and data_value <= value
-        elif operator == "between":
-            return data_value is not None and value <= data_value <= (value2 or value)
-        elif operator == "contains":
-            return value in str(data_value) if data_value else False
-        elif operator == "startswith":
-            return str(data_value).startswith(str(value)) if data_value else False
-        elif operator == "endswith":
-            return str(data_value).endswith(str(value)) if data_value else False
-        elif operator == "matches":
-            import re
-            return bool(re.search(value, str(data_value))) if data_value else False
-        elif operator == "in":
-            return data_value in (value if isinstance(value, list) else [value])
-        elif operator == "exists":
-            return field in data
-        elif operator == "truthy":
-            return bool(data_value)
-        elif operator == "falsy":
-            return not data_value
-        return False
+        Returns:
+            Tuple of (overall_result, list of individual results).
+        """
+        results = [self.evaluate(name, context) for name in condition_names]
 
-    def get_required_params(self) -> List[str]:
-        return ["conditions"]
+        if mode == "AND":
+            overall = all(r.passed for r in results)
+        elif mode == "OR":
+            overall = any(r.passed for r in results)
+        else:
+            overall = all(r.passed for r in results)
 
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"data": {}, "logical_op": "and", "case_sensitive": False}
+        return overall, results
 
+    def evaluate_and(
+        self,
+        condition_names: list[str],
+        context: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Evaluate conditions with AND logic.
 
-class BranchConditionAction(BaseAction):
-    """Execute branches based on conditions."""
-    action_type = "automation_branch_condition"
-    display_name = "条件分支"
-    description = "根据条件执行分支"
+        Args:
+            condition_names: List of condition names.
+            context: Evaluation context.
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            branches = params.get("branches", [])
-            data = params.get("data", {})
-            default_action = params.get("default_action")
-            match_type = params.get("match_type", "first")
+        Returns:
+            True if all conditions pass.
+        """
+        overall, _ = self.evaluate_all(condition_names, context, mode="AND")
+        return overall
 
-            if not branches:
-                return ActionResult(success=False, message="No branches defined")
+    def evaluate_or(
+        self,
+        condition_names: list[str],
+        context: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Evaluate conditions with OR logic.
 
-            executed = None
-            result_data = None
+        Args:
+            condition_names: List of condition names.
+            context: Evaluation context.
 
-            for branch in branches:
-                name = branch.get("name", "unnamed")
-                condition = branch.get("condition", {})
-                action = branch.get("action", {})
-                priority = branch.get("priority", 0)
+        Returns:
+            True if any condition passes.
+        """
+        overall, _ = self.evaluate_all(condition_names, context, mode="OR")
+        return overall
 
-                eval_action = ConditionEvaluatorAction()
-                eval_result = eval_action.execute(context, {
-                    "conditions": [condition] if condition else [],
-                    "data": data
-                })
+    def remove_condition(self, name: str) -> bool:
+        """Remove a condition.
 
-                if eval_result.data.get("condition_met", False):
-                    success = action.get("success", True)
-                    executed = name
-                    result_data = {
-                        "branch": name,
-                        "priority": priority,
-                        "action_result": success,
-                        "condition": condition
-                    }
+        Args:
+            name: Condition name.
 
-                    if match_type == "first":
-                        break
+        Returns:
+            True if removed, False if not found.
+        """
+        with self._lock:
+            if name in self._conditions:
+                del self._conditions[name]
+                return True
+            return False
 
-            if executed is None and default_action:
-                executed = "default"
-                result_data = {
-                    "branch": "default",
-                    "action_result": default_action.get("success", True)
-                }
+    def list_conditions(self) -> list[Condition]:
+        """List all registered conditions."""
+        with self._lock:
+            return list(self._conditions.values())
 
-            return ActionResult(
-                success=executed is not None,
-                data={
-                    "executed_branch": executed,
-                    "result": result_data,
-                    "branches_evaluated": len(branches),
-                    "match_type": match_type
-                },
-                message=f"Branch executed: '{executed}'" if executed else "No branch matched"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Branch condition error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["branches"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"data": {}, "default_action": None, "match_type": "first"}
-
-
-class SwitchConditionAction(BaseAction):
-    """Multi-way branching."""
-    action_type = "automation_switch_condition"
-    display_name = "多路分支"
-    description = "多路分支执行"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            switch_value = params.get("switch_value")
-            cases = params.get("cases", [])
-            default_case = params.get("default_case")
-            case_field = params.get("case_field")
-
-            data = params.get("data", {})
-            if case_field:
-                switch_value = data.get(case_field, switch_value)
-
-            matched_case = None
-            result_data = None
-
-            for case in cases:
-                case_value = case.get("value")
-                action = case.get("action", {})
-                name = case.get("name", str(case_value))
-
-                if switch_value == case_value:
-                    matched_case = name
-                    result_data = {
-                        "case": name,
-                        "value": case_value,
-                        "action_result": action.get("success", True)
-                    }
-                    break
-
-            if matched_case is None and default_case:
-                matched_case = "default"
-                result_data = {
-                    "case": "default",
-                    "value": None,
-                    "action_result": default_case.get("success", True)
-                }
-
-            return ActionResult(
-                success=matched_case is not None,
-                data={
-                    "matched_case": matched_case,
-                    "result": result_data,
-                    "cases_checked": len(cases),
-                    "switch_value": switch_value
-                },
-                message=f"Switch matched: '{matched_case}'" if matched_case else "No case matched"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Switch condition error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["cases"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"switch_value": None, "case_field": None, "default_case": None, "data": {}}
-
-
-class GuardConditionAction(BaseAction):
-    """Guard conditions for action execution."""
-    action_type = "automation_guard_condition"
-    display_name = "保护条件"
-    description = "动作执行前的保护条件"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            conditions = params.get("conditions", [])
-            data = params.get("data", {})
-            action = params.get("action", {})
-            guard_mode = params.get("guard_mode", "require_all")
-            skip_on_fail = params.get("skip_on_fail", True)
-
-            eval_action = ConditionEvaluatorAction()
-            eval_result = eval_action.execute(context, {
-                "conditions": conditions,
-                "data": data,
-                "logical_op": "and" if guard_mode == "require_all" else "or"
-            })
-
-            guard_passed = eval_result.data.get("condition_met", False)
-
-            if guard_passed:
-                return ActionResult(
-                    success=True,
-                    data={
-                        "guard_passed": True,
-                        "action_executed": True,
-                        "action_result": action.get("success", True),
-                        "conditions_checked": len(conditions)
-                    },
-                    message="Guard passed, action executed"
-                )
-            else:
-                if skip_on_fail:
-                    return ActionResult(
-                        success=True,
-                        data={
-                            "guard_passed": False,
-                            "action_executed": False,
-                            "skipped": True,
-                            "conditions_checked": len(conditions)
-                        },
-                        message="Guard failed, action skipped"
-                    )
-                else:
-                    return ActionResult(
-                        success=False,
-                        data={
-                            "guard_passed": False,
-                            "action_executed": False,
-                            "blocked": True,
-                            "conditions_checked": len(conditions)
-                        },
-                        message="Guard failed, action blocked"
-                    )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Guard condition error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["conditions"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"data": {}, "action": {}, "guard_mode": "require_all", "skip_on_fail": True}
-
-
-class ConditionalLoopAction(BaseAction):
-    """Loop based on condition."""
-    action_type = "automation_conditional_loop"
-    display_name = "条件循环"
-    description = "基于条件的循环执行"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            conditions = params.get("conditions", [])
-            data = params.get("data", {})
-            max_iterations = params.get("max_iterations", 100)
-            loop_action = params.get("loop_action", {})
-            update_data = params.get("update_data", False)
-
-            iteration = 0
-            iterations = []
-            current_data = dict(data)
-
-            while iteration < max_iterations:
-                eval_action = ConditionEvaluatorAction()
-                eval_result = eval_action.execute(context, {
-                    "conditions": conditions,
-                    "data": current_data
-                })
-
-                if not eval_result.data.get("condition_met", False):
-                    break
-
-                iterations.append({
-                    "iteration": iteration,
-                    "data_snapshot": dict(current_data),
-                    "action_result": loop_action.get("success", True)
-                })
-
-                if update_data:
-                    iteration += 1
-
-            return ActionResult(
-                success=True,
-                data={
-                    "iterations": iterations,
-                    "total_iterations": len(iterations),
-                    "max_iterations": max_iterations,
-                    "terminated_by": "condition" if len(iterations) < max_iterations else "max_iterations"
-                },
-                message=f"Loop completed: {len(iterations)} iterations"
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Conditional loop error: {str(e)}")
-
-    def get_required_params(self) -> List[str]:
-        return ["conditions"]
-
-    def get_optional_params(self) -> Dict[str, Any]:
-        return {"data": {}, "max_iterations": 100, "loop_action": {}, "update_data": False}
+    def get_stats(self) -> dict[str, int]:
+        """Get evaluation statistics."""
+        with self._lock:
+            return dict(self._stats)

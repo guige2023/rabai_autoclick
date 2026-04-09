@@ -1,262 +1,240 @@
-"""Data profiling action module for RabAI AutoClick.
+"""Data Profiling and Statistics.
 
-Provides data profiling operations:
-- DataProfilerAction: Profile dataset structure and statistics
-- ColumnProfilerAction: Profile individual columns
-- DataQualityAction: Assess data quality metrics
+This module provides data profiling capabilities:
+- Column-level statistics
+- Data type inference
+- Value distribution analysis
+- Missing value detection
+
+Example:
+    >>> from actions.data_profiling_action import DataProfiler
+    >>> profiler = DataProfiler()
+    >>> profile = profiler.profile_dataframe(df)
 """
 
+from __future__ import annotations
+
+import logging
+import threading
 import math
-from collections import Counter
-from typing import Any, Dict, List, Optional, Union
+import re
+from typing import Any, Callable, Optional
+from collections import Counter, defaultdict
 
-import sys
-import os
-
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
+logger = logging.getLogger(__name__)
 
 
-class DataProfilerAction(BaseAction):
-    """Profile dataset structure and statistics."""
-    action_type = "data_profiler"
-    display_name = "数据画像"
-    description = "分析数据集结构和统计信息"
+class DataProfiler:
+    """Profiles datasets and computes statistics."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data")
-            profile_type = params.get("profile_type", "basic")
+    def __init__(self) -> None:
+        """Initialize the data profiler."""
+        self._lock = threading.RLock()
+        self._profiles: dict[str, dict[str, Any]] = {}
 
-            if data is None:
-                return ActionResult(success=False, message="data is required")
+    def profile_records(
+        self,
+        records: list[dict[str, Any]],
+        sample_size: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Profile a list of records.
 
-            if isinstance(data, list):
-                return self._profile_list(data, profile_type)
-            elif isinstance(data, dict):
-                return self._profile_dict(data, profile_type)
-            else:
-                return ActionResult(success=False, message="Unsupported data type")
+        Args:
+            records: List of record dicts.
+            sample_size: Optional sample size for large datasets.
 
-        except Exception as e:
-            return ActionResult(success=False, message=f"DataProfiler error: {e}")
-
-    def _profile_list(self, data: List, profile_type: str) -> ActionResult:
-        if not data:
-            return ActionResult(success=True, message="Empty dataset", data={"row_count": 0})
-
-        row_count = len(data)
-        types = Counter(type(item).__name__ for item in data)
-        type_counts = dict(types)
-
-        profile = {
-            "row_count": row_count,
-            "type_distribution": type_counts,
-            "types": list(types.keys()),
-        }
-
-        if profile_type in ("basic", "full"):
-            null_count = sum(1 for item in data if item is None)
-            profile["null_count"] = null_count
-            profile["null_percent"] = round(null_count / row_count * 100, 2)
-
-            if all(isinstance(item, (int, float)) for item in data):
-                nums = [item for item in data if item is not None]
-                profile["numeric_stats"] = self._numeric_stats(nums)
-
-        if profile_type == "full" and all(isinstance(item, dict) for item in data):
-            all_keys = set()
-            for item in data:
-                all_keys.update(item.keys())
-            field_names = sorted(all_keys)
-            profile["fields"] = field_names
-            profile["field_count"] = len(field_names)
-
-            field_profiles = {}
-            for field in field_names:
-                values = [item.get(field) for item in data if field in item]
-                field_types = Counter(type(v).__name__ for v in values)
-                field_profiles[field] = {
-                    "count": len(values),
-                    "types": dict(field_types),
-                    "null_count": len(data) - len(values),
-                }
-            profile["field_profiles"] = field_profiles
-
-        return ActionResult(success=True, message=f"Profiled {row_count} rows", data=profile)
-
-    def _profile_dict(self, data: Dict, profile_type: str) -> ActionResult:
-        key_count = len(data)
-        value_types = Counter(type(v).__name__ for v in data.values())
-        null_count = sum(1 for v in data.values() if v is None)
-
-        profile = {
-            "key_count": key_count,
-            "value_type_distribution": dict(value_types),
-            "null_count": null_count,
-            "null_percent": round(null_count / key_count * 100, 2) if key_count > 0 else 0,
-            "keys": list(data.keys()),
-        }
-
-        if profile_type == "full":
-            numeric_keys = [k for k, v in data.items() if isinstance(v, (int, float))]
-            if numeric_keys:
-                nums = [data[k] for k in numeric_keys]
-                profile["numeric_stats"] = self._numeric_stats(nums)
-
-        return ActionResult(success=True, message=f"Profiled {key_count} keys", data=profile)
-
-    def _numeric_stats(self, nums: List) -> Dict:
-        if not nums:
+        Returns:
+            Profile dict with column statistics.
+        """
+        if not records:
             return {}
-        sorted_nums = sorted(nums)
-        n = len(sorted_nums)
-        mean = sum(sorted_nums) / n
-        variance = sum((x - mean) ** 2 for x in sorted_nums) / n
-        std_dev = math.sqrt(variance)
+
+        if sample_size and len(records) > sample_size:
+            import random
+            records = random.sample(records, sample_size)
+
+        columns = set()
+        for r in records:
+            columns.update(r.keys())
+
+        column_stats = {}
+        for col in columns:
+            values = [r.get(col) for r in records if col in r]
+            column_stats[col] = self._profile_column(values)
+
         return {
-            "min": sorted_nums[0],
-            "max": sorted_nums[-1],
-            "mean": round(mean, 6),
-            "median": sorted_nums[n // 2],
-            "std_dev": round(std_dev, 6),
-            "variance": round(variance, 6),
-            "q1": sorted_nums[n // 4],
-            "q3": sorted_nums[3 * n // 4],
+            "total_records": len(records),
+            "total_columns": len(columns),
+            "columns": column_stats,
         }
 
+    def _profile_column(self, values: list[Any]) -> dict[str, Any]:
+        """Profile a single column."""
+        non_null = [v for v in values if v is not None]
+        null_count = len(values) - len(non_null)
+        null_pct = (null_count / len(values) * 100) if values else 0
 
-class ColumnProfilerAction(BaseAction):
-    """Profile individual columns."""
-    action_type = "column_profiler"
-    display_name = "列数据画像"
-    description = "分析单个列的数据特征"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            column_data = params.get("column_data", [])
-            column_name = params.get("column_name", "column")
-            compute_stats = params.get("compute_stats", True)
-
-            if not isinstance(column_data, list):
-                return ActionResult(success=False, message="column_data must be a list")
-
-            total = len(column_data)
-            if total == 0:
-                return ActionResult(success=True, message="Empty column", data={"name": column_name, "count": 0})
-
-            null_count = sum(1 for v in column_data if v is None)
-            non_null = [v for v in column_data if v is not None]
-            unique_values = set(non_null)
-
-            profile = {
-                "name": column_name,
-                "count": total,
+        if not non_null:
+            return {
+                "type": "empty",
+                "count": len(values),
                 "null_count": null_count,
-                "null_percent": round(null_count / total * 100, 2),
-                "unique_count": len(unique_values),
-                "unique_percent": round(len(unique_values) / len(non_null) * 100, 2) if non_null else 0,
+                "null_percent": null_pct,
             }
 
-            if compute_stats:
-                types = Counter(type(v).__name__ for v in non_null)
-                profile["types"] = dict(types)
+        inferred_type = self._infer_type(non_null)
 
-                numeric_vals = [v for v in non_null if isinstance(v, (int, float))]
-                if numeric_vals:
-                    profile["numeric_stats"] = DataProfilerAction()._numeric_stats(numeric_vals)
+        stats = {
+            "type": inferred_type,
+            "count": len(values),
+            "non_null_count": len(non_null),
+            "null_count": null_count,
+            "null_percent": null_pct,
+            "unique_count": len(set(str(v) for v in non_null)),
+        }
 
-                str_vals = [v for v in non_null if isinstance(v, str)]
-                if str_vals:
-                    lengths = [len(s) for s in str_vals]
-                    profile["string_stats"] = {
-                        "min_length": min(lengths),
-                        "max_length": max(lengths),
-                        "avg_length": round(sum(lengths) / len(lengths), 2),
-                        "non_empty": sum(1 for s in str_vals if s.strip()),
-                    }
+        if inferred_type == "numeric":
+            stats.update(self._numeric_stats(non_null))
+        else:
+            stats.update(self._categorical_stats(non_null))
 
-            return ActionResult(success=True, message=f"Profiled column '{column_name}'", data=profile)
-        except Exception as e:
-            return ActionResult(success=False, message=f"ColumnProfiler error: {e}")
+        return stats
 
-
-class DataQualityAction(BaseAction):
-    """Assess data quality metrics."""
-    action_type = "data_quality"
-    display_name = "数据质量评估"
-    description = "评估数据质量指标"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            rules = params.get("rules", {})
-
-            if not isinstance(data, list):
-                return ActionResult(success=False, message="data must be a list")
-
-            total = len(data)
-            if total == 0:
-                return ActionResult(success=False, message="Empty dataset")
-
-            quality_metrics = {}
-
-            completeness_threshold = rules.get("completeness_threshold", 0.95)
-            if isinstance(data[0], dict) if data else False:
-                all_keys = set()
-                for item in data:
-                    all_keys.update(item.keys())
-                field_completeness = {}
-                for key in all_keys:
-                    non_null = sum(1 for item in data if key in item and item[key] is not None)
-                    completeness = non_null / total
-                    field_completeness[key] = {
-                        "completeness": round(completeness, 4),
-                        "pass": completeness >= completeness_threshold,
-                    }
-                quality_metrics["field_completeness"] = field_completeness
-                overall_completeness = sum(fc["completeness"] for fc in field_completeness.values()) / len(field_completeness)
-                quality_metrics["overall_completeness"] = round(overall_completeness, 4)
+    def _infer_type(self, values: list[Any]) -> str:
+        """Infer the data type of a column."""
+        types = Counter()
+        for v in values:
+            if isinstance(v, bool):
+                types["boolean"] += 1
+            elif isinstance(v, int):
+                types["integer"] += 1
+            elif isinstance(v, float):
+                types["float"] += 1
+            elif isinstance(v, str):
+                if self._looks_like_datetime(v):
+                    types["datetime"] += 1
+                elif self._looks_like_number(v):
+                    types["numeric_string"] += 1
+                else:
+                    types["string"] += 1
+            elif isinstance(v, (list, dict)):
+                types["object"] += 1
             else:
-                null_count = sum(1 for v in data if v is None)
-                quality_metrics["overall_completeness"] = round((total - null_count) / total, 4)
+                types["unknown"] += 1
 
-            uniqueness_threshold = rules.get("uniqueness_threshold", 0.9)
-            deduped_count = len(set(str(v) for v in data))
-            uniqueness = deduped_count / total
-            quality_metrics["uniqueness"] = round(uniqueness, 4)
-            quality_metrics["uniqueness_pass"] = uniqueness >= uniqueness_threshold
+        if not types:
+            return "unknown"
 
-            validity_rules = rules.get("validity", [])
-            validity_results = []
-            for item in data:
-                item_valid = True
-                if isinstance(item, dict):
-                    for field, rule in validity_rules:
-                        value = item.get(field)
-                        if rule.get("type") == "range":
-                            min_val = rule.get("min")
-                            max_val = rule.get("max")
-                            if value is not None and not (min_val <= value <= max_val):
-                                item_valid = False
-                                break
-                validity_results.append(item_valid)
-            valid_count = sum(validity_results)
-            quality_metrics["validity_rate"] = round(valid_count / total, 4)
+        most_common = types.most_common(1)[0][0]
+        if most_common in ("integer", "float", "numeric_string"):
+            return "numeric"
+        return most_common
 
-            score = (
-                quality_metrics.get("overall_completeness", 1.0) * 0.4
-                + quality_metrics.get("uniqueness", 1.0) * 0.3
-                + quality_metrics.get("validity_rate", 1.0) * 0.3
-            )
-            quality_metrics["overall_score"] = round(score, 4)
-            quality_metrics["quality_grade"] = "A" if score >= 0.9 else "B" if score >= 0.7 else "C" if score >= 0.5 else "D"
+    def _looks_like_datetime(self, s: str) -> bool:
+        """Check if a string looks like a datetime."""
+        patterns = [
+            r"\d{4}-\d{2}-\d{2}",
+            r"\d{2}/\d{2}/\d{4}",
+            r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}",
+        ]
+        for p in patterns:
+            if re.match(p, s):
+                return True
+        return False
 
-            return ActionResult(
-                success=True,
-                message=f"Data quality score: {quality_metrics['overall_score']} ({quality_metrics['quality_grade']})",
-                data={"metrics": quality_metrics, "total_records": total},
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"DataQuality error: {e}")
+    def _looks_like_number(self, s: str) -> bool:
+        """Check if a string looks like a number."""
+        try:
+            float(s.replace(",", ""))
+            return True
+        except (ValueError, AttributeError):
+            return False
+
+    def _numeric_stats(self, values: list[Any]) -> dict[str, Any]:
+        """Calculate numeric statistics."""
+        nums = []
+        for v in values:
+            try:
+                if isinstance(v, str):
+                    v = float(v.replace(",", ""))
+                nums.append(float(v))
+            except (ValueError, TypeError):
+                continue
+
+        if not nums:
+            return {"min": None, "max": None, "mean": None, "median": None}
+
+        sorted_nums = sorted(nums)
+        n = len(sorted_nums)
+
+        return {
+            "min": min(nums),
+            "max": max(nums),
+            "mean": sum(nums) / n,
+            "median": sorted_nums[n // 2],
+            "std": self._std(nums),
+            "p25": sorted_nums[n // 4],
+            "p75": sorted_nums[3 * n // 4],
+            "distinct_values": len(set(nums)),
+        }
+
+    def _categorical_stats(self, values: list[Any]) -> dict[str, Any]:
+        """Calculate categorical statistics."""
+        counter = Counter(str(v) for v in values)
+        most_common = counter.most_common(10)
+
+        return {
+            "min_length": min(len(str(v)) for v in values),
+            "max_length": max(len(str(v)) for v in values),
+            "avg_length": sum(len(str(v)) for v in values) / len(values),
+            "top_values": [{"value": v, "count": c} for v, c in most_common],
+        }
+
+    def _std(self, nums: list[float]) -> float:
+        """Calculate standard deviation."""
+        if len(nums) < 2:
+            return 0.0
+        mean = sum(nums) / len(nums)
+        variance = sum((x - mean) ** 2 for x in nums) / (len(nums) - 1)
+        return math.sqrt(variance)
+
+    def compare_profiles(
+        self,
+        profile_a: dict[str, Any],
+        profile_b: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compare two data profiles.
+
+        Args:
+            profile_a: First profile.
+            profile_b: Second profile.
+
+        Returns:
+            Dict describing differences.
+        """
+        diff = {
+            "record_count_diff": profile_b.get("total_records", 0) - profile_a.get("total_records", 0),
+            "column_diffs": [],
+        }
+
+        cols_a = profile_a.get("columns", {})
+        cols_b = profile_b.get("columns", {})
+
+        all_cols = set(cols_a.keys()) | set(cols_b.keys())
+        for col in all_cols:
+            if col not in cols_a:
+                diff["column_diffs"].append({"column": col, "status": "added"})
+            elif col not in cols_b:
+                diff["column_diffs"].append({"column": col, "status": "removed"})
+            else:
+                type_a = cols_a[col].get("type")
+                type_b = cols_b[col].get("type")
+                if type_a != type_b:
+                    diff["column_diffs"].append({
+                        "column": col,
+                        "status": "type_changed",
+                        "from": type_a,
+                        "to": type_b,
+                    })
+
+        return diff

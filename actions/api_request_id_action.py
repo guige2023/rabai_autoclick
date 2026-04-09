@@ -1,234 +1,174 @@
-"""API request ID tracking and propagation.
+"""API Request ID Propagator.
 
-This module provides request ID handling:
-- Request ID generation
-- Header propagation
-- Logging integration
-- Distributed tracing support
+This module provides request ID generation and propagation:
+- Unique request ID generation
+- Context propagation across async calls
+- Request ID logging integration
+- Response header injection
 
 Example:
-    >>> from actions.api_request_id_action import RequestIDMiddleware
-    >>> middleware = RequestIDMiddleware()
-    >>> request_id = middleware.get_or_create_request_id(request)
+    >>> from actions.api_request_id_action import RequestIDPropagator
+    >>> propagator = RequestIDPropagator()
+    >>> request_id = propagator.get_or_create_request_id()
 """
 
 from __future__ import annotations
 
 import uuid
-import logging
-from typing import Any, Optional
-from dataclasses import dataclass
 import threading
+import logging
+from contextvars import ContextVar
+from typing import Optional, Callable
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REQUEST_ID_HEADER = "X-Request-ID"
-DEFAULT_TRACE_ID_HEADER = "X-Trace-ID"
-DEFAULT_SPAN_ID_HEADER = "X-Span-ID"
+_request_id_var: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
 
 
-class RequestIDContext:
-    """Thread-local request ID context."""
-
-    def __init__(self) -> None:
-        self._local = threading.local()
-
-    def set_request_id(self, request_id: str) -> None:
-        """Set the request ID for this context."""
-        self._local.request_id = request_id
-
-    def get_request_id(self) -> Optional[str]:
-        """Get the request ID for this context."""
-        return getattr(self._local, "request_id", None)
-
-    def clear(self) -> None:
-        """Clear the context."""
-        self._local.request_id = None
+@dataclass
+class RequestContext:
+    """Request context with ID and metadata."""
+    request_id: str
+    parent_id: Optional[str] = None
+    root_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    span_id: Optional[str] = None
+    metadata: dict = None
 
 
-class RequestIDGenerator:
-    """Generate unique request IDs.
-
-    Example:
-        >>> generator = RequestIDGenerator()
-        >>> request_id = generator.generate()
-    """
-
-    def __init__(self, prefix: str = "") -> None:
-        self.prefix = prefix
-        self._counter = 0
-        self._counter_lock = threading.Lock()
-
-    def generate(self) -> str:
-        """Generate a new unique request ID.
-
-        Returns:
-            A unique request ID string.
-        """
-        unique_id = str(uuid.uuid4())
-        with self._counter_lock:
-            self._counter += 1
-            counter = self._counter
-        if self.prefix:
-            return f"{self.prefix}-{unique_id}-{counter}"
-        return f"{unique_id}-{counter}"
-
-
-class RequestIDManager:
-    """Manage request IDs across an application.
-
-    Example:
-        >>> manager = RequestIDManager()
-        >>> request_id = manager.get_or_create_request_id(request)
-        >>> manager.add_to_logging(request_id)
-    """
+class RequestIDPropagator:
+    """Generates and propagates request IDs across service calls."""
 
     def __init__(
         self,
-        request_id_header: str = DEFAULT_REQUEST_ID_HEADER,
-        trace_id_header: str = DEFAULT_TRACE_ID_HEADER,
-        generate: bool = True,
+        header_name: str = "X-Request-ID",
+        propagate_header: str = "X-Request-ID",
     ) -> None:
-        self.request_id_header = request_id_header
-        self.trace_id_header = trace_id_header
-        self._context = RequestIDContext()
-        self._generator = RequestIDGenerator() if generate else None
-        self._request_ids: dict[str, str] = {}
+        """Initialize the propagator.
+
+        Args:
+            header_name: Header name for request ID.
+            propagate_header: Header name for incoming request ID propagation.
+        """
+        self._header_name = header_name
+        self._propagate_header = propagate_header
+        self._lock = threading.Lock()
+        self._counters: dict[str, int] = {}
+        self._contexts: dict[str, RequestContext] = {}
 
     def get_or_create_request_id(
         self,
-        request: dict[str, Any],
+        incoming_id: Optional[str] = None,
     ) -> str:
         """Get existing request ID or create a new one.
 
         Args:
-            request: Request dictionary.
+            incoming_id: ID from incoming request header.
 
         Returns:
-            Request ID string.
+            The request ID.
         """
-        headers = request.get("headers", {})
-        request_id = headers.get(self.request_id_header)
-        if not request_id and self._generator:
-            request_id = self._generator.generate()
-        if request_id:
-            self._context.set_request_id(request_id)
-            self._request_ids[request_id] = request_id
-        return request_id or ""
+        existing = _request_id_var.get()
+        if existing:
+            return existing
 
-    def get_current_request_id(self) -> Optional[str]:
-        """Get the current request ID from context.
+        request_id = incoming_id or self._generate_request_id()
+        _request_id_var.set(request_id)
+        return request_id
+
+    def create_request_context(
+        self,
+        request_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
+    ) -> RequestContext:
+        """Create a new request context.
+
+        Args:
+            request_id: Request ID. None = generate new.
+            parent_id: Parent request ID for tracing.
 
         Returns:
-            Current request ID or None.
+            The created RequestContext.
         """
-        return self._context.get_request_id()
+        request_id = request_id or self._generate_request_id()
+        ctx = RequestContext(
+            request_id=request_id,
+            parent_id=parent_id,
+            root_id=parent_id or request_id,
+            metadata={},
+        )
 
-    def propagate_to_headers(
+        with self._lock:
+            self._contexts[request_id] = ctx
+
+        return ctx
+
+    def get_context(self, request_id: str) -> Optional[RequestContext]:
+        """Get request context by ID."""
+        with self._lock:
+            return self._contexts.get(request_id)
+
+    def generate_span_id(self) -> str:
+        """Generate a new span ID for distributed tracing."""
+        return uuid.uuid4().hex[:16]
+
+    def set_context_value(self, request_id: str, key: str, value: any) -> None:
+        """Set a metadata value in the request context.
+
+        Args:
+            request_id: Request ID.
+            key: Metadata key.
+            value: Metadata value.
+        """
+        with self._lock:
+            ctx = self._contexts.get(request_id)
+            if ctx and ctx.metadata is not None:
+                ctx.metadata[key] = value
+
+    def inject_into_headers(
         self,
         headers: dict[str, str],
         request_id: Optional[str] = None,
     ) -> dict[str, str]:
-        """Add request ID to headers for propagation.
+        """Inject request ID into response headers.
 
         Args:
-            headers: Headers dictionary.
-            request_id: Optional specific request ID.
+            headers: Response headers dict.
+            request_id: Request ID. None = get from context.
 
         Returns:
             Headers with request ID added.
         """
-        rid = request_id or self.get_current_request_id()
-        if rid:
-            headers[self.request_id_header] = rid
+        rid = request_id or _request_id_var.get() or self._generate_request_id()
+        headers[self._header_name] = rid
         return headers
 
-    def generate_trace_context(self) -> dict[str, str]:
-        """Generate trace context for downstream calls.
-
-        Returns:
-            Dictionary of trace headers.
-        """
-        trace_id = str(uuid.uuid4())
-        span_id = str(uuid.uuid4())[:16]
-        return {
-            self.trace_id_header: trace_id,
-            self.span_id_header: span_id,
-        }
-
-
-class RequestIDMiddleware:
-    """Middleware for automatic request ID handling.
-
-    Example:
-        >>> middleware = RequestIDMiddleware()
-        >>> response = middleware.process(request)
-    """
-
-    def __init__(
-        self,
-        manager: Optional[RequestIDManager] = None,
-    ) -> None:
-        self.manager = manager or RequestIDManager()
-
-    def process_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Process incoming request.
+    def extract_from_headers(self, headers: dict[str, str]) -> Optional[str]:
+        """Extract request ID from incoming request headers.
 
         Args:
-            request: Request dictionary.
+            headers: Request headers dict.
 
         Returns:
-            Modified request with request ID.
+            Request ID if found, None otherwise.
         """
-        request_id = self.manager.get_or_create_request_id(request)
-        if request_id:
-            request["request_id"] = request_id
-            logger.info(f"Request {request_id}: Processing {request.get('path', 'unknown')}")
-        return request
+        return headers.get(self._propagate_header)
 
-    def process_response(
-        self,
-        response: dict[str, Any],
-        request_id: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Process outgoing response.
+    def _generate_request_id(self) -> str:
+        """Generate a unique request ID."""
+        return f"req_{uuid.uuid4().hex[:24]}"
+
+    def clear_context(self, request_id: str) -> None:
+        """Clear a request context.
 
         Args:
-            response: Response dictionary.
-            request_id: Request ID to add.
-
-        Returns:
-            Modified response with request ID.
+            request_id: Request ID to clear.
         """
-        rid = request_id or self.manager.get_current_request_id()
-        if rid:
-            response["headers"] = self.manager.propagate_to_headers(
-                response.get("headers", {}),
-                rid,
-            )
-        return response
+        with self._lock:
+            self._contexts.pop(request_id, None)
 
-
-def get_request_id(request: dict[str, Any]) -> Optional[str]:
-    """Quick extract request ID from request.
-
-    Args:
-        request: Request dictionary.
-
-    Returns:
-        Request ID or None.
-    """
-    return request.get("headers", {}).get(DEFAULT_REQUEST_ID_HEADER)
-
-
-def set_request_id(request: dict[str, Any], request_id: str) -> None:
-    """Quick set request ID in request.
-
-    Args:
-        request: Request dictionary.
-        request_id: Request ID to set.
-    """
-    if "headers" not in request:
-        request["headers"] = {}
-    request["headers"][DEFAULT_REQUEST_ID_HEADER] = request_id
-    request["request_id"] = request_id
+    def list_active_contexts(self) -> list[RequestContext]:
+        """List all active request contexts."""
+        with self._lock:
+            return list(self._contexts.values())

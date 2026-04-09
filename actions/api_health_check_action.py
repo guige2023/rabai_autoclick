@@ -1,216 +1,211 @@
-"""API Health Check Action Module.
+"""API Health Check Monitor.
 
-Provides health checking with endpoint probing,
-status aggregation, and alerting on degraded services.
+This module provides health check capabilities:
+- Component-level health checks
+- Dependency monitoring
+- Health status aggregation
+- Automatic recovery detection
+
+Example:
+    >>> from actions.api_health_check_action import HealthCheckMonitor
+    >>> monitor = HealthCheckMonitor()
+    >>> monitor.register_component("database", check_db)
+    >>> status = monitor.get_health_status()
 """
+
 from __future__ import annotations
 
-import asyncio
 import time
+import logging
+import threading
+from typing import Any, Callable, Optional
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
-from collections import defaultdict
-import logging
 
 logger = logging.getLogger(__name__)
 
 
 class HealthStatus(Enum):
-    """Health status."""
+    """Health status levels."""
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
+    UNKNOWN = "unknown"
 
 
 @dataclass
-class HealthCheck:
-    """Single health check."""
-    name: str
-    check_fn: Callable[[], bool]
-    timeout: float = 5.0
-    critical: bool = False
-
-
-@dataclass
-class HealthCheckResult:
-    """Health check result."""
+class ComponentHealth:
+    """Health status of a single component."""
     name: str
     status: HealthStatus
-    latency_ms: float
-    error: Optional[str] = None
-    timestamp: float = field(default_factory=time.time)
+    message: str = ""
+    last_check: float = field(default_factory=time.time)
+    consecutive_failures: int = 0
+    consecutive_successes: int = 0
+    latency_ms: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class AggregateHealth:
-    """Aggregated health status."""
-    overall_status: HealthStatus
-    checks: List[HealthCheckResult]
-    timestamp: float = field(default_factory=time.time)
+class HealthCheckMonitor:
+    """Monitors health of API components and dependencies."""
 
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        recovery_threshold: int = 2,
+        check_timeout: float = 5.0,
+    ) -> None:
+        """Initialize the health monitor.
 
-class APIHealthCheckAction:
-    """API health checker.
-
-    Example:
-        health = APIHealthCheckAction()
-
-        health.add_check(HealthCheck(
-            name="database",
-            check_fn=lambda: db.ping()
-        ))
-
-        health.add_check(HealthCheck(
-            name="api",
-            check_fn=lambda: requests.get("/health").ok
-        ))
-
-        status = await health.check()
-        print(status.overall_status)
-    """
-
-    def __init__(self) -> None:
-        self._checks: List[HealthCheck] = []
-        self._history: Dict[str, List[HealthCheckResult]] = defaultdict(list)
-        self._max_history = 100
-
-    def add_check(self, check: HealthCheck) -> "APIHealthCheckAction":
-        """Add health check.
-
-        Returns self for chaining.
+        Args:
+            failure_threshold: Consecutive failures before unhealthy.
+            recovery_threshold: Consecutive successes before healthy.
+            check_timeout: Timeout for each health check.
         """
-        self._checks.append(check)
-        return self
+        self._components: dict[str, Callable[[], tuple[bool, str]]] = {}
+        self._component_health: dict[str, ComponentHealth] = {}
+        self._failure_threshold = failure_threshold
+        self._recovery_threshold = recovery_threshold
+        self._check_timeout = check_timeout
+        self._lock = threading.RLock()
+        self._stats = {"checks": 0, "healthy": 0, "unhealthy": 0}
 
-    async def check(self) -> AggregateHealth:
-        """Run all health checks.
+    def register_component(
+        self,
+        name: str,
+        check_func: Callable[[], tuple[bool, str]],
+        description: str = "",
+    ) -> None:
+        """Register a component for health monitoring.
+
+        Args:
+            name: Component name.
+            check_func: Function returning (is_healthy, message).
+            description: Human-readable description.
+        """
+        with self._lock:
+            self._components[name] = check_func
+            self._component_health[name] = ComponentHealth(
+                name=name,
+                status=HealthStatus.UNKNOWN,
+                message=f"Registered: {description}" if description else "Registered",
+            )
+            logger.info("Registered health check component: %s", name)
+
+    def unregister_component(self, name: str) -> None:
+        """Unregister a component.
+
+        Args:
+            name: Component name.
+        """
+        with self._lock:
+            self._components.pop(name, None)
+            self._component_health.pop(name, None)
+            logger.info("Unregistered health check component: %s", name)
+
+    def check_component(self, name: str) -> ComponentHealth:
+        """Manually trigger a health check for a component.
+
+        Args:
+            name: Component name.
 
         Returns:
-            AggregateHealth with results
+            The ComponentHealth result.
         """
-        tasks = [
-            self._run_check(check)
-            for check in self._checks
-        ]
+        check_func = self._components.get(name)
+        if check_func is None:
+            return ComponentHealth(name=name, status=HealthStatus.UNKNOWN, message="Component not registered")
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        valid_results = []
-        for check, result in zip(self._checks, results):
-            if isinstance(result, Exception):
-                valid_results.append(HealthCheckResult(
-                    name=check.name,
-                    status=HealthStatus.UNHEALTHY,
-                    latency_ms=0,
-                    error=str(result),
-                ))
-            else:
-                valid_results.append(result)
-                self._record_result(check.name, result)
-
-        overall = self._determine_overall_status(valid_results)
-
-        return AggregateHealth(
-            overall_status=overall,
-            checks=valid_results,
-        )
-
-    async def _run_check(self, check: HealthCheck) -> HealthCheckResult:
-        """Run single health check."""
         start = time.time()
-
         try:
-            if asyncio.iscoroutinefunction(check.check_fn):
-                result = await asyncio.wait_for(
-                    check.check_fn(),
-                    timeout=check.timeout
-                )
-            else:
-                result = check.check_fn()
-
+            is_healthy, message = check_func()
             latency = (time.time() - start) * 1000
-            status = HealthStatus.HEALTHY if result else HealthStatus.UNHEALTHY
-
-            return HealthCheckResult(
-                name=check.name,
-                status=status,
-                latency_ms=latency,
-            )
-
-        except asyncio.TimeoutError:
-            return HealthCheckResult(
-                name=check.name,
-                status=HealthStatus.UNHEALTHY,
-                latency_ms=check.timeout * 1000,
-                error="Timeout",
-            )
-
         except Exception as e:
-            return HealthCheckResult(
-                name=check.name,
-                status=HealthStatus.UNHEALTHY,
-                latency_ms=(time.time() - start) * 1000,
-                error=str(e),
-            )
+            is_healthy = False
+            message = f"Exception: {type(e).__name__}: {e}"
+            latency = (time.time() - start) * 1000
 
-    def _record_result(self, name: str, result: HealthCheckResult) -> None:
-        """Record result in history."""
-        self._history[name].append(result)
-        if len(self._history[name]) > self._max_history:
-            self._history[name].pop(0)
+        health = self._component_health.get(name)
+        if health is None:
+            return ComponentHealth(name=name, status=HealthStatus.UNKNOWN, message=message)
 
-    def _determine_overall_status(
+        return self._update_health(health, is_healthy, message, latency)
+
+    def check_all(self) -> dict[str, ComponentHealth]:
+        """Run health checks on all components.
+
+        Returns:
+            Dict mapping component name to health status.
+        """
+        with self._lock:
+            results = {}
+            for name in list(self._components.keys()):
+                results[name] = self.check_component(name)
+        return results
+
+    def _update_health(
         self,
-        results: List[HealthCheckResult],
-    ) -> HealthStatus:
-        """Determine overall health status."""
-        critical_unhealthy = any(
-            r.status == HealthStatus.UNHEALTHY and
-            any(c.name == r.name and c.critical for c in self._checks)
-            for r in results
-        )
+        health: ComponentHealth,
+        is_healthy: bool,
+        message: str,
+        latency_ms: float,
+    ) -> ComponentHealth:
+        """Update component health based on check result."""
+        health.last_check = time.time()
+        health.message = message
+        health.latency_ms = latency_ms
 
-        if critical_unhealthy:
-            return HealthStatus.UNHEALTHY
+        if is_healthy:
+            health.consecutive_successes += 1
+            health.consecutive_failures = 0
 
-        unhealthy_count = sum(
-            1 for r in results
-            if r.status == HealthStatus.UNHEALTHY
-        )
+            if health.consecutive_successes >= self._recovery_threshold:
+                health.status = HealthStatus.HEALTHY
+        else:
+            health.consecutive_failures += 1
+            health.consecutive_successes = 0
 
-        if unhealthy_count > len(results) / 2:
-            return HealthStatus.UNHEALTHY
+            if health.consecutive_failures >= self._failure_threshold:
+                health.status = HealthStatus.UNHEALTHY
 
-        degraded_count = sum(
-            1 for r in results
-            if r.status == HealthStatus.DEGRADED
-        )
+        self._stats["checks"] += 1
+        if health.status == HealthStatus.HEALTHY:
+            self._stats["healthy"] += 1
+        elif health.status == HealthStatus.UNHEALTHY:
+            self._stats["unhealthy"] += 1
 
-        if unhealthy_count > 0 or degraded_count > len(results) / 3:
-            return HealthStatus.DEGRADED
+        return health
 
-        return HealthStatus.HEALTHY
+    def get_health_status(self) -> dict[str, Any]:
+        """Get overall health status.
 
-    def get_history(
-        self,
-        check_name: str,
-        limit: int = 10,
-    ) -> List[HealthCheckResult]:
-        """Get history for specific check."""
-        return self._history.get(check_name, [])[-limit:]
+        Returns:
+            Dict with overall status and component details.
+        """
+        with self._lock:
+            components = dict(self._component_health)
+            statuses = [c.status for c in components.values()]
 
-    def get_stats(self) -> Dict[str, Any]:
+            if not statuses:
+                overall = HealthStatus.UNKNOWN
+            elif HealthStatus.UNHEALTHY in statuses:
+                overall = HealthStatus.UNHEALTHY
+            elif HealthStatus.DEGRADED in statuses or HealthStatus.UNKNOWN in statuses:
+                overall = HealthStatus.DEGRADED
+            else:
+                overall = HealthStatus.HEALTHY
+
+            return {
+                "status": overall.value,
+                "components": {name: {"status": c.status.value, "message": c.message} for name, c in components.items()},
+                "timestamp": time.time(),
+            }
+
+    def is_healthy(self) -> bool:
+        """Quick check if overall system is healthy."""
+        return self.get_health_status()["status"] == HealthStatus.HEALTHY.value
+
+    def get_stats(self) -> dict[str, int]:
         """Get health check statistics."""
-        stats = {}
-        for name, history in self._history.items():
-            if history:
-                recent = history[-10:]
-                healthy_count = sum(
-                    1 for r in recent if r.status == HealthStatus.HEALTHY
-                )
-                stats[name] = {
-                    "uptime": healthy_count / len(recent) if recent else 0,
-                    "avg_latency_ms": sum(r.latency_ms for r in recent) / len(recent),
-                }
-        return stats
+        with self._lock:
+            return dict(self._stats)

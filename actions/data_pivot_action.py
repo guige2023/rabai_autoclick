@@ -1,183 +1,179 @@
-"""Data pivot action module for RabAI AutoClick.
+"""Data Pivot and Aggregation Engine.
 
-Provides data pivoting operations:
-- PivotCreateAction: Create pivot table
-- PivotRotateAction: Rotate pivot axes
-- PivotAggregateAction: Pivot with aggregation
-- PivotUnpivotAction: Unpivot data
+This module provides pivot table capabilities:
+- Row and column pivoting
+- Multiple aggregation functions
+- Grouped pivoting
+- Sparse and dense matrix output
+
+Example:
+    >>> from actions.data_pivot_action import DataPivoter
+    >>> pivoter = DataPivoter()
+    >>> result = pivoter.pivot(records, index="date", columns="region", values="sales", aggfunc="sum")
 """
 
-from typing import Any, Dict, List
+from __future__ import annotations
 
-import sys
-import os
+import logging
+import threading
+from typing import Any, Callable, Optional
+from collections import defaultdict
 
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _parent_dir)
-from core.base_action import BaseAction, ActionResult
-
-
-class PivotCreateAction(BaseAction):
-    """Create a pivot table."""
-    action_type = "pivot_create"
-    display_name = "创建透视表"
-    description = "创建数据透视表"
-
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            index = params.get("index", [])
-            columns = params.get("columns", [])
-            values = params.get("values", [])
-            aggfunc = params.get("aggfunc", "sum")
-
-            if not data:
-                return ActionResult(success=False, message="data is required")
-
-            pivot: Dict = {}
-            for item in data:
-                idx_val = tuple(item.get(i) for i in index)
-                col_val = tuple(item.get(c) for c in columns)
-                if idx_val not in pivot:
-                    pivot[idx_val] = {}
-                if col_val not in pivot[idx_val]:
-                    pivot[idx_val][col_val] = []
-                for v in values:
-                    pivot[idx_val][col_val].append(item.get(v, 0))
-
-            result_rows = []
-            for idx, col_data in pivot.items():
-                row = dict(zip(index, idx))
-                for col, vals in col_data.items():
-                    col_key = "_".join(str(c) for c in col)
-                    if aggfunc == "sum":
-                        row[col_key] = sum(vals)
-                    elif aggfunc == "avg":
-                        row[col_key] = sum(vals) / len(vals) if vals else 0
-                    elif aggfunc == "count":
-                        row[col_key] = len(vals)
-                    elif aggfunc == "min":
-                        row[col_key] = min(vals) if vals else None
-                    elif aggfunc == "max":
-                        row[col_key] = max(vals) if vals else None
-                result_rows.append(row)
-
-            return ActionResult(
-                success=True,
-                data={"pivot_table": result_rows, "row_count": len(result_rows), "index": index, "columns": columns},
-                message=f"Pivot table created: {len(result_rows)} rows",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pivot create failed: {e}")
+logger = logging.getLogger(__name__)
 
 
-class PivotRotateAction(BaseAction):
-    """Rotate pivot axes."""
-    action_type = "pivot_rotate"
-    display_name = "旋转透视"
-    description = "旋转透视表轴"
+class DataPivoter:
+    """Creates pivot tables from tabular data."""
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            pivot_data = params.get("pivot_data", [])
-            swap_axes = params.get("swap_axes", True)
+    AGG_FUNCTIONS = {
+        "sum": sum,
+        "mean": lambda vals: sum(vals) / len(vals) if vals else None,
+        "count": len,
+        "min": min,
+        "max": max,
+        "first": lambda vals: vals[0] if vals else None,
+        "last": lambda vals: vals[-1] if vals else None,
+        "std": None,
+        "median": None,
+    }
 
-            if not pivot_data:
-                return ActionResult(success=False, message="pivot_data is required")
+    def __init__(self) -> None:
+        """Initialize the data pivoter."""
+        self._lock = threading.Lock()
+        self._stats = {"pivots_created": 0}
 
-            rotated = []
-            if swap_axes and pivot_data:
-                keys = list(pivot_data[0].keys())
-                for k in keys:
-                    row = {"axis": k}
-                    for item in pivot_data:
-                        row[f"val_{k}"] = item.get(k)
-                    rotated.append(row)
+    def pivot(
+        self,
+        records: list[dict[str, Any]],
+        index: str,
+        columns: str,
+        values: str,
+        aggfunc: str = "sum",
+        fill_value: Any = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Create a pivot table.
 
-            return ActionResult(
-                success=True,
-                data={"rotated": rotated, "axis_count": len(rotated)},
-                message=f"Rotated pivot: {len(rotated)} axes",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pivot rotate failed: {e}")
+        Args:
+            records: List of record dicts.
+            index: Field to use as row index.
+            columns: Field to use as columns.
+            values: Field to aggregate.
+            aggfunc: Aggregation function name.
+            fill_value: Value to use for missing cells.
 
+        Returns:
+            Dict mapping index values to column values to aggregated values.
+        """
+        result: dict[str, dict[str, Any]] = defaultdict(dict)
+        agg_fn = self.AGG_FUNCTIONS.get(aggfunc)
 
-class PivotAggregateAction(BaseAction):
-    """Pivot with aggregation."""
-    action_type = "pivot_aggregate"
-    display_name = "透视聚合"
-    description = "透视聚合操作"
+        if agg_fn is None and aggfunc not in ("std", "median"):
+            agg_fn = sum
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            group_by = params.get("group_by", [])
-            agg_field = params.get("agg_field", "value")
-            agg_funcs = params.get("agg_funcs", ["sum", "avg", "count"])
+        self._stats["pivots_created"] += 1
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+        for record in records:
+            index_val = record.get(index)
+            column_val = record.get(columns)
+            cell_val = record.get(values)
 
-            groups: Dict = {}
-            for item in data:
-                key = tuple(item.get(g) for g in group_by)
-                if key not in groups:
-                    groups[key] = []
-                groups[key].append(item.get(agg_field, 0))
+            if index_val is None or column_val is None:
+                continue
 
-            results = []
-            for key, vals in groups.items():
-                row = dict(zip(group_by, key))
-                for func in agg_funcs:
-                    if func == "sum":
-                        row[f"{agg_field}_{func}"] = sum(vals)
-                    elif func == "avg":
-                        row[f"{agg_field}_{func}"] = sum(vals) / len(vals) if vals else 0
-                    elif func == "count":
-                        row[f"{agg_field}_{func}"] = len(vals)
-                    elif func == "min":
-                        row[f"{agg_field}_{func}"] = min(vals) if vals else None
-                    elif func == "max":
-                        row[f"{agg_field}_{func}"] = max(vals) if vals else None
-                results.append(row)
+            str_index = str(index_val)
+            str_column = str(column_val)
 
-            return ActionResult(
-                success=True,
-                data={"results": results, "group_count": len(results), "agg_funcs": agg_funcs},
-                message=f"Pivot aggregate: {len(results)} groups with {[f + '=' + agg_field for f in agg_funcs]}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pivot aggregate failed: {e}")
+            if aggfunc == "std":
+                if str_index not in result:
+                    result[str_index] = {}
+                if str_column not in result[str_index]:
+                    result[str_index][str_column] = []
+                result[str_index][str_column].append(cell_val)
+            else:
+                if str_column not in result[str_index]:
+                    result[str_index][str_column] = []
+                result[str_index][str_column].append(cell_val)
 
+        for idx in result:
+            for col in result[idx]:
+                vals = result[idx][col]
+                if aggfunc == "std":
+                    import statistics
+                    result[idx][col] = round(statistics.stdev(vals), 4) if len(vals) > 1 else 0
+                elif aggfunc == "median":
+                    import statistics
+                    result[idx][col] = statistics.median(vals)
+                elif agg_fn:
+                    result[idx][col] = agg_fn(vals)
 
-class PivotUnpivotAction(BaseAction):
-    """Unpivot data."""
-    action_type = "pivot_unpivot"
-    display_name = "逆透视"
-    description = "逆透视数据"
+                if result[idx][col] is None and fill_value is not None:
+                    result[idx][col] = fill_value
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        try:
-            data = params.get("data", [])
-            id_vars = params.get("id_vars", [])
-            value_vars = params.get("value_vars", [])
+        return dict(result)
 
-            if not data:
-                return ActionResult(success=False, message="data is required")
+    def pivot_multi(
+        self,
+        records: list[dict[str, Any]],
+        rows: list[str],
+        columns: str,
+        values: str,
+        aggfunc: str = "sum",
+    ) -> dict[str, Any]:
+        """Create a pivot table with multiple row fields.
 
-            unpivoted = []
-            for item in data:
-                id_values = {k: item.get(k) for k in id_vars if k in item}
-                for v in value_vars:
-                    if v in item:
-                        new_row = {**id_values, "variable": v, "value": item.get(v)}
-                        unpivoted.append(new_row)
+        Args:
+            records: List of record dicts.
+            rows: Fields to use as row index (compound).
+            columns: Field to use as columns.
+            values: Field to aggregate.
+            aggfunc: Aggregation function name.
 
-            return ActionResult(
-                success=True,
-                data={"unpivoted": unpivoted, "row_count": len(unpivoted), "variable_count": len(value_vars)},
-                message=f"Unpivoted: {len(data)} rows → {len(unpivoted)} rows",
-            )
-        except Exception as e:
-            return ActionResult(success=False, message=f"Pivot unpivot failed: {e}")
+        Returns:
+            Nested dict with compound row keys.
+        """
+        agg_fn = self.AGG_FUNCTIONS.get(aggfunc, sum)
+        result: dict[str, Any] = {}
+
+        for record in records:
+            row_key_parts = [str(record.get(r, "null")) for r in rows]
+            row_key = "|".join(row_key_parts)
+            column_val = str(record.get(columns, "null"))
+            cell_val = record.get(values)
+
+            if row_key not in result:
+                result[row_key] = {}
+            if column_val not in result[row_key]:
+                result[row_key][column_val] = []
+            result[row_key][column_val].append(cell_val)
+
+        for row_key in result:
+            for col in result[row_key]:
+                vals = result[row_key][col]
+                result[row_key][col] = agg_fn(vals)
+
+        return result
+
+    def unstack(
+        self,
+        pivoted: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert a pivot table back to records.
+
+        Args:
+            pivoted: Pivot table result.
+
+        Returns:
+            List of records.
+        """
+        records = []
+        for index_val, columns in pivoted.items():
+            record = {"index": index_val}
+            for col_name, col_val in columns.items():
+                record[col_name] = col_val
+            records.append(record)
+        return records
+
+    def get_stats(self) -> dict[str, int]:
+        """Get pivot statistics."""
+        with self._lock:
+            return dict(self._stats)
