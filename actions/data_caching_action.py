@@ -1,383 +1,455 @@
 """
-Data Caching Action Module
+Data Caching Action Module.
 
-Provides multi-level caching, cache invalidation, and cache strategies.
+Provides multi-level caching capabilities including in-memory cache,
+LRU eviction, TTL support, and cache invalidation strategies.
+
+Author: RabAI Team
 """
-from typing import Any, Optional, Callable, TypeVar
+
+from typing import Any, Callable, Dict, Hashable, List, Optional, TypeVar, Generic
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from enum import Enum
-from collections import OrderedDict
-import asyncio
+import threading
+import time
 import hashlib
-import json
+import pickle
+from collections import OrderedDict
+from datetime import datetime, timedelta
+from abc import ABC, abstractmethod
 
 
 T = TypeVar('T')
+K = TypeVar('K', bound=Hashable)
+V = TypeVar('V')
 
 
-class CacheStrategy(Enum):
-    """Cache strategies."""
-    LRU = "lru"  # Least Recently Used
-    LFU = "lfu"  # Least Frequently Used
-    FIFO = "fifo"  # First In First Out
-    TTL = "ttl"  # Time To Live
-    WRITE_THROUGH = "write_through"
-    WRITE_BACK = "write_back"
+class EvictionPolicy(Enum):
+    """Cache eviction policies."""
+    LRU = "lru"
+    LFU = "lfu"
+    FIFO = "fifo"
+    LIFO = "lifo"
+    TTL = "ttl"
+    RANDOM = "random"
 
 
 @dataclass
-class CacheEntry:
-    """A cache entry."""
-    key: str
-    value: Any
-    created_at: datetime
-    accessed_at: datetime
+class CacheEntry(Generic[V]):
+    """Represents a cache entry."""
+    key: K
+    value: V
+    created_at: float
+    last_accessed: float
     access_count: int = 0
-    ttl_seconds: Optional[float] = None
-    tags: list[str] = field(default_factory=list)
-    size_bytes: int = 0
-
-
-@dataclass
-class CacheStats:
-    """Cache statistics."""
-    hits: int = 0
-    misses: int = 0
-    evictions: int = 0
-    expirations: int = 0
-    writes: int = 0
-    deletes: int = 0
-
-
-@dataclass
-class CacheConfig:
-    """Cache configuration."""
-    name: str
-    max_size: int = 1000
-    max_memory_mb: float = 100.0
-    strategy: CacheStrategy = CacheStrategy.LRU
-    default_ttl_seconds: Optional[float] = 3600.0
-    enable_stats: bool = True
-    serializer: Optional[Callable[[Any], bytes]] = None
-    deserializer: Optional[Callable[[bytes], Any]] = None
-
-
-class LRUCache:
-    """Least Recently Used cache implementation."""
+    ttl: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
-    def __init__(self, max_size: int):
-        self.max_size = max_size
-        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
-    
-    def get(self, key: str) -> Optional[CacheEntry]:
-        """Get entry and mark as recently used."""
-        if key not in self._cache:
-            return None
-        
-        entry = self._cache[key]
-        self._cache.move_to_end(key)
-        entry.accessed_at = datetime.now()
-        entry.access_count += 1
-        return entry
-    
-    def put(self, key: str, entry: CacheEntry):
-        """Put entry in cache."""
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        elif len(self._cache) >= self.max_size:
-            # Evict oldest
-            self._cache.popitem(last=False)
-        
-        self._cache[key] = entry
-    
-    def remove(self, key: str) -> bool:
-        """Remove entry from cache."""
-        if key in self._cache:
-            del self._cache[key]
-            return True
-        return False
-    
-    def clear(self):
-        """Clear all entries."""
-        self._cache.clear()
-    
-    def get_all(self) -> list[CacheEntry]:
-        """Get all entries."""
-        return list(self._cache.values())
-    
-    def get_lru_key(self) -> Optional[str]:
-        """Get the least recently used key."""
-        if self._cache:
-            return next(iter(self._cache))
-        return None
-
-
-class DataCachingAction:
-    """Main data caching action handler."""
-    
-    def __init__(self, default_config: Optional[CacheConfig] = None):
-        self.default_config = default_config or CacheConfig(name="default")
-        self._caches: dict[str, LRUCache] = {}
-        self._entries: dict[str, dict[str, CacheEntry]] = {}
-        self._stats: dict[str, CacheStats] = defaultdict(CacheStats)
-        self._write_buffer: dict[str, list[tuple[str, Any]]] = defaultdict(list)
-    
-    def get_cache(self, name: str, config: Optional[CacheConfig] = None) -> "DataCachingAction":
-        """Get or create a named cache."""
-        if name not in self._caches:
-            cfg = config or self.default_config
-            self._caches[name] = LRUCache(max_size=cfg.max_size)
-            self._entries[name] = {}
-            self._stats[name] = CacheStats()
-        return self
-    
-    async def get(
-        self,
-        key: str,
-        cache_name: str = "default"
-    ) -> Optional[Any]:
-        """
-        Get value from cache.
-        
-        Args:
-            key: Cache key
-            cache_name: Name of cache
-            
-        Returns:
-            Cached value or None if not found/expired
-        """
-        if cache_name not in self._caches:
-            return None
-        
-        entry = self._caches[cache_name].get(key)
-        
-        if entry is None:
-            self._stats[cache_name].misses += 1
-            return None
-        
-        # Check TTL
-        if entry.ttl_seconds:
-            age = (datetime.now() - entry.created_at).total_seconds()
-            if age > entry.ttl_seconds:
-                self._caches[cache_name].remove(key)
-                del self._entries[cache_name][key]
-                self._stats[cache_name].expirations += 1
-                self._stats[cache_name].misses += 1
-                return None
-        
-        self._stats[cache_name].hits += 1
-        return entry.value
-    
-    async def set(
-        self,
-        key: str,
-        value: Any,
-        ttl_seconds: Optional[float] = None,
-        tags: Optional[list[str]] = None,
-        cache_name: str = "default"
-    ):
-        """
-        Set value in cache.
-        
-        Args:
-            key: Cache key
-            value: Value to cache
-            ttl_seconds: Time to live in seconds
-            tags: Tags for cache invalidation
-            cache_name: Name of cache
-        """
-        if cache_name not in self._caches:
-            self.get_cache(cache_name)
-        
-        entry = CacheEntry(
-            key=key,
-            value=value,
-            created_at=datetime.now(),
-            accessed_at=datetime.now(),
-            ttl_seconds=ttl_seconds,
-            tags=tags or []
-        )
-        
-        self._caches[cache_name].put(key, entry)
-        self._entries[cache_name][key] = entry
-        self._stats[cache_name].writes += 1
-        
-        # Check memory limit
-        await self._check_memory_limit(cache_name)
-    
-    async def delete(
-        self,
-        key: str,
-        cache_name: str = "default"
-    ) -> bool:
-        """Delete a key from cache."""
-        if cache_name not in self._caches:
+    def is_expired(self) -> bool:
+        """Check if entry has expired."""
+        if self.ttl is None:
             return False
-        
-        removed = self._caches[cache_name].remove(key)
-        if removed and key in self._entries[cache_name]:
-            del self._entries[cache_name][key]
-            self._stats[cache_name].deletes += 1
-        
-        return removed
+        return time.monotonic() - self.created_at > self.ttl
     
-    async def invalidate_by_tags(
+    def touch(self):
+        """Update last accessed time and count."""
+        self.last_accessed = time.monotonic()
+        self.access_count += 1
+
+
+class CacheBackend(ABC):
+    """Abstract base class for cache backends."""
+    
+    @abstractmethod
+    def get(self, key: K) -> Optional[V]:
+        pass
+    
+    @abstractmethod
+    def set(self, key: K, value: V, ttl: Optional[float] = None) -> None:
+        pass
+    
+    @abstractmethod
+    def delete(self, key: K) -> bool:
+        pass
+    
+    @abstractmethod
+    def clear(self) -> None:
+        pass
+    
+    @abstractmethod
+    def keys(self) -> List[K]:
+        pass
+
+
+class InMemoryCache(CacheBackend):
+    """
+    In-memory cache with configurable eviction policy.
+    
+    Example:
+        cache = InMemoryCache(max_size=100, policy=EvictionPolicy.LRU)
+        cache.set("key1", "value1", ttl=60)
+        value = cache.get("key1")
+    """
+    
+    def __init__(
         self,
-        tags: list[str],
-        cache_name: str = "default"
-    ) -> int:
-        """
-        Invalidate all cache entries with given tags.
+        max_size: int = 1000,
+        policy: EvictionPolicy = EvictionPolicy.LRU,
+        default_ttl: Optional[float] = None
+    ):
+        self.max_size = max_size
+        self.policy = policy
+        self.default_ttl = default_ttl
         
-        Returns:
-            Number of entries invalidated
-        """
-        if cache_name not in self._entries:
-            return 0
-        
-        to_delete = []
-        for key, entry in self._entries[cache_name].items():
-            if any(tag in entry.tags for tag in tags):
-                to_delete.append(key)
-        
-        for key in to_delete:
-            self._caches[cache_name].remove(key)
-            del self._entries[cache_name][key]
-        
-        self._stats[cache_name].evictions += len(to_delete)
-        return len(to_delete)
+        self._cache: OrderedDict = OrderedDict()
+        self._access_counts: Dict[K, int] = {}
+        self._lock = threading.RLock()
     
-    async def invalidate_by_pattern(
-        self,
-        pattern: str,
-        cache_name: str = "default"
-    ) -> int:
-        """
-        Invalidate cache entries matching a pattern.
-        
-        Args:
-            pattern: Key pattern (supports * wildcard)
-            cache_name: Name of cache
+    def get(self, key: K) -> Optional[V]:
+        """Get value from cache."""
+        with self._lock:
+            if key not in self._cache:
+                return None
             
-        Returns:
-            Number of entries invalidated
-        """
-        import fnmatch
-        
-        if cache_name not in self._entries:
-            return 0
-        
-        to_delete = [
-            key for key in self._entries[cache_name]
-            if fnmatch.fnmatch(key, pattern)
-        ]
-        
-        for key in to_delete:
-            self._caches[cache_name].remove(key)
-            del self._entries[cache_name][key]
-        
-        self._stats[cache_name].evictions += len(to_delete)
-        return len(to_delete)
-    
-    async def clear(self, cache_name: str = "default"):
-        """Clear all entries from cache."""
-        if cache_name in self._caches:
-            self._caches[cache_name].clear()
-            self._entries[cache_name].clear()
-    
-    async def get_or_compute(
-        self,
-        key: str,
-        compute_fn: Callable[[], Awaitable[T]],
-        ttl_seconds: Optional[float] = None,
-        cache_name: str = "default"
-    ) -> T:
-        """
-        Get from cache or compute if not present.
-        
-        Args:
-            key: Cache key
-            compute_fn: Async function to compute value if not cached
-            ttl_seconds: Time to live
-            cache_name: Name of cache
+            entry: CacheEntry = self._cache[key]
             
-        Returns:
-            Cached or computed value
-        """
-        cached = await self.get(key, cache_name)
-        if cached is not None:
-            return cached
-        
-        value = await compute_fn()
-        await self.set(key, value, ttl_seconds, cache_name=cache_name)
-        return value
-    
-    async def _check_memory_limit(self, cache_name: str):
-        """Check and enforce memory limits."""
-        cfg = self.default_config
-        
-        # Calculate total size
-        total_size = sum(
-            entry.size_bytes for entry in self._entries[cache_name].values()
-        )
-        
-        max_bytes = cfg.max_memory_mb * 1024 * 1024
-        
-        while total_size > max_bytes:
-            lru_key = self._caches[cache_name].get_lru_key()
-            if not lru_key:
-                break
+            if entry.is_expired():
+                del self._cache[key]
+                return None
             
-            entry = self._entries[cache_name][lru_key]
-            total_size -= entry.size_bytes
+            # Update access metadata based on policy
+            if self.policy == EvictionPolicy.LRU:
+                self._cache.move_to_end(key)
+            elif self.policy == EvictionPolicy.LFU:
+                self._access_counts[key] = entry.access_count + 1
             
-            self._caches[cache_name].remove(lru_key)
-            del self._entries[cache_name][lru_key]
-            self._stats[cache_name].evictions += 1
+            entry.touch()
+            return entry.value
     
-    async def cleanup_expired(self, cache_name: str = "default"):
-        """Remove all expired entries."""
-        if cache_name not in self._entries:
+    def set(self, key: K, value: V, ttl: Optional[float] = None) -> None:
+        """Set value in cache."""
+        with self._lock:
+            # Evict if necessary
+            if key not in self._cache and len(self._cache) >= self.max_size:
+                self._evict()
+            
+            now = time.monotonic()
+            entry = CacheEntry(
+                key=key,
+                value=value,
+                created_at=now,
+                last_accessed=now,
+                ttl=ttl or self.default_ttl
+            )
+            
+            self._cache[key] = entry
+            if self.policy == EvictionPolicy.LFU:
+                self._access_counts[key] = 0
+    
+    def delete(self, key: K) -> bool:
+        """Delete value from cache."""
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                self._access_counts.pop(key, None)
+                return True
+            return False
+    
+    def clear(self) -> None:
+        """Clear all entries."""
+        with self._lock:
+            self._cache.clear()
+            self._access_counts.clear()
+    
+    def keys(self) -> List[K]:
+        """Get all cache keys."""
+        with self._lock:
+            return list(self._cache.keys())
+    
+    def _evict(self):
+        """Evict one entry based on policy."""
+        if not self._cache:
             return
         
-        now = datetime.now()
-        to_delete = []
-        
-        for key, entry in self._entries[cache_name].items():
-            if entry.ttl_seconds:
-                age = (now - entry.created_at).total_seconds()
-                if age > entry.ttl_seconds:
-                    to_delete.append(key)
-        
-        for key in to_delete:
-            self._caches[cache_name].remove(key)
-            del self._entries[cache_name][key]
-            self._stats[cache_name].expirations += 1
+        if self.policy == EvictionPolicy.LRU:
+            self._cache.popitem(last=False)
+        elif self.policy == EvictionPolicy.LFU:
+            min_key = min(self._access_counts, key=self._access_counts.get)
+            del self._cache[min_key]
+            del self._access_counts[min_key]
+        elif self.policy == EvictionPolicy.FIFO:
+            self._cache.popitem(last=False)
+        elif self.policy == EvictionPolicy.LIFO:
+            self._cache.popitem(last=True)
+        elif self.policy == EvictionPolicy.RANDOM:
+            key = next(iter(self._cache))
+            del self._cache[key]
+        elif self.policy == EvictionPolicy.TTL:
+            # Evict oldest expired
+            for key, entry in self._cache.items():
+                if entry.is_expired():
+                    del self._cache[key]
+                    return
+
+
+class TwoLevelCache(CacheBackend):
+    """
+    Two-level cache with L1 (memory) and L2 (persistent) layers.
     
-    def get_stats(self, cache_name: str = "default") -> dict[str, Any]:
-        """Get cache statistics."""
-        stats = self._stats.get(cache_name, CacheStats())
-        total = stats.hits + stats.misses
-        
-        return {
-            "name": cache_name,
-            "entries": len(self._entries.get(cache_name, {})),
-            "hits": stats.hits,
-            "misses": stats.misses,
-            "hit_rate": stats.hits / total if total > 0 else 0,
-            "evictions": stats.evictions,
-            "expirations": stats.expirations,
-            "writes": stats.writes,
-            "deletes": stats.deletes
-        }
+    Example:
+        cache = TwoLevelCache(l1_size=100, l2_size=1000)
+        cache.set("key", "value")  # Writes to both levels
+    """
     
-    async def warm_cache(
+    def __init__(
         self,
-        entries: list[tuple[str, Any]],
-        ttl_seconds: Optional[float] = None,
-        cache_name: str = "default"
+        l1_cache: InMemoryCache,
+        l2_cache: Optional[CacheBackend] = None
     ):
-        """Pre-populate cache with entries."""
-        for key, value in entries:
-            await self.set(key, value, ttl_seconds, cache_name=cache_name)
+        self.l1 = l1_cache
+        self.l2 = l2_cache
+        self._lock = threading.RLock()
+    
+    def get(self, key: K) -> Optional[V]:
+        """Get from L1, fallback to L2."""
+        with self._lock:
+            value = self.l1.get(key)
+            if value is not None:
+                return value
+            
+            if self.l2:
+                value = self.l2.get(key)
+                if value is not None:
+                    # Promote to L1
+                    self.l1.set(key, value)
+                return value
+            
+            return None
+    
+    def set(self, key: K, value: V, ttl: Optional[float] = None) -> None:
+        """Set in both L1 and L2."""
+        with self._lock:
+            self.l1.set(key, value, ttl)
+            if self.l2:
+                self.l2.set(key, value, ttl)
+    
+    def delete(self, key: K) -> bool:
+        """Delete from both levels."""
+        with self._lock:
+            l1_deleted = self.l1.delete(key)
+            l2_deleted = self.l2.delete(key) if self.l2 else False
+            return l1_deleted or l2_deleted
+    
+    def clear(self) -> None:
+        """Clear both levels."""
+        self.l1.clear()
+        if self.l2:
+            self.l2.clear()
+    
+    def keys(self) -> List[K]:
+        """Get all keys from L1."""
+        return self.l1.keys()
+
+
+class CacheDecorator:
+    """
+    Decorator for adding caching to functions.
+    
+    Example:
+        @CacheDecorator(cache)
+        def expensive_function(x, y):
+            return x + y
+    """
+    
+    def __init__(self, cache: CacheBackend):
+        self.cache = cache
+    
+    def __call__(self, func: Callable[..., V]) -> Callable[..., V]:
+        def wrapper(*args, **kwargs) -> V:
+            # Create cache key from function name and args
+            key = self._make_key(func.__name__, args, kwargs)
+            
+            # Try cache
+            result = self.cache.get(key)
+            if result is not None:
+                return result
+            
+            # Execute function
+            result = func(*args, **kwargs)
+            
+            # Store in cache
+            self.cache.set(key, result)
+            
+            return result
+        
+        return wrapper
+    
+    def _make_key(self, func_name: str, args: tuple, kwargs: dict) -> str:
+        """Create cache key from function call."""
+        key_data = {
+            "func": func_name,
+            "args": args,
+            "kwargs": kwargs
+        }
+        key_str = pickle.dumps(key_data)
+        return hashlib.md5(key_str).hexdigest()
+
+
+class WriteBackCache:
+    """
+    Write-back cache that batches writes.
+    
+    Example:
+        cache = WriteBackCache(max_size=100, flush_interval=5.0)
+        cache.set("key", "value")
+        cache.close()  # Flushes pending writes
+    """
+    
+    def __init__(
+        self,
+        backend: CacheBackend,
+        max_size: int = 1000,
+        flush_interval: float = 60.0
+    ):
+        self.backend = backend
+        self.max_size = max_size
+        self.flush_interval = flush_interval
+        
+        self._write_buffer: Dict[K, V] = {}
+        self._dirty_keys: Set[K] = set()
+        self._lock = threading.RLock()
+        
+        self._flush_thread = threading.Thread(target=self._auto_flush, daemon=True)
+        self._running = True
+        self._flush_thread.start()
+    
+    def get(self, key: K) -> Optional[V]:
+        """Get value, checking write buffer first."""
+        with self._lock:
+            if key in self._write_buffer:
+                return self._write_buffer[key]
+            return self.backend.get(key)
+    
+    def set(self, key: K, value: V) -> None:
+        """Set value in write buffer."""
+        with self._lock:
+            self._write_buffer[key] = value
+            self._dirty_keys.add(key)
+            
+            if len(self._write_buffer) >= self.max_size:
+                self.flush()
+    
+    def flush(self):
+        """Flush write buffer to backend."""
+        with self._lock:
+            for key in self._dirty_keys:
+                if key in self._write_buffer:
+                    self.backend.set(key, self._write_buffer[key])
+            self._write_buffer.clear()
+            self._dirty_keys.clear()
+    
+    def close(self):
+        """Close cache and flush pending writes."""
+        self._running = False
+        self.flush()
+    
+    def _auto_flush(self):
+        """Auto-flush thread."""
+        while self._running:
+            time.sleep(self.flush_interval)
+            if self._running:
+                self.flush()
+
+
+class BaseAction:
+    """Base class for all actions."""
+    
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Any:
+        raise NotImplementedError
+
+
+class DataCachingAction(BaseAction):
+    """
+    Data caching action for automation workflows.
+    
+    Parameters:
+        operation: Operation type (set/get/delete/clear)
+        key: Cache key
+        value: Value to cache
+        ttl: Time to live in seconds
+        policy: Eviction policy (lru/lfu/fifo/ttl)
+        max_size: Maximum cache size
+    
+    Example:
+        action = DataCachingAction()
+        result = action.execute({}, {
+            "operation": "set",
+            "key": "user_123",
+            "value": {"name": "John"},
+            "ttl": 300
+        })
+    """
+    
+    _cache: Optional[InMemoryCache] = None
+    _lock = threading.Lock()
+    
+    def execute(self, context: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute caching operation."""
+        operation = params.get("operation", "get")
+        key = params.get("key")
+        value = params.get("value")
+        ttl = params.get("ttl")
+        policy_str = params.get("policy", "lru")
+        max_size = params.get("max_size", 1000)
+        
+        policy = EvictionPolicy(policy_str)
+        
+        with self._lock:
+            if self._cache is None:
+                self._cache = InMemoryCache(max_size=max_size, policy=policy)
+            elif operation == "clear":
+                self._cache.clear()
+                return {"success": True, "operation": "clear}
+        
+        if operation == "set":
+            self._cache.set(key, value, ttl)
+            return {
+                "success": True,
+                "operation": "set",
+                "key": key,
+                "cached_at": datetime.now().isoformat()
+            }
+        
+        elif operation == "get":
+            result = self._cache.get(key)
+            return {
+                "success": result is not None,
+                "operation": "get",
+                "key": key,
+                "value": result,
+                "found": result is not None
+            }
+        
+        elif operation == "delete":
+            deleted = self._cache.delete(key)
+            return {
+                "success": deleted,
+                "operation": "delete",
+                "key": key
+            }
+        
+        elif operation == "clear":
+            self._cache.clear()
+            return {"success": True, "operation": "clear"}
+        
+        elif operation == "stats":
+            return {
+                "success": True,
+                "operation": "stats",
+                "size": len(self._cache.keys()),
+                "max_size": max_size,
+                "policy": policy_str
+            }
+        
+        else:
+            return {"success": False, "error": f"Unknown operation: {operation}"}
