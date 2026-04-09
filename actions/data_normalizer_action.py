@@ -1,292 +1,471 @@
-"""
-Data Normalizer Action Module.
+"""Data Normalizer Action Module.
 
-Provides data normalization and transformation utilities including
-scaling, standardization, min-max normalization, and robust scaling.
+Provides data normalization and standardization operations.
 """
 
+import re
 import math
-from typing import Optional, List, Dict, Any, Callable, Union
-from dataclasses import dataclass
-from enum import Enum
-import numpy as np
+import traceback
+import sys
+import os
+from typing import Any, Dict, List, Optional, Union, Callable
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.base_action import BaseAction, ActionResult
 
 
-class NormalizationMethod(Enum):
-    """Normalization method types."""
-    MIN_MAX = "min_max"
-    Z_SCORE = "z_score"
-    ROBUST = "robust"
-    LOG = "log"
-    LOG10 = "log10"
-    SQUARE_ROOT = "square_root"
-    MAX_ABS = "max_abs"
-    L2 = "l2"
-
-
-@dataclass
-class NormalizerConfig:
-    """Configuration for data normalization."""
-    method: NormalizationMethod = NormalizationMethod.MIN_MAX
-    feature_range: tuple = (0, 1)  # for MIN_MAX
-    robust_quantiles: tuple = (0.25, 0.75)  # for ROBUST
-    log_offset: float = 1.0  # offset for log normalization
-    epsilon: float = 1e-10  # small value to prevent division by zero
-
-
-class DataStatistics:
-    """Statistics for a data series."""
-
-    def __init__(self, data: List[float]):
-        self.data = data
-        self.n = len(data)
-        self.mean = sum(data) / self.n if self.n > 0 else 0
-        self.min_val = min(data) if self.n > 0 else 0
-        self.max_val = max(data) if self.n > 0 else 0
-        self.range = self.max_val - self.min_val
-
-        # Calculate variance and std
-        if self.n > 0:
-            variance = sum((x - self.mean) ** 2 for x in data) / self.n
-            self.std = math.sqrt(variance)
-            self.var = variance
-        else:
-            self.std = 0
-            self.var = 0
-
-        # Median
-        sorted_data = sorted(data)
-        if self.n % 2 == 0:
-            self.median = (sorted_data[self.n // 2 - 1] + sorted_data[self.n // 2]) / 2
-        else:
-            self.median = sorted_data[self.n // 2]
-
-        # Quartiles for robust scaling
-        q1_idx = self.n // 4
-        q3_idx = 3 * self.n // 4
-        self.q1 = sorted_data[q1_idx] if self.n > 0 else 0
-        self.q3 = sorted_data[q3_idx] if self.n > 0 else 0
-        self.iqr = self.q3 - self.q1
-
-
-class DataNormalizerAction:
+class DataNormalizerAction(BaseAction):
+    """Normalize data to standard formats.
+    
+    Handles string normalization, date/time normalization, and numeric scaling.
     """
-    Data normalization and transformation action.
-
-    Provides various normalization methods for preparing data
-    for machine learning or analysis pipelines.
-    """
-
-    def __init__(self, config: Optional[NormalizerConfig] = None):
-        self.config = config or NormalizerConfig()
-        self._stats: Dict[str, DataStatistics] = {}
-        self._fitted = False
-        self._feature_range = self.config.feature_range
-
-    def fit(self, data: Union[List[float], List[List[float]]]) -> "DataNormalizerAction":
-        """
-        Fit the normalizer to the data.
-
-        Args:
-            data: Training data for computing normalization parameters
-
-        Returns:
-            self for chaining
-        """
-        if isinstance(data[0], (int, float)):
-            # 1D data
-            self._stats["default"] = DataStatistics(data)
-        else:
-            # 2D data (multiple features)
-            n_features = len(data[0])
-            for i in range(n_features):
-                feature_data = [row[i] for row in data]
-                self._stats[f"feature_{i}"] = DataStatistics(feature_data)
-
-        self._fitted = True
-        return self
-
-    def transform(self, data: Union[List[float], List[List[float]]]) -> List[float]:
-        """
-        Transform data using fitted normalization.
-
-        Args:
-            data: Data to normalize
-
-        Returns:
-            Normalized data
-        """
-        if not self._fitted:
-            raise ValueError("Normalizer must be fitted before transform")
-
-        if isinstance(data[0], (int, float)):
-            # 1D data
-            stats = self._stats.get("default")
-            return self._normalize_1d(data, stats)
-        else:
-            # 2D data
-            result = []
-            for row in data:
-                normalized_row = []
-                for i, val in enumerate(row):
-                    stats = self._stats.get(f"feature_{i}")
-                    if stats:
-                        normalized_row.append(
-                            self._normalize_value(val, stats)[0]
-                        )
-                    else:
-                        normalized_row.append(val)
-                result.append(normalized_row)
-            return result
-
-    def fit_transform(self, data: Union[List[float], List[List[float]]]) -> List[float]:
-        """Fit and transform in one step."""
-        return self.fit(data).transform(data)
-
-    def _normalize_1d(self, data: List[float], stats: DataStatistics) -> List[float]:
-        """Normalize 1D data."""
-        return [self._normalize_value(val, stats)[0] for val in data]
-
-    def _normalize_value(
-        self, value: float, stats: DataStatistics
-    ) -> tuple[float, str]:
-        """Normalize a single value using configured method."""
-        method = self.config.method
-        epsilon = self.config.epsilon
-
-        if method == NormalizationMethod.MIN_MAX:
-            if stats.range < epsilon:
-                return (self._feature_range[0], "clipped")
-            normalized = self._feature_range[0] + (
-                (value - stats.min_val) / stats.range
-            ) * (self._feature_range[1] - self._feature_range[0])
-            return (normalized, "ok")
-
-        elif method == NormalizationMethod.Z_SCORE:
-            if stats.std < epsilon:
-                return (0.0, "clipped")
-            normalized = (value - stats.mean) / stats.std
-            return (normalized, "ok")
-
-        elif method == NormalizationMethod.ROBUST:
-            iqr = stats.q3 - stats.q1
-            if iqr < epsilon:
-                return (0.0, "clipped")
-            normalized = (value - stats.median) / iqr
-            return (normalized, "ok")
-
-        elif method == NormalizationMethod.LOG:
-            normalized = math.log(value + self.config.log_offset)
-            return (normalized, "ok")
-
-        elif method == NormalizationMethod.LOG10:
-            normalized = math.log10(value + self.config.log_offset)
-            return (normalized, "ok")
-
-        elif method == NormalizationMethod.SQUARE_ROOT:
-            normalized = math.sqrt(max(0, value))
-            return (normalized, "ok")
-
-        elif method == NormalizationMethod.MAX_ABS:
-            max_abs = max(abs(stats.min_val), abs(stats.max_val))
-            if max_abs < epsilon:
-                return (0.0, "clipped")
-            return (value / max_abs, "ok")
-
-        elif method == NormalizationMethod.L2:
-            norm = math.sqrt(sum(x ** 2 for x in [value]))
-            if norm < epsilon:
-                return (0.0, "clipped")
-            return (value / norm, "ok")
-
-        return (value, "unsupported")
-
-    def inverse_transform(
-        self, data: Union[List[float], List[List[float]]]
-    ) -> List[float]:
-        """
-        Reverse normalization to original scale.
-
-        Args:
-            data: Normalized data
-
-        Returns:
-            Original scale data
-        """
-        if not self._fitted:
-            raise ValueError("Normalizer must be fitted before inverse_transform")
-
-        # This is a simplified version - full implementation would
-        # need to track the actual normalization parameters
-        if isinstance(data[0], (int, float)):
-            stats = self._stats.get("default")
-            if stats is None:
-                return data
-
-            if self.config.method == NormalizationMethod.MIN_MAX:
-                min_f, max_f = self._feature_range
-                result = []
-                for val in data:
-                    original = min_f + val * (stats.max_val - stats.min_val) / (max_f - min_f)
-                    result.append(original)
-                return result
-
-        return data
-
-    def get_stats(self, feature: str = "default") -> Optional[DataStatistics]:
-        """Get statistics for a feature."""
-        return self._stats.get(feature)
-
-    def is_fitted(self) -> bool:
-        """Check if normalizer has been fitted."""
-        return self._fitted
-
-
-class OutlierClipper:
-    """Clip outliers to specified quantiles."""
-
-    def __init__(
+    action_type = "data_normalizer"
+    display_name = "数据标准化"
+    description = "将数据标准化为统一格式"
+    
+    def execute(
         self,
-        lower_quantile: float = 0.05,
-        upper_quantile: float = 0.95,
-    ):
-        self.lower_quantile = lower_quantile
-        self.upper_quantile = upper_quantile
-        self._lower_bound: Optional[float] = None
-        self._upper_bound: Optional[float] = None
-
-    def fit(self, data: List[float]) -> "OutlierClipper":
-        """Fit clipper bounds to data."""
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute normalization.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: data, normalization_type, options.
+        
+        Returns:
+            ActionResult with normalized data.
+        """
+        data = params.get('data', [])
+        norm_type = params.get('normalization_type', 'minmax')
+        options = params.get('options', {})
+        
+        if not data:
+            return ActionResult(
+                success=False,
+                data=None,
+                error="No data to normalize"
+            )
+        
+        try:
+            if isinstance(data, list) and len(data) > 0:
+                if norm_type == 'minmax':
+                    normalized = self._minmax_normalize(data, options)
+                elif norm_type == 'zscore':
+                    normalized = self._zscore_normalize(data, options)
+                elif norm_type == 'robust':
+                    normalized = self._robust_normalize(data, options)
+                elif norm_type == 'decimal':
+                    normalized = self._decimal_normalize(data, options)
+                elif norm_type == 'log':
+                    normalized = self._log_normalize(data, options)
+                else:
+                    return ActionResult(
+                        success=False,
+                        data=None,
+                        error=f"Unknown normalization type: {norm_type}"
+                    )
+            else:
+                normalized = self._normalize_single(data, norm_type, options)
+            
+            return ActionResult(
+                success=True,
+                data={
+                    'normalized': normalized,
+                    'type': norm_type
+                },
+                error=None
+            )
+            
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                data=None,
+                error=f"Normalization failed: {str(e)}"
+            )
+    
+    def _minmax_normalize(self, data: List, options: Dict) -> List:
+        """Min-max normalization to [0, 1] range."""
+        min_val = options.get('min', min(data))
+        max_val = options.get('max', max(data))
+        range_val = max_val - min_val
+        
+        if range_val == 0:
+            return [0.5] * len(data)
+        
+        return [(x - min_val) / range_val for x in data]
+    
+    def _zscore_normalize(self, data: List, options: Dict) -> List:
+        """Z-score normalization (standardization)."""
+        mean = sum(data) / len(data)
+        variance = sum((x - mean) ** 2 for x in data) / len(data)
+        stddev = math.sqrt(variance)
+        
+        if stddev == 0:
+            return [0.0] * len(data)
+        
+        return [(x - mean) / stddev for x in data]
+    
+    def _robust_normalize(self, data: List, options: Dict) -> List:
+        """Robust normalization using median and IQR."""
         sorted_data = sorted(data)
         n = len(sorted_data)
-        self._lower_bound = sorted_data[int(n * self.lower_quantile)]
-        self._upper_bound = sorted_data[int(n * self.upper_quantile)]
-        return self
+        
+        median = sorted_data[n // 2]
+        q1 = sorted_data[n // 4]
+        q3 = sorted_data[3 * n // 4]
+        iqr = q3 - q1
+        
+        if iqr == 0:
+            return [0.0] * len(data)
+        
+        return [(x - median) / iqr for x in data]
+    
+    def _decimal_normalize(self, data: List, options: Dict) -> List:
+        """Decimal scaling normalization."""
+        max_abs = max(abs(x) for x in data)
+        if max_abs == 0:
+            return data
+        
+        # Find appropriate scale
+        scale = 1
+        while max_abs >= 10:
+            max_abs /= 10
+            scale *= 10
+        
+        return [x / scale for x in data]
+    
+    def _log_normalize(self, data: List, options: Dict) -> List:
+        """Log transformation normalization."""
+        min_val = min(data)
+        shift = options.get('shift', 1 - min_val if min_val <= 0 else 0)
+        
+        return [math.log(x + shift) for x in data]
+    
+    def _normalize_single(self, data: Any, norm_type: str, options: Dict) -> Any:
+        """Normalize a single non-list value."""
+        return data
 
-    def transform(self, data: List[float]) -> List[float]:
-        """Clip outliers in data."""
-        if self._lower_bound is None:
-            raise ValueError("Clipper must be fitted first")
-        return [
-            max(self._lower_bound, min(self._upper_bound, val))
-            for val in data
-        ]
 
-    def fit_transform(self, data: List[float]) -> List[float]:
-        """Fit and transform in one step."""
-        return self.fit(data).transform(data)
+class StringNormalizerAction(BaseAction):
+    """Normalize string data.
+    
+    Handles case normalization, whitespace, special characters, and encoding.
+    """
+    action_type = "string_normalizer"
+    display_name = "字符串标准化"
+    description = "标准化字符串数据"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute string normalization.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: text, operations.
+        
+        Returns:
+            ActionResult with normalized string.
+        """
+        text = params.get('text', '')
+        operations = params.get('operations', ['trim', 'lowercase'])
+        
+        if not isinstance(text, str):
+            return ActionResult(
+                success=False,
+                data=None,
+                error="Input is not a string"
+            )
+        
+        result = text
+        
+        for op in operations:
+            if op == 'trim':
+                result = result.strip()
+            elif op == 'lowercase':
+                result = result.lower()
+            elif op == 'uppercase':
+                result = result.upper()
+            elif op == 'titlecase':
+                result = result.title()
+            elif op == 'remove_whitespace':
+                result = re.sub(r'\s+', '', result)
+            elif op == 'normalize_whitespace':
+                result = re.sub(r'\s+', ' ', result)
+            elif op == 'remove_special':
+                result = re.sub(r'[^a-zA-Z0-9\s]', '', result)
+            elif op == 'remove_accents':
+                result = self._remove_accents(result)
+            elif op == 'remove_punctuation':
+                result = re.sub(r'[^\w\s]', '', result)
+        
+        return ActionResult(
+            success=True,
+            data={
+                'original': text,
+                'normalized': result,
+                'operations_applied': operations
+            },
+            error=None
+        )
+    
+    def _remove_accents(self, text: str) -> str:
+        """Remove accents from text."""
+        # Simple implementation
+        replacements = {
+            'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
+            'Á': 'A', 'É': 'E', 'Í': 'I', 'Ó': 'O', 'Ú': 'U'
+        }
+        for char, replacement in replacements.items():
+            text = text.replace(char, replacement)
+        return text
 
 
-class CustomTransformer:
-    """Apply custom transformation functions."""
+class DateTimeNormalizerAction(BaseAction):
+    """Normalize date and time data.
+    
+    Handles various date formats and converts to standard representations.
+    """
+    action_type = "datetime_normalizer"
+    display_name = "日期时间标准化"
+    description = "标准化日期时间数据"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute datetime normalization.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: datetime_value, input_format, output_format.
+        
+        Returns:
+            ActionResult with normalized datetime.
+        """
+        datetime_value = params.get('datetime_value', '')
+        input_format = params.get('input_format', 'auto')
+        output_format = params.get('output_format', 'iso8601')
+        timezone = params.get('timezone', 'UTC')
+        
+        if not datetime_value:
+            return ActionResult(
+                success=False,
+                data=None,
+                error="No datetime value provided"
+            )
+        
+        try:
+            # Parse datetime
+            parsed = self._parse_datetime(datetime_value, input_format)
+            
+            # Convert to output format
+            normalized = self._format_datetime(parsed, output_format)
+            
+            return ActionResult(
+                success=True,
+                data={
+                    'original': datetime_value,
+                    'normalized': normalized,
+                    'timestamp': parsed.timestamp(),
+                    'output_format': output_format
+                },
+                error=None
+            )
+            
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                data=None,
+                error=f"Datetime normalization failed: {str(e)}"
+            )
+    
+    def _parse_datetime(self, value: str, fmt: str):
+        """Parse datetime string."""
+        import datetime as dt
+        
+        if fmt == 'auto':
+            # Try common formats
+            formats = [
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%dT%H:%M:%S',
+                '%Y-%m-%d',
+                '%d/%m/%Y',
+                '%m/%d/%Y',
+                '%Y/%m/%d'
+            ]
+            for f in formats:
+                try:
+                    return dt.datetime.strptime(value, f)
+                except ValueError:
+                    continue
+            raise ValueError(f"Could not parse datetime: {value}")
+        else:
+            return dt.datetime.strptime(value, fmt)
+    
+    def _format_datetime(self, dt_obj, fmt: str) -> str:
+        """Format datetime object."""
+        if fmt == 'iso8601':
+            return dt_obj.isoformat()
+        elif fmt == 'unix':
+            return str(int(dt_obj.timestamp()))
+        elif fmt == 'date_only':
+            return dt_obj.strftime('%Y-%m-%d')
+        elif fmt == 'time_only':
+            return dt_obj.strftime('%H:%M:%S')
+        elif fmt == 'readable':
+            return dt_obj.strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            return dt_obj.strftime(fmt)
 
-    def __init__(self, func: Callable[[float], float]):
-        self.func = func
 
-    def transform(self, data: List[float]) -> List[float]:
-        """Apply custom function to data."""
-        return [self.func(val) for val in data]
+class DataEncoderAction(BaseAction):
+    """Encode data to various formats.
+    
+    Supports encoding categorical data, text to numbers, and custom encodings.
+    """
+    action_type = "data_encoder"
+    display_name = "数据编码"
+    description = "将数据编码为各种格式"
+    
+    def execute(
+        self,
+        context: Any,
+        params: Dict[str, Any]
+    ) -> ActionResult:
+        """Execute data encoding.
+        
+        Args:
+            context: Execution context.
+            params: Dict with keys: data, encoding_type, options.
+        
+        Returns:
+            ActionResult with encoded data.
+        """
+        data = params.get('data', [])
+        encoding_type = params.get('encoding_type', 'label')
+        options = params.get('options', {})
+        
+        if not data:
+            return ActionResult(
+                success=False,
+                data=None,
+                error="No data to encode"
+            )
+        
+        try:
+            if encoding_type == 'label':
+                encoded, mapping = self._label_encode(data, options)
+            elif encoding_type == 'onehot':
+                encoded, mapping = self._onehot_encode(data, options)
+            elif encoding_type == 'ordinal':
+                encoded, mapping = self._ordinal_encode(data, options)
+            elif encoding_type == 'binary':
+                encoded, mapping = self._binary_encode(data, options)
+            elif encoding_type == 'frequency':
+                encoded, mapping = self._frequency_encode(data, options)
+            elif encoding_type == 'target':
+                encoded, mapping = self._target_encode(data, options)
+            else:
+                return ActionResult(
+                    success=False,
+                    data=None,
+                    error=f"Unknown encoding type: {encoding_type}"
+                )
+            
+            return ActionResult(
+                success=True,
+                data={
+                    'encoded': encoded,
+                    'mapping': mapping,
+                    'encoding_type': encoding_type
+                },
+                error=None
+            )
+            
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                data=None,
+                error=f"Encoding failed: {str(e)}"
+            )
+    
+    def _label_encode(self, data: List, options: Dict) -> Tuple[List, Dict]:
+        """Label encoding."""
+        unique_values = list(set(data))
+        mapping = {v: i for i, v in enumerate(unique_values)}
+        encoded = [mapping[v] for v in data]
+        return encoded, mapping
+    
+    def _onehot_encode(self, data: List, options: Dict) -> Tuple[List[List], Dict]:
+        """One-hot encoding."""
+        unique_values = list(set(data))
+        mapping = {v: i for i, v in enumerate(unique_values)}
+        
+        encoded = []
+        for v in data:
+            row = [0] * len(unique_values)
+            row[mapping[v]] = 1
+            encoded.append(row)
+        
+        return encoded, mapping
+    
+    def _ordinal_encode(self, data: List, options: Dict) -> Tuple[List, Dict]:
+        """Ordinal encoding with specified order."""
+        order = options.get('order', sorted(set(data)))
+        mapping = {v: i for i, v in enumerate(order)}
+        encoded = [mapping.get(v, -1) for v in data]
+        return encoded, mapping
+    
+    def _binary_encode(self, data: List, options: Dict) -> Tuple[List[str], Dict]:
+        """Binary encoding."""
+        unique_values = list(set(data))
+        mapping = {v: i for i, v in enumerate(unique_values)}
+        max_val = len(unique_values) - 1
+        bits = max(1, (max_val).bit_length())
+        
+        encoded = [format(mapping[v], f'0{bits}b') for v in data]
+        return encoded, mapping
+    
+    def _frequency_encode(self, data: List, options: Dict) -> Tuple[List, Dict]:
+        """Frequency encoding."""
+        from collections import Counter
+        freq = Counter(data)
+        total = len(data)
+        mapping = {v: freq[v] / total for v in freq}
+        encoded = [mapping[v] for v in data]
+        return encoded, mapping
+    
+    def _target_encode(self, data: List, options: Dict) -> Tuple[List, Dict]:
+        """Target encoding (requires target values)."""
+        target = options.get('target', [])
+        if len(data) != len(target):
+            raise ValueError("Data and target must have same length")
+        
+        # Group by category and compute mean target
+        groups = {}
+        for d, t in zip(data, target):
+            if d not in groups:
+                groups[d] = []
+            groups[d].append(t)
+        
+        mapping = {k: sum(v) / len(v) for k, v in groups.items()}
+        global_mean = sum(target) / len(target)
+        
+        encoded = [mapping.get(v, global_mean) for v in data]
+        return encoded, mapping
 
-    def fit_transform(self, data: List[float]) -> List[float]:
-        """Fit and transform in one step."""
-        return self.transform(data)
+
+def register_actions():
+    """Register all Data Normalizer actions."""
+    return [
+        DataNormalizerAction,
+        StringNormalizerAction,
+        DateTimeNormalizerAction,
+        DataEncoderAction,
+    ]
