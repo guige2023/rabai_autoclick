@@ -1,346 +1,314 @@
 """
-Data Normalization Action - Normalizes and standardizes data from various sources.
+Data Normalization Action Module
 
-This module provides data cleaning, transformation, and normalization
-capabilities for automation workflows handling heterogeneous data.
+Provides data normalization and standardization capabilities.
+Supports min-max, z-score, log, and custom normalization methods.
+
+Author: rabai_autoclick team
+Version: 1.0.0
 """
 
 from __future__ import annotations
 
-import re
 import math
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, TypeVar, Generic
 from enum import Enum
+from typing import Any, Callable, Optional, Union
 from datetime import datetime
 
 
-T = TypeVar("T")
-
-
-class NormalizationType(Enum):
-    """Type of normalization to apply."""
+class NormalizationMethod(Enum):
+    """Normalization method types."""
     MIN_MAX = "min_max"
     Z_SCORE = "z_score"
     LOG = "log"
-    SQUARE_ROOT = "square_root"
+    LOG_PLUS_ONE = "log_plus_one"
     ROBUST = "robust"
-    PERCENTILE = "percentile"
+    UNIT_VECTOR = "unit_vector"
+    CUSTOM = "custom"
 
 
 @dataclass
-class NormalizationConfig:
-    """Configuration for data normalization."""
-    normalization_type: NormalizationType = NormalizationType.MIN_MAX
-    clip_outliers: bool = False
-    outlier_threshold: float = 3.0
-    default_value: Any = None
-    handle_nulls: str = "skip"  # skip, zero, mean, median
-
-
-@dataclass
-class DataStats:
-    """Statistical summary of a dataset."""
+class NormalizationStats:
+    """Statistics for normalization."""
     count: int = 0
+    min_val: float = 0.0
+    max_val: float = 0.0
     mean: float = 0.0
     median: float = 0.0
     std_dev: float = 0.0
-    min_val: float = 0.0
-    max_val: float = 0.0
-    q1: float = 0.0
-    q3: float = 0.0
-    null_count: int = 0
+    sum: float = 0.0
+    sum_sq: float = 0.0
 
 
 @dataclass
-class NormalizedResult:
-    """Result of normalizing a dataset."""
-    data: list[Any]
-    stats: DataStats
-    transformations_applied: list[str] = field(default_factory=list)
-    nulls_handled: int = 0
-    outliers_clipped: int = 0
+class NormalizationResult:
+    """Result of a normalization operation."""
+    original_values: list[Any]
+    normalized_values: list[float]
+    method: NormalizationMethod
+    stats: NormalizationStats
+    duration_ms: float = 0.0
+
+
+@dataclass
+class FieldTransform:
+    """Transform configuration for a field."""
+    field_name: str
+    method: NormalizationMethod = NormalizationMethod.MIN_MAX
+    custom_fn: Optional[Callable[[float], float]] = None
+    handle_outliers: bool = False
+    outlier_threshold: float = 3.0
 
 
 class DataNormalizer:
     """
-    Handles normalization of numeric and string data.
+    Data normalization utility.
+    
+    Provides various normalization methods for numerical data.
     
     Example:
         normalizer = DataNormalizer()
-        result = normalizer.normalize([1, 2, 3, 4, 5], NormalizationConfig())
-        print(result.data)  # [0.0, 0.25, 0.5, 0.75, 1.0]
+        
+        result = normalizer.normalize(
+            values=[1, 2, 3, 4, 5],
+            method=NormalizationMethod.MIN_MAX
+        )
     """
     
-    def __init__(self, config: NormalizationConfig | None = None) -> None:
-        self.config = config or NormalizationConfig()
+    def __init__(self):
+        self._stats_cache: dict[str, NormalizationStats] = {}
+        self._fit_data: dict[str, list[float]] = defaultdict(list)
     
-    def compute_stats(self, data: list[float]) -> DataStats:
-        """Compute statistical summary of data."""
-        clean_data = [x for x in data if x is not None and not math.isnan(x)]
+    def _compute_stats(self, values: list[float]) -> NormalizationStats:
+        """Compute statistics for a list of values."""
+        if not values:
+            return NormalizationStats()
         
-        if not clean_data:
-            return DataStats()
+        count = len(values)
+        sorted_vals = sorted(values)
+        sum_val = sum(values)
+        sum_sq = sum(v * v for v in values)
+        mean = sum_val / count
         
-        sorted_data = sorted(clean_data)
-        n = len(sorted_data)
+        median = sorted_vals[count // 2] if count % 2 == 1 else (
+            sorted_vals[count // 2 - 1] + sorted_vals[count // 2]
+        ) / 2
         
-        mean_val = sum(sorted_data) / n
-        median_val = sorted_data[n // 2] if n % 2 else (sorted_data[n // 2 - 1] + sorted_data[n // 2]) / 2
+        variance = (sum_sq / count) - (mean * mean)
+        std_dev = math.sqrt(variance) if variance > 0 else 0
         
-        variance = sum((x - mean_val) ** 2 for x in sorted_data) / n
-        std_dev = math.sqrt(variance)
-        
-        q1_idx = n // 4
-        q3_idx = 3 * n // 4
-        q1 = sorted_data[q1_idx]
-        q3 = sorted_data[q3_idx]
-        
-        return DataStats(
-            count=n,
-            mean=mean_val,
-            median=median_val,
+        return NormalizationStats(
+            count=count,
+            min_val=min(values),
+            max_val=max(values),
+            mean=mean,
+            median=median,
             std_dev=std_dev,
-            min_val=min(clean_data),
-            max_val=max(clean_data),
-            q1=q1,
-            q3=q3,
-            null_count=len(data) - n,
+            sum=sum_val,
+            sum_sq=sum_sq
         )
+    
+    def _min_max_normalize(self, value: float, stats: NormalizationStats) -> float:
+        """Apply min-max normalization."""
+        range_val = stats.max_val - stats.min_val
+        if range_val == 0:
+            return 0.5
+        return (value - stats.min_val) / range_val
+    
+    def _z_score_normalize(self, value: float, stats: NormalizationStats) -> float:
+        """Apply z-score normalization."""
+        if stats.std_dev == 0:
+            return 0.0
+        return (value - stats.mean) / stats.std_dev
+    
+    def _log_normalize(self, value: float) -> float:
+        """Apply log normalization."""
+        if value <= 0:
+            return 0.0
+        return math.log(value)
+    
+    def _log_plus_one_normalize(self, value: float) -> float:
+        """Apply log(x+1) normalization."""
+        return math.log(value + 1)
+    
+    def _robust_normalize(self, value: float, stats: NormalizationStats) -> float:
+        """Apply robust normalization using median and IQR."""
+        q1 = stats.min_val
+        q3 = stats.max_val
+        iqr = q3 - q1
+        if iqr == 0:
+            return 0.0
+        return (value - stats.median) / iqr
+    
+    def _unit_vector_normalize(self, value: float, stats: NormalizationStats) -> float:
+        """Apply unit vector normalization."""
+        if stats.sum_sq == 0:
+            return 0.0
+        magnitude = math.sqrt(stats.sum_sq)
+        return value / magnitude
+    
+    def _handle_outliers(self, values: list[float], stats: NormalizationStats,
+                         threshold: float) -> list[float]:
+        """Cap outliers using z-score threshold."""
+        result = []
+        for v in values:
+            if stats.std_dev > 0:
+                z_score = abs((v - stats.mean) / stats.std_dev)
+                if z_score > threshold:
+                    v = stats.mean + (threshold * stats.std_dev * (1 if v > stats.mean else -1))
+            result.append(v)
+        return result
     
     def normalize(
         self,
-        data: list[Any],
-        config: NormalizationConfig | None = None,
-    ) -> NormalizedResult:
+        values: list[float],
+        method: NormalizationMethod = NormalizationMethod.MIN_MAX,
+        handle_outliers: bool = False,
+        outlier_threshold: float = 3.0,
+        fit: bool = True,
+        cache_key: Optional[str] = None
+    ) -> NormalizationResult:
         """
-        Normalize a list of numeric values.
+        Normalize a list of values.
         
         Args:
-            data: List of numeric values
-            config: Optional override config
+            values: List of numerical values to normalize
+            method: Normalization method to use
+            handle_outliers: Whether to handle outliers before normalization
+            outlier_threshold: Z-score threshold for outlier detection
+            fit: Whether to compute new stats or use cached
+            cache_key: Key for caching stats
             
         Returns:
-            NormalizedResult with normalized data and stats
+            NormalizationResult with normalized values and stats
         """
-        cfg = config or self.config
-        transformations: list[str] = []
-        nulls_handled = 0
+        start_time = datetime.now()
         
-        numeric_data: list[float] = []
-        for val in data:
-            if val is None or (isinstance(val, float) and math.isnan(val)):
-                if cfg.handle_nulls == "zero":
-                    numeric_data.append(0.0)
-                    nulls_handled += 1
-                elif cfg.handle_nulls == "mean":
-                    pass
-                elif cfg.handle_nulls == "median":
-                    pass
-                else:
-                    pass
+        values_copy = list(values)
+        
+        if handle_outliers and cache_key and cache_key in self._stats_cache:
+            stats = self._stats_cache[cache_key]
+            values_copy = self._handle_outliers(values_copy, stats, outlier_threshold)
+        elif handle_outliers:
+            stats = self._compute_stats(values_copy)
+            values_copy = self._handle_outliers(values_copy, stats, outlier_threshold)
+        
+        if fit or cache_key not in self._stats_cache:
+            stats = self._compute_stats(values_copy)
+            if cache_key:
+                self._stats_cache[cache_key] = stats
+        else:
+            stats = self._stats_cache[cache_key]
+        
+        normalized = []
+        for v in values_copy:
+            if method == NormalizationMethod.MIN_MAX:
+                norm_val = self._min_max_normalize(v, stats)
+            elif method == NormalizationMethod.Z_SCORE:
+                norm_val = self._z_score_normalize(v, stats)
+            elif method == NormalizationMethod.LOG:
+                norm_val = self._log_normalize(v)
+            elif method == NormalizationMethod.LOG_PLUS_ONE:
+                norm_val = self._log_plus_one_normalize(v)
+            elif method == NormalizationMethod.ROBUST:
+                norm_val = self._robust_normalize(v, stats)
+            elif method == NormalizationMethod.UNIT_VECTOR:
+                norm_val = self._unit_vector_normalize(v, stats)
+            elif method == NormalizationMethod.CUSTOM:
+                norm_val = v
             else:
-                try:
-                    numeric_data.append(float(val))
-                except (ValueError, TypeError):
-                    if cfg.default_value is not None:
-                        numeric_data.append(float(cfg.default_value))
+                norm_val = v
+            normalized.append(norm_val)
         
-        stats = self.compute_stats(numeric_data)
+        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
         
-        if cfg.handle_nulls in ("mean", "median"):
-            fill_value = stats.median if cfg.handle_nulls == "median" else stats.mean
-            nulls_handled = stats.null_count
-            numeric_data = [fill_value if (x == 0 and stats.null_count > 0) else x for x in numeric_data]
-        
-        result_data = self._apply_normalization(numeric_data, stats, cfg, transformations)
-        
-        outliers_clipped = 0
-        if cfg.clip_outliers and cfg.normalization_type == NormalizationType.MIN_MAX:
-            outliers_clipped = self._clip_outliers(result_data, cfg.outlier_threshold)
-            transformations.append(f"clipped_{outliers_clipped}_outliers")
-        
-        return NormalizedResult(
-            data=result_data,
+        return NormalizationResult(
+            original_values=values,
+            normalized_values=normalized,
+            method=method,
             stats=stats,
-            transformations_applied=transformations,
-            nulls_handled=nulls_handled,
-            outliers_clipped=outliers_clipped,
+            duration_ms=duration_ms
         )
     
-    def _apply_normalization(
+    def normalize_dict(
         self,
-        data: list[float],
-        stats: DataStats,
-        config: NormalizationConfig,
-        transformations: list[str],
-    ) -> list[Any]:
-        """Apply the configured normalization."""
-        norm_type = config.normalization_type
+        data: list[dict],
+        field_name: str,
+        method: NormalizationMethod = NormalizationMethod.MIN_MAX,
+        output_field: Optional[str] = None,
+        **kwargs
+    ) -> list[dict]:
+        """
+        Normalize a specific field in a list of dictionaries.
         
-        if norm_type == NormalizationType.MIN_MAX:
-            transformations.append("min_max_scaling")
-            if stats.max_val == stats.min_val:
-                return [0.5] * len(data)
-            return [(x - stats.min_val) / (stats.max_val - stats.min_val) for x in data]
+        Args:
+            data: List of dictionaries
+            field_name: Field to normalize
+            method: Normalization method
+            output_field: Output field name (defaults to field_name)
+            **kwargs: Additional arguments for normalize
+            
+        Returns:
+            List of dictionaries with normalized field
+        """
+        output_field = output_field or field_name
+        values = [item.get(field_name, 0) for item in data]
+        result = self.normalize(values, method, **kwargs)
         
-        elif norm_type == NormalizationType.Z_SCORE:
-            transformations.append("z_score_standardization")
-            if stats.std_dev == 0:
-                return [0.0] * len(data)
-            return [(x - stats.mean) / stats.std_dev for x in data]
-        
-        elif norm_type == NormalizationType.LOG:
-            transformations.append("log_transform")
-            return [math.log(x + 1) for x in data]
-        
-        elif norm_type == NormalizationType.SQUARE_ROOT:
-            transformations.append("square_root_transform")
-            return [math.sqrt(max(0, x)) for x in data]
-        
-        elif norm_type == NormalizationType.ROBUST:
-            transformations.append("robust_scaling")
-            iqr = stats.q3 - stats.q1
-            if iqr == 0:
-                return [0.0] * len(data)
-            return [(x - stats.median) / iqr for x in data]
-        
-        elif norm_type == NormalizationType.PERCENTILE:
-            transformations.append("percentile_ranking")
-            sorted_unique = sorted(set(data))
-            rank_map = {v: i / len(sorted_unique) for i, v in enumerate(sorted_unique)}
-            return [rank_map.get(x, 0.5) for x in data]
+        for i, item in enumerate(data):
+            item[output_field] = result.normalized_values[i]
         
         return data
     
-    def _clip_outliers(self, data: list[float], threshold: float) -> int:
-        """Clip values beyond threshold."""
-        clipped = 0
-        for i, val in enumerate(data):
-            if abs(val) > threshold:
-                data[i] = math.copysign(threshold, val)
-                clipped += 1
-        return clipped
-
-
-class StringNormalizer:
-    """
-    Normalizes and standardizes string data.
-    """
-    
-    def __init__(
+    def denormalize(
         self,
-        lowercase: bool = True,
-        strip_whitespace: bool = True,
-        remove_accents: bool = False,
-    ) -> None:
-        self.lowercase = lowercase
-        self.strip_whitespace = strip_whitespace
-        self.remove_accents = remove_accents
-    
-    def normalize(self, value: str) -> str:
-        """Normalize a single string value."""
-        if value is None:
-            return ""
-        
-        result = str(value)
-        
-        if self.strip_whitespace:
-            result = result.strip()
-        
-        if self.lowercase:
-            result = result.lower()
-        
-        if self.remove_accents:
-            result = self._remove_accents(result)
-        
+        normalized_values: list[float],
+        stats: NormalizationStats,
+        method: NormalizationMethod = NormalizationMethod.MIN_MAX
+    ) -> list[float]:
+        """Denormalize values back to original scale."""
+        result = []
+        for v in normalized_values:
+            if method == NormalizationMethod.MIN_MAX:
+                orig = v * (stats.max_val - stats.min_val) + stats.min_val
+            elif method == NormalizationMethod.Z_SCORE:
+                orig = v * stats.std_dev + stats.mean
+            else:
+                orig = v
+            result.append(orig)
         return result
     
-    def _remove_accents(self, text: str) -> str:
-        """Remove accents from text."""
-        import unicodedata
-        nfd = unicodedata.normalize("NFD", text)
-        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-
-
-class DataNormalizationAction:
-    """
-    Unified data normalization action for automation workflows.
-    
-    Example:
-        action = DataNormalizationAction()
-        result = await action.normalize_dataset(
-            {"temperature": [1, 2, 3, 4, 5], "humidity": [10, 20, 30, 40, 50]},
-            {"temperature": NormalizationConfig(NormalizationType.MIN_MAX)}
-        )
-    """
-    
-    def __init__(
+    def fit_transform(
         self,
-        numeric_config: NormalizationConfig | None = None,
-        string_config: dict[str, Any] | None = None,
-    ) -> None:
-        self.numeric_normalizer = DataNormalizer(numeric_config)
-        self.string_normalizer = StringNormalizer(**(string_config or {}))
-    
-    async def normalize_dataset(
-        self,
-        data: dict[str, list[Any]],
-        numeric_configs: dict[str, NormalizationConfig] | None = None,
-        string_fields: list[str] | None = None,
-    ) -> dict[str, list[Any]]:
+        data: list[dict],
+        fields: list[FieldTransform]
+    ) -> list[dict]:
         """
-        Normalize all fields in a dataset.
+        Fit and transform multiple fields.
         
         Args:
-            data: Dictionary mapping field names to value lists
-            numeric_configs: Config for numeric field normalization
-            string_fields: List of fields to normalize as strings
+            data: List of dictionaries
+            fields: List of FieldTransform configurations
             
         Returns:
-            Dictionary with normalized values
+            Transformed data
         """
-        result = {}
-        configs = numeric_configs or {}
-        string_field_list = string_fields or []
-        
-        for field_name, values in data.items():
-            if field_name in string_field_list:
-                result[field_name] = [self.string_normalizer.normalize(v) for v in values]
-            elif isinstance(values[0] if values else None, (int, float)):
-                config = configs.get(field_name, NormalizationConfig())
-                normalized = self.numeric_normalizer.normalize(values, config)
-                result[field_name] = normalized.data
-            else:
-                result[field_name] = values
-        
-        return result
+        for field_config in fields:
+            self.normalize_dict(
+                data,
+                field_config.field_name,
+                field_config.method,
+                handle_outliers=field_config.handle_outliers,
+                outlier_threshold=field_config.outlier_threshold
+            )
+        return data
     
-    async def transform_record(
-        self,
-        record: dict[str, Any],
-        transformations: dict[str, Callable[[Any], Any]],
-    ) -> dict[str, Any]:
-        """Apply field-by-field transformations to a record."""
-        result = {}
-        for key, value in record.items():
-            if key in transformations:
-                try:
-                    result[key] = transformations[key](value)
-                except Exception:
-                    result[key] = value
-            else:
-                result[key] = value
-        return result
-
-
-# Export public API
-__all__ = [
-    "NormalizationType",
-    "NormalizationConfig",
-    "DataStats",
-    "NormalizedResult",
-    "DataNormalizer",
-    "StringNormalizer",
-    "DataNormalizationAction",
-]
+    def get_stats(self, cache_key: str) -> Optional[NormalizationStats]:
+        """Get cached statistics."""
+        return self._stats_cache.get(cache_key)
+    
+    def clear_cache(self) -> None:
+        """Clear statistics cache."""
+        self._stats_cache.clear()
