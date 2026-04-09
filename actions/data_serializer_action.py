@@ -1,367 +1,303 @@
 """
 Data Serializer Action Module.
 
-Universal data serialization with support for multiple
-formats, schema evolution, and compression.
+Provides multi-format serialization/deserialization with
+schema evolution support.
 """
 
-import json
-import zlib
+import asyncio
 import base64
+import json
+import pickle
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
 from enum import Enum
-import logging
+from typing import Any, Callable, Generic, Optional, TypeVar
+import zlib
 
-logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 class SerializationFormat(Enum):
     """Supported serialization formats."""
     JSON = "json"
+    XML = "xml"
+    PICKLE = "pickle"
     MSGPACK = "msgpack"
     CBOR = "cbor"
     UBJSON = "ubjson"
-    CUSTOM = "custom"
 
 
-class CompressionType(Enum):
-    """Compression types."""
-    NONE = "none"
-    ZLIB = "zlib"
-    GZIP = "gzip"
-    LZ4 = "lz4"
+@dataclass
+class SchemaVersion:
+    """Schema version for evolution."""
+    version: int
+    transform: Optional[Callable[[dict], dict]] = None
+    validator: Optional[Callable[[dict], bool]] = None
 
 
 @dataclass
 class SerializerConfig:
     """Serializer configuration."""
     format: SerializationFormat = SerializationFormat.JSON
-    compression: CompressionType = CompressionType.NONE
-    indent: Optional[int] = None
-    ensure_ascii: bool = False
-    custom_encoder: Optional[Callable] = None
-    schema_version: str = "1.0"
+    pretty: bool = False
+    compression: bool = False
+    schema_versions: list[SchemaVersion] = field(default_factory=list)
+    current_version: int = 1
 
 
 @dataclass
 class SerializationResult:
-    """Result of serialization operation."""
+    """Serialization result."""
     success: bool
-    data: Any
-    format: SerializationFormat
-    compressed: bool
-    size_bytes: int
+    data: Any = None
+    format: SerializationFormat = SerializationFormat.JSON
+    size: int = 0
+    compressed: bool = False
+    error: Optional[str] = None
+
+
+class JSONSerializer:
+    """JSON serializer."""
+
+    def __init__(self, pretty: bool = False):
+        self.pretty = pretty
+
+    def serialize(self, data: Any) -> bytes:
+        """Serialize to JSON bytes."""
+        if self.pretty:
+            return json.dumps(data, indent=2, ensure_ascii=False).encode()
+        return json.dumps(data, ensure_ascii=False).encode()
+
+    def deserialize(self, data: bytes) -> Any:
+        """Deserialize from JSON bytes."""
+        return json.loads(data.decode())
+
+
+class XMLSerializer:
+    """XML serializer."""
+
+    def __init__(self, root_name: str = "root"):
+        self.root_name = root_name
+
+    def _dict_to_xml(self, data: Any, element: ET.Element) -> None:
+        """Convert dict to XML element."""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                sub_element = ET.SubElement(element, str(key))
+                self._dict_to_xml(value, sub_element)
+        elif isinstance(data, list):
+            for item in data:
+                item_element = ET.SubElement(element, "item")
+                self._dict_to_xml(item, item_element)
+        else:
+            element.text = str(data) if data is not None else ""
+
+    def _xml_to_dict(self, element: ET.Element) -> Any:
+        """Convert XML element to dict."""
+        result = {}
+
+        for child in element:
+            child_data = self._xml_to_dict(child)
+
+            if child.tag == "item":
+                if element.tag not in result:
+                    result[element.tag] = []
+                result[element.tag].append(child_data)
+            else:
+                result[child.tag] = child_data
+
+        if not result and element.text:
+            return element.text
+
+        return result if result else None
+
+    def serialize(self, data: Any) -> bytes:
+        """Serialize to XML bytes."""
+        root = ET.Element(self.root_name)
+        self._dict_to_xml(data, root)
+        return ET.tostring(root, encoding="utf-8")
+
+    def deserialize(self, data: bytes) -> Any:
+        """Deserialize from XML bytes."""
+        root = ET.fromstring(data)
+        return {root.tag: self._xml_to_dict(root)}
+
+
+class PickleSerializer:
+    """Pickle serializer."""
+
+    def serialize(self, data: Any) -> bytes:
+        """Serialize to pickle bytes."""
+        return pickle.dumps(data)
+
+    def deserialize(self, data: bytes) -> Any:
+        """Deserialize from pickle bytes."""
+        return pickle.loads(data)
+
+
+class CompressionWrapper:
+    """Compression wrapper for serializers."""
+
+    def __init__(self, serializer: Any, level: int = 6):
+        self.serializer = serializer
+        self.level = level
+
+    def serialize_compress(self, data: Any) -> tuple[bytes, int]:
+        """Serialize and compress."""
+        serialized = self.serializer.serialize(data)
+        compressed = zlib.compress(serialized, level=self.level)
+        return compressed, len(serialized)
+
+    def decompress_deserialize(self, data: bytes) -> Any:
+        """Decompress and deserialize."""
+        decompressed = zlib.decompress(data)
+        return self.serializer.deserialize(decompressed)
+
+
+class DataSerializer:
+    """Multi-format data serializer."""
+
+    def __init__(self, config: Optional[SerializerConfig] = None):
+        self.config = config or SerializerConfig()
+        self._serializer = self._create_serializer()
+        self._compression = CompressionWrapper(
+            self._serializer,
+            level=6
+        ) if self.config.compression else None
+
+    def _create_serializer(self) -> Any:
+        """Create appropriate serializer."""
+        if self.config.format == SerializationFormat.JSON:
+            return JSONSerializer(pretty=self.config.pretty)
+        elif self.config.format == SerializationFormat.XML:
+            return XMLSerializer()
+        elif self.config.format == SerializationFormat.PICKLE:
+            return PickleSerializer()
+        else:
+            return JSONSerializer(pretty=self.config.pretty)
+
+    def serialize(self, data: Any) -> SerializationResult:
+        """Serialize data."""
+        try:
+            if self._compression:
+                serialized, original_size = self._compression.serialize_compress(data)
+                return SerializationResult(
+                    success=True,
+                    data=base64.b64encode(serialized).decode(),
+                    format=self.config.format,
+                    size=len(serialized),
+                    compressed=True
+                )
+            else:
+                serialized = self._serializer.serialize(data)
+                return SerializationResult(
+                    success=True,
+                    data=serialized.decode() if isinstance(serialized, bytes) else serialized,
+                    format=self.config.format,
+                    size=len(serialized)
+                )
+        except Exception as e:
+            return SerializationResult(
+                success=False,
+                error=str(e)
+            )
+
+    def deserialize(self, data: Any) -> SerializationResult:
+        """Deserialize data."""
+        try:
+            if isinstance(data, str) and self.config.compression:
+                decoded = base64.b64decode(data)
+                result = self._compression.decompress_deserialize(decoded)
+            elif isinstance(data, bytes):
+                result = self._serializer.deserialize(data)
+            else:
+                result = self._serializer.deserialize(data.encode())
+            return SerializationResult(
+                success=True,
+                data=result,
+                format=self.config.format
+            )
+        except Exception as e:
+            return SerializationResult(
+                success=False,
+                error=str(e)
+            )
+
+    def migrate_version(
+        self,
+        data: dict,
+        from_version: int,
+        to_version: int
+    ) -> dict:
+        """Migrate data between schema versions."""
+        current_version = from_version
+        result = data.copy()
+
+        while current_version < to_version:
+            next_version = current_version + 1
+            version_spec = next(
+                (v for v in self.config.schema_versions if v.version == next_version),
+                None
+            )
+
+            if version_spec and version_spec.transform:
+                result = version_spec.transform(result)
+
+            current_version = next_version
+
+        return result
 
 
 class DataSerializerAction:
     """
-    Universal data serializer with multiple format support.
+    Multi-format serialization with schema evolution.
 
     Example:
-        serializer = DataSerializerAction()
-        serializer.configure(format=SerializationFormat.MSGPACK, compression=CompressionType.ZLIB)
-        serialized = serializer.serialize(data)
-        data = serializer.deserialize(serialized)
-    """
-
-    def __init__(self, config: Optional[SerializerConfig] = None):
-        """
-        Initialize data serializer.
-
-        Args:
-            config: Serializer configuration.
-        """
-        self.config = config or SerializerConfig()
-        self._custom_serializers: dict[type, Callable] = {}
-
-    def configure(
-        self,
-        format: Optional[SerializationFormat] = None,
-        compression: Optional[CompressionType] = None,
-        indent: Optional[int] = None
-    ) -> None:
-        """Update serializer configuration."""
-        if format is not None:
-            self.config.format = format
-        if compression is not None:
-            self.config.compression = compression
-        if indent is not None:
-            self.config.indent = indent
-
-    def register_type(
-        self,
-        type_cls: type,
-        serializer: Callable,
-        deserializer: Callable
-    ) -> None:
-        """
-        Register custom type serializer.
-
-        Args:
-            type_cls: Type class to register.
-            serializer: Function to serialize type.
-            deserializer: Function to deserialize type.
-        """
-        self._custom_serializers[type_cls] = {
-            "serialize": serializer,
-            "deserialize": deserializer
-        }
-
-    def serialize(
-        self,
-        data: Any,
-        format: Optional[SerializationFormat] = None,
-        compression: Optional[CompressionType] = None
-    ) -> Any:
-        """
-        Serialize data to specified format.
-
-        Args:
-            data: Data to serialize.
-            format: Output format (uses config default if None).
-            compression: Compression type (uses config default if None).
-
-        Returns:
-            Serialized data.
-        """
-        fmt = format or self.config.format
-        comp = compression or self.config.compression
-
-        try:
-            serialized = self._serialize_impl(data, fmt)
-
-            if comp != CompressionType.NONE:
-                serialized = self._compress(serialized, comp)
-
-            return serialized
-
-        except Exception as e:
-            logger.error(f"Serialization failed: {e}")
-            raise
-
-    def deserialize(
-        self,
-        data: Any,
-        format: Optional[SerializationFormat] = None,
-        compression: Optional[CompressionType] = None
-    ) -> Any:
-        """
-        Deserialize data from specified format.
-
-        Args:
-            data: Serialized data.
-            format: Input format (uses config default if None).
-            compression: Compression type (uses config default if None).
-
-        Returns:
-            Deserialized data.
-        """
-        fmt = format or self.config.format
-        comp = compression or self.config.compression
-
-        try:
-            if comp != CompressionType.NONE:
-                data = self._decompress(data, comp)
-
-            return self._deserialize_impl(data, fmt)
-
-        except Exception as e:
-            logger.error(f"Deserialization failed: {e}")
-            raise
-
-    def serialize_to_bytes(
-        self,
-        data: Any,
-        format: Optional[SerializationFormat] = None
-    ) -> bytes:
-        """
-        Serialize to bytes.
-
-        Args:
-            data: Data to serialize.
-            format: Output format.
-
-        Returns:
-            Serialized bytes.
-        """
-        fmt = format or self.config.format
-        serialized = self._serialize_impl(data, fmt)
-
-        if isinstance(serialized, str):
-            return serialized.encode("utf-8")
-
-        return serialized
-
-    def serialize_to_base64(
-        self,
-        data: Any,
-        format: Optional[SerializationFormat] = None
-    ) -> str:
-        """
-        Serialize and encode to base64.
-
-        Args:
-            data: Data to serialize.
-            format: Output format.
-
-        Returns:
-            Base64-encoded string.
-        """
-        bytes_data = self.serialize_to_bytes(data, format)
-        return base64.b64encode(bytes_data).decode("ascii")
-
-    def deserialize_from_base64(
-        self,
-        encoded: str,
-        format: Optional[SerializationFormat] = None
-    ) -> Any:
-        """
-        Deserialize from base64-encoded string.
-
-        Args:
-            encoded: Base64-encoded string.
-            format: Input format.
-
-        Returns:
-            Deserialized data.
-        """
-        bytes_data = base64.b64decode(encoded.encode("ascii"))
-        return self.deserialize(bytes_data, format)
-
-    def _serialize_impl(self, data: Any, fmt: SerializationFormat) -> Any:
-        """Internal serialization implementation."""
-        if fmt == SerializationFormat.JSON:
-            return self._to_json(data)
-
-        elif fmt == SerializationFormat.MSGPACK:
-            try:
-                import msgpack
-                return msgpack.packb(data, use_bin_type=True)
-            except ImportError:
-                raise ImportError("msgpack is required. Install with: pip install msgpack")
-
-        elif fmt == SerializationFormat.CBOR:
-            try:
-                import cbor2
-                return cbor2.dumps(data)
-            except ImportError:
-                raise ImportError("cbor2 is required. Install with: pip install cbor2")
-
-        elif fmt == SerializationFormat.UBJSON:
-            try:
-                import ubjson
-                return ubjson.dumpb(data)
-            except ImportError:
-                raise ImportError("ubjson is required. Install with: pip install ubjson")
-
-        raise ValueError(f"Unsupported format: {fmt}")
-
-    def _deserialize_impl(self, data: Any, fmt: SerializationFormat) -> Any:
-        """Internal deserialization implementation."""
-        if fmt == SerializationFormat.JSON:
-            return self._from_json(data)
-
-        elif fmt == SerializationFormat.MSGPACK:
-            try:
-                import msgpack
-                return msgpack.unpackb(data, raw=False)
-            except ImportError:
-                raise ImportError("msgpack is required")
-
-        elif fmt == SerializationFormat.CBOR:
-            try:
-                import cbor2
-                return cbor2.loads(data)
-            except ImportError:
-                raise ImportError("cbor2 is required")
-
-        elif fmt == SerializationFormat.UBJSON:
-            try:
-                import ubjson
-                return ubjson.loadb(data)
-            except ImportError:
-                raise ImportError("ubjson is required")
-
-        raise ValueError(f"Unsupported format: {fmt}")
-
-    def _to_json(self, data: Any) -> str:
-        """Serialize to JSON string."""
-        default_handler = None
-
-        if self._custom_serializers:
-            def default(o):
-                for type_cls, handlers in self._custom_serializers.items():
-                    if isinstance(o, type_cls):
-                        return {"__type__": type_cls.__name__, "data": handlers["serialize"](o)}
-                raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
-
-            default_handler = default
-
-        return json.dumps(
-            data,
-            indent=self.config.indent,
-            ensure_ascii=self.config.ensure_ascii,
-            default=default_handler
+        config = SerializerConfig(
+            format=SerializationFormat.JSON,
+            pretty=True,
+            compression=True
         )
 
-    def _from_json(self, data: Any) -> Any:
-        """Deserialize from JSON."""
-        if isinstance(data, str):
-            return json.loads(data)
-        return json.loads(data.decode("utf-8"))
+        serializer = DataSerializerAction(config)
+        result = serializer.serialize(data)
+        data = serializer.deserialize(result.data)
+    """
 
-    def _compress(self, data: Any, compression: CompressionType) -> bytes:
-        """Compress serialized data."""
-        if isinstance(data, str):
-            data = data.encode("utf-8")
+    def __init__(
+        self,
+        format: SerializationFormat = SerializationFormat.JSON,
+        **kwargs: Any
+    ):
+        config = SerializerConfig(format=format, **kwargs)
+        self._serializer = DataSerializer(config)
 
-        if compression == CompressionType.ZLIB:
-            return zlib.compress(data)
+    def serialize(self, data: Any) -> SerializationResult:
+        """Serialize data."""
+        return self._serializer.serialize(data)
 
-        elif compression == CompressionType.GZIP:
-            import gzip
-            return gzip.compress(data)
+    def deserialize(self, data: Any) -> SerializationResult:
+        """Deserialize data."""
+        return self._serializer.deserialize(data)
 
-        elif compression == CompressionType.LZ4:
-            try:
-                import lz4.frame
-                return lz4.frame.compress(data)
-            except ImportError:
-                raise ImportError("lz4 is required. Install with: pip install lz4")
+    def add_schema_version(
+        self,
+        version: int,
+        transform: Optional[Callable[[dict], dict]] = None,
+        validator: Optional[Callable[[dict], bool]] = None
+    ) -> "DataSerializerAction":
+        """Add schema version."""
+        self._serializer.config.schema_versions.append(
+            SchemaVersion(version, transform, validator)
+        )
+        return self
 
-        return data
-
-    def _decompress(self, data: bytes, compression: CompressionType) -> Any:
-        """Decompress serialized data."""
-        if compression == CompressionType.ZLIB:
-            return zlib.decompress(data)
-
-        elif compression == CompressionType.GZIP:
-            import gzip
-            return gzip.decompress(data)
-
-        elif compression == CompressionType.LZ4:
-            try:
-                import lz4.frame
-                return lz4.frame.decompress(data)
-            except ImportError:
-                raise ImportError("lz4 is required")
-
-        return data
-
-    def get_size(self, data: Any, format: Optional[SerializationFormat] = None) -> int:
-        """
-        Get serialized size in bytes.
-
-        Args:
-            data: Data to measure.
-            format: Serialization format.
-
-        Returns:
-            Size in bytes.
-        """
-        serialized = self._serialize_impl(data, format or self.config.format)
-        if isinstance(serialized, str):
-            return len(serialized.encode("utf-8"))
-        return len(serialized)
+    def migrate(
+        self,
+        data: dict,
+        from_version: int,
+        to_version: int
+    ) -> dict:
+        """Migrate between versions."""
+        return self._serializer.migrate_version(data, from_version, to_version)
