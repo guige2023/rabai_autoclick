@@ -1,555 +1,278 @@
-"""Automation Orchestrator Action Module.
+"""
+Automation Orchestrator Module.
 
 Orchestrates complex multi-step automation workflows with
-conditional branching, parallel execution, and error recovery.
-"""
+dependency management, parallel execution, and failure recovery.
 
+Author: AutoGen
+"""
 from __future__ import annotations
 
-import sys
-import os
-import time
 import asyncio
-import hashlib
-from typing import Any, Dict, List, Optional, Callable
+import logging
+import time
+from collections import defaultdict
 from dataclasses import dataclass, field
-from enum import Enum
+from datetime import datetime
+from enum import Enum, auto
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
-
-
-class StepStatus(Enum):
-    """Execution status of a workflow step."""
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCESS = "success"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    RETRYING = "retrying"
+logger = logging.getLogger(__name__)
 
 
-class StepType(Enum):
-    """Type of workflow step."""
-    ACTION = "action"
-    CONDITION = "condition"
-    PARALLEL = "parallel"
-    LOOP = "loop"
-    SUBWORKFLOW = "subworkflow"
-    NOTIFY = "notify"
-    DELAY = "delay"
+class TaskStatus(Enum):
+    PENDING = auto()
+    READY = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    SKIPPED = auto()
 
 
 @dataclass
-class StepResult:
-    """Result of a single workflow step execution."""
-    step_id: str
-    status: StepStatus
-    output: Any = None
+class Task:
+    task_id: str
+    name: str
+    handler: Callable
+    dependencies: FrozenSet[str] = field(default_factory=frozenset)
+    timeout: float = 300.0
+    retry_count: int = 0
+    retry_delay: float = 1.0
+    status: TaskStatus = TaskStatus.PENDING
+    result: Any = None
     error: Optional[str] = None
-    duration: float = 0.0
-    retries: int = 0
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
-
-
-@dataclass
-class WorkflowStep:
-    """Definition of a workflow step."""
-    step_id: str
-    step_type: StepType
-    name: str
-    config: Dict[str, Any] = field(default_factory=dict)
-    conditions: Optional[Dict[str, Any]] = None
-    retry_config: Optional[Dict[str, Any]] = None
-    on_error: str = "fail"
-    timeout: float = 60.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class Workflow:
-    """Definition of an automation workflow."""
     workflow_id: str
     name: str
-    description: str = ""
-    steps: List[WorkflowStep] = field(default_factory=list)
-    parallel_groups: Dict[str, List[str]] = field(default_factory=dict)
-    variables: Dict[str, Any] = field(default_factory=dict)
-    max_retries: int = 3
-    default_timeout: float = 60.0
+    tasks: Dict[str, Task] = field(default_factory=dict)
+    max_parallel: int = 5
+    continue_on_failure: bool = True
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
 
 
-@dataclass
-class ExecutionContext:
-    """Runtime context for workflow execution."""
-    workflow_id: str
-    execution_id: str
-    variables: Dict[str, Any]
-    step_results: Dict[str, StepResult] = field(default_factory=dict)
-    started_at: float = 0.0
-    completed_at: Optional[float] = None
-    status: StepStatus = StepStatus.PENDING
+class TaskGraph:
+    """Manages task dependencies and execution order."""
+
+    def __init__(self):
+        self._graph: Dict[str, Set[str]] = defaultdict(set)
+        self._reverse: Dict[str, Set[str]] = defaultdict(set)
+
+    def add_dependency(self, task_id: str, depends_on: str) -> None:
+        self._graph[task_id].add(depends_on)
+        self._reverse[depends_on].add(task_id)
+
+    def get_ready_tasks(self, completed: Set[str]) -> List[str]:
+        ready = []
+        for task_id, deps in self._graph.items():
+            if deps <= completed and task_id not in completed:
+                ready.append(task_id)
+        return ready
+
+    def get_execution_order(self) -> List[List[str]]:
+        order: List[List[str]] = []
+        completed: Set[str] = set()
+        remaining = set(self._graph.keys())
+
+        while remaining:
+            batch = self.get_ready_tasks(completed)
+            if not batch:
+                break
+            order.append(batch)
+            completed.update(batch)
+            remaining -= set(batch)
+
+        return order
+
+    def get_indegree(self, task_id: str) -> int:
+        return len(self._graph.get(task_id, set()))
 
 
-class AutomationOrchestratorAction(BaseAction):
+class AutomationOrchestrator:
     """
-    Orchestrates complex automation workflows.
-
-    Supports sequential, parallel, and conditional execution flows
-    with automatic retry, timeout, and error recovery.
-
-    Example:
-        orchestrator = AutomationOrchestratorAction()
-        result = orchestrator.execute(ctx, {
-            "action": "run",
-            "workflow_id": "my-workflow",
-            "steps": [...]
-        })
+    Orchestrates complex automation workflows with parallel execution.
     """
-    action_type = "automation_orchestrator"
-    display_name = "自动化编排器"
-    description = "编排复杂的多步骤自动化工作流，支持条件分支、并行执行和错误恢复"
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, max_parallel: int = 5):
+        self.max_parallel = max_parallel
         self._workflows: Dict[str, Workflow] = {}
-        self._execution_contexts: Dict[str, ExecutionContext] = {}
-        self._step_handlers: Dict[StepType, Callable] = {
-            StepType.ACTION: self._execute_action_step,
-            StepType.CONDITION: self._execute_condition_step,
-            StepType.PARALLEL: self._execute_parallel_step,
-            StepType.LOOP: self._execute_loop_step,
-            StepType.DELAY: self._execute_delay_step,
-            StepType.NOTIFY: self._execute_notify_step,
-        }
+        self._task_graphs: Dict[str, TaskGraph] = {}
+        self._running_workflows: Dict[str, asyncio.Task] = {}
 
-    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
-        """Execute an orchestration action.
-
-        Args:
-            context: Execution context.
-            params: Dict with keys: action (run|pause|resume|cancel|get_status),
-                   workflow_id, steps, variables.
-
-        Returns:
-            ActionResult with execution result.
-        """
-        action = params.get("action", "")
-
-        try:
-            if action == "run":
-                return self._run_workflow(params)
-            elif action == "pause":
-                return self._pause_workflow(params)
-            elif action == "resume":
-                return self._resume_workflow(params)
-            elif action == "cancel":
-                return self._cancel_workflow(params)
-            elif action == "get_status":
-                return self._get_execution_status(params)
-            elif action == "register":
-                return self._register_workflow(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown action: {action}")
-        except Exception as e:
-            return ActionResult(success=False, message=f"Orchestration error: {str(e)}")
-
-    def _run_workflow(self, params: Dict[str, Any]) -> ActionResult:
-        """Run a workflow."""
-        workflow_id = params.get("workflow_id", "")
-        steps = params.get("steps", [])
-        variables = params.get("variables", {})
-        execution_id = params.get("execution_id", self._generate_execution_id())
-
-        if not steps and not workflow_id:
-            return ActionResult(success=False, message="Either workflow_id or steps required")
-
-        if steps:
-            workflow = self._build_workflow(workflow_id or "adhoc", steps)
-        elif workflow_id in self._workflows:
-            workflow = self._workflows[workflow_id]
-        else:
-            return ActionResult(success=False, message=f"Workflow not found: {workflow_id}")
-
-        exec_context = ExecutionContext(
-            workflow_id=workflow.workflow_id,
-            execution_id=execution_id,
-            variables={**workflow.variables, **variables},
-            started_at=time.time(),
-        )
-        self._execution_contexts[execution_id] = exec_context
-
-        results = self._execute_workflow(workflow, exec_context)
-
-        exec_context.completed_at = time.time()
-        duration = exec_context.completed_at - exec_context.started_at
-
-        overall_status = all(r.status == StepStatus.SUCCESS for r in results.values())
-
-        return ActionResult(
-            success=overall_status,
-            message=f"Workflow {'completed' if overall_status else 'failed'}",
-            data={
-                "execution_id": execution_id,
-                "status": "success" if overall_status else "failed",
-                "duration": duration,
-                "step_results": {
-                    k: {"status": v.status.value, "output": v.output, "error": v.error}
-                    for k, v in results.items()
-                }
-            }
-        )
-
-    def _execute_workflow(self, workflow: Workflow, exec_context: ExecutionContext) -> Dict[str, StepResult]:
-        """Execute all steps in a workflow."""
-        results: Dict[str, StepResult] = {}
-
-        for step in workflow.steps:
-            if step.step_id in workflow.parallel_groups:
-                group_results = self._execute_parallel_group(
-                    workflow, step.step_id, exec_context
-                )
-                results.update(group_results)
-            else:
-                result = self._execute_step(step, exec_context, results)
-                results[step.step_id] = result
-
-                if result.status == StepStatus.FAILED and step.on_error == "fail":
-                    break
-
-        return results
-
-    def _execute_step(
+    def create_workflow(
         self,
-        step: WorkflowStep,
-        exec_context: ExecutionContext,
-        prior_results: Dict[str, StepResult],
-    ) -> StepResult:
-        """Execute a single workflow step."""
-        start_time = time.time()
-
-        if step.conditions and not self._evaluate_conditions(step.conditions, exec_context, prior_results):
-            return StepResult(
-                step_id=step.step_id,
-                status=StepStatus.SKIPPED,
-                started_at=start_time,
-                completed_at=time.time(),
-            )
-
-        handler = self._step_handlers.get(step.step_type, self._execute_action_step)
-
-        max_retries = step.retry_config.get("max_retries", 0) if step.retry_config else 0
-        retry_count = 0
-
-        while retry_count <= max_retries:
-            try:
-                result = handler(step, exec_context)
-
-                if result.status == StepStatus.SUCCESS or result.status == StepStatus.SKIPPED:
-                    return result
-
-                retry_count += 1
-
-                if retry_count <= max_retries:
-                    delay = step.retry_config.get("delay", 1.0) * retry_count
-                    time.sleep(delay)
-                    result.status = StepStatus.RETRYING
-                    result.retries = retry_count
-            except Exception as e:
-                if retry_count > max_retries:
-                    return StepResult(
-                        step_id=step.step_id,
-                        status=StepStatus.FAILED,
-                        error=str(e),
-                        started_at=start_time,
-                        completed_at=time.time(),
-                        retries=retry_count,
-                    )
-                retry_count += 1
-
-        return result
-
-    def _execute_action_step(self, step: WorkflowStep, exec_context: ExecutionContext) -> StepResult:
-        """Execute an action step."""
-        start_time = time.time()
-        action_type = step.config.get("action_type", "generic")
-        action_params = step.config.get("params", {})
-
-        try:
-            from core.action_registry import ActionRegistry
-            registry = ActionRegistry()
-            action = registry.get_action(action_type)
-
-            result = action.execute(exec_context, action_params)
-
-            return StepResult(
-                step_id=step.step_id,
-                status=StepStatus.SUCCESS if result.success else StepStatus.FAILED,
-                output=result.data,
-                error=result.message if not result.success else None,
-                started_at=start_time,
-                completed_at=time.time(),
-            )
-        except Exception as e:
-            return StepResult(
-                step_id=step.step_id,
-                status=StepStatus.FAILED,
-                error=str(e),
-                started_at=start_time,
-                completed_at=time.time(),
-            )
-
-    def _execute_condition_step(self, step: WorkflowStep, exec_context: ExecutionContext) -> StepResult:
-        """Evaluate a condition step."""
-        start_time = time.time()
-        condition_expr = step.config.get("expression", "true")
-        expected = step.config.get("expected", True)
-
-        try:
-            result = self._evaluate_condition_expression(condition_expr, exec_context)
-            matches = (result == expected) if isinstance(result, bool) else False
-
-            return StepResult(
-                step_id=step.step_id,
-                status=StepStatus.SUCCESS,
-                output={"result": result, "matches": matches},
-                started_at=start_time,
-                completed_at=time.time(),
-            )
-        except Exception as e:
-            return StepResult(
-                step_id=step.step_id,
-                status=StepStatus.FAILED,
-                error=str(e),
-                started_at=start_time,
-                completed_at=time.time(),
-            )
-
-    def _execute_parallel_step(self, step: WorkflowStep, exec_context: ExecutionContext) -> StepResult:
-        """Execute a parallel group step."""
-        start_time = time.time()
-        group_id = step.config.get("group_id", "")
-
-        return StepResult(
-            step_id=step.step_id,
-            status=StepStatus.SUCCESS,
-            output={"group_id": group_id, "executed": True},
-            started_at=start_time,
-            completed_at=time.time(),
-        )
-
-    def _execute_parallel_group(
-        self,
-        workflow: Workflow,
-        group_id: str,
-        exec_context: ExecutionContext,
-    ) -> Dict[str, StepResult]:
-        """Execute steps in a parallel group."""
-        step_ids = workflow.parallel_groups.get(group_id, [])
-        results: Dict[str, StepResult] = {}
-
-        for step in workflow.steps:
-            if step.step_id in step_ids:
-                results[step.step_id] = self._execute_step(step, exec_context, results)
-
-        return results
-
-    def _execute_loop_step(self, step: WorkflowStep, exec_context: ExecutionContext) -> StepResult:
-        """Execute a loop step."""
-        start_time = time.time()
-        loop_type = step.config.get("type", "for")
-        items = step.config.get("items", [])
-        max_iterations = step.config.get("max_iterations", 100)
-
-        results = []
-        for i, item in enumerate(items[:max_iterations]):
-            exec_context.variables["loop_item"] = item
-            exec_context.variables["loop_index"] = i
-            results.append({"index": i, "item": item})
-
-        return StepResult(
-            step_id=step.step_id,
-            status=StepStatus.SUCCESS,
-            output={"iterations": len(results), "items": results},
-            started_at=start_time,
-            completed_at=time.time(),
-        )
-
-    def _execute_delay_step(self, step: WorkflowStep, exec_context: ExecutionContext) -> StepResult:
-        """Execute a delay step."""
-        start_time = time.time()
-        delay_seconds = step.config.get("seconds", 1)
-
-        time.sleep(delay_seconds)
-
-        return StepResult(
-            step_id=step.step_id,
-            status=StepStatus.SUCCESS,
-            output={"delayed_seconds": delay_seconds},
-            started_at=start_time,
-            completed_at=time.time(),
-        )
-
-    def _execute_notify_step(self, step: WorkflowStep, exec_context: ExecutionContext) -> StepResult:
-        """Execute a notification step."""
-        start_time = time.time()
-        channel = step.config.get("channel", "log")
-        message = step.config.get("message", "")
-
-        return StepResult(
-            step_id=step.step_id,
-            status=StepStatus.SUCCESS,
-            output={"channel": channel, "notified": True},
-            started_at=start_time,
-            completed_at=time.time(),
-        )
-
-    def _evaluate_conditions(
-        self,
-        conditions: Dict[str, Any],
-        exec_context: ExecutionContext,
-        prior_results: Dict[str, StepResult],
-    ) -> bool:
-        """Evaluate step conditions."""
-        condition_type = conditions.get("type", "always")
-
-        if condition_type == "always":
-            return True
-        elif condition_type == "never":
-            return False
-        elif condition_type == "on_success":
-            step_id = conditions.get("step_id", "")
-            return prior_results.get(step_id, StepResult("dummy", StepStatus.FAILED)).status == StepStatus.SUCCESS
-        elif condition_type == "on_failure":
-            step_id = conditions.get("step_id", "")
-            return prior_results.get(step_id, StepResult("dummy", StepStatus.SUCCESS)).status == StepStatus.FAILED
-        elif condition_type == "expression":
-            return self._evaluate_condition_expression(conditions.get("expression", "true"), exec_context)
-
-        return True
-
-    def _evaluate_condition_expression(self, expr: str, exec_context: ExecutionContext) -> Any:
-        """Evaluate a condition expression."""
-        try:
-            variables = exec_context.variables.copy()
-            return eval(expr, {"__builtins__": {}}, variables)
-        except Exception:
-            return False
-
-    def _build_workflow(self, workflow_id: str, steps: List[Dict[str, Any]]) -> Workflow:
-        """Build a Workflow object from step definitions."""
-        workflow_steps = []
-        parallel_groups: Dict[str, List[str]] = {}
-
-        for step_data in steps:
-            step_type_str = step_data.get("step_type", "action")
-            try:
-                step_type = StepType(step_type_str)
-            except ValueError:
-                step_type = StepType.ACTION
-
-            step = WorkflowStep(
-                step_id=step_data.get("step_id", self._generate_step_id()),
-                step_type=step_type,
-                name=step_data.get("name", step_type_str),
-                config=step_data.get("config", {}),
-                conditions=step_data.get("conditions"),
-                retry_config=step_data.get("retry_config"),
-                on_error=step_data.get("on_error", "fail"),
-                timeout=step_data.get("timeout", 60.0),
-            )
-
-            if step_data.get("parallel_group"):
-                group_id = step_data["parallel_group"]
-                if group_id not in parallel_groups:
-                    parallel_groups[group_id] = []
-                parallel_groups[group_id].append(step.step_id)
-
-            workflow_steps.append(step)
-
-        return Workflow(
+        workflow_id: str,
+        name: str,
+        tasks: List[Task],
+        max_parallel: int = 5,
+        continue_on_failure: bool = True,
+    ) -> Workflow:
+        workflow = Workflow(
             workflow_id=workflow_id,
-            name=workflow_data.get("name", workflow_id),
-            description=workflow_data.get("description", ""),
-            steps=workflow_steps,
-            parallel_groups=parallel_groups,
-            variables=workflow_data.get("variables", {}),
+            name=name,
+            tasks={t.task_id: t for t in tasks},
+            max_parallel=max_parallel,
+            continue_on_failure=continue_on_failure,
         )
-
-    def _register_workflow(self, params: Dict[str, Any]) -> ActionResult:
-        """Register a workflow for later use."""
-        workflow_id = params.get("workflow_id", "")
-        workflow_data = params.get("workflow", {})
-
-        if not workflow_id:
-            return ActionResult(success=False, message="workflow_id is required")
-
-        workflow = self._build_workflow(workflow_id, workflow_data.get("steps", []))
-        workflow.name = workflow_data.get("name", workflow_id)
-        workflow.description = workflow_data.get("description", "")
-        workflow.variables = workflow_data.get("variables", {})
-
         self._workflows[workflow_id] = workflow
 
-        return ActionResult(
-            success=True,
-            message=f"Workflow registered: {workflow_id}",
-            data={"workflow_id": workflow_id, "steps": len(workflow.steps)}
+        graph = TaskGraph()
+        for task in tasks:
+            for dep in task.dependencies:
+                graph.add_dependency(task.task_id, dep)
+        self._task_graphs[workflow_id] = graph
+
+        logger.info("Created workflow '%s' with %d tasks", name, len(tasks))
+        return workflow
+
+    async def execute_workflow(
+        self, workflow_id: str, initial_context: Optional[Dict[str, Any]] = None
+    ) -> Tuple[bool, Dict[str, Any]]:
+        workflow = self._workflows.get(workflow_id)
+        if not workflow:
+            return False, {"error": f"Workflow not found: {workflow_id}"}
+
+        workflow.start_time = time.time()
+        context = initial_context or {}
+
+        for task in workflow.tasks.values():
+            task.status = TaskStatus.PENDING
+            task.result = None
+            task.error = None
+
+        completed: Set[str] = set()
+        failed: Set[str] = set()
+        graph = self._task_graphs[workflow_id]
+        execution_order = graph.get_execution_order()
+
+        logger.info("Executing workflow '%s' with %d batches", workflow.name, len(execution_order))
+
+        for batch in execution_order:
+            if not batch:
+                continue
+
+            batch_tasks = [(tid, workflow.tasks[tid]) for tid in batch if tid in workflow.tasks]
+
+            if not workflow.continue_on_failure and failed:
+                for task_id in batch:
+                    if task_id in workflow.tasks:
+                        workflow.tasks[task_id].status = TaskStatus.SKIPPED
+                continue
+
+            batch_results = await asyncio.gather(
+                *[self._execute_task(t, context) for _, t in batch_tasks],
+                return_exceptions=True,
+            )
+
+            for (task_id, task), result in zip(batch_tasks, batch_results):
+                if isinstance(result, Exception):
+                    task.status = TaskStatus.FAILED
+                    task.error = str(result)
+                    failed.add(task_id)
+                    logger.error("Task %s failed: %s", task_id, result)
+                elif isinstance(result, tuple) and len(result) == 2:
+                    success, task_result = result
+                    if success:
+                        task.status = TaskStatus.COMPLETED
+                        task.result = task_result
+                        completed.add(task_id)
+                    else:
+                        task.status = TaskStatus.FAILED
+                        task.error = str(task_result)
+                        failed.add(task_id)
+                else:
+                    task.status = TaskStatus.COMPLETED
+                    task.result = result
+                    completed.add(task_id)
+
+        workflow.end_time = time.time()
+        duration = workflow.end_time - (workflow.start_time or 0)
+
+        success = len(failed) == 0
+        logger.info(
+            "Workflow '%s' %s: %d/%d tasks completed in %.1fs",
+            workflow.name,
+            "SUCCESS" if success else "PARTIAL",
+            len(completed),
+            len(workflow.tasks),
+            duration,
         )
 
-    def _pause_workflow(self, params: Dict[str, Any]) -> ActionResult:
-        """Pause a running workflow."""
-        execution_id = params.get("execution_id", "")
-        return ActionResult(success=True, message=f"Workflow paused: {execution_id}")
+        return success, {
+            "workflow_id": workflow_id,
+            "status": "success" if success else "partial",
+            "completed": len(completed),
+            "failed": len(failed),
+            "duration_s": duration,
+            "context": context,
+        }
 
-    def _resume_workflow(self, params: Dict[str, Any]) -> ActionResult:
-        """Resume a paused workflow."""
-        execution_id = params.get("execution_id", "")
-        return ActionResult(success=True, message=f"Workflow resumed: {execution_id}")
+    async def _execute_task(
+        self, task: Task, context: Dict[str, Any]
+    ) -> Tuple[bool, Any]:
+        task.status = TaskStatus.RUNNING
+        task.started_at = time.time()
 
-    def _cancel_workflow(self, params: Dict[str, Any]) -> ActionResult:
-        """Cancel a running workflow."""
-        execution_id = params.get("execution_id", "")
-        if execution_id in self._execution_contexts:
-            self._execution_contexts[execution_id].status = StepStatus.FAILED
-        return ActionResult(success=True, message=f"Workflow cancelled: {execution_id}")
+        for attempt in range(task.retry_count + 1):
+            try:
+                if asyncio.iscoroutinefunction(task.handler):
+                    result = await asyncio.wait_for(
+                        task.handler(context, task.metadata),
+                        timeout=task.timeout,
+                    )
+                else:
+                    result = task.handler(context, task.metadata)
 
-    def _get_execution_status(self, params: Dict[str, Any]) -> ActionResult:
-        """Get status of a workflow execution."""
-        execution_id = params.get("execution_id", "")
+                task.completed_at = time.time()
+                return True, result
 
-        if execution_id not in self._execution_contexts:
-            return ActionResult(success=False, message=f"Execution not found: {execution_id}")
+            except asyncio.TimeoutError:
+                error = f"Task timed out after {task.timeout}s"
+                if attempt < task.retry_count:
+                    logger.warning("Task %s timeout, retrying %d", task.task_id, attempt + 1)
+                    await asyncio.sleep(task.retry_delay * (attempt + 1))
+                    continue
+                task.error = error
+                task.completed_at = time.time()
+                return False, error
 
-        ctx = self._execution_contexts[execution_id]
-        return ActionResult(
-            success=True,
-            data={
-                "execution_id": execution_id,
-                "workflow_id": ctx.workflow_id,
-                "status": ctx.status.value,
-                "started_at": ctx.started_at,
-                "completed_at": ctx.completed_at,
-                "variables": ctx.variables,
-                "step_results": {
-                    k: {"status": v.status.value, "output": v.output}
-                    for k, v in ctx.step_results.items()
-                }
-            }
-        )
+            except Exception as exc:
+                error = str(exc)
+                if attempt < task.retry_count:
+                    logger.warning("Task %s error '%s', retrying %d", task.task_id, exc, attempt + 1)
+                    await asyncio.sleep(task.retry_delay * (attempt + 1))
+                    continue
+                task.error = error
+                task.completed_at = time.time()
+                return False, error
 
-    def _generate_execution_id(self) -> str:
-        """Generate a unique execution ID."""
-        return hashlib.sha1(str(time.time()).encode()).hexdigest()[:12]
+    def get_workflow_status(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+        workflow = self._workflows.get(workflow_id)
+        if not workflow:
+            return None
 
-    def _generate_step_id(self) -> str:
-        """Generate a unique step ID."""
-        return f"step_{hashlib.sha1(str(time.time_ns()).encode()).hexdigest()[:8]}"
+        task_statuses = {
+            tid: t.status.name for tid, t in workflow.tasks.items()
+        }
+        completed = sum(1 for t in workflow.tasks.values() if t.status == TaskStatus.COMPLETED)
+        failed = sum(1 for t in workflow.tasks.values() if t.status == TaskStatus.FAILED)
+
+        return {
+            "workflow_id": workflow_id,
+            "name": workflow.name,
+            "status": "running" if workflow.start_time and not workflow.end_time else "completed",
+            "completed_tasks": completed,
+            "failed_tasks": failed,
+            "total_tasks": len(workflow.tasks),
+            "duration_s": (workflow.end_time or time.time()) - (workflow.start_time or 0),
+            "task_statuses": task_statuses,
+        }
 
     def list_workflows(self) -> List[str]:
-        """List registered workflow IDs."""
         return list(self._workflows.keys())
-
-    def get_workflow(self, workflow_id: str) -> Optional[Workflow]:
-        """Get a workflow by ID."""
-        return self._workflows.get(workflow_id)
