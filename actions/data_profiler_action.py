@@ -1,478 +1,424 @@
 """
-Data Profiling and Quality Assessment Module.
+Data Profiler Action Module
 
-Profiles datasets to understand schema, statistics, distributions,
-null patterns, and quality issues. Generates detailed data reports.
+Statistical profiling of datasets with type inference,
+distribution analysis, and anomaly detection.
 
-Author: AutoGen
+MIT License - Copyright (c) 2025 RabAi Research
 """
+
 from __future__ import annotations
 
-import json
 import logging
 import math
-import random
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum, auto
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    FrozenSet,
-    List,
-    Optional,
-    Sequence,
-    Set,
-    Tuple,
-    Type,
-)
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-class DataType(Enum):
-    """Inferred data types."""
-    STRING = auto()
-    INTEGER = auto()
-    FLOAT = auto()
-    BOOLEAN = auto()
-    DATETIME = auto()
-    DATE = auto()
-    TIME = auto()
-    UUID = auto()
-    EMAIL = auto()
-    URL = auto()
-    IP_ADDRESS = auto()
-    PHONE = auto()
-    JSON = auto()
-    LIST = auto()
-    DICT = auto()
-    NULL = auto()
-    MIXED = auto()
+class FieldType(Enum):
+    """Inferred field types."""
+    
+    STRING = "string"
+    INTEGER = "integer"
+    FLOAT = "float"
+    BOOLEAN = "boolean"
+    DATETIME = "datetime"
+    LIST = "list"
+    DICT = "dict"
+    NULL = "null"
+    UNKNOWN = "unknown"
 
 
 @dataclass
 class FieldProfile:
-    """Statistical profile for a single field/column."""
+    """Statistical profile of a single field."""
+    
     name: str
-    data_type: DataType
+    field_type: FieldType
     total_count: int = 0
     null_count: int = 0
     unique_count: int = 0
-    empty_count: int = 0
-
+    
     min_value: Optional[Any] = None
     max_value: Optional[Any] = None
     mean_value: Optional[float] = None
-    median_value: Optional[float] = None
+    median_value: Optional[Any] = None
+    
     std_dev: Optional[float] = None
-
-    min_length: Optional[int] = None
-    max_length: Optional[int] = None
-    avg_length: Optional[float] = None
-
+    variance: Optional[float] = None
+    
     top_values: List[Tuple[Any, int]] = field(default_factory=list)
     histogram: Dict[str, int] = field(default_factory=dict)
-
-    patterns: List[str] = field(default_factory=list)
-    is_unique: bool = False
-    is_nullable: bool = True
-    is_sparse: bool = False
-    is_imbalanced: bool = False
-    imbalance_ratio: float = 0.0
-
-    completeness: float = 1.0
-    validity_score: float = 1.0
-
-    def null_pct(self) -> float:
-        if self.total_count == 0:
-            return 100.0
-        return (self.null_count / self.total_count) * 100
-
-    def unique_pct(self) -> float:
-        if self.total_count == 0:
-            return 0.0
-        return (self.unique_count / self.total_count) * 100
+    
+    pattern: Optional[str] = None
+    sample_values: List[Any] = field(default_factory=list)
 
 
 @dataclass
 class DatasetProfile:
-    """Complete profile for an entire dataset."""
-    name: str
-    row_count: int = 0
-    field_count: int = 0
-    fields: List[FieldProfile] = field(default_factory=list)
-
-    quality_score: float = 1.0
-    issues: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-
-    profiled_at: datetime = field(default_factory=datetime.utcnow)
-    sample_size: int = 0
-    is_streaming: bool = False
+    """Complete profile of a dataset."""
+    
+    total_records: int
+    total_fields: int
+    field_profiles: Dict[str, FieldProfile]
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class TypeInferrer:
-    """Infers data types from string values."""
-
-    EMAIL_RE = re.compile(r"^[\w\.\+\-]+@[\w\.\-]+\.\w+$")
-    URL_RE = re.compile(r"^https?://[\w\.\-]+", re.IGNORECASE)
-    UUID_RE = re.compile(
-        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-        re.IGNORECASE,
-    )
-    IP_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
-    DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-    TIME_RE = re.compile(r"^\d{2}:\d{2}(:\d{2})?(\.\d+)?$")
-    DATETIME_RE = re.compile(
-        r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
-    )
-
-    def infer(self, value: Any) -> DataType:
-        if value is None or (isinstance(value, str) and value.strip() == ""):
-            return DataType.NULL
-
+    """Infers field types from values."""
+    
+    DATETIME_PATTERNS = [
+        r"^\d{4}-\d{2}-\d{2}$",
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+        r"^\d{10,13}$"
+    ]
+    
+    @classmethod
+    def infer(cls, value: Any) -> FieldType:
+        """Infer type from a single value."""
+        if value is None:
+            return FieldType.NULL
+        
         if isinstance(value, bool):
-            return DataType.BOOLEAN
-
+            return FieldType.BOOLEAN
+        
         if isinstance(value, int):
-            return DataType.INTEGER
-
+            return FieldType.INTEGER
+        
         if isinstance(value, float):
-            return DataType.FLOAT
-
-        if isinstance(value, (dict, list)):
-            return DataType.DICT if isinstance(value, dict) else DataType.LIST
-
+            return FieldType.FLOAT
+        
         if isinstance(value, str):
-            s = value.strip()
+            return cls._infer_string(value)
+        
+        if isinstance(value, list):
+            return FieldType.LIST
+        
+        if isinstance(value, dict):
+            return FieldType.DICT
+        
+        return FieldType.UNKNOWN
+    
+    @classmethod
+    def _infer_string(cls, value: str) -> FieldType:
+        """Infer type from string value."""
+        if value.lower() in ("true", "false"):
+            return FieldType.BOOLEAN
+        
+        if value.lower() in ("null", "none", "nan", ""):
+            return FieldType.NULL
+        
+        if re.match(r"^-?\d+$", value):
+            return FieldType.INTEGER
+        
+        if re.match(r"^-?\d+\.\d+$", value):
+            return FieldType.FLOAT
+        
+        for pattern in cls.DATETIME_PATTERNS:
+            if re.match(pattern, value):
+                return FieldType.DATETIME
+        
+        return FieldType.STRING
 
-            if s.lower() in ("true", "false", "yes", "no", "1", "0"):
-                return DataType.BOOLEAN
 
-            if self.EMAIL_RE.match(s):
-                return DataType.EMAIL
-            if self.URL_RE.match(s):
-                return DataType.URL
-            if self.UUID_RE.match(s):
-                return DataType.UUID
-            if self.IP_RE.match(s):
-                return DataType.IP_ADDRESS
-
-            if self.DATETIME_RE.match(s):
-                try:
-                    datetime.fromisoformat(s.replace(" ", "T"))
-                    return DataType.DATETIME
-                except ValueError:
-                    pass
-            if self.DATE_RE.match(s):
-                return DataType.DATE
-            if self.TIME_RE.match(s):
-                return DataType.TIME
-
-            try:
-                int(s)
-                return DataType.INTEGER
-            except ValueError:
-                pass
-
-            try:
-                float(s)
-                return DataType.FLOAT
-            except ValueError:
-                pass
-
-            try:
-                json.loads(s)
-                return DataType.JSON
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-            return DataType.STRING
-
-        return DataType.MIXED
+class StatisticalAnalyzer:
+    """Performs statistical analysis on numeric fields."""
+    
+    @staticmethod
+    def compute_stats(values: List[float]) -> Dict[str, float]:
+        """Compute basic statistics for numeric values."""
+        if not values:
+            return {}
+        
+        n = len(values)
+        mean = sum(values) / n
+        
+        variance = sum((x - mean) ** 2 for x in values) / n
+        std_dev = math.sqrt(variance)
+        
+        sorted_values = sorted(values)
+        median = sorted_values[n // 2] if n % 2 == 1 else (
+            sorted_values[n // 2 - 1] + sorted_values[n // 2]
+        ) / 2
+        
+        return {
+            "mean": mean,
+            "median": median,
+            "std_dev": std_dev,
+            "variance": variance,
+            "min": min(values),
+            "max": max(values)
+        }
 
 
 class DataProfiler:
-    """Profiles datasets to generate statistical summaries."""
-
-    def __init__(
-        self,
-        sample_size: int = 10000,
-        histogram_bins: int = 20,
-        top_k: int = 10,
-    ):
-        self.sample_size = sample_size
-        self.histogram_bins = histogram_bins
-        self.top_k = top_k
-        self.type_inferrer = TypeInferrer()
-
-    def profile_dataframe(
-        self, df: Any, name: str = "dataset"
-    ) -> DatasetProfile:
-        """
-        Profile a pandas DataFrame or similar tabular data structure.
-        Accepts dict of lists, list of dicts, or DataFrame.
-        """
-        import pandas as pd
-
-        if isinstance(df, pd.DataFrame):
-            records = df.to_dict(orient="records")
-            columns = list(df.columns)
-        elif isinstance(df, dict):
-            records = [dict(zip(df.keys(), vals)) for vals in zip(*df.values())]
-            columns = list(df.keys())
-        elif isinstance(df, list):
-            if not df:
-                return self._empty_profile(name)
-            records = df
-            columns = list(df[0].keys()) if isinstance(df[0], dict) else []
-        else:
-            raise ValueError(f"Unsupported data type: {type(df)}")
-
-        row_count = len(records)
-        sample_size = min(self.sample_size, row_count)
-
-        if row_count > self.sample_size:
-            records = random.sample(records, sample_size)
-
-        fields: List[FieldProfile] = []
-        all_issues: List[str] = []
-        all_warnings: List[str] = []
-
-        for col in columns:
-            values = [r.get(col) for r in records if col in r]
-            field_profile = self._profile_column(col, values)
-            fields.append(field_profile)
-
-            if field_profile.null_pct() > 50:
-                all_issues.append(
-                    f"Field '{col}' has {field_profile.null_pct():.1f}% null values"
-                )
-            if field_profile.is_imbalanced:
-                all_warnings.append(
-                    f"Field '{col}' is highly imbalanced (ratio: {field_profile.imbalance_ratio:.1f})"
-                )
-            if field_profile.is_unique and row_count > 10000:
-                all_warnings.append(f"Field '{col}' is unique - may not be informative")
-
-        quality_score = self._compute_quality_score(fields, all_issues)
-
-        return DatasetProfile(
-            name=name,
-            row_count=row_count,
-            field_count=len(columns),
-            fields=fields,
-            quality_score=quality_score,
-            issues=all_issues,
-            warnings=all_warnings,
-            sample_size=sample_size,
-        )
-
-    def _profile_column(self, name: str, values: List[Any]) -> FieldProfile:
-        non_null = [v for v in values if v is not None and str(v).strip() != ""]
-        empty = [v for v in values if v is None or str(v).strip() == ""]
-
-        inferred_types = [self.type_inferrer.infer(v) for v in non_null[:1000]]
-        type_counts = Counter(inferred_types)
-        primary_type = type_counts.most_common(1)[0][0] if type_counts else DataType.STRING
-
-        unique_values = set(non_null)
-        unique_count = len(unique_values)
-
+    """Profiles datasets to extract statistical information."""
+    
+    def __init__(self):
+        self._type_inferrer = TypeInferrer
+        self._stats_analyzer = StatisticalAnalyzer
+    
+    def profile_field(self, name: str, values: List[Any]) -> FieldProfile:
+        """Profile a single field."""
+        non_null = [v for v in values if v is not None]
+        
+        field_type = self._type_inferrer.infer(values[0]) if values else FieldType.UNKNOWN
+        
         profile = FieldProfile(
             name=name,
-            data_type=primary_type,
+            field_type=field_type,
             total_count=len(values),
-            null_count=len(empty),
-            unique_count=unique_count,
-            empty_count=len(empty),
-            is_unique=unique_count == len(non_null) and len(non_null) > 0,
-            is_nullable=len(empty) > 0,
-            is_sparse=len(empty) / len(values) > 0.3 if values else False,
+            null_count=len(values) - len(non_null),
+            unique_count=len(set(str(v) for v in non_null)) if non_null else 0,
+            sample_values=list(non_null[:5])
         )
-
-        numeric_values: List[float] = []
-        str_values: List[str] = []
-
-        for v in non_null:
-            if isinstance(v, (int, float)):
-                numeric_values.append(float(v))
-            elif isinstance(v, str):
-                str_values.append(v)
-                try:
-                    numeric_values.append(float(v))
-                except ValueError:
-                    pass
-
-        if numeric_values:
-            profile.min_value = min(numeric_values)
-            profile.max_value = max(numeric_values)
-            profile.mean_value = sum(numeric_values) / len(numeric_values)
-
-            sorted_vals = sorted(numeric_values)
-            mid = len(sorted_vals) // 2
-            if len(sorted_vals) % 2 == 0:
-                profile.median_value = (sorted_vals[mid - 1] + sorted_vals[mid]) / 2
-            else:
-                profile.median_value = sorted_vals[mid]
-
-            if len(numeric_values) > 1:
-                variance = sum((x - profile.mean_value) ** 2 for x in numeric_values) / len(numeric_values)
-                profile.std_dev = math.sqrt(variance)
-
-            self._compute_histogram(profile, numeric_values)
-
-        if str_values:
-            profile.min_length = min(len(s) for s in str_values)
-            profile.max_length = max(len(s) for s in str_values)
-            profile.avg_length = sum(len(s) for s in str_values) / len(str_values)
-
-            self._detect_patterns(profile, str_values)
-
+        
         if non_null:
-            value_counts = Counter(str(v) for v in non_null)
-            profile.top_values = value_counts.most_common(self.top_k)
-
-            if value_counts:
-                most_common_count = value_counts.most_common(1)[0][1]
-                least_common_count = value_counts.most_common()[-1][1]
-                if least_common_count > 0:
-                    profile.imbalance_ratio = most_common_count / least_common_count
-                    profile.is_imbalanced = profile.imbalance_ratio > 20
-
-        profile.completeness = 1 - (profile.null_count / profile.total_count) if profile.total_count > 0 else 0
-        profile.validity_score = self._compute_validity(profile)
-
+            value_counter = Counter(non_null)
+            profile.top_values = value_counter.most_common(10)
+        
+        if field_type in (FieldType.INTEGER, FieldType.FLOAT):
+            try:
+                numeric_values = [float(v) for v in non_null if v is not None]
+                stats = self._stats_analyzer.compute_stats(numeric_values)
+                
+                profile.mean_value = stats.get("mean")
+                profile.median_value = stats.get("median")
+                profile.std_dev = stats.get("std_dev")
+                profile.variance = stats.get("variance")
+                profile.min_value = stats.get("min")
+                profile.max_value = stats.get("max")
+                
+                profile.histogram = self._compute_histogram(numeric_values)
+            
+            except Exception as e:
+                logger.warning(f"Could not compute numeric stats for {name}: {e}")
+        
+        if field_type == FieldType.STRING:
+            profile.pattern = self._detect_pattern(non_null)
+            profile.histogram = self._compute_value_histogram(non_null)
+        
         return profile
-
-    def _compute_histogram(self, profile: FieldProfile, values: List[float]) -> None:
-        if not values or profile.min_value is None or profile.max_value is None:
-            return
-
-        if profile.min_value == profile.max_value:
-            profile.histogram = {"single_value": len(values)}
-            return
-
-        bin_width = (profile.max_value - profile.min_value) / self.histogram_bins
-        bins: Dict[str, int] = {f"{profile.min_value:.2f}-{profile.max_value:.2f}": 0}
-
-        for v in values:
-            if v == profile.max_value:
-                bin_idx = self.histogram_bins - 1
+    
+    def _compute_histogram(self, values: List[float], bins: int = 10) -> Dict[str, int]:
+        """Compute histogram bins for numeric values."""
+        if not values:
+            return {}
+        
+        min_val = min(values)
+        max_val = max(values)
+        
+        if min_val == max_val:
+            return {"all_same": len(values)}
+        
+        bin_width = (max_val - min_val) / bins
+        histogram = {}
+        
+        for value in values:
+            if value == max_val:
+                bin_key = f"{max_val - bin_width:.2f}-{max_val:.2f}"
             else:
-                bin_idx = int((v - profile.min_value) / bin_width)
-                bin_idx = min(bin_idx, self.histogram_bins - 1)
-
-            low = profile.min_value + bin_idx * bin_width
-            high = low + bin_width
-            key = f"{low:.1f}-{high:.1f}"
-            bins[key] = bins.get(key, 0) + 1
-
-        profile.histogram = dict(list(bins.items())[: self.histogram_bins])
-
-    def _detect_patterns(self, profile: FieldProfile, values: List[str]) -> None:
-        patterns_found: Set[str] = set()
-
-        for v in values[:500]:
-            if re.match(r"^\d{4}-\d{2}-\d{2}$", v):
-                patterns_found.add("date_iso")
-            elif re.match(r"^\d+$", v):
-                patterns_found.add("digits_only")
-            elif re.match(r"^[A-Z]{2,}$", v):
-                patterns_found.add("uppercase_letters")
-            elif re.match(r"^[a-z]+$", v):
-                patterns_found.add("lowercase_letters")
-            elif re.match(r"^[A-Za-z0-9]+$", v):
-                patterns_found.add("alphanumeric")
-            elif re.match(r"^[\w\.]+@[\w\.]+\.\w+$", v):
-                patterns_found.add("email")
-            elif re.match(r"^0x[0-9a-f]+$", v, re.IGNORECASE):
-                patterns_found.add("hexadecimal")
-
-        profile.patterns = sorted(patterns_found)
-
-    def _compute_validity(self, profile: FieldProfile) -> float:
-        score = 1.0
-
-        if profile.data_type == DataType.MIXED:
-            score *= 0.5
-        if profile.null_count / profile.total_count > 0.1 if profile.total_count > 0 else False:
-            score *= 0.9
-        if profile.patterns and profile.unique_count > 100:
-            if len(profile.patterns) == 1 and profile.patterns[0] in ("date_iso", "email", "url"):
-                score *= 1.0
-            elif len(profile.patterns) < 3:
-                score *= 0.9
-
-        return max(0.0, min(1.0, score))
-
-    def _compute_quality_score(
-        self, fields: List[FieldProfile], issues: List[str]
-    ) -> float:
-        if not fields:
-            return 0.0
-
-        avg_completeness = sum(f.completeness for f in fields) / len(fields)
-        avg_validity = sum(f.validity_score for f in fields) / len(fields)
-
-        issue_penalty = min(len(issues) * 0.05, 0.5)
-
-        quality = (avg_completeness * 0.4 + avg_validity * 0.4 + 0.2) - issue_penalty
-        return max(0.0, min(1.0, quality))
-
-    def _empty_profile(self, name: str) -> DatasetProfile:
+                bin_idx = int((value - min_val) / bin_width)
+                bin_start = min_val + bin_idx * bin_width
+                bin_end = bin_start + bin_width
+                bin_key = f"{bin_start:.2f}-{bin_end:.2f}"
+            
+            histogram[bin_key] = histogram.get(bin_key, 0) + 1
+        
+        return histogram
+    
+    def _compute_value_histogram(self, values: List[str], max_bins: int = 20) -> Dict[str, int]:
+        """Compute histogram for categorical values."""
+        counter = Counter(values)
+        return dict(counter.most_common(max_bins))
+    
+    def _detect_pattern(self, values: List[str]) -> Optional[str]:
+        """Detect common patterns in string values."""
+        patterns_found = defaultdict(int)
+        
+        for value in values[:100]:
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+                patterns_found["date_iso"] += 1
+            elif re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", value):
+                patterns_found["ipv4"] += 1
+            elif re.match(r"^[\w.-]+@[\w.-]+\.\w+$", value):
+                patterns_found["email"] += 1
+            elif re.match(r"^https?://", value):
+                patterns_found["url"] += 1
+            elif re.match(r"^0x[a-fA-F0-9]+$", value):
+                patterns_found["hex"] += 1
+            elif re.match(r"^\d+$", value):
+                patterns_found["numeric_string"] += 1
+        
+        if patterns_found:
+            return max(patterns_found, key=patterns_found.get)
+        
+        return None
+    
+    def profile_dataset(self, records: List[Dict]) -> DatasetProfile:
+        """Profile an entire dataset."""
+        if not records:
+            return DatasetProfile(
+                total_records=0,
+                total_fields=0,
+                field_profiles={}
+            )
+        
+        all_fields: Set[str] = set()
+        for record in records:
+            all_fields.update(record.keys())
+        
+        field_values: Dict[str, List[Any]] = {field: [] for field in all_fields}
+        
+        for record in records:
+            for field in all_fields:
+                field_values[field].append(record.get(field))
+        
+        field_profiles = {}
+        for field, values in field_values.items():
+            field_profiles[field] = self.profile_field(field, values)
+        
         return DatasetProfile(
-            name=name,
-            quality_score=0.0,
-            issues=[f"Dataset '{name}' is empty"],
+            total_records=len(records),
+            total_fields=len(all_fields),
+            field_profiles=field_profiles
         )
 
-    def profile_to_json(self, profile: DatasetProfile) -> str:
-        """Serialize a dataset profile to JSON."""
 
-        def sanitize(obj: Any) -> Any:
-            if isinstance(obj, FieldProfile):
-                return {
-                    "name": obj.name,
-                    "data_type": obj.data_type.name,
-                    "total_count": obj.total_count,
-                    "null_count": obj.null_count,
-                    "null_pct": obj.null_pct(),
-                    "unique_count": obj.unique_count,
-                    "unique_pct": obj.unique_pct(),
-                    "min_value": str(obj.min_value) if obj.min_value is not None else None,
-                    "max_value": str(obj.max_value) if obj.max_value is not None else None,
-                    "mean_value": obj.mean_value,
-                    "median_value": obj.median_value,
-                    "std_dev": obj.std_dev,
-                    "min_length": obj.min_length,
-                    "max_length": obj.max_length,
-                    "avg_length": obj.avg_length,
-                    "top_values": [[str(k), v] for k, v in obj.top_values],
-                    "patterns": obj.patterns,
-                    "is_unique": obj.is_unique,
-                    "is_sparse": obj.is_sparse,
-                    "is_imbalanced": obj.is_imbalanced,
-                    "imbalance_ratio": obj.imbalance_ratio,
-                    "completeness": obj.completeness,
-                    "validity_score": obj.validity_score,
-                }
-            elif isinstance(obj, DatasetProfile):
-                return {
-                    "name": obj.name,
-                    "row_count": obj.row_count,
-                    "field_count": obj.field_count,
-                    "fields": [sanitize(f) for f in obj.fields],
-                    "quality_score": obj.quality_score,
-                    "issues": obj.issues,
-                    "warnings": obj.warnings,
-                    "profiled_at": obj.profiled_at.isoformat(),
-                    "sample_size": obj.sample_size,
-                }
-            return obj
-
-        return json.dumps(sanitize(profile), indent=2, default=str)
+class DataProfilerAction:
+    """
+    Main data profiler action handler.
+    
+    Provides statistical profiling of datasets with type inference,
+    distribution analysis, and quality metrics.
+    """
+    
+    def __init__(self):
+        self.profiler = DataProfiler()
+        self._profiles: Dict[str, DatasetProfile] = {}
+    
+    def profile(
+        self,
+        records: List[Dict],
+        profile_id: Optional[str] = None
+    ) -> DatasetProfile:
+        """Profile a dataset."""
+        profile = self.profiler.profile_dataset(records)
+        
+        if profile_id:
+            self._profiles[profile_id] = profile
+        
+        return profile
+    
+    def compare_profiles(
+        self,
+        profile1: DatasetProfile,
+        profile2: DatasetProfile
+    ) -> Dict[str, Any]:
+        """Compare two dataset profiles."""
+        comparison = {
+            "record_count_change": profile2.total_records - profile1.total_records,
+            "field_changes": {},
+            "type_changes": [],
+            "value_changes": {}
+        }
+        
+        all_fields = set(profile1.field_profiles.keys()) | set(profile2.field_profiles.keys())
+        
+        for field in all_fields:
+            p1 = profile1.field_profiles.get(field)
+            p2 = profile2.field_profiles.get(field)
+            
+            if p1 and p2:
+                if p1.field_type != p2.field_type:
+                    comparison["type_changes"].append({
+                        "field": field,
+                        "from": p1.field_type.value,
+                        "to": p2.field_type.value
+                    })
+                
+                if p1.null_count != p2.null_count:
+                    comparison["field_changes"][field] = {
+                        "null_count_change": p2.null_count - p1.null_count
+                    }
+            elif p1:
+                comparison["field_changes"][field] = {"status": "removed"}
+            elif p2:
+                comparison["field_changes"][field] = {"status": "added"}
+        
+        return comparison
+    
+    def get_profile(self, profile_id: str) -> Optional[DatasetProfile]:
+        """Get a stored profile by ID."""
+        return self._profiles.get(profile_id)
+    
+    def list_profiles(self) -> List[str]:
+        """List all stored profile IDs."""
+        return list(self._profiles.keys())
+    
+    def detect_anomalies(
+        self,
+        profile: DatasetProfile,
+        threshold: float = 3.0
+    ) -> List[Dict[str, Any]]:
+        """Detect anomalies in the profile based on statistical measures."""
+        anomalies = []
+        
+        for field_name, field_profile in profile.field_profiles.items():
+            if field_profile.field_type not in (FieldType.INTEGER, FieldType.FLOAT):
+                continue
+            
+            if field_profile.std_dev and field_profile.mean_value:
+                if field_profile.std_dev > threshold * abs(field_profile.mean_value):
+                    anomalies.append({
+                        "field": field_name,
+                        "type": "high_variance",
+                        "std_dev": field_profile.std_dev,
+                        "mean": field_profile.mean_value
+                    })
+            
+            if field_profile.null_count / max(field_profile.total_count, 1) > 0.5:
+                anomalies.append({
+                    "field": field_name,
+                    "type": "high_null_rate",
+                    "null_count": field_profile.null_count,
+                    "total_count": field_profile.total_count
+                })
+        
+        return anomalies
+    
+    def generate_report(self, profile: DatasetProfile) -> str:
+        """Generate a human-readable report from a profile."""
+        lines = [
+            f"Dataset Profile",
+            f"=" * 50,
+            f"Total Records: {profile.total_records}",
+            f"Total Fields: {profile.total_fields}",
+            f"Generated: {profile.created_at}",
+            f"",
+            f"Field Profiles",
+            f"-" * 50
+        ]
+        
+        for field_name, fp in profile.field_profiles.items():
+            lines.append(f"\n{field_name} ({fp.field_type.value}):")
+            lines.append(f"  Count: {fp.total_count}")
+            lines.append(f"  Null: {fp.null_count} ({fp.null_count / max(fp.total_count, 1) * 100:.1f}%)")
+            lines.append(f"  Unique: {fp.unique_count}")
+            
+            if fp.field_type in (FieldType.INTEGER, FieldType.FLOAT):
+                lines.append(f"  Min: {fp.min_value}")
+                lines.append(f"  Max: {fp.max_value}")
+                lines.append(f"  Mean: {fp.mean_value:.2f}")
+                lines.append(f"  Median: {fp.median_value}")
+                lines.append(f"  Std Dev: {fp.std_dev:.2f}")
+        
+        return "\n".join(lines)
