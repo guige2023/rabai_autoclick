@@ -1,291 +1,400 @@
 """
-Data Quality Assessment and Validation Module.
+Data Quality Checker Action Module
 
-Validates data quality dimensions: completeness, consistency,
-accuracy, timeliness, and uniqueness. Provides quality scores and reports.
+Provides data quality validation and profiling for UI automation workflows.
+Supports schema validation, null checks, uniqueness, and statistical analysis.
 
-Author: AutoGen
+Author: AI Agent
+Version: 1.0.0
 """
+
 from __future__ import annotations
 
-import json
 import logging
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class QualityDimension(Enum):
-    COMPLETENESS = auto()
-    CONSISTENCY = auto()
-    ACCURACY = auto()
-    TIMELINESS = auto()
-    UNIQUENESS = auto()
-    VALIDITY = auto()
+class QualityLevel(Enum):
+    """Data quality levels."""
+    EXCELLENT = auto()
+    GOOD = auto()
+    FAIR = auto()
+    POOR = auto()
+    FAIL = auto()
+
+
+class ValidationType(Enum):
+    """Validation types."""
+    SCHEMA = auto()
+    NULL = auto()
+    UNIQUE = auto()
+    RANGE = auto()
+    PATTERN = auto()
+    TYPE = auto()
+    CUSTOM = auto()
 
 
 @dataclass
-class ValidationRule:
-    rule_id: str
+class ValidationError:
+    """Single validation error."""
     field: str
-    rule_type: str
-    params: Dict[str, Any] = field(default_factory=dict)
-    error_message: str = ""
-    severity: str = "error"
-
-
-@dataclass
-class ValidationResult:
-    rule_id: str
-    field: str
-    passed: bool
+    validation_type: ValidationType
+    message: str
     value: Any = None
-    error_message: str = ""
+    row_index: Optional[int] = None
 
 
 @dataclass
-class FieldQuality:
-    field_name: str
-    completeness: float = 1.0
-    uniqueness: float = 1.0
-    validity: float = 1.0
-    consistency: float = 1.0
-    accuracy: float = 1.0
-    quality_score: float = 1.0
-    issues: List[str] = field(default_factory=list)
-
-
-@dataclass
-class DataQualityReport:
-    dataset_name: str
+class QualityMetrics:
+    """Data quality metrics."""
     total_records: int = 0
-    overall_score: float = 1.0
-    dimension_scores: Dict[str, float] = field(default_factory=dict)
-    field_quality: List[FieldQuality] = field(default_factory=list)
-    validation_results: List[ValidationResult] = field(default_factory=list)
-    issues: List[str] = field(default_factory=list)
-    generated_at: datetime = field(default_factory=datetime.utcnow)
+    valid_records: int = 0
+    invalid_records: int = 0
+    null_count: int = 0
+    unique_count: int = 0
+    duplicate_count: int = 0
+    completeness: float = 0.0
+    accuracy: float = 0.0
+    consistency: float = 0.0
+    timeliness: float = 0.0
+    validity: float = 0.0
+
+    @property
+    def quality_score(self) -> float:
+        """Calculate overall quality score."""
+        weights = {
+            "completeness": 0.25,
+            "accuracy": 0.25,
+            "consistency": 0.20,
+            "timeliness": 0.10,
+            "validity": 0.20,
+        }
+        score = sum(getattr(self, k) * v for k, v in weights.items())
+        return min(1.0, max(0.0, score))
+
+    @property
+    def quality_level(self) -> QualityLevel:
+        """Get quality level."""
+        score = self.quality_score
+        if score >= 0.95:
+            return QualityLevel.EXCELLENT
+        if score >= 0.85:
+            return QualityLevel.GOOD
+        if score >= 0.70:
+            return QualityLevel.FAIR
+        if score >= 0.50:
+            return QualityLevel.POOR
+        return QualityLevel.FAIL
 
 
-class ValidationRuleEngine:
-    """Executes validation rules against data records."""
-
-    BUILT_IN_RULES = {
-        "required": lambda v: v is not None and str(v).strip() != "",
-        "email": lambda v: bool(re.match(r"^[\w\.\+\-]+@[\w\.\-]+\.\w+$", str(v))) if v else False,
-        "phone": lambda v: bool(re.match(r"^\+?[\d\s\-]{10,}$", str(v))) if v else False,
-        "url": lambda v: bool(re.match(r"^https?://", str(v))) if v else False,
-        "numeric": lambda v: str(v).isdigit() if v else False,
-        "min_length": lambda v, p: len(str(v)) >= int(p) if v else False,
-        "max_length": lambda v, p: len(str(v)) <= int(p) if v else False,
-        "min_value": lambda v, p: float(v) >= float(p) if v else False,
-        "max_value": lambda v, p: float(v) <= float(p) if v else False,
-        "pattern": lambda v, p: bool(re.match(p, str(v))) if v else False,
-        "in_list": lambda v, p: str(v) in p.split(",") if v else False,
-    }
-
-    def __init__(self):
-        self._rules: List[ValidationRule] = []
-
-    def add_rule(
-        self,
-        field: str,
-        rule_type: str,
-        params: Optional[Dict[str, Any]] = None,
-        error_message: str = "",
-        severity: str = "error",
-    ) -> str:
-        import uuid
-        rule_id = str(uuid.uuid4())[:8]
-        rule = ValidationRule(
-            rule_id=rule_id,
-            field=field,
-            rule_type=rule_type,
-            params=params or {},
-            error_message=error_message or f"Validation failed for {field} ({rule_type})",
-            severity=severity,
-        )
-        self._rules.append(rule)
-        return rule_id
-
-    def validate_record(self, record: Dict[str, Any]) -> List[ValidationResult]:
-        results = []
-        for rule in self._rules:
-            value = record.get(rule.field)
-            result = self._apply_rule(rule, value)
-            results.append(result)
-        return results
-
-    def _apply_rule(self, rule: ValidationRule, value: Any) -> ValidationResult:
-        rule_func = self.BUILT_IN_RULES.get(rule.rule_type)
-        if not rule_func:
-            return ValidationResult(
-                rule_id=rule.rule_id,
-                field=rule.field,
-                passed=False,
-                value=value,
-                error_message=f"Unknown rule type: {rule.rule_type}",
-            )
-
-        try:
-            if rule.params:
-                passed = rule_func(value, *rule.params.values())
-            else:
-                passed = rule_func(value)
-        except Exception as exc:
-            passed = False
-
-        return ValidationResult(
-            rule_id=rule.rule_id,
-            field=rule.field,
-            passed=bool(passed),
-            value=value,
-            error_message=rule.error_message if not passed else "",
-        )
+@dataclass
+class SchemaRule:
+    """Schema validation rule."""
+    field: str
+    field_type: type
+    required: bool = False
+    nullable: bool = True
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
+    pattern: Optional[str] = None
+    allowed_values: Optional[list[Any]] = None
+    custom_validator: Optional[Callable] = None
 
 
 class DataQualityChecker:
     """
-    Assesses data quality across multiple dimensions.
+    Data quality checker with multiple validation types.
+
+    Example:
+        >>> checker = DataQualityChecker()
+        >>> checker.add_rule(SchemaRule("email", str, required=True, pattern=r".+@.+\\..+"))
+        >>> result = checker.validate(data)
     """
 
-    def __init__(self):
-        self.rule_engine = ValidationRuleEngine()
+    def __init__(self) -> None:
+        self._rules: list[SchemaRule] = []
+        self._custom_validators: dict[str, Callable] = {}
 
-    def assess_field_quality(self, field_name: str, values: List[Any]) -> FieldQuality:
-        non_null = [v for v in values if v is not None and str(v).strip() != ""]
-        completeness = len(non_null) / max(len(values), 1)
+    def add_rule(self, rule: SchemaRule) -> "DataQualityChecker":
+        """Add validation rule."""
+        self._rules.append(rule)
+        return self
 
-        unique_values = set(non_null)
-        uniqueness = len(unique_values) / max(len(non_null), 1)
-
-        valid_count = sum(1 for v in non_null if self._is_valid_scalar(v))
-        validity = valid_count / max(len(non_null), 1)
-
-        consistency = 1.0
-        if len(non_null) > 1:
-            types = Counter(type(v).__name__ for v in non_null)
-            consistency = types.most_common(1)[0][1] / len(non_null)
-
-        quality_score = (
-            completeness * 0.25 +
-            uniqueness * 0.25 +
-            validity * 0.25 +
-            consistency * 0.25
-        )
-
-        issues = []
-        if completeness < 0.5:
-            issues.append(f"Low completeness: {completeness:.1%}")
-        if uniqueness < 0.1 and len(non_null) > 10:
-            issues.append(f"Low uniqueness: {uniqueness:.1%} (possible duplicates)")
-        if validity < 0.8:
-            issues.append(f"Validity concerns: {validity:.1%}")
-
-        return FieldQuality(
-            field_name=field_name,
-            completeness=completeness,
-            uniqueness=uniqueness,
-            validity=validity,
-            consistency=consistency,
-            quality_score=quality_score,
-            issues=issues,
-        )
-
-    def _is_valid_scalar(self, value: Any) -> bool:
-        if isinstance(value, (int, float, str, bool)):
-            return True
-        return False
-
-    def assess_dataset(
+    def add_custom_validator(
         self,
-        dataset_name: str,
-        records: List[Dict[str, Any]],
-        rules: Optional[List[ValidationRule]] = None,
-    ) -> DataQualityReport:
-        if not records:
-            return DataQualityReport(
-                dataset_name=dataset_name,
-                total_records=0,
-                overall_score=0.0,
-                issues=["Empty dataset"],
-            )
+        name: str,
+        validator: Callable[[Any], tuple[bool, str]],
+    ) -> "DataQualityChecker":
+        """Add custom validator function."""
+        self._custom_validators[name] = validator
+        return self
 
-        field_names = list(records[0].keys()) if records else []
-        field_values: Dict[str, List[Any]] = {f: [] for f in field_names}
+    def validate(self, data: list[dict]) -> tuple[bool, list[ValidationError], QualityMetrics]:
+        """Validate data and return results."""
+        errors: list[ValidationError] = []
+        metrics = QualityMetrics(total_records=len(data))
 
-        for record in records:
+        if not data:
+            return True, [], metrics
+
+        field_names = set()
+        for record in data:
+            field_names.update(record.keys())
+
+        for idx, record in enumerate(data):
+            record_errors = self._validate_record(record, idx)
+            errors.extend(record_errors)
+
             for field_name in field_names:
-                field_values[field_name].append(record.get(field_name))
+                if field_name not in record or record[field_name] is None:
+                    metrics.null_count += 1
 
-        field_quality_list = []
-        dimension_totals = {d.name.lower(): 0.0 for d in QualityDimension}
+        metrics.invalid_records = len(set(e.row_index for e in errors if e.row_index is not None))
+        metrics.valid_records = metrics.total_records - metrics.invalid_records
 
-        for field_name, values in field_values.items():
-            fq = self.assess_field_quality(field_name, values)
-            field_quality_list.append(fq)
-            dimension_totals["completeness"] += fq.completeness
-            dimension_totals["uniqueness"] += fq.uniqueness
-            dimension_totals["validity"] += fq.validity
-            dimension_totals["consistency"] += fq.consistency
+        all_values = []
+        for record in data:
+            all_values.extend(str(v) for v in record.values() if v is not None)
+        metrics.unique_count = len(set(all_values))
+        metrics.duplicate_count = len(all_values) - metrics.unique_count
 
-        dimension_scores = {
-            name: score / max(len(field_names), 1)
-            for name, score in dimension_totals.items()
+        metrics.completeness = 1.0 - (metrics.null_count / max(1, metrics.total_records * len(field_names)))
+        metrics.validity = metrics.valid_records / metrics.total_records if metrics.total_records > 0 else 0.0
+
+        return len(errors) == 0, errors, metrics
+
+    def _validate_record(self, record: dict, row_index: int) -> list[ValidationError]:
+        """Validate single record."""
+        errors: list[ValidationError] = []
+
+        for rule in self._rules:
+            value = record.get(rule.field)
+            field_errors = self._validate_field(rule, value, row_index)
+            errors.extend(field_errors)
+
+        for name, validator in self._custom_validators.items():
+            try:
+                valid, message = validator(record)
+                if not valid:
+                    errors.append(ValidationError(
+                        field="__custom__",
+                        validation_type=ValidationType.CUSTOM,
+                        message=f"Custom validation '{name}': {message}",
+                        value=record,
+                        row_index=row_index,
+                    ))
+            except Exception as e:
+                errors.append(ValidationError(
+                    field="__custom__",
+                    validation_type=ValidationType.CUSTOM,
+                    message=f"Custom validator error: {e}",
+                    row_index=row_index,
+                ))
+
+        return errors
+
+    def _validate_field(
+        self,
+        rule: SchemaRule,
+        value: Any,
+        row_index: int,
+    ) -> list[ValidationError]:
+        """Validate single field."""
+        errors: list[ValidationError] = []
+
+        if value is None:
+            if rule.required and not rule.nullable:
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.NULL,
+                    message=f"Required field is null",
+                    value=value,
+                    row_index=row_index,
+                ))
+            return errors
+
+        if not isinstance(value, rule.field_type):
+            if not (rule.nullable and value is None):
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.TYPE,
+                    message=f"Expected type {rule.field_type.__name__}, got {type(value).__name__}",
+                    value=value,
+                    row_index=row_index,
+                ))
+            return errors
+
+        if rule.min_value is not None and isinstance(value, (int, float)):
+            if value < rule.min_value:
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.RANGE,
+                    message=f"Value {value} is less than minimum {rule.min_value}",
+                    value=value,
+                    row_index=row_index,
+                ))
+
+        if rule.max_value is not None and isinstance(value, (int, float)):
+            if value > rule.max_value:
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.RANGE,
+                    message=f"Value {value} is greater than maximum {rule.max_value}",
+                    value=value,
+                    row_index=row_index,
+                ))
+
+        if rule.min_length is not None and isinstance(value, (str, list)):
+            if len(value) < rule.min_length:
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.RANGE,
+                    message=f"Length {len(value)} is less than minimum {rule.min_length}",
+                    value=value,
+                    row_index=row_index,
+                ))
+
+        if rule.max_length is not None and isinstance(value, (str, list)):
+            if len(value) > rule.max_length:
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.RANGE,
+                    message=f"Length {len(value)} is greater than maximum {rule.max_length}",
+                    value=value,
+                    row_index=row_index,
+                ))
+
+        if rule.pattern is not None and isinstance(value, str):
+            if not re.match(rule.pattern, value):
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.PATTERN,
+                    message=f"Value does not match pattern: {rule.pattern}",
+                    value=value,
+                    row_index=row_index,
+                ))
+
+        if rule.allowed_values is not None:
+            if value not in rule.allowed_values:
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.SCHEMA,
+                    message=f"Value not in allowed values: {rule.allowed_values}",
+                    value=value,
+                    row_index=row_index,
+                ))
+
+        if rule.custom_validator is not None:
+            try:
+                valid, message = rule.custom_validator(value)
+                if not valid:
+                    errors.append(ValidationError(
+                        field=rule.field,
+                        validation_type=ValidationType.CUSTOM,
+                        message=f"Custom validation failed: {message}",
+                        value=value,
+                        row_index=row_index,
+                    ))
+            except Exception as e:
+                errors.append(ValidationError(
+                    field=rule.field,
+                    validation_type=ValidationType.CUSTOM,
+                    message=f"Custom validator error: {e}",
+                    value=value,
+                    row_index=row_index,
+                ))
+
+        return errors
+
+
+class DataProfiler:
+    """
+    Data profiling with statistics.
+
+    Example:
+        >>> profiler = DataProfiler()
+        >>> stats = profiler.profile(data)
+    """
+
+    def profile(self, data: list[dict]) -> dict[str, Any]:
+        """Profile data and return statistics."""
+        if not data:
+            return {}
+
+        field_names = list(data[0].keys())
+        profile: dict[str, Any] = {
+            "record_count": len(data),
+            "field_count": len(field_names),
+            "fields": {},
+            "timestamp": datetime.utcnow().timestamp(),
         }
 
-        all_results = []
-        if rules:
-            self.rule_engine._rules = rules
-        for record in records:
-            all_results.extend(self.rule_engine.validate_record(record))
+        for field_name in field_names:
+            values = [record.get(field_name) for record in data if field_name in record]
+            profile["fields"][field_name] = self._profile_field(field_name, values)
 
-        overall_score = sum(dimension_scores.values()) / len(dimension_scores) if dimension_scores else 0.0
+        return profile
 
-        issues = []
-        if overall_score < 0.7:
-            issues.append(f"Overall quality score is below threshold: {overall_score:.1%}")
-        failed_validations = [r for r in all_results if not r.passed]
-        if failed_validations:
-            issues.append(f"{len(failed_validations)} validation rules failed")
+    def _profile_field(self, name: str, values: list[Any]) -> dict[str, Any]:
+        """Profile single field."""
+        non_null = [v for v in values if v is not None]
+        null_count = len(values) - len(non_null)
 
-        return DataQualityReport(
-            dataset_name=dataset_name,
-            total_records=len(records),
-            overall_score=overall_score,
-            dimension_scores=dimension_scores,
-            field_quality=field_quality_list,
-            validation_results=all_results,
-            issues=issues,
-        )
+        field_profile: dict[str, Any] = {
+            "name": name,
+            "total_count": len(values),
+            "null_count": null_count,
+            "null_percentage": null_count / len(values) * 100 if values else 0,
+            "unique_count": len(set(str(v) for v in non_null)),
+        }
 
-    def to_json(self, report: DataQualityReport) -> str:
-        return json.dumps({
-            "dataset_name": report.dataset_name,
-            "total_records": report.total_records,
-            "overall_score": report.overall_score,
-            "dimension_scores": report.dimension_scores,
-            "field_quality": [
-                {
-                    "field_name": fq.field_name,
-                    "quality_score": fq.quality_score,
-                    "completeness": fq.completeness,
-                    "uniqueness": fq.uniqueness,
-                    "validity": fq.validity,
-                    "issues": fq.issues,
-                }
-                for fq in report.field_quality
-            ],
-            "validation_summary": {
-                "total": len(report.validation_results),
-                "passed": sum(1 for r in report.validation_results if r.passed),
-                "failed": sum(1 for r in report.validation_results if not r.passed),
-            },
-            "issues": report.issues,
-            "generated_at": report.generated_at.isoformat(),
-        }, indent=2)
+        if non_null:
+            if all(isinstance(v, (int, float)) for v in non_null):
+                nums = [float(v) for v in non_null]
+                field_profile.update({
+                    "type": "numeric",
+                    "min": min(nums),
+                    "max": max(nums),
+                    "mean": sum(nums) / len(nums),
+                    "median": self._median(nums),
+                    "std_dev": self._std_dev(nums),
+                })
+            else:
+                str_values = [str(v) for v in non_null]
+                value_counts = Counter(str_values)
+                field_profile.update({
+                    "type": "categorical",
+                    "min_length": min(len(v) for v in str_values),
+                    "max_length": max(len(v) for v in str_values),
+                    "avg_length": sum(len(v) for v in str_values) / len(str_values),
+                    "top_values": value_counts.most_common(10),
+                })
+
+        return field_profile
+
+    def _median(self, values: list[float]) -> float:
+        """Calculate median."""
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        if n == 0:
+            return 0.0
+        if n % 2 == 0:
+            return (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+        return sorted_vals[n // 2]
+
+    def _std_dev(self, values: list[float]) -> float:
+        """Calculate standard deviation."""
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / len(values)
+        return variance ** 0.5
