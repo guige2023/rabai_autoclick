@@ -1,346 +1,427 @@
-"""Data import action module for RabAI AutoClick.
+"""Data Import Action Module.
 
-Provides data import operations from various formats including
-JSON, CSV, XML, Excel, and database imports.
+Provides data import capabilities supporting multiple formats including
+JSON, CSV, TSV, Excel, XML, YAML with automatic format detection.
 """
 
-import time
-import json
+from __future__ import annotations
+
+import base64
 import csv
 import io
+import json
+import logging
+import xml.etree.ElementTree as ET
+import zipfile
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, TextIO, Tuple, Union
+
 import sys
 import os
-from typing import Any, Dict, List, Optional
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.base_action import BaseAction, ActionResult
 
 
-class JsonImporterAction(BaseAction):
-    """Import data from JSON format.
-    
-    Imports records from JSON files or strings with
-    support for nested structures and various JSON forms.
-    """
-    action_type = "json_importer"
-    display_name = "JSON导入"
-    description = "从JSON格式导入数据"
+logger = logging.getLogger(__name__)
 
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Import data from JSON.
-        
+
+class ImportFormat(Enum):
+    """Supported import formats."""
+    AUTO = "auto"
+    JSON = "json"
+    CSV = "csv"
+    TSV = "tsv"
+    XML = "xml"
+    YAML = "yaml"
+    EXCEL = "excel"
+    FORM_URLENCODED = "form_urlencoded"
+    MULTIPART = "multipart"
+
+
+class DataType(Enum):
+    """Detected data types."""
+    STRING = "string"
+    INTEGER = "integer"
+    FLOAT = "float"
+    BOOLEAN = "boolean"
+    NULL = "null"
+    ARRAY = "array"
+    OBJECT = "object"
+
+
+@dataclass
+class ImportOptions:
+    """Options for data import."""
+    format: ImportFormat = ImportFormat.AUTO
+    encoding: str = "utf-8"
+    delimiter: str = ","
+    has_header: bool = True
+    skip_rows: int = 0
+    max_rows: Optional[int] = None
+    flatten_nested: bool = False
+    flatten_separator: str = "."
+    infer_types: bool = True
+    null_values: List[str] = field(default_factory=lambda: ["", "null", "NULL", "NA", "N/A", "None"])
+    true_values: List[str] = field(default_factory=lambda: ["true", "True", "TRUE", "1", "yes", "Yes", "YES"])
+    false_values: List[str] = field(default_factory=lambda: ["false", "False", "FALSE", "0", "no", "No", "NO"])
+
+
+@dataclass
+class ImportMetadata:
+    """Metadata about imported data."""
+    record_count: int = 0
+    field_count: int = 0
+    fields: List[str] = field(default_factory=list)
+    detected_format: Optional[str] = None
+    inferred_types: Dict[str, str] = field(default_factory=dict)
+    parse_time_ms: float = 0.0
+    warnings: List[str] = field(default_factory=list)
+
+
+def _detect_type(value: str, options: ImportOptions) -> Tuple[Any, DataType]:
+    """Infer the type of a string value."""
+    if value in options.null_values:
+        return None, DataType.NULL
+
+    # Boolean
+    if value in options.true_values:
+        return True, DataType.BOOLEAN
+    if value in options.false_values:
+        return False, DataType.BOOLEAN
+
+    # Integer
+    try:
+        return int(value), DataType.INTEGER
+    except ValueError:
+        pass
+
+    # Float
+    try:
+        return float(value), DataType.FLOAT
+    except ValueError:
+        pass
+
+    return value, DataType.STRING
+
+
+def _flatten_record(record: Dict[str, Any], sep: str = ".") -> Dict[str, Any]:
+    """Flatten a nested record."""
+    result: Dict[str, Any] = {}
+
+    def flatten(obj: Any, prefix: str = "") -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                new_key = f"{prefix}{sep}{key}" if prefix else key
+                flatten(value, new_key)
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                new_key = f"{prefix}[{i}]"
+                flatten(item, new_key)
+        else:
+            result[prefix] = obj
+
+    flatten(record)
+    return result
+
+
+class DataImportAction(BaseAction):
+    """Data Import Action for importing data from various formats.
+
+    Supports auto-detection, type inference, and flexible parsing options.
+
+    Examples:
+        >>> action = DataImportAction()
+        >>> result = action.execute(ctx, {
+        ...     "source": "file",
+        ...     "file_path": "/tmp/data.csv",
+        ...     "format": "auto"
+        ... })
+    """
+
+    action_type = "data_import"
+    display_name = "数据导入"
+    description = "多格式数据导入：JSON/CSV/XML/YAML/Excel，自动格式检测"
+
+    def execute(self, context: Any, params: Dict[str, Any]) -> ActionResult:
+        """Execute data import.
+
         Args:
             context: Execution context.
-            params: Dict with keys: source (file path or JSON string),
-                   data_path (dot notation to array in JSON),
-                   normalize, flatten_separator.
-        
+            params: Dict with keys:
+                - source: 'file', 'text', or 'base64'
+                - file_path: Path to file (for file source)
+                - text: Raw text data (for text source)
+                - base64_data: Base64 encoded data (for base64 source)
+                - format: Format hint ('auto', 'json', 'csv', etc.)
+                - encoding: Text encoding (default: 'utf-8')
+                - delimiter: CSV delimiter (default: ',')
+                - has_header: CSV has header row (default: True)
+                - skip_rows: Rows to skip (default: 0)
+                - max_rows: Max rows to import
+                - flatten_nested: Flatten nested structures
+                - infer_types: Infer column types
+
         Returns:
-            ActionResult with imported data.
+            ActionResult with imported data and metadata.
         """
-        source = params.get('source', '')
-        data_path = params.get('data_path', '')
-        normalize = params.get('normalize', False)
-        flatten_sep = params.get('flatten_separator', '_')
+        import time
         start_time = time.time()
 
-        if not source:
-            return ActionResult(success=False, message="source is required")
+        source = params.get("source", "text")
+        file_path = params.get("file_path")
+        text_data = params.get("text", "")
+        base64_data = params.get("base64_data")
+        format_hint = params.get("format", "auto").lower()
 
+        # Build import options
+        options = ImportOptions(
+            format=ImportFormat(format_hint),
+            encoding=params.get("encoding", "utf-8"),
+            delimiter=params.get("delimiter", ","),
+            has_header=params.get("has_header", True),
+            skip_rows=params.get("skip_rows", 0),
+            max_rows=params.get("max_rows"),
+            flatten_nested=params.get("flatten_nested", False),
+            infer_types=params.get("infer_types", True),
+        )
+
+        # Load raw data
+        raw_data: Union[str, bytes]
         try:
-            if os.path.exists(source):
-                with open(source, 'r', encoding='utf-8') as f:
-                    raw = f.read()
+            if source == "file":
+                if not file_path:
+                    return ActionResult(success=False, message="file_path required for file source")
+                path = Path(file_path)
+                if not path.exists():
+                    return ActionResult(success=False, message=f"File not found: {file_path}")
+                raw_data = path.read_bytes() if _is_binary_format(format_hint) else path.read_text(encoding=options.encoding)
+            elif source == "base64":
+                if not base64_data:
+                    return ActionResult(success=False, message="base64_data required")
+                raw_data = base64.b64decode(base64_data)
+            else:  # text
+                raw_data = text_data
+
+        except Exception as e:
+            return ActionResult(success=False, message=f"Failed to read data: {str(e)}")
+
+        # Detect format
+        if isinstance(raw_data, bytes):
+            try:
+                raw_data = raw_data.decode(options.encoding)
+            except UnicodeDecodeError as e:
+                return ActionResult(success=False, message=f"Encoding error: {str(e)}")
+
+        detected_format = self._detect_format(raw_data, format_hint, options)
+        metadata = ImportMetadata(detected_format=detected_format)
+
+        # Parse data
+        try:
+            if detected_format == "json":
+                records, meta = self._parse_json(raw_data, options)
+            elif detected_format in ("csv", "tsv"):
+                records, meta = self._parse_csv(raw_data, options)
+            elif detected_format == "xml":
+                records, meta = self._parse_xml(raw_data, options)
+            elif detected_format == "yaml":
+                records, meta = self._parse_yaml(raw_data, options)
+            elif detected_format == "form_urlencoded":
+                records, meta = self._parse_form_urlencoded(raw_data, options)
             else:
-                raw = source
+                return ActionResult(success=False, message=f"Unsupported format: {detected_format}")
 
-            data = json.loads(raw)
+            metadata.record_count = len(records)
+            metadata.field_count = meta.get("field_count", 0)
+            metadata.fields = meta.get("fields", [])
+            metadata.inferred_types = meta.get("inferred_types", {})
+            metadata.warnings = meta.get("warnings", [])
 
-            if data_path:
-                for key in data_path.split('.'):
-                    if key.isdigit():
-                        data = data[int(key)]
+        except Exception as e:
+            logger.exception(f"Parse error: {detected_format}")
+            return ActionResult(success=False, message=f"Parse error: {str(e)}")
+
+        metadata.parse_time_ms = (time.time() - start_time) * 1000
+
+        return ActionResult(
+            success=True,
+            message=f"Imported {len(records)} records from {detected_format}",
+            data={
+                "data": records,
+                "metadata": {
+                    "record_count": metadata.record_count,
+                    "field_count": metadata.field_count,
+                    "fields": metadata.fields,
+                    "detected_format": metadata.detected_format,
+                    "inferred_types": metadata.inferred_types,
+                    "parse_time_ms": metadata.parse_time_ms,
+                    "warnings": metadata.warnings,
+                }
+            }
+        )
+
+    def _is_binary_format(self, format_hint: str) -> bool:
+        """Check if format is binary."""
+        return format_hint in ("excel", "parquet", "zip")
+
+    def _detect_format(self, data: str, hint: str, options: ImportOptions) -> str:
+        """Auto-detect data format."""
+        if hint != "auto":
+            return hint
+
+        data = data.strip()
+
+        # JSON
+        if data.startswith("{") or data.startswith("["):
+            try:
+                json.loads(data)
+                return "json"
+            except json.JSONDecodeError:
+                pass
+
+        # XML
+        if data.startswith("<"):
+            return "xml"
+
+        # CSV/TSV - check delimiter
+        first_line = data.split("\n")[0] if "\n" in data else data
+        if "\t" in first_line:
+            return "tsv"
+        if "," in first_line or ";" in first_line:
+            return "csv"
+
+        # YAML
+        if ":" in data and "\n" in data:
+            return "yaml"
+
+        # Form URL-encoded
+        if "=" in data and "&" in data:
+            return "form_urlencoded"
+
+        return "json"
+
+    def _parse_json(self, data: str, options: ImportOptions) -> Tuple[List, Dict]:
+        """Parse JSON data."""
+        parsed = json.loads(data)
+        records = parsed if isinstance(parsed, list) else [parsed]
+
+        if options.flatten_nested:
+            records = [_flatten_record(r, options.flatten_separator) if isinstance(r, dict) else r
+                      for r in records]
+
+        inferred = {}
+        if options.infer_types and records:
+            for key in records[0].keys() if isinstance(records[0], dict) else []:
+                sample = records[0].get(key)
+                _, dtype = _detect_type(str(sample), options)
+                inferred[key] = dtype.value
+
+        return records, {"fields": list(records[0].keys()) if records and isinstance(records[0], dict) else [],
+                         "field_count": len(records[0]) if records and isinstance(records[0], dict) else 0,
+                         "inferred_types": inferred}
+
+    def _parse_csv(self, data: str, options: ImportOptions) -> Tuple[List[Dict], Dict]:
+        """Parse CSV/TSV data."""
+        delimiter = "\t" if options.format == ImportFormat.TSV else options.delimiter
+        reader = csv.reader(io.StringIO(data), delimiter=delimiter)
+        rows = list(reader)
+
+        # Skip rows
+        rows = rows[options.skip_rows:]
+
+        # Header
+        if options.has_header and rows:
+            headers = rows[0]
+            data_rows = rows[1:]
+        else:
+            headers = [f"col_{i}" for i in range(len(rows[0]))]
+            data_rows = rows
+
+        # Max rows
+        if options.max_rows:
+            data_rows = data_rows[:options.max_rows]
+
+        # Build records
+        records = []
+        inferred = {}
+
+        for row in data_rows:
+            record = {}
+            for i, value in enumerate(row):
+                if i < len(headers):
+                    key = headers[i]
+                    if options.infer_types:
+                        typed_value, dtype = _detect_type(value, options)
+                        record[key] = typed_value
+                        if key not in inferred:
+                            inferred[key] = dtype.value
                     else:
-                        data = data.get(key, [])
+                        record[key] = value
+            records.append(record)
 
-            if not isinstance(data, list):
-                data = [data]
+        return records, {
+            "fields": headers,
+            "field_count": len(headers),
+            "inferred_types": inferred,
+        }
 
-            if normalize:
-                data = self._normalize_records(data, flatten_sep)
+    def _parse_xml(self, data: str, options: ImportOptions) -> Tuple[List[Dict], Dict]:
+        """Parse XML data."""
+        root = ET.fromstring(data)
+        records = []
 
-            return ActionResult(
-                success=True,
-                message=f"Imported {len(data)} records from JSON",
-                data={
-                    'data': data,
-                    'count': len(data),
-                    'source': source if os.path.exists(source) else '<string>'
-                },
-                duration=time.time() - start_time
-            )
-        except json.JSONDecodeError as e:
-            return ActionResult(
-                success=False,
-                message=f"JSON parse error: {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Import failed: {str(e)}"
-            )
-
-    def _normalize_records(self, data: List[Dict], sep: str) -> List[Dict]:
-        """Flatten nested records."""
-        normalized = []
-        for record in data:
-            if isinstance(record, dict):
-                flat = self._flatten_dict(record, sep)
-                normalized.append(flat)
-            else:
-                normalized.append(record)
-        return normalized
-
-    def _flatten_dict(self, d: Dict, sep: str, parent_key: str = '') -> Dict:
-        """Flatten nested dictionary."""
-        items = []
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            if isinstance(v, dict):
-                items.extend(self._flatten_dict(v, sep, new_key).items())
-            elif isinstance(v, list):
-                items.append((new_key, json.dumps(v)))
-            else:
-                items.append((new_key, v))
-        return dict(items)
-
-
-class CsvImporterAction(BaseAction):
-    """Import data from CSV format.
-    
-    Imports records from CSV files or strings with
-    configurable delimiter, quoting, and header handling.
-    """
-    action_type = "csv_importer"
-    display_name = "CSV导入"
-    description = "从CSV格式导入数据"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Import data from CSV.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: source (file path or CSV string),
-                   delimiter, skip_rows, has_header, columns.
-        
-        Returns:
-            ActionResult with imported data.
-        """
-        source = params.get('source', '')
-        delimiter = params.get('delimiter', ',')
-        skip_rows = params.get('skip_rows', 0)
-        has_header = params.get('has_header', True)
-        columns = params.get('columns', [])
-        start_time = time.time()
-
-        if not source:
-            return ActionResult(success=False, message="source is required")
-
-        try:
-            if os.path.exists(source):
-                with open(source, 'r', encoding='utf-8') as f:
-                    raw = f.read()
-            else:
-                raw = source
-
-            for _ in range(skip_rows):
-                raw = raw[raw.index('\n') + 1:]
-
-            reader = csv.reader(io.StringIO(raw), delimiter=delimiter)
-            rows = list(reader)
-
-            if has_header and rows:
-                header = rows[0]
-                data_rows = rows[1:]
-            elif columns:
-                header = columns
-                data_rows = rows
-            else:
-                header = [f"col_{i}" for i in range(len(rows[0]))]
-                data_rows = rows
-
-            data = []
-            for row in data_rows:
-                record = {header[i]: row[i] if i < len(row) else '' for i in range(len(header))}
-                data.append(record)
-
-            return ActionResult(
-                success=True,
-                message=f"Imported {len(data)} records from CSV",
-                data={
-                    'data': data,
-                    'count': len(data),
-                    'columns': header
-                },
-                duration=time.time() - start_time
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"CSV import failed: {str(e)}"
-            )
-
-
-class XmlImporterAction(BaseAction):
-    """Import data from XML format.
-    
-    Imports records from XML files or strings with
-    support for repeated elements and attributes.
-    """
-    action_type = "xml_importer"
-    display_name = "XML导入"
-    description = "从XML格式导入数据"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Import data from XML.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: source (file path or XML string),
-                   row_tag, include_attrs.
-        
-        Returns:
-            ActionResult with imported data.
-        """
-        import xml.etree.ElementTree as ET
-
-        source = params.get('source', '')
-        row_tag = params.get('row_tag', 'row')
-        include_attrs = params.get('include_attrs', False)
-        start_time = time.time()
-
-        if not source:
-            return ActionResult(success=False, message="source is required")
-
-        try:
-            if os.path.exists(source):
-                tree = ET.parse(source)
-                root = tree.getroot()
-            else:
-                root = ET.fromstring(source)
-
-            data = []
-            for element in root.iter(row_tag):
+        # Find records - look for repeated elements
+        if len(root) > 0:
+            sample = root[0]
+            for child in root:
                 record = {}
-                if include_attrs:
-                    record.update(element.attrib)
-                for child in element:
-                    tag = child.tag
-                    text = child.text.strip() if child.text else ''
-                    if child.attrib:
-                        record[f"{tag}_attr"] = dict(child.attrib)
-                    record[tag] = text
-                if not record and element.text and element.text.strip():
-                    record['_value'] = element.text.strip()
-                data.append(record)
+                for subchild in child:
+                    key = subchild.tag
+                    value = subchild.text if subchild.text else ""
+                    if options.infer_types:
+                        value, _ = _detect_type(value, options)
+                    record[key] = value
+                records.append(record)
+            fields = list(sample.attrib.keys()) + [c.tag for c in sample]
+        else:
+            records = [{"text": root.text or ""}]
+            fields = ["text"]
 
-            return ActionResult(
-                success=True,
-                message=f"Imported {len(data)} records from XML",
-                data={
-                    'data': data,
-                    'count': len(data)
-                },
-                duration=time.time() - start_time
-            )
-        except ET.ParseError as e:
-            return ActionResult(
-                success=False,
-                message=f"XML parse error: {str(e)}"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"XML import failed: {str(e)}"
-            )
+        return records, {"fields": fields, "field_count": len(fields)}
 
-
-class ExcelImporterAction(BaseAction):
-    """Import data from Excel format.
-    
-    Imports records from Excel files (.xlsx, .xls) with
-    support for sheet selection and header detection.
-    """
-    action_type = "excel_importer"
-    display_name = "Excel导入"
-    description = "从Excel格式导入数据"
-
-    def execute(
-        self,
-        context: Any,
-        params: Dict[str, Any]
-    ) -> ActionResult:
-        """Import data from Excel.
-        
-        Args:
-            context: Execution context.
-            params: Dict with keys: source (file path), sheet_name,
-                   sheet_index, has_header, skip_rows.
-        
-        Returns:
-            ActionResult with imported data.
-        """
-        source = params.get('source', '')
-        sheet_name = params.get('sheet_name', None)
-        sheet_index = params.get('sheet_index', 0)
-        has_header = params.get('has_header', True)
-        skip_rows = params.get('skip_rows', 0)
-        start_time = time.time()
-
-        if not source or not os.path.exists(source):
-            return ActionResult(success=False, message="source file not found")
-
+    def _parse_yaml(self, data: str, options: ImportOptions) -> Tuple[List, Dict]:
+        """Parse YAML data."""
         try:
-            import pandas as pd
-            df = pd.read_excel(source, sheet_name=sheet_name or sheet_index, header=0 if has_header else None, skiprows=skip_rows)
-
-            if has_header:
-                df.columns = [str(c) for c in df.columns]
-            else:
-                df.columns = [f"col_{i}" for i in range(len(df.columns))]
-
-            data = df.to_dict('records')
-
-            return ActionResult(
-                success=True,
-                message=f"Imported {len(data)} records from Excel (sheet: {sheet_name or sheet_index})",
-                data={
-                    'data': data,
-                    'count': len(data),
-                    'columns': list(df.columns),
-                    'sheet': sheet_name or sheet_index
-                },
-                duration=time.time() - start_time
-            )
+            import yaml
+            parsed = yaml.safe_load(data)
+            records = parsed if isinstance(parsed, list) else [parsed]
+            return records, {"fields": [], "field_count": 0}
         except ImportError:
-            return ActionResult(
-                success=False,
-                message="pandas and openpyxl required for Excel import"
-            )
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                message=f"Excel import failed: {str(e)}"
-            )
+            # Fallback - treat as JSON
+            return self._parse_json(data, options)
+
+    def _parse_form_urlencoded(self, data: str, options: ImportOptions) -> Tuple[List[Dict], Dict]:
+        """Parse form URL-encoded data."""
+        from urllib.parse import parse_qs
+        parsed = parse_qs(data)
+        records = [{k: v[0] if len(v) == 1 else v for k, v in parsed.items()}]
+        return records, {"fields": list(parsed.keys()), "field_count": len(parsed)}
+
+    def get_required_params(self) -> List[str]:
+        return ["text"]
+
+    def get_optional_params(self) -> Dict[str, Any]:
+        return {
+            "source": "text",
+            "file_path": None,
+            "base64_data": None,
+            "format": "auto",
+            "encoding": "utf-8",
+            "delimiter": ",",
+            "has_header": True,
+            "skip_rows": 0,
+            "max_rows": None,
+            "flatten_nested": False,
+            "infer_types": True,
+        }
