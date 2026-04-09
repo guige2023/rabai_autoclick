@@ -1,344 +1,393 @@
-"""Async utilities for RabAI AutoClick.
+"""Async/await and concurrency utilities.
 
-Provides:
-- Async context managers and decorators
-- Task grouping and coordination
-- Timeout and cancellation utilities
-- Async iterator helpers
+Provides async wrappers, Future implementations,
+concurrency primitives, and parallel execution utilities.
 """
 
-import asyncio
-import functools
+from __future__ import annotations
+
 from typing import (
-    Any,
-    Awaitable,
-    Callable,
-    Coroutine,
-    Iterable,
-    List,
-    Optional,
-    Set,
-    TypeVar,
-    Union,
+    TypeVar, Generic, Callable, Optional, Any, List, Tuple,
+    Dict, Set, Awaitable, Future as StdFuture, Coroutine
 )
+from dataclasses import dataclass, field
+from enum import Enum, auto
+import threading
+import asyncio
+import concurrent.futures
+import time
+from functools import wraps
 
-T = TypeVar("T")
-T_co = TypeVar("T_co", covariant=True)
+
+T = TypeVar('T')
+T_co = TypeVar('T_co', covariant=True)
 
 
-class AsyncTimeoutError(asyncio.TimeoutError):
-    """Raised when an async operation times out."""
-    pass
+class FutureState(Enum):
+    """States of a Future."""
+    PENDING = auto()
+    RUNNING = auto()
+    DONE = auto()
+    CANCELLED = auto()
+    FAILED = auto()
 
 
-async def with_timeout(
-    coro: Coroutine[Any, Any, T],
-    timeout: float,
-    *,
-    cancel_on_timeout: bool = True,
-) -> T:
-    """Execute a coroutine with a timeout.
+@dataclass
+class FutureResult(Generic[T]):
+    """Result holder for Future operations."""
+    success: bool
+    value: Optional[T] = None
+    error: Optional[Exception] = None
 
-    Args:
-        coro: The coroutine to execute.
-        timeout: Timeout in seconds.
-        cancel_on_timeout: If True, cancel the coroutine on timeout.
 
-    Returns:
-        The result of the coroutine.
+class Future(Generic[T]):
+    """Simple Future implementation for async operations.
 
-    Raises:
-        AsyncTimeoutError: If the operation times out.
+    Example:
+        future = Future[str]()
+        def setter():
+            future.set_result("Done!")
+        Thread(target=setter).start()
+        result = future.get()  # Blocks until result is set
     """
-    try:
-        return await asyncio.wait_for(coro, timeout=timeout)
-    except asyncio.TimeoutError:
-        if cancel_on_timeout:
-            coro.close()
-        raise AsyncTimeoutError(f"Operation timed out after {timeout}s")
-
-
-async def gather_with_concurrency(
-    *coros: Awaitable[T],
-    max_concurrency: int = 10,
-    return_exceptions: bool = False,
-) -> List[T]:
-    """Gather coroutines with limited concurrency.
-
-    Args:
-        *coros: Coroutines to execute.
-        max_concurrency: Maximum number of concurrent tasks.
-        return_exceptions: If True, return exceptions as results.
-
-    Returns:
-        List of results in the same order as input coroutines.
-    """
-    semaphore = asyncio.Semaphore(max_concurrency)
-
-    async def _run(coro: Awaitable[T]) -> T:
-        async with semaphore:
-            return await coro
-
-    wrapped = [_run(c) for c in coros]
-    return await asyncio.gather(*wrapped, return_exceptions=return_exceptions)
-
-
-async def gather_with_progress(
-    coros: List[Awaitable[T]],
-    *,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
-) -> List[T]:
-    """Gather coroutines with optional progress reporting.
-
-    Args:
-        coros: List of coroutines to execute.
-        progress_callback: Called with (completed, total) on each completion.
-
-    Returns:
-        List of results.
-    """
-    results: List[T] = []
-    total = len(coros)
-
-    async def _run_with_report(coro: Awaitable[T], idx: int) -> T:
-        result = await coro
-        if progress_callback:
-            progress_callback(idx + 1, total)
-        return result
-
-    wrapped = [_run_with_report(c, i) for i, c in enumerate(coros)]
-    results = await asyncio.gather(*wrapped)
-    return results
-
-
-class AsyncSemaphore:
-    """Async semaphore with acquire context manager."""
-
-    def __init__(self, value: int = 1) -> None:
-        self._sem = asyncio.Semaphore(value)
-
-    async def __aenter__(self) -> "AsyncSemaphore":
-        await self._sem.acquire()
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        self._sem.release()
-
-    async def acquire(self) -> None:
-        await self._sem.acquire()
-
-    def release(self) -> None:
-        self._sem.release()
-
-
-class AsyncLock:
-    """Async lock with context manager support."""
 
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()
+        self._state = FutureState.PENDING
+        self._result: Optional[T] = None
+        self._error: Optional[Exception] = None
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._callbacks: List[Callable[[Future[T]], None]] = []
 
-    async def __aenter__(self) -> "AsyncLock":
-        await self._lock.acquire()
-        return self
+    def set_result(self, value: T) -> None:
+        """Set the result and notify waiters."""
+        with self._lock:
+            if self._state not in (FutureState.PENDING, FutureState.RUNNING):
+                raise ValueError(f"Future already {self._state}")
+            self._result = value
+            self._state = FutureState.DONE
+            self._condition.notify_all()
+        self._notify_callbacks()
 
-    async def __aexit__(self, *args: Any) -> None:
-        self._lock.release()
+    def set_error(self, error: Exception) -> None:
+        """Set an error and notify waiters."""
+        with self._lock:
+            if self._state not in (FutureState.PENDING, FutureState.RUNNING):
+                raise ValueError(f"Future already {self._state}")
+            self._error = error
+            self._state = FutureState.FAILED
+            self._condition.notify_all()
+        self._notify_callbacks()
 
-    async def acquire(self) -> None:
-        await self._lock.acquire()
+    def set_running(self) -> None:
+        """Mark future as running."""
+        with self._lock:
+            if self._state == FutureState.PENDING:
+                self._state = FutureState.RUNNING
 
-    def release(self) -> None:
-        self._lock.release()
+    def cancel(self) -> bool:
+        """Attempt to cancel the future."""
+        with self._lock:
+            if self._state in (FutureState.DONE, FutureState.FAILED, FutureState.CANCELLED):
+                return False
+            self._state = FutureState.CANCELLED
+            self._condition.notify_all()
+        self._notify_callbacks()
+        return True
 
+    def get(self, timeout: Optional[float] = None) -> T:
+        """Get result, blocking until available."""
+        with self._condition:
+            while self._state in (FutureState.PENDING, FutureState.RUNNING):
+                if not self._condition.wait(timeout):
+                    raise TimeoutError("Future get timed out")
+            if self._state == FutureState.CANCELLED:
+                raise concurrent.futures.CancelledError()
+            if self._state == FutureState.FAILED:
+                raise self._error  # type: ignore
+            return self._result  # type: ignore
 
-class AsyncEvent:
-    """Async event for signaling between tasks."""
+    def result(self, timeout: Optional[float] = None) -> T:
+        """Alias for get()."""
+        return self.get(timeout)
 
-    def __init__(self) -> None:
-        self._event = asyncio.Event()
+    @property
+    def state(self) -> FutureState:
+        """Get current state."""
+        return self._state
 
-    async def wait(self) -> None:
-        await self._event.wait()
+    @property
+    def is_done(self) -> bool:
+        """Check if future is complete."""
+        return self._state in (
+            FutureState.DONE, FutureState.FAILED, FutureState.CANCELLED
+        )
 
-    def is_set(self) -> bool:
-        return self._event.is_set()
+    @property
+    def is_cancelled(self) -> bool:
+        """Check if future was cancelled."""
+        return self._state == FutureState.CANCELLED
 
-    def set(self) -> None:
-        self._event.set()
-
-    def clear(self) -> None:
-        self._event.clear()
-
-
-class AsyncBarrier:
-    """Async barrier for synchronizing tasks."""
-
-    def __init__(self, parties: int) -> None:
-        self._barrier = asyncio.Barrier(parties)
-
-    async def wait(self) -> int:
-        return await self._barrier.wait()
-
-
-async def retry_async(
-    coro_fn: Callable[..., Coroutine[Any, Any, T]],
-    *args: Any,
-    retries: int = 3,
-    delay: float = 1.0,
-    backoff: float = 2.0,
-    exceptions: tuple = (Exception,),
-    **kwargs: Any,
-) -> T:
-    """Retry an async function with exponential backoff.
-
-    Args:
-        coro_fn: Async function to retry.
-        *args: Positional arguments for the function.
-        retries: Number of retry attempts.
-        delay: Initial delay between retries (seconds).
-        backoff: Multiplier for delay after each retry.
-        exceptions: Tuple of exceptions to catch.
-        **kwargs: Keyword arguments for the function.
-
-    Returns:
-        Result of the function call.
-
-    Raises:
-        Last exception if all retries fail.
-    """
-    last_exc: Optional[Exception] = None
-    current_delay = delay
-
-    for attempt in range(retries + 1):
-        try:
-            return await coro_fn(*args, **kwargs)
-        except exceptions as e:
-            last_exc = e
-            if attempt < retries:
-                await asyncio.sleep(current_delay)
-                current_delay *= backoff
+    def add_done_callback(
+        self, callback: Callable[[Future[T]], None]
+    ) -> None:
+        """Add callback to be called when future completes."""
+        with self._lock:
+            if self._state in (FutureState.DONE, FutureState.FAILED, FutureState.CANCELLED):
+                callback(self)
             else:
-                raise last_exc
+                self._callbacks.append(callback)
+
+    def _notify_callbacks(self) -> None:
+        """Notify all registered callbacks."""
+        with self._lock:
+            callbacks = self._callbacks[:]
+        for callback in callbacks:
+            try:
+                callback(self)
+            except Exception:
+                pass
 
 
-def async_to_sync(coro: Coroutine[Any, Any, T]) -> T:
-    """Run a coroutine in the default event loop synchronously.
+def make_future(
+    func: Callable[..., T],
+    *args: Any,
+    **kwargs: Any
+) -> Future[T]:
+    """Execute function in thread and return Future for result.
 
-    Args:
-        coro: The coroutine to run.
+    Example:
+        future = make_future(expensive_computation, arg1, arg2)
+        result = future.get()
+    """
+    future: Future[T] = Future[T]()
 
-    Returns:
-        The result of the coroutine.
+    def runner() -> None:
+        try:
+            future.set_running()
+            result = func(*args, **kwargs)
+            future.set_result(result)
+        except Exception as e:
+            future.set_error(e)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    return future
+
+
+@dataclass
+class AsyncTask(Generic[T]):
+    """Wrapper for async task management."""
+    task_id: str
+    future: Future[T]
+    created_at: float = field(default_factory=time.time)
+    completed_at: Optional[float] = None
+
+
+class TaskPool:
+    """Pool for managing multiple async tasks.
+
+    Example:
+        pool = TaskPool(max_workers=4)
+        task = pool.submit(lambda: compute_value(42))
+        results = pool.wait_all(timeout=10.0)
+    """
+
+    def __init__(self, max_workers: Optional[int] = None) -> None:
+        self._max_workers = max_workers
+        self._tasks: Dict[str, AsyncTask[Any]] = {}
+        self._lock = threading.RLock()
+        self._counter = itertools.count()
+
+    def submit(
+        self,
+        func: Callable[..., T],
+        *args: Any,
+        **kwargs: Any
+    ) -> AsyncTask[T]:
+        """Submit task to pool."""
+        task_id = f"task_{next(self._counter)}"
+        future = make_future(func, *args, **kwargs)
+        task = AsyncTask(task_id=task_id, future=future)
+        with self._lock:
+            self._tasks[task_id] = task
+        return task
+
+    def get_result(
+        self, task_id: str, timeout: Optional[float] = None
+    ) -> Any:
+        """Get result of specific task."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(f"Task {task_id} not found")
+        return task.future.get(timeout)
+
+    def wait_task(
+        self, task_id: str, timeout: Optional[float] = None
+    ) -> bool:
+        """Wait for specific task. Returns True if completed."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        try:
+            task.future.get(timeout)
+            return True
+        except TimeoutError:
+            return False
+
+    def wait_all(
+        self, timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Wait for all tasks and return results."""
+        start = time.time()
+        remaining = timeout
+        results: Dict[str, Any] = {}
+        with self._lock:
+            task_ids = list(self._tasks.keys())
+        for task_id in task_ids:
+            task_timeout = None
+            if remaining is not None:
+                elapsed = time.time() - start
+                task_timeout = max(0.1, remaining - elapsed)
+                if task_timeout <= 0:
+                    break
+            try:
+                results[task_id] = self.get_result(task_id, task_timeout)
+            except TimeoutError:
+                break
+            if remaining is not None:
+                elapsed = time.time() - start
+                remaining = timeout - elapsed
+        return results
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Cancel specific task."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        return task.future.cancel()
+
+    def cancel_all(self) -> int:
+        """Cancel all tasks. Returns count cancelled."""
+        with self._lock:
+            count = 0
+            for task in self._tasks.values():
+                if task.future.cancel():
+                    count += 1
+            return count
+
+    def get_pending(self) -> List[str]:
+        """Get list of pending task IDs."""
+        with self._lock:
+            return [
+                tid for tid, task in self._tasks.items()
+                if not task.future.is_done
+            ]
+
+    def get_completed(self) -> List[str]:
+        """Get list of completed task IDs."""
+        with self._lock:
+            return [
+                tid for tid, task in self._tasks.items()
+                if task.future.is_done
+            ]
+
+    def remove_completed(self) -> int:
+        """Remove completed tasks from pool."""
+        with self._lock:
+            completed = [
+                tid for tid, task in self._tasks.items()
+                if task.future.is_done
+            ]
+            for tid in completed:
+                del self._tasks[tid]
+            return len(completed)
+
+    @property
+    def pending_count(self) -> int:
+        return len(self.get_pending())
+
+    @property
+    def total_count(self) -> int:
+        with self._lock:
+            return len(self._tasks)
+
+
+import itertools
+
+
+def async_to_sync(awaitable: Awaitable[T]) -> T:
+    """Convert awaitable to synchronous result.
+
+    Note: This creates a new event loop, suitable for use outside of async context.
     """
     try:
         loop = asyncio.get_running_loop()
+        future: StdFuture[T] = asyncio.ensure_future(
+            awaitable  # type: ignore
+        )
+        return future.result()
     except RuntimeError:
-        return asyncio.run(coro)
-
-    future = asyncio.ensure_future(coro)
-    return asyncio.run(future)
+        return asyncio.run(awaitable)  # type: ignore
 
 
-async def run_in_executor(
+def run_in_executor(
+    executor: Optional[concurrent.futures.Executor],
     func: Callable[..., T],
-    *args: Any,
-) -> T:
-    """Run a blocking function in a thread pool executor.
+    *args: Any
+) -> Future[T]:
+    """Run blocking function in executor, return Future."""
+    return make_future(lambda: executor.submit(func, *args).result())
 
-    Args:
-        func: Blocking function to run.
-        *args: Arguments for the function.
 
-    Returns:
-        Result of the function call.
+class SynchronizationBarrier:
+    """Barrier for synchronizing multiple threads/tasks.
+
+    Example:
+        barrier = SynchronizationBarrier(parties=3)
+        for i in range(3):
+            Thread(target=worker, args=(barrier,)).start()
     """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, func, *args)
 
+    def __init__(self, parties: int) -> None:
+        if parties <= 0:
+            raise ValueError("parties must be positive")
+        self._parties = parties
+        self._count = 0
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._generation = 0
 
-async def sleep_with_jitter(
-    base_delay: float,
-    *,
-    jitter: float = 0.1,
-) -> None:
-    """Sleep with random jitter.
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Wait for all parties to reach barrier."""
+        with self._condition:
+            gen = self._generation
+            self._count += 1
+            if self._count == self._parties:
+                self._count = 0
+                self._generation += 1
+                self._condition.notify_all()
+                return True
+            end_time = None
+            if timeout is not None:
+                end_time = time.time() + timeout
+            while self._generation == gen:
+                if timeout is not None:
+                    remaining = end_time - time.time()
+                    if remaining <= 0:
+                        return False
+                    self._condition.wait(remaining)
+                else:
+                    self._condition.wait()
+            return True
 
-    Args:
-        base_delay: Base sleep duration in seconds.
-        jitter: Maximum random jitter to add (as fraction of base_delay).
-    """
-    import random
-    jitter_amount = base_delay * jitter * random.random()
-    await asyncio.sleep(base_delay + jitter_amount)
+    @property
+    def parties(self) -> int:
+        return self._parties
 
-
-async def wait_for_any(
-    *tasks: Union[Awaitable[T], asyncio.Task[T]],
-    timeout: Optional[float] = None,
-) -> tuple[int, T]:
-    """Wait for any one task to complete.
-
-    Args:
-        *tasks: Tasks to wait on.
-        timeout: Optional timeout in seconds.
-        return_when: When to return (FIRST_COMPLETED, FIRST_EXCEPTION, etc.)
-
-    Returns:
-        Tuple of (index, result) of the completed task.
-    """
-    if not tasks:
-        raise ValueError("At least one task required")
-
-    if len(tasks) == 1:
-        result = await tasks[0]
-        return (0, result)
-
-    done, _ = await asyncio.wait(
-        [asyncio.ensure_future(t) for t in tasks],
-        timeout=timeout,
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-
-    for i, task in enumerate(tasks):
-        if task.done():
-            return (i, task.result())
-
-    raise asyncio.TimeoutError("No task completed within timeout")
-
-
-async def cancel_tasks(tasks: List[asyncio.Task[T]]) -> None:
-    """Cancel a list of tasks gracefully.
-
-    Args:
-        tasks: List of tasks to cancel.
-    """
-    for task in tasks:
-        if not task.done():
-            task.cancel()
-
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-
-def create_task(
-    coro: Coroutine[Any, Any, T],
-    *,
-    name: Optional[str] = None,
-    early_cancel: Optional[asyncio.Event] = None,
-) -> asyncio.Task[T]:
-    """Create a task with optional early cancellation.
-
-    Args:
-        coro: The coroutine to wrap in a task.
-        name: Optional task name.
-        early_cancel: Optional event that, if set, cancels the task early.
-
-    Returns:
-        The created task.
-    """
-    async def _watch_cancel() -> T:
-        result = await coro
-        if early_cancel is not None:
-            early_cancel.set()
-        return result
-
-    return asyncio.create_task(_watch_cancel(), name=name)
+    @property
+    def waiting(self) -> int:
+        return self._count
