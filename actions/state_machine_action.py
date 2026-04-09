@@ -1,187 +1,289 @@
-"""State Machine Action Module.
+"""
+State Machine Action Module.
 
-Provides state machine implementation for
-workflow state management.
+Provides finite state machine with transitions, guards,
+and async event handling.
 """
 
-import time
-from typing import Any, Dict, List, Optional, Callable
+import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
-import sys
-import os
+from typing import Any, Callable, Optional, TypeVar
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.base_action import BaseAction, ActionResult
+T = TypeVar("T")
 
 
-class TransitionType(Enum):
-    """Transition type."""
-    EXTERNAL = "external"
-    INTERNAL = "internal"
+class StateMachineStatus(Enum):
+    """State machine status."""
+    IDLE = "idle"
+    RUNNING = "running"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+
+
+@dataclass
+class Transition:
+    """State transition definition."""
+    from_state: str
+    to_state: str
+    event: str
+    guard: Optional[Callable[[], bool]] = None
+    action: Optional[Callable] = None
+    timeout: Optional[float] = None
 
 
 @dataclass
 class State:
     """State definition."""
-    state_id: str
     name: str
-    entry_action: Optional[Callable] = None
-    exit_action: Optional[Callable] = None
+    on_enter: Optional[Callable] = None
+    on_exit: Optional[Callable] = None
+    on_update: Optional[Callable] = None
 
 
 @dataclass
-class Transition:
-    """State transition."""
-    from_state: str
-    to_state: str
-    event: str
-    guard: Optional[Callable] = None
-    action: Optional[Callable] = None
+class StateContext:
+    """Current state context."""
+    current_state: str
+    previous_state: Optional[str] = None
+    event: Optional[str] = None
+    metadata: dict = field(default_factory=dict)
+
+
+class StateMachineError(Exception):
+    """State machine error."""
+    pass
+
+
+class InvalidTransitionError(StateMachineError):
+    """Invalid transition error."""
+    pass
+
+
+class GuardViolationError(StateMachineError):
+    """Guard condition not met."""
+    pass
 
 
 class StateMachine:
-    """State machine implementation."""
+    """Finite state machine."""
 
-    def __init__(self, machine_id: str, initial_state: str):
-        self.machine_id = machine_id
-        self.current_state = initial_state
-        self._states: Dict[str, State] = {}
-        self._transitions: List[Transition] = []
-        self._history: List[Dict] = []
+    def __init__(self, initial_state: str, name: str = "state_machine"):
+        self.name = name
+        self._initial_state = initial_state
+        self._current_state = initial_state
+        self._states: dict[str, State] = {}
+        self._transitions: list[Transition] = []
+        self._transition_map: dict[tuple[str, str], Transition] = {}
+        self._status = StateMachineStatus.IDLE
+        self._lock = asyncio.Lock()
+        self._context = StateContext(current_state=initial_state)
 
-    def add_state(self, state: State) -> None:
+    def add_state(
+        self,
+        name: str,
+        on_enter: Optional[Callable] = None,
+        on_exit: Optional[Callable] = None,
+        on_update: Optional[Callable] = None
+    ) -> "StateMachine":
         """Add a state."""
-        self._states[state.state_id] = state
+        state = State(
+            name=name,
+            on_enter=on_enter,
+            on_exit=on_exit,
+            on_update=on_update
+        )
+        self._states[name] = state
+        return self
 
-    def add_transition(self, transition: Transition) -> None:
+    def add_transition(
+        self,
+        from_state: str,
+        to_state: str,
+        event: str,
+        guard: Optional[Callable[[], bool]] = None,
+        action: Optional[Callable] = None,
+        timeout: Optional[float] = None
+    ) -> "StateMachine":
         """Add a transition."""
+        transition = Transition(
+            from_state=from_state,
+            to_state=to_state,
+            event=event,
+            guard=guard,
+            action=action,
+            timeout=timeout
+        )
         self._transitions.append(transition)
+        self._transition_map[(from_state, to_state)] = transition
+        return self
 
-    def trigger(self, event: str, data: Optional[Dict] = None) -> bool:
-        """Trigger an event."""
-        for transition in self._transitions:
-            if transition.from_state != self.current_state:
-                continue
-            if transition.event != event:
-                continue
+    def _find_transition(self, from_state: str, event: str) -> Optional[Transition]:
+        """Find transition for state and event."""
+        for t in self._transitions:
+            if t.from_state == from_state and t.event == event:
+                return t
+        return None
 
-            if transition.guard and not transition.guard(data):
-                continue
+    async def _execute_callback(self, callback: Optional[Callable], *args: Any) -> None:
+        """Execute callback."""
+        if callback is None:
+            return
+        if asyncio.iscoroutinefunction(callback):
+            await callback(*args)
+        else:
+            await asyncio.to_thread(callback, *args)
 
-            state = self._states.get(self.current_state)
-            if state and state.exit_action:
-                state.exit_action()
+    async def send(self, event: str, data: Optional[Any] = None) -> bool:
+        """Send event to state machine."""
+        async with self._lock:
+            if self._status == StateMachineStatus.STOPPED:
+                raise StateMachineError("State machine is stopped")
 
-            self._history.append({
-                "from": self.current_state,
-                "to": transition.to_state,
-                "event": event,
-                "timestamp": time.time()
-            })
+            transition = self._find_transition(self._current_state, event)
+            if transition is None:
+                return False
 
-            self.current_state = transition.to_state
+            if transition.guard:
+                try:
+                    guard_result = transition.guard()
+                    if asyncio.iscoroutinefunction(transition.guard):
+                        guard_result = await guard_result
+                    if not guard_result:
+                        raise GuardViolationError(
+                            f"Guard failed for transition {self._current_state} -> {transition.to_state}"
+                        )
+                except GuardViolationError:
+                    raise
+                except Exception as e:
+                    raise GuardViolationError(f"Guard error: {e}")
 
-            state = self._states.get(self.current_state)
-            if state and state.entry_action:
-                state.entry_action()
+            old_state = self._current_state
+
+            if old_state in self._states:
+                await self._execute_callback(
+                    self._states[old_state].on_exit,
+                    self._context
+                )
 
             if transition.action:
-                transition.action(data)
+                await self._execute_callback(
+                    transition.action,
+                    self._context
+                )
+
+            self._current_state = transition.to_state
+            self._context = StateContext(
+                current_state=transition.to_state,
+                previous_state=old_state,
+                event=event,
+                metadata=data or {}
+            )
+
+            if transition.to_state in self._states:
+                await self._execute_callback(
+                    self._states[transition.to_state].on_enter,
+                    self._context
+                )
 
             return True
 
-        return False
+    async def start(self) -> None:
+        """Start state machine."""
+        async with self._lock:
+            if self._current_state in self._states:
+                await self._execute_callback(
+                    self._states[self._current_state].on_enter,
+                    self._context
+                )
+            self._status = StateMachineStatus.RUNNING
 
-    def get_state(self) -> str:
+    async def stop(self) -> None:
+        """Stop state machine."""
+        async with self._lock:
+            self._status = StateMachineStatus.STOPPED
+
+    async def pause(self) -> None:
+        """Pause state machine."""
+        self._status = StateMachineStatus.PAUSED
+
+    async def resume(self) -> None:
+        """Resume state machine."""
+        self._status = StateMachineStatus.RUNNING
+
+    @property
+    def current_state(self) -> str:
         """Get current state."""
-        return self.current_state
+        return self._current_state
 
-    def get_history(self) -> List[Dict]:
-        """Get state history."""
-        return self._history
+    @property
+    def status(self) -> StateMachineStatus:
+        """Get status."""
+        return self._status
+
+    @property
+    def context(self) -> StateContext:
+        """Get context."""
+        return self._context
 
 
-class StateMachineAction(BaseAction):
-    """Action for state machine operations."""
+class StateMachineAction:
+    """
+    State machine for workflow automation.
 
-    def __init__(self):
-        super().__init__("state_machine")
-        self._machines: Dict[str, StateMachine] = {}
+    Example:
+        sm = StateMachineAction(initial_state="idle", name="order")
 
-    def execute(self, params: Dict) -> ActionResult:
-        """Execute state machine action."""
-        try:
-            operation = params.get("operation", "create")
+        sm.add_state("idle")
+        sm.add_state("pending")
+        sm.add_state("processing")
+        sm.add_state("completed")
 
-            if operation == "create":
-                return self._create(params)
-            elif operation == "add_state":
-                return self._add_state(params)
-            elif operation == "trigger":
-                return self._trigger(params)
-            elif operation == "get_state":
-                return self._get_state(params)
-            else:
-                return ActionResult(success=False, message=f"Unknown: {operation}")
+        sm.add_transition("idle", "pending", "submit")
+        sm.add_transition("pending", "processing", "approve")
+        sm.add_transition("processing", "completed", "finish")
 
-        except Exception as e:
-            return ActionResult(success=False, message=str(e))
+        await sm.start()
+        await sm.send("submit", order_data)
+    """
 
-    def _create(self, params: Dict) -> ActionResult:
-        """Create state machine."""
-        machine_id = params.get("machine_id", "")
-        initial = params.get("initial_state", "initial")
+    def __init__(self, initial_state: str, name: str = "state_machine"):
+        self._sm = StateMachine(initial_state, name)
 
-        machine = StateMachine(machine_id, initial)
-        self._machines[machine_id] = machine
+    def add_state(self, name: str, **kwargs: Any) -> "StateMachineAction":
+        """Add state."""
+        self._sm.add_state(name, **kwargs)
+        return self
 
-        return ActionResult(success=True, data={"machine_id": machine_id})
+    def add_transition(
+        self,
+        from_state: str,
+        to_state: str,
+        event: str,
+        **kwargs: Any
+    ) -> "StateMachineAction":
+        """Add transition."""
+        self._sm.add_transition(from_state, to_state, event, **kwargs)
+        return self
 
-    def _add_state(self, params: Dict) -> ActionResult:
-        """Add state to machine."""
-        machine_id = params.get("machine_id", "")
-        machine = self._machines.get(machine_id)
+    async def send(self, event: str, data: Optional[Any] = None) -> bool:
+        """Send event."""
+        return await self._sm.send(event, data)
 
-        if not machine:
-            return ActionResult(success=False, message="Machine not found")
+    async def start(self) -> None:
+        """Start."""
+        await self._sm.start()
 
-        state = State(
-            state_id=params.get("state_id", ""),
-            name=params.get("name", "")
-        )
+    async def stop(self) -> None:
+        """Stop."""
+        await self._sm.stop()
 
-        machine.add_state(state)
+    @property
+    def current_state(self) -> str:
+        """Current state."""
+        return self._sm.current_state
 
-        return ActionResult(success=True)
-
-    def _trigger(self, params: Dict) -> ActionResult:
-        """Trigger event."""
-        machine_id = params.get("machine_id", "")
-        machine = self._machines.get(machine_id)
-
-        if not machine:
-            return ActionResult(success=False, message="Machine not found")
-
-        success = machine.trigger(
-            params.get("event", ""),
-            params.get("data")
-        )
-
-        return ActionResult(success=success, data={
-            "success": success,
-            "current_state": machine.get_state()
-        })
-
-    def _get_state(self, params: Dict) -> ActionResult:
-        """Get current state."""
-        machine_id = params.get("machine_id", "")
-        machine = self._machines.get(machine_id)
-
-        if not machine:
-            return ActionResult(success=False, message="Machine not found")
-
-        return ActionResult(success=True, data={
-            "machine_id": machine_id,
-            "current_state": machine.get_state()
-        })
+    @property
+    def context(self) -> StateContext:
+        """Context."""
+        return self._sm.context
