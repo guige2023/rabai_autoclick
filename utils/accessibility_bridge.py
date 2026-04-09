@@ -1,318 +1,352 @@
-"""Accessibility bridge utilities for UI automation.
+"""
+Accessibility Bridge Module.
 
-Provides a high-level interface to accessibility APIs
-(AX API on macOS, UIA on Windows, AT-SPI on Linux)
-for reading and interacting with UI elements.
+Provides a bridge between accessibility APIs and the automation framework,
+translating system accessibility events into framework-agnostic actions.
 """
 
 from __future__ import annotations
 
-import uuid
+import asyncio
+import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Protocol
 
 
-class AXRole(Enum):
-    """Cross-platform accessibility roles."""
-    WINDOW = "AXWindow"
-    BUTTON = "AXButton"
-    TEXT_FIELD = "AXTextField"
-    TEXT_AREA = "AXTextArea"
-    CHECKBOX = "AXCheckBox"
-    RADIO_BUTTON = "AXRadioButton"
-    POP_UP_BUTTON = "AXPopUpButton"
-    MENU_BAR = "AXMenuBar"
-    MENU = "AXMenu"
-    MENU_ITEM = "AXMenuItem"
-    TABLE = "AXTable"
-    ROW = "AXRow"
-    CELL = "AXCell"
-    GROUP = "AXGroup"
-    SHEET = "AXSheet"
-    DIALOG = "AXDialog"
-    TOOLBAR = "AXToolbar"
-    TABLE_HEADER = "AXTableHeader"
-    LINK = "AXLink"
-    IMAGE = "AXImage"
-    STATIC_TEXT = "AXStaticText"
-    VALUE_INDICATOR = "AXValueIndicator"
-    SLIDER = "AXSlider"
-    COLUMN = "AXColumn"
-    OUTLINE = "AXOutline"
-    OUTLINE_ROW = "AXRow"
+logger = logging.getLogger(__name__)
+
+
+class AccessibilityEvent(Enum):
+    """Enumeration of accessibility event types."""
+    ELEMENT_FOCUSED = auto()
+    ELEMENT_UNFOCUSED = auto()
+    ELEMENT_SELECTED = auto()
+    ELEMENT_EXPANDED = auto()
+    ELEMENT_COLLAPSED = auto()
+    ELEMENT_MOVED = auto()
+    ELEMENT_RESIZED = auto()
+    WINDOW_ACTIVATED = auto()
+    WINDOW_DEACTIVATED = auto()
+    WINDOW_MINIMIZED = auto()
+    WINDOW_MAXIMIZED = auto()
+    WINDOW_RESTORED = auto()
+    VALUE_CHANGED = auto()
+    TEXT_CHANGED = auto()
+    STRUCTURE_CHANGED = auto()
 
 
 @dataclass
-class AXAttribute:
-    """An accessibility attribute."""
-    name: str
-    value: Any
-    is_readable: bool = True
-    is_writable: bool = False
+class AccessibilityEventData:
+    """Data container for accessibility events."""
+    event_type: AccessibilityEvent
+    element: Any = None
+    window: Any = None
+    old_value: Any = None
+    new_value: Any = None
+    timestamp: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class AXAction:
-    """An accessibility action."""
-    name: str
-    description: str = ""
+class AccessibilityEventHandler(Protocol):
+    """Protocol for handling accessibility events."""
 
-
-@dataclass
-class AXElement:
-    """A cross-platform accessibility element wrapper.
-
-    Attributes:
-        element_id: Unique identifier.
-        role: The element's accessibility role.
-        role_string: Raw role string from the platform API.
-        title: Title or label.
-        value: Current value.
-        description: Accessibility description.
-        help: Help text.
-        children: Child elements.
-        parent: Parent element.
-        attributes: Dictionary of accessibility attributes.
-        actions: Available actions.
-        is_enabled: Whether element is enabled.
-        is_focused: Whether element has keyboard focus.
-        is_selected: Whether element is selected.
-        bounds: Bounding box as (x, y, width, height).
-        platform_handle: Platform-specific handle.
-    """
-    role: AXRole = AXRole.WINDOW
-    role_string: str = ""
-    title: str = ""
-    value: Any = None
-    description: str = ""
-    help: str = ""
-    children: list[AXElement] = field(default_factory=list)
-    parent: Optional[AXElement] = None
-    element_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    attributes: dict[str, AXAttribute] = field(default_factory=dict)
-    actions: list[AXAction] = field(default_factory=list)
-    is_enabled: bool = True
-    is_focused: bool = False
-    is_selected: bool = False
-    bounds: tuple[float, float, float, float] = (0, 0, 0, 0)
-    platform_handle: Any = None
-
-    @property
-    def x(self) -> float:
-        return self.bounds[0]
-
-    @property
-    def y(self) -> float:
-        return self.bounds[1]
-
-    @property
-    def width(self) -> float:
-        return self.bounds[2]
-
-    @property
-    def height(self) -> float:
-        return self.bounds[3]
-
-    @property
-    def center(self) -> tuple[float, float]:
-        return (self.x + self.width / 2, self.y + self.height / 2)
-
-    def get_attribute(self, name: str) -> Optional[Any]:
-        """Get an attribute value by name."""
-        attr = self.attributes.get(name)
-        return attr.value if attr else None
-
-    def has_action(self, action_name: str) -> bool:
-        """Check if element supports an action."""
-        return any(a.name == action_name for a in self.actions)
-
-    def is_button(self) -> bool:
-        """Return True if this is a button."""
-        return self.role == AXRole.BUTTON
-
-    def is_text_field(self) -> bool:
-        """Return True if this is a text field."""
-        return self.role in (AXRole.TEXT_FIELD, AXRole.TEXT_AREA)
-
-    def is_focusable(self) -> bool:
-        """Return True if element can receive focus."""
-        focusable_roles = {
-            AXRole.BUTTON, AXRole.TEXT_FIELD, AXRole.TEXT_AREA,
-            AXRole.CHECKBOX, AXRole.RADIO_BUTTON, AXRole.POP_UP_BUTTON,
-            AXRole.SLIDER, AXRole.LINK,
-        }
-        return self.role in focusable_roles and self.is_enabled
-
-    def get_path_from_root(self) -> list[AXElement]:
-        """Get path from root element to this element."""
-        path: list[AXElement] = []
-        current: Optional[AXElement] = self
-        while current:
-            path.append(current)
-            current = current.parent
-        return list(reversed(path))
-
-    def find_child_by_role(
-        self,
-        role: AXRole,
-        recursive: bool = False,
-    ) -> Optional[AXElement]:
-        """Find first child with a given role."""
-        for child in self.children:
-            if child.role == role:
-                return child
-            if recursive:
-                result = child.find_child_by_role(role, recursive=True)
-                if result:
-                    return result
-        return None
-
-    def find_children_by_role(
-        self,
-        role: AXRole,
-        recursive: bool = False,
-    ) -> list[AXElement]:
-        """Find all children with a given role."""
-        results: list[AXElement] = []
-        for child in self.children:
-            if child.role == role:
-                results.append(child)
-            if recursive:
-                results.extend(
-                    child.find_children_by_role(role, recursive=True)
-                )
-        return results
+    def handle_event(self, event: AccessibilityEventData) -> None:
+        """Handle an accessibility event."""
+        ...
 
 
 class AccessibilityBridge:
-    """High-level accessibility API bridge.
+    """
+    Bridge class connecting system accessibility APIs to the automation framework.
 
-    Provides a unified interface to platform accessibility APIs.
-    Currently provides the interface; platform implementations
-    should be registered via register_platform().
+    This class translates raw accessibility events into structured, framework-
+    agnostic actions that can be processed by the automation system.
+
+    Example:
+        >>> bridge = AccessibilityBridge()
+        >>> bridge.register_handler(handler)
+        >>> bridge.start_listening()
     """
 
     def __init__(self) -> None:
         """Initialize the accessibility bridge."""
-        self._platform_handlers: dict[str, Any] = {}
-        self._role_map: dict[str, AXRole] = {}
-        self._on_change_callbacks: list[Callable[[str, AXElement], None]] = []
+        self._handlers: list[AccessibilityEventHandler] = []
+        self._event_queue: asyncio.Queue[AccessibilityEventData] = asyncio.Queue()
+        self._listening: bool = False
+        self._task: asyncio.Task[None] | None = None
+        self._event_buffer: list[AccessibilityEventData] = []
+        self._buffer_size: int = 100
 
-    def register_platform(
-        self,
-        platform: str,
-        handler: Any,
-    ) -> None:
-        """Register a platform-specific accessibility handler.
+    def register_handler(self, handler: AccessibilityEventHandler) -> None:
+        """
+        Register an event handler with the bridge.
 
         Args:
-            platform: Platform name ('macos', 'windows', 'linux').
-            handler: Platform handler instance.
+            handler: An object implementing AccessibilityEventHandler protocol.
         """
-        self._platform_handlers[platform] = handler
+        if handler not in self._handlers:
+            self._handlers.append(handler)
+            logger.debug(f"Registered handler: {handler.__class__.__name__}")
 
-    def get_platform_handler(self, platform: str) -> Optional[Any]:
-        """Get the registered handler for a platform."""
-        return self._platform_handlers.get(platform)
-
-    def get_focused_element(self, platform: str) -> Optional[AXElement]:
-        """Get the currently focused accessibility element."""
-        handler = self._platform_handlers.get(platform)
-        if handler and hasattr(handler, "get_focused_element"):
-            return handler.get_focused_element()
-        return None
-
-    def get_element_at_point(
-        self,
-        platform: str,
-        x: float,
-        y: float,
-    ) -> Optional[AXElement]:
-        """Get the accessibility element at a given screen point."""
-        handler = self._platform_handlers.get(platform)
-        if handler and hasattr(handler, "get_element_at_point"):
-            return handler.get_element_at_point(x, y)
-        return None
-
-    def get_window_elements(
-        self,
-        platform: str,
-        window_id: str,
-    ) -> Optional[AXElement]:
-        """Get the accessibility tree for a window."""
-        handler = self._platform_handlers.get(platform)
-        if handler and hasattr(handler, "get_window_elements"):
-            return handler.get_window_elements(window_id)
-        return None
-
-    def perform_action(
-        self,
-        element: AXElement,
-        action_name: str,
-    ) -> bool:
-        """Perform an accessibility action on an element.
-
-        Returns True if the action was performed successfully.
+    def unregister_handler(self, handler: AccessibilityEventHandler) -> None:
         """
-        if not element.has_action(action_name):
-            return False
-        if element.platform_handle and hasattr(
-            element.platform_handle, "perform_action"
-        ):
-            return element.platform_handle.perform_action(action_name)
-        return False
+        Unregister an event handler from the bridge.
 
-    def set_value(self, element: AXElement, value: Any) -> bool:
-        """Set the value of an accessibility element."""
-        if not element.is_writable:
-            return False
-        if element.platform_handle and hasattr(
-            element.platform_handle, "set_value"
-        ):
-            return element.platform_handle.set_value(value)
-        return False
+        Args:
+            handler: The handler to remove.
+        """
+        if handler in self._handlers:
+            self._handlers.remove(handler)
+            logger.debug(f"Unregistered handler: {handler.__class__.__name__}")
 
-    def focus_element(self, element: AXElement) -> bool:
-        """Set keyboard focus to an element."""
-        return self.perform_action(element, "AXShowMenu") or \
-            self.perform_action(element, "AXRaise")
+    async def start_listening(self) -> None:
+        """Start listening for accessibility events."""
+        if self._listening:
+            logger.warning("Already listening for accessibility events")
+            return
 
-    def on_change(
+        self._listening = True
+        self._task = asyncio.create_task(self._event_processor())
+        logger.info("Accessibility bridge started listening")
+
+    async def stop_listening(self) -> None:
+        """Stop listening for accessibility events."""
+        self._listening = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Accessibility bridge stopped listening")
+
+    async def emit_event(self, event: AccessibilityEventData) -> None:
+        """
+        Emit an accessibility event to all registered handlers.
+
+        Args:
+            event: The accessibility event to emit.
+        """
+        await self._event_queue.put(event)
+
+    async def _event_processor(self) -> None:
+        """Process events from the queue and dispatch to handlers."""
+        while self._listening:
+            try:
+                event = await asyncio.wait_for(
+                    self._event_queue.get(),
+                    timeout=1.0
+                )
+                await self._dispatch_event(event)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"Error processing accessibility event: {e}")
+
+    async def _dispatch_event(self, event: AccessibilityEventData) -> None:
+        """
+        Dispatch an event to all registered handlers.
+
+        Args:
+            event: The event to dispatch.
+        """
+        self._buffer_event(event)
+
+        for handler in self._handlers:
+            try:
+                handler.handle_event(event)
+            except Exception as e:
+                logger.error(
+                    f"Error in handler {handler.__class__.__name__}: {e}"
+                )
+
+    def _buffer_event(self, event: AccessibilityEventData) -> None:
+        """
+        Buffer an event for later replay.
+
+        Args:
+            event: The event to buffer.
+        """
+        self._event_buffer.append(event)
+        if len(self._event_buffer) > self._buffer_size:
+            self._event_buffer.pop(0)
+
+    def get_event_history(self) -> list[AccessibilityEventData]:
+        """
+        Get the buffered event history.
+
+        Returns:
+            List of recent accessibility events.
+        """
+        return list(self._event_buffer)
+
+    def clear_event_history(self) -> None:
+        """Clear the buffered event history."""
+        self._event_buffer.clear()
+        logger.debug("Event history cleared")
+
+    def set_buffer_size(self, size: int) -> None:
+        """
+        Set the maximum buffer size for event history.
+
+        Args:
+            size: Maximum number of events to buffer.
+        """
+        self._buffer_size = max(1, size)
+        while len(self._event_buffer) > self._buffer_size:
+            self._event_buffer.pop(0)
+        logger.debug(f"Buffer size set to {size}")
+
+
+class AccessibilityEventFilter:
+    """
+    Filter for accessibility events based on criteria.
+
+    Allows filtering events by type, source, or custom predicates.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the event filter."""
+        self._event_types: set[AccessibilityEvent] = set()
+        self._element_predicates: list[Callable[[Any], bool]] = []
+        self._custom_filters: list[Callable[[AccessibilityEventData], bool]] = []
+
+    def add_event_type(self, event_type: AccessibilityEvent) -> AccessibilityEventFilter:
+        """
+        Add an event type to the filter.
+
+        Args:
+            event_type: The event type to include.
+
+        Returns:
+            Self for chaining.
+        """
+        self._event_types.add(event_type)
+        return self
+
+    def add_element_predicate(
         self,
-        callback: Callable[[str, AXElement], None],
-    ) -> None:
-        """Register a callback for accessibility tree changes."""
-        self._on_change_callbacks.append(callback)
+        predicate: Callable[[Any], bool]
+    ) -> AccessibilityEventFilter:
+        """
+        Add a predicate for filtering elements.
 
-    @staticmethod
-    def map_role_string(role_str: str) -> AXRole:
-        """Map a platform role string to a cross-platform AXRole."""
-        role_map: dict[str, AXRole] = {
-            "AXWindow": AXRole.WINDOW,
-            "AXButton": AXRole.BUTTON,
-            "AXTextField": AXRole.TEXT_FIELD,
-            "AXTextArea": AXRole.TEXT_AREA,
-            "AXCheckBox": AXRole.CHECKBOX,
-            "AXRadioButton": AXRole.RADIO_BUTTON,
-            "AXPopUpButton": AXRole.POP_UP_BUTTON,
-            "AXMenuBar": AXRole.MENU_BAR,
-            "AXMenu": AXRole.MENU,
-            "AXMenuItem": AXRole.MENU_ITEM,
-            "AXTable": AXRole.TABLE,
-            "AXRow": AXRole.ROW,
-            "AXCell": AXRole.CELL,
-            "AXGroup": AXRole.GROUP,
-            "AXSheet": AXRole.SHEET,
-            "AXDialog": AXRole.DIALOG,
-            "AXToolbar": AXRole.TOOLBAR,
-            "AXTableHeader": AXRole.TABLE_HEADER,
-            "AXLink": AXRole.LINK,
-            "AXImage": AXRole.IMAGE,
-            "AXStaticText": AXRole.STATIC_TEXT,
-            "AXValueIndicator": AXRole.VALUE_INDICATOR,
-            "AXSlider": AXRole.SLIDER,
-            "AXColumn": AXRole.COLUMN,
-            "AXOutline": AXRole.OUTLINE,
-        }
-        return role_map.get(role_str, AXRole.WINDOW)
+        Args:
+            predicate: Function that returns True if element should pass.
+
+        Returns:
+            Self for chaining.
+        """
+        self._element_predicates.append(predicate)
+        return self
+
+    def add_custom_filter(
+        self,
+        filter_func: Callable[[AccessibilityEventData], bool]
+    ) -> AccessibilityEventFilter:
+        """
+        Add a custom filter function.
+
+        Args:
+            filter_func: Function that returns True if event should pass.
+
+        Returns:
+            Self for chaining.
+        """
+        self._custom_filters.append(filter_func)
+        return self
+
+    def should_emit(self, event: AccessibilityEventData) -> bool:
+        """
+        Determine if an event should be emitted based on filters.
+
+        Args:
+            event: The event to evaluate.
+
+        Returns:
+            True if the event passes all filters.
+        """
+        if self._event_types and event.event_type not in self._event_types:
+            return False
+
+        if self._element_predicates and event.element is not None:
+            if not any(p(event.element) for p in self._element_predicates):
+                return False
+
+        if self._custom_filters:
+            if not all(f(event) for f in self._custom_filters):
+                return False
+
+        return True
+
+
+class AccessibilityBridgeBuilder:
+    """
+    Builder for creating configured AccessibilityBridge instances.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the builder."""
+        self._handlers: list[AccessibilityEventHandler] = []
+        self._filters: list[AccessibilityEventFilter] = []
+        self._buffer_size: int = 100
+
+    def add_handler(self, handler: AccessibilityEventHandler) -> AccessibilityBridgeBuilder:
+        """
+        Add a handler to the bridge.
+
+        Args:
+            handler: The handler to add.
+
+        Returns:
+            Self for chaining.
+        """
+        self._handlers.append(handler)
+        return self
+
+    def add_filter(self, filter_impl: AccessibilityEventFilter) -> AccessibilityBridgeBuilder:
+        """
+        Add a filter to the bridge.
+
+        Args:
+            filter_impl: The filter to add.
+
+        Returns:
+            Self for chaining.
+        """
+        self._filters.append(filter_impl)
+        return self
+
+    def set_buffer_size(self, size: int) -> AccessibilityBridgeBuilder:
+        """
+        Set the event buffer size.
+
+        Args:
+            size: Maximum buffer size.
+
+        Returns:
+            Self for chaining.
+        """
+        self._buffer_size = size
+        return self
+
+    def build(self) -> AccessibilityBridge:
+        """
+        Build the configured AccessibilityBridge instance.
+
+        Returns:
+            Configured AccessibilityBridge.
+        """
+        bridge = AccessibilityBridge()
+        bridge.set_buffer_size(self._buffer_size)
+
+        for handler in self._handlers:
+            bridge.register_handler(handler)
+
+        logger.info(
+            f"Built AccessibilityBridge with {len(self._handlers)} handlers, "
+            f"{len(self._filters)} filters"
+        )
+
+        return bridge
