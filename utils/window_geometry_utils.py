@@ -1,361 +1,137 @@
 """
-Window geometry and bounds management utilities.
+Window geometry utilities.
 
-Handles window positioning, sizing, multi-monitor support,
-and window arrangement operations.
-
-Author: Auto-generated
+Calculate and manipulate window geometries.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from enum import Enum, auto
-from typing import Sequence
-
-
-class AnchorPosition(Enum):
-    """Anchor positions for window placement."""
-    TOP_LEFT = auto()
-    TOP_CENTER = auto()
-    TOP_RIGHT = auto()
-    CENTER_LEFT = auto()
-    CENTER = auto()
-    CENTER_RIGHT = auto()
-    BOTTOM_LEFT = auto()
-    BOTTOM_CENTER = auto()
-    BOTTOM_RIGHT = auto()
+from typing import Optional, Tuple
 
 
 @dataclass
-class Geometry:
-    """Window or element geometry."""
-    x: float
-    y: float
-    width: float
-    height: float
+class Rect:
+    """Rectangle geometry."""
+    x: int
+    y: int
+    width: int
+    height: int
     
-    @property
-    def left(self) -> float:
-        return self.x
+    def contains(self, px: int, py: int) -> bool:
+        """Check if point is inside rect."""
+        return self.x <= px <= self.x + self.width and self.y <= py <= self.y + self.height
     
-    @property
-    def top(self) -> float:
-        return self.y
-    
-    @property
-    def right(self) -> float:
-        return self.x + self.width
-    
-    @property
-    def bottom(self) -> float:
-        return self.y + self.height
-    
-    @property
-    def center_x(self) -> float:
-        return self.x + self.width / 2
-    
-    @property
-    def center_y(self) -> float:
-        return self.y + self.height / 2
-    
-    @property
-    def center(self) -> tuple[float, float]:
-        return (self.center_x, self.center_y)
-    
-    @property
-    def area(self) -> float:
-        return self.width * self.height
-    
-    def contains_point(self, px: float, py: float) -> bool:
-        """Check if point is within geometry."""
-        return self.left <= px <= self.right and self.top <= py <= self.bottom
-    
-    def contains_geometry(self, other: Geometry) -> bool:
-        """Check if another geometry is fully contained."""
-        return (
-            self.left <= other.left
-            and self.right >= other.right
-            and self.top <= other.top
-            and self.bottom >= other.bottom
-        )
-    
-    def intersects(self, other: Geometry) -> bool:
-        """Check if geometries intersect."""
+    def intersects(self, other: "Rect") -> bool:
+        """Check if this rect intersects another."""
         return not (
-            self.right < other.left
-            or self.left > other.right
-            or self.bottom < other.top
-            or self.top > other.bottom
+            self.x + self.width < other.x or
+            other.x + other.width < self.x or
+            self.y + self.height < other.y or
+            other.y + other.height < self.y
         )
     
-    def distance_to(self, other: Geometry) -> float:
-        """Calculate distance between geometries (center points)."""
-        dx = self.center_x - other.center_x
-        dy = self.center_y - other.center_y
-        return math.sqrt(dx * dx + dy * dy)
+    def union(self, other: "Rect") -> "Rect":
+        """Get bounding rect of union."""
+        x = min(self.x, other.x)
+        y = min(self.y, other.y)
+        right = max(self.x + self.width, other.x + other.width)
+        bottom = max(self.y + self.height, other.y + other.height)
+        return Rect(x, y, right - x, bottom - y)
     
-    def union(self, other: Geometry) -> Geometry:
-        """Get bounding box containing both geometries."""
-        left = min(self.left, other.left)
-        top = min(self.top, other.top)
-        right = max(self.right, other.right)
-        bottom = max(self.bottom, other.bottom)
-        return Geometry(left, top, right - left, bottom - top)
-    
-    def intersection(self, other: Geometry) -> Geometry | None:
-        """Get intersection of two geometries."""
-        left = max(self.left, other.left)
-        top = max(self.top, other.top)
-        right = min(self.right, other.right)
-        bottom = min(self.bottom, other.bottom)
-        
-        if left >= right or top >= bottom:
+    def intersection(self, other: "Rect") -> Optional["Rect"]:
+        """Get intersection of two rects."""
+        if not self.intersects(other):
             return None
         
-        return Geometry(left, top, right - left, bottom - top)
+        x = max(self.x, other.x)
+        y = max(self.y, other.y)
+        right = min(self.x + self.width, other.x + other.width)
+        bottom = min(self.y + self.height, other.y + other.height)
+        return Rect(x, y, right - x, bottom - y)
     
-    def to_tuple(self) -> tuple[float, float, float, float]:
-        """Convert to (x, y, width, height) tuple."""
-        return (self.x, self.y, self.width, self.height)
+    def center(self) -> Tuple[int, int]:
+        """Get center point."""
+        return (self.x + self.width // 2, self.y + self.height // 2)
     
-    def to_bounds_tuple(self) -> tuple[float, float, float, float]:
-        """Convert to (left, top, right, bottom) tuple."""
-        return (self.left, self.top, self.right, self.bottom)
+    def distance_to(self, other: "Rect") -> float:
+        """Get minimum distance to another rect."""
+        cx1, cy1 = self.center()
+        cx2, cy2 = other.center()
+        return math.sqrt((cx2 - cx1) ** 2 + (cy2 - cy1) ** 2)
 
 
-@dataclass
-class Screen:
-    """Display screen information."""
-    id: str
-    name: str
-    geometry: Geometry
-    work_area: Geometry
-    scale_factor: float = 1.0
-    is_primary: bool = False
+class WindowGeometryCalculator:
+    """Calculate window geometries."""
     
-    @property
-    def bounds(self) -> Geometry:
-        """Alias for geometry."""
-        return self.geometry
-
-
-class WindowArranger:
-    """
-    Arranges windows on screen.
+    @staticmethod
+    def calculate_centered_geometry(
+        parent: Rect,
+        child_width: int,
+        child_height: int
+    ) -> Rect:
+        """Calculate centered geometry within parent."""
+        x = parent.x + (parent.width - child_width) // 2
+        y = parent.y + (parent.height - child_height) // 2
+        return Rect(x, y, child_width, child_height)
     
-    Example:
-        arranger = WindowArranger()
-        screens = arranger.get_screens()
-        arranger.tile_windows([w1, w2, w3], screen=screens[0])
-    """
-    
-    def __init__(self, screens: Sequence[Screen] | None = None):
-        self._screens = list(screens) if screens else []
-    
-    def add_screen(self, screen: Screen) -> None:
-        """Add a screen to the arranger."""
-        self._screens.append(screen)
-    
-    def get_screen_at(self, x: float, y: float) -> Screen | None:
-        """Get screen containing the given point."""
-        for screen in self._screens:
-            if screen.geometry.contains_point(x, y):
-                return screen
-        return None
-    
-    def get_primary_screen(self) -> Screen | None:
-        """Get the primary screen."""
-        for screen in self._screens:
-            if screen.is_primary:
-                return screen
-        return self._screens[0] if self._screens else None
-    
-    def tile_windows(
-        self,
-        windows: Sequence[Geometry],
-        screen: Screen,
-        padding: float = 10,
-        direction: str = "horizontal",
-    ) -> list[Geometry]:
-        """
-        Tile windows within a screen's work area.
-        
-        Args:
-            windows: List of window geometries
-            screen: Screen to tile within
-            padding: Padding between windows
-            direction: 'horizontal' or 'vertical'
-            
-        Returns:
-            List of positioned geometries
-        """
+    @staticmethod
+    def calculate_tile_horizontal(
+        windows: list[Rect],
+        parent: Rect
+    ) -> list[Rect]:
+        """Tile windows horizontally."""
         if not windows:
             return []
         
-        work = screen.work_area
-        n = len(windows)
+        tile_width = parent.width // len(windows)
+        result = []
         
-        if direction == "horizontal":
-            window_width = (work.width - padding * (n + 1)) / n
-            window_height = work.height - padding * 2
-            
-            return [
-                Geometry(
-                    x=work.x + padding * (i + 1) + window_width * i,
-                    y=work.y + padding,
-                    width=window_width,
-                    height=window_height,
-                )
-                for i in range(n)
-            ]
-        else:
-            window_width = work.width - padding * 2
-            window_height = (work.height - padding * (n + 1)) / n
-            
-            return [
-                Geometry(
-                    x=work.x + padding,
-                    y=work.y + padding * (i + 1) + window_height * i,
-                    width=window_width,
-                    height=window_height,
-                )
-                for i in range(n)
-            ]
+        for i, window in enumerate(windows):
+            x = parent.x + i * tile_width
+            result.append(Rect(x, parent.y, tile_width, parent.height))
+        
+        return result
     
-    def cascade_windows(
-        self,
-        windows: Sequence[Geometry],
-        screen: Screen,
-        offset_x: float = 30,
-        offset_y: float = 30,
-        base_width: float | None = None,
-        base_height: float | None = None,
-    ) -> list[Geometry]:
-        """
-        Cascade windows with offset.
-        
-        Args:
-            windows: List of window geometries
-            screen: Screen to cascade within
-            offset_x: Horizontal offset between windows
-            offset_y: Vertical offset between windows
-            base_width: Starting width (default: screen work area width)
-            base_height: Starting height (default: screen work area height)
-            
-        Returns:
-            List of positioned geometries
-        """
+    @staticmethod
+    def calculate_tile_vertical(
+        windows: list[Rect],
+        parent: Rect
+    ) -> list[Rect]:
+        """Tile windows vertically."""
         if not windows:
             return []
         
-        work = screen.work_area
-        width = base_width or work.width * 0.7
-        height = base_height or work.height * 0.7
+        tile_height = parent.height // len(windows)
+        result = []
         
-        return [
-            Geometry(
-                x=work.x + offset_x * i,
-                y=work.y + offset_y * i,
-                width=min(width, work.width - offset_x * i),
-                height=min(height, work.height - offset_y * i),
-            )
-            for i in range(len(windows))
-        ]
-    
-    def maximize_within(
-        self,
-        window: Geometry,
-        screen: Screen,
-        padding: float = 0,
-    ) -> Geometry:
-        """Position window to maximize within screen work area."""
-        work = screen.work_area
-        return Geometry(
-            x=work.x + padding,
-            y=work.y + padding,
-            width=work.width - padding * 2,
-            height=work.height - padding * 2,
-        )
-    
-    def center_on_screen(
-        self,
-        window: Geometry,
-        screen: Screen,
-    ) -> Geometry:
-        """Center window on screen."""
-        return Geometry(
-            x=screen.work_area.center_x - window.width / 2,
-            y=screen.work_area.center_y - window.height / 2,
-            width=window.width,
-            height=window.height,
-        )
-    
-    def align_to_anchor(
-        self,
-        window: Geometry,
-        anchor: AnchorPosition,
-        screen: Screen,
-        margin: float = 10,
-    ) -> Geometry:
-        """Align window to anchor position on screen."""
-        work = screen.work_area
+        for i, window in enumerate(windows):
+            y = parent.y + i * tile_height
+            result.append(Rect(parent.x, y, parent.width, tile_height))
         
-        # Calculate x position
-        if anchor in (
-            AnchorPosition.TOP_LEFT, AnchorPosition.CENTER_LEFT,
-            AnchorPosition.BOTTOM_LEFT
-        ):
-            x = work.x + margin
-        elif anchor in (
-            AnchorPosition.TOP_CENTER, AnchorPosition.CENTER,
-            AnchorPosition.BOTTOM_CENTER
-        ):
-            x = work.center_x - window.width / 2
-        else:
-            x = work.right - window.width - margin
+        return result
+    
+    @staticmethod
+    def calculate_grid(
+        windows: list[Rect],
+        parent: Rect,
+        cols: int = 2
+    ) -> list[Rect]:
+        """Calculate grid layout."""
+        if not windows:
+            return []
         
-        # Calculate y position
-        if anchor in (
-            AnchorPosition.TOP_LEFT, AnchorPosition.TOP_CENTER,
-            AnchorPosition.TOP_RIGHT
-        ):
-            y = work.y + margin
-        elif anchor in (
-            AnchorPosition.CENTER_LEFT, AnchorPosition.CENTER,
-            AnchorPosition.CENTER_RIGHT
-        ):
-            y = work.center_y - window.height / 2
-        else:
-            y = work.bottom - window.height - margin
+        rows = (len(windows) + cols - 1) // cols
+        cell_width = parent.width // cols
+        cell_height = parent.height // rows
+        result = []
         
-        return Geometry(x, y, window.width, window.height)
-
-
-def calculate_overlap_score(
-    window: Geometry,
-    reference: Geometry,
-    weight_x: float = 0.5,
-    weight_y: float = 0.5,
-) -> float:
-    """
-    Calculate how well a window overlaps with a reference position.
-    
-    Returns score from 0.0 (no overlap) to 1.0 (perfect center match).
-    """
-    if not window.intersects(reference):
-        return 0.0
-    
-    # Calculate center distance
-    dx = abs(window.center_x - reference.center_x) / reference.width
-    dy = abs(window.center_y - reference.center_y) / reference.height
-    
-    # Calculate overlap area
-    intersection = window.intersection(reference)
-    overlap_area = intersection.area if intersection else 0
-    overlap_ratio = overlap_area / max(window.area, 1)
-    
-    # Combined score
-    center_score = 1.0 - (dx + dy) / 2
-    return (center_score * weight_x + overlap_ratio * weight_y) / (weight_x + weight_y)
+        for i, window in enumerate(windows):
+            col = i % cols
+            row = i // cols
+            x = parent.x + col * cell_width
+            y = parent.y + row * cell_height
+            result.append(Rect(x, y, cell_width, cell_height))
+        
+        return result
